@@ -60,13 +60,13 @@ Rules of assembly:
 | `incident` | any_keyword: outage, incident, broken, failing, down, hotfix | `code-worker` | P0 | pr-gate |
 | `review-pr` | kind: pr-review | `pr-reviewer` | P1 | pr-gate |
 | `review-issue` | kind: issue-review | `issue-reviewer` | P1 | board-callback |
+| `architecture` | any_keyword: architecture, design review, structural, duplication, extract library, technical debt, tech debt | `architect` | P2 | board-callback |
 | `cleanup` | any_keyword: worktree, stale branch, cleanup, prune, disk | `janitor` | P3 | board-callback |
 | `server` | any_keyword: debian, server, systemd, timer, cron, service, apt | `ops-worker` | P2 | board-callback |
 | `automation` | any_keyword: automate, script, recurring, repeated, workflow | `automation-smith` | P2 | board-callback |
 | `tests` | any_keyword: test, pytest, coverage, flaky | `test-worker` | P2 | board-callback |
 | `docs` | any_keyword: docs, documentation, readme, runbook | `scribe` | P3 | board-callback |
 | `research` | any_keyword: research, investigate, compare, evaluate | `researcher` | P3 | board-callback |
-| `architecture` | any_keyword: architecture, design review, structural, duplication, extract library, technical debt, tech debt | `architect` | P2 | board-callback |
 | `improvement` | any_keyword: bottleneck, metric, throughput, improve, refactor process | `improver` | P2 | board-callback |
 | `code` | any_keyword: implement, bug, feature, refactor, fix | `code-worker` | P2 | pr-gate |
 | _default_ | anything else | `chief-of-staff` | P2 | board-callback |

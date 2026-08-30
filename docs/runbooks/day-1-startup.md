@@ -65,6 +65,10 @@ systemctl --user list-timers 'saturnin-*'
 - `saturnin-janitor.timer` - daily stale worktree/branch cleanup (dry run by
   default; set `APPLY=1` in the unit's environment when you trust it).
 - `saturnin-improve.timer` - hourly measure/detect/dispatch cycle.
+- `saturnin-poller.timer` - every five minutes, collects results for tasks whose
+  answer cannot report back on its own, so nobody ever waits (rule 9).
+- `saturnin-mirror.timer` - every fifteen minutes, mirrors open tasks as GitHub
+  issues so the board survives this machine (rule 8).
 
 Without a login session, keep the timers alive across logouts:
 `loginctl enable-linger $USER`.
@@ -76,6 +80,8 @@ Without a login session, keep the timers alive across logouts:
 | On every request | `saturnin task add ... --dispatch` | CEO |
 | Hourly (timer) | `automation/library/improvement_cycle.sh` | improver |
 | Daily (timer) | `automation/library/cleanup_worktrees.sh` | janitor |
+| Every 5 min (timer) | `automation/library/result_poller.sh` | chief-of-staff |
+| Every 15 min (timer) | `automation/library/mirror_tasks.sh` | chief-of-staff |
 | Weekly | read `var/reports/`, groom `docs/improvement-backlog.md` | improver |
 
 ## 8. When something is unclear

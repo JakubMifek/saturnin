@@ -101,6 +101,9 @@ rules:
   - id: review-issue
     when: {kind: issue-review}
     route: {role: issue-reviewer, priority: P1}
+  - id: architecture
+    when: {any_keyword: [architecture, design review, structural, duplication, extract library, technical debt, tech debt]}
+    route: {role: architect, priority: P2, squad: [architect, code-worker]}
   - id: cleanup
     when: {any_keyword: [worktree, stale branch, cleanup, prune, disk]}
     route: {role: janitor, priority: P3}
@@ -119,9 +122,6 @@ rules:
   - id: research
     when: {any_keyword: [research, investigate, compare, evaluate]}
     route: {role: researcher, priority: P3}
-  - id: architecture
-    when: {any_keyword: [architecture, design review, structural, duplication, extract library, technical debt, tech debt]}
-    route: {role: architect, priority: P2, squad: [architect, code-worker]}
   - id: improvement
     when: {any_keyword: [bottleneck, metric, throughput, improve, refactor process]}
     route: {role: improver, priority: P2}
