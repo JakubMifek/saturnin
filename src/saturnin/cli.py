@@ -14,14 +14,17 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Sequence
 
+import yaml
+
 from . import escalation as escalation_mod
 from . import telemetry
 from .automation import AutomationLibrary
-from .board import Board, BoardError, Task
+from .board import CONTAINER_KINDS, Board, BoardError, Task
 from .checkpoints import Checkpoint, CheckpointStore
 from .config import Config
 from .governance import Governance
 from .improve import ImprovementLoop
+from .issues import IssueMirror, MirrorError
 from .review import ReviewLedger
 from .routing import Router, RoutingError
 from .worktrees import GitError, WorktreeManager
@@ -58,6 +61,7 @@ def build_parser() -> argparse.ArgumentParser:
     add.add_argument("--label", action="append", default=[])
     add.add_argument("--repo")
     add.add_argument("--priority", default="P2")
+    add.add_argument("--parent", help="objective/epic/feature this work belongs to")
     add.add_argument("--dispatch", action="store_true", help="route it immediately")
 
     listing = task.add_parser("list", help="list tasks")
@@ -75,6 +79,14 @@ def build_parser() -> argparse.ArgumentParser:
     move.add_argument("--actor", default="ceo")
     move.add_argument("--note", default="")
 
+    tree = task.add_parser("tree", help="show the work hierarchy")
+    tree.add_argument("task_id", nargs="?", help="root; default: every top level item")
+
+    sync = task.add_parser("sync", help="mirror tasks as GitHub issues (rule 8)")
+    sync.add_argument("task_id", nargs="?")
+    sync.add_argument("--all", action="store_true", help="every open unmirrored task")
+    sync.add_argument("--push", action="store_true", help="actually call gh; default is a preview")
+
     attach = task.add_parser("attach", help="attach a branch/worktree to a task")
     attach.add_argument("task_id")
     attach.add_argument("--branch")
@@ -85,6 +97,12 @@ def build_parser() -> argparse.ArgumentParser:
     dispatch.add_argument("task_id", nargs="?")
     dispatch.add_argument("--all", action="store_true", help="dispatch everything in intake")
     dispatch.add_argument("--dry-run", action="store_true", help="show the route only")
+    dispatch.add_argument(
+        "--squad",
+        action="append",
+        default=[],
+        help="assemble an ad-hoc squad for this task (repeatable)",
+    )
 
     # board ------------------------------------------------------------
     board_cmd = sub.add_parser("board", help="board overview").add_subparsers(
@@ -176,10 +194,77 @@ def build_parser() -> argparse.ArgumentParser:
     # improve / doctor -------------------------------------------------
     improve = sub.add_parser("improve", help="run the self-improvement loop")
     improve.add_argument("--no-tasks", action="store_true", help="report only, file nothing")
+    repo_cmd = sub.add_parser("repo", help="managed repository contract").add_subparsers(
+        dest="repo_command", required=True
+    )
+    repo_check = repo_cmd.add_parser("check", help="validate a managed repo against the contract")
+    repo_check.add_argument("path", nargs="?", default=".")
+
     sub.add_parser("doctor", help="validate policies and installation")
 
     return parser
 
+
+def _tree_dict(board: Board, task: Task, lines: list[str], depth: int) -> dict[str, Any]:
+    marker = {"done": "x", "cancelled": "-"}.get(task.state, " ")
+    suffix = ""
+    if task.kind in CONTAINER_KINDS:
+        roll = board.rollup(task.id)
+        suffix = f"  [{roll['done']}/{roll['leaves']} done, {roll['percent']}%]"
+    lines.append(f"{'  ' * depth}[{marker}] {task.id} ({task.kind}) {task.title}{suffix}")
+    node = task.to_dict()
+    node["children"] = [_tree_dict(board, c, lines, depth + 1) for c in board.children(task.id)]
+    return node
+
+
+def _mirror_audit(config: Config, board: Board) -> list[str]:
+    """Rule 8: warn when open work exists only on this machine."""
+    mirror = IssueMirror(config, board)
+    if not mirror.enabled:
+        return []
+    unmirrored = mirror.unmirrored()
+    if not unmirrored:
+        return []
+    return [
+        f"{len(unmirrored)} open task(s) are not mirrored as issues and would be lost with "
+        f"this machine: {', '.join(t.id for t in unmirrored[:5])}"
+        + (" ..." if len(unmirrored) > 5 else "")
+        + " - run: saturnin task sync --all --push"
+    ]
+
+
+def check_managed_repo(path: Path, config: Config) -> list[str]:
+    """Validate a Saturnin-managed repository against the contract.
+
+    The contract lives in ``policies/repos.yaml``; it is what lets Saturnin
+    dispatch into a project repository without first re-learning it.
+    """
+    contract = config.policy("repos").get("managed_repo_contract", {})
+    problems: list[str] = []
+    for required in contract.get("required_files", []):
+        if not (path / required).is_file():
+            problems.append(f"missing required file: {required}")
+    manifest_path = path / ".saturnin" / "repo.yaml"
+    if not manifest_path.is_file():
+        return problems
+    try:
+        manifest = yaml.safe_load(manifest_path.read_text(encoding="utf-8")) or {}
+    except yaml.YAMLError as exc:
+        return problems + [f".saturnin/repo.yaml is not valid YAML: {exc}"]
+    if not isinstance(manifest, dict):
+        return problems + [".saturnin/repo.yaml must contain a mapping"]
+    for key in contract.get("required_keys", []):
+        if not manifest.get(key):
+            problems.append(f".saturnin/repo.yaml is missing required key: {key}")
+    roles = config.routing.get("roles", {})
+    squad = manifest.get("squad") or []
+    if isinstance(squad, list):
+        unknown = [role for role in squad if role not in roles]
+        if unknown:
+            problems.append(f"squad names roles that are not in the catalog: {', '.join(unknown)}")
+    else:
+        problems.append("squad must be a list of role ids")
+    return problems
 
 def _config(args: argparse.Namespace) -> Config:
     return Config.load(Path(args.home) if args.home else None)
@@ -192,7 +277,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     config.ensure_dirs()
     try:
         return _run(args, config)
-    except (BoardError, RoutingError, GitError, RuntimeError) as exc:
+    except (BoardError, RoutingError, GitError, MirrorError, RuntimeError) as exc:
         print(f"saturnin: {exc}", file=sys.stderr)
         return 1
 
@@ -219,7 +304,7 @@ def _run(args: argparse.Namespace, config: Config) -> int:  # noqa: C901 - flat 
             roles,
             as_json,
             "\n".join(
-                f"{rid:<16} {r.get('squad', '-'):<12} "
+                f"{rid:<16} {r.get('unit', '-'):<12} "
                 f"{'executes' if r.get('executes', True) else 'DELEGATES ONLY':<14} "
                 f"{r.get('description', '')}"
                 for rid, r in roles.items()
@@ -261,6 +346,14 @@ def _run(args: argparse.Namespace, config: Config) -> int:  # noqa: C901 - flat 
             return 2
         _emit({"body": body}, as_json, body)
         return 0
+    if args.command == "repo":
+        problems = check_managed_repo(Path(args.path), config)
+        _emit(
+            {"path": args.path, "compliant": not problems, "problems": problems},
+            as_json,
+            "\n".join(problems) if problems else "Repository satisfies the Saturnin contract.",
+        )
+        return 0 if not problems else 2
     if args.command == "automation":
         return _run_automation(args, config, board, as_json)
     if args.command == "improve":
@@ -280,6 +373,7 @@ def _run(args: argparse.Namespace, config: Config) -> int:  # noqa: C901 - flat 
             Governance(config).audit()
             + Router(config).validate_policy()
             + AutomationLibrary(config).audit()
+            + _mirror_audit(config, board)
         )
         _emit(
             {"healthy": not problems, "problems": problems},
@@ -300,6 +394,7 @@ def _run_task(args: argparse.Namespace, config: Config, board: Board, as_json: b
             labels=args.label,
             repo=args.repo,
             priority=args.priority,
+            parent=args.parent,
         )
         if args.dispatch:
             Router(config).dispatch(board, task)
@@ -322,6 +417,32 @@ def _run_task(args: argparse.Namespace, config: Config, board: Board, as_json: b
     if args.task_command == "show":
         task = board.get(args.task_id)
         _emit(task.to_dict(), as_json, json.dumps(task.to_dict(), indent=2))
+        return 0
+    if args.task_command == "tree":
+        roots = (
+            [board.get(args.task_id)]
+            if args.task_id
+            else [t for t in board.list() if t.parent is None]
+        )
+        lines: list[str] = []
+        payload = [_tree_dict(board, root, lines, 0) for root in roots]
+        _emit(payload, as_json, "\n".join(lines) or "(board is empty)")
+        return 0
+    if args.task_command == "sync":
+        mirror = IssueMirror(config, board)
+        if args.all:
+            targets = mirror.unmirrored()
+        elif args.task_id:
+            targets = [board.get(args.task_id)]
+        else:
+            print("saturnin: give a task id or --all", file=sys.stderr)
+            return 1
+        payloads = mirror.sync_all(targets, push=args.push)
+        _emit(
+            [p.to_dict() for p in payloads],
+            as_json,
+            "\n".join(f"{p.repo}: {p.title}" for p in payloads) or "(nothing to mirror)",
+        )
         return 0
     if args.task_command == "attach":
         task = board.get(args.task_id)
@@ -354,14 +475,22 @@ def _run_dispatch(args: argparse.Namespace, config: Config, board: Board, as_jso
         return 1
     results = []
     for task in targets:
-        route = router.resolve(task) if args.dry_run else router.dispatch(board, task)
+        route = (
+            router.resolve(task)
+            if args.dry_run
+            else router.dispatch(board, task, squad=args.squad or None)
+        )
         results.append({"task": task.id, "role": route.role, "rule": route.rule,
-                        "priority": route.priority, "escalate": route.escalate})
+                        "priority": route.priority, "escalate": route.escalate,
+                        "squad": list(args.squad or route.squad),
+                        "result_contract": route.result_contract})
     _emit(
         results,
         as_json,
         "\n".join(
-            f"{r['task']} -> {r['role']} ({r['priority']}, rule={r['rule']})" for r in results
+            f"{r['task']} -> {r['role']} ({r['priority']}, rule={r['rule']}, "
+            f"results via {r['result_contract']})"
+            for r in results
         )
         or "(nothing to dispatch)",
     )

@@ -7,13 +7,21 @@ they diff well, survive crashes and can be inspected without any tooling.
 from __future__ import annotations
 
 import json
+import os
 import secrets
+from contextlib import contextmanager
 from dataclasses import asdict, dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Iterable, Iterator
 
 from .config import Config, default_config
+from .locking import file_lock
+
+KINDS = ("objective", "epic", "feature", "task", "pr-review", "issue-review",
+         "automation", "improvement")
+# Kinds that only contain other work; they are tracked, never executed directly.
+CONTAINER_KINDS = ("objective", "epic", "feature")
 
 STATES = (
     "intake",
@@ -61,13 +69,22 @@ class Task:
     state: str = "intake"
     priority: str = "P2"
     role: str | None = None
-    squad: str | None = None
+    unit: str | None = None
+    squad: list[str] = field(default_factory=list)
     repo: str | None = None
     labels: list[str] = field(default_factory=list)
     body: str = ""
     branch: str | None = None
     worktree: str | None = None
     checkpoint: str | None = None
+    # Work hierarchy: objective > epic > feature > task.
+    parent: str | None = None
+    # Rule 8: the mirrored GitHub issue is the durable copy of this task.
+    issue: str | None = None
+    issue_synced_at: str | None = None
+    # How the dispatcher will learn that this task finished, so that nobody has
+    # to sit and wait for a worker (see docs/operating-model.md).
+    result_contract: str | None = None
     created_at: str = field(default_factory=utcnow)
     updated_at: str = field(default_factory=utcnow)
     routed_at: str | None = None
@@ -115,16 +132,36 @@ class Board:
 
     def save(self, task: Task) -> Task:
         path = self.path_for(task.id)
-        tmp = path.with_suffix(".json.tmp")
-        tmp.write_text(json.dumps(task.to_dict(), indent=2) + "\n", encoding="utf-8")
-        tmp.replace(path)
+        with file_lock(path):
+            self._write(path, task)
         return task
+
+    def _write(self, path: Path, task: Task) -> None:
+        tmp = path.with_suffix(f".json.{os.getpid()}.tmp")
+        tmp.write_text(json.dumps(task.to_dict(), indent=2) + "\n", encoding="utf-8")
+        os.replace(tmp, path)
+
+    @contextmanager
+    def edit(self, task_id: str) -> Iterator[Task]:
+        """Read-modify-write a task under an exclusive lock.
+
+        Parallel squads share one board; every mutation that depends on the
+        current value must go through here rather than get()/save().
+        """
+        path = self.path_for(task_id)
+        with file_lock(path):
+            if not path.is_file():
+                raise BoardError(f"unknown task: {task_id}")
+            task = Task.from_dict(json.loads(path.read_text(encoding="utf-8")))
+            yield task
+            self._write(path, task)
 
     def get(self, task_id: str) -> Task:
         path = self.path_for(task_id)
         if not path.is_file():
             raise BoardError(f"unknown task: {task_id}")
-        return Task.from_dict(json.loads(path.read_text(encoding="utf-8")))
+        with file_lock(path, exclusive=False):
+            return Task.from_dict(json.loads(path.read_text(encoding="utf-8")))
 
     def __iter__(self) -> Iterator[Task]:
         for path in sorted(self.config.tasks_dir.glob("*.json")):
@@ -140,12 +177,17 @@ class Board:
         labels: Iterable[str] = (),
         repo: str | None = None,
         priority: str = "P2",
+        parent: str | None = None,
         source: str = "cli",
     ) -> Task:
         if not title.strip():
             raise BoardError("task title must not be empty")
         if priority not in PRIORITIES:
             raise BoardError(f"unknown priority: {priority}")
+        if kind not in KINDS:
+            raise BoardError(f"unknown kind: {kind} (expected one of {', '.join(KINDS)})")
+        if parent is not None:
+            self.check_parent(parent, kind)
         task = Task(
             id=new_task_id(),
             title=title.strip(),
@@ -154,6 +196,7 @@ class Board:
             labels=sorted({label.strip() for label in labels if label.strip()}),
             repo=repo,
             priority=priority,
+            parent=parent,
         )
         task.log("intake", actor=source)
         return self.save(task)
@@ -190,6 +233,50 @@ class Board:
         if open_only:
             tasks = [t for t in tasks if t.state not in TERMINAL_STATES]
         return sorted(tasks, key=lambda t: (PRIORITIES.index(t.priority), t.created_at))
+
+    # -- hierarchy -----------------------------------------------------
+    def check_parent(self, parent_id: str, kind: str) -> Task:
+        """A task may only hang under a container that is broader than itself."""
+        parent = self.get(parent_id)
+        if parent.kind not in CONTAINER_KINDS:
+            raise BoardError(
+                f"{parent_id} is a {parent.kind}; only {', '.join(CONTAINER_KINDS)} "
+                "can hold children"
+            )
+        if KINDS.index(kind) <= KINDS.index(parent.kind) and kind in CONTAINER_KINDS:
+            raise BoardError(f"a {kind} cannot live under a {parent.kind}")
+        return parent
+
+    def children(self, task_id: str) -> list[Task]:
+        return sorted(
+            (t for t in self if t.parent == task_id),
+            key=lambda t: (PRIORITIES.index(t.priority), t.created_at),
+        )
+
+    def descendants(self, task_id: str) -> list[Task]:
+        found: list[Task] = []
+        queue = [task_id]
+        seen = {task_id}
+        while queue:
+            for child in self.children(queue.pop()):
+                if child.id in seen:  # pragma: no cover - defensive
+                    continue
+                seen.add(child.id)
+                found.append(child)
+                queue.append(child.id)
+        return found
+
+    def rollup(self, task_id: str) -> dict[str, Any]:
+        """Progress of a container, derived from its descendants."""
+        leaves = [t for t in self.descendants(task_id) if t.kind not in CONTAINER_KINDS]
+        done = [t for t in leaves if t.state == "done"]
+        return {
+            "id": task_id,
+            "leaves": len(leaves),
+            "done": len(done),
+            "open": len([t for t in leaves if t.state not in TERMINAL_STATES]),
+            "percent": round(100 * len(done) / len(leaves), 1) if leaves else 0.0,
+        }
 
     def open_tasks_for_branch(self, branch: str) -> list[Task]:
         return [t for t in self.list(open_only=True) if t.branch == branch]

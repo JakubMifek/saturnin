@@ -45,7 +45,11 @@ def test_dispatch_updates_task(config: Config, board: Board) -> None:
     stored = board.get(task.id)
     assert stored.state == "routed"
     assert stored.role == route.role
-    assert stored.squad == "engineering"
+    assert stored.unit == "engineering"
+    # Squads are ad hoc; the rule only suggests a starting crew.
+    assert stored.squad and stored.role in stored.squad
+    # Rule 9: dispatch always agrees how the result comes back.
+    assert stored.result_contract == route.result_contract
     assert stored.routed_at is not None
     assert stored.history[-2]["event"] == "dispatch"
 
@@ -70,3 +74,22 @@ def test_unknown_role_is_rejected(config: Config, board: Board) -> None:
     router = Router(config)
     router.rules = [{"id": "bad", "when": {"kind": "task"}, "route": {"role": "ghost"}}]
     assert router.validate_policy()
+
+
+def test_squad_is_assembled_per_task(config: Config, board: Board) -> None:
+    task = board.create("Implement the widget")
+    route = Router(config).dispatch(board, task, squad=["code-worker", "scribe"])
+    assert route.squad  # the rule's suggestion is still reported
+    assert board.get(task.id).squad == ["code-worker", "scribe"]
+
+
+def test_unknown_result_contract_is_rejected(config: Config) -> None:
+    router = Router(config)
+    with pytest.raises(RoutingError):
+        router._build({"role": "code-worker", "result_contract": "telepathy"}, "bad")
+
+
+def test_ceo_may_not_be_in_a_squad(config: Config) -> None:
+    router = Router(config)
+    with pytest.raises(RoutingError):
+        router._build({"role": "code-worker", "squad": ["ceo"]}, "bad")

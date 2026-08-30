@@ -59,3 +59,24 @@ delegation:
   ceo_may_execute: false
   max_dispatch_seconds: 60
   max_deliberation_steps: 3
+  # Rule 9: the CEO never waits for a worker. Dispatch, agree how the result
+  # comes back, move on. Blocking on a worker is a governance violation.
+  ceo_may_wait_for_workers: false
+  # Every dispatched task must name one of these result contracts.
+  result_contracts:
+    # The worker moves the task to review/done itself; Saturnin sees it on the
+    # next board sweep.
+    - board-callback
+    # The worker opens a PR; the review gate reports back.
+    - pr-gate
+    # A polling automation watches an external signal and re-triggers Saturnin.
+    - poller
+    # A human is on the hook; an escalation issue tracks it.
+    - escalation
+  default_result_contract: board-callback
+
+tracking:
+  # Rule 8: every task is mirrored as a GitHub issue so that losing the local
+  # board costs nothing. Details in policies/repos.yaml.
+  mirror_tasks_as_issues: true
+  policy_file: repos

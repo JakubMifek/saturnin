@@ -8,7 +8,7 @@ in the system.
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Any
+from typing import Any, Sequence
 
 from .board import Board, BoardError, Task
 from .config import Config, default_config
@@ -21,10 +21,15 @@ class RoutingError(RuntimeError):
 @dataclass(frozen=True)
 class Route:
     role: str
-    squad: str | None
+    #: Permanent organizational unit of the lead role.
+    unit: str | None
     priority: str
     rule: str
     escalate: bool = False
+    #: Ad-hoc crew suggested for this task; the chief of staff may amend it.
+    squad: tuple[str, ...] = ()
+    #: How the result comes back, so that the CEO never waits for the worker.
+    result_contract: str = "board-callback"
 
 
 class Router:
@@ -33,7 +38,13 @@ class Router:
         self.policy: dict[str, Any] = self.config.routing
         self.roles: dict[str, dict[str, Any]] = self.policy.get("roles", {})
         self.rules: list[dict[str, Any]] = self.policy.get("rules", [])
-        self.ceo_role: str = self.config.governance.get("delegation", {}).get("ceo_role", "ceo")
+        delegation = self.config.governance.get("delegation", {})
+        self.ceo_role: str = delegation.get("ceo_role", "ceo")
+        self.result_contracts: list[str] = list(delegation.get("result_contracts", []))
+        self.default_result_contract: str = self.policy.get(
+            "default_result_contract",
+            delegation.get("default_result_contract", "board-callback"),
+        )
 
     # -- matching ------------------------------------------------------
     @staticmethod
@@ -75,29 +86,60 @@ class Router:
             )
         if not self.roles[role].get("executes", True):
             raise RoutingError(f"role {role!r} is not an executing role")
+        squad = tuple(route.get("squad", (role,))) or (role,)
+        unknown = [member for member in squad if member not in self.roles]
+        if unknown:
+            raise RoutingError(f"rule {rule_id!r} suggests unknown squad members: {unknown}")
+        if self.ceo_role in squad:
+            raise RoutingError(f"rule {rule_id!r} puts the CEO in a squad; the CEO never executes")
+        contract = route.get("result_contract", self.default_result_contract)
+        if self.result_contracts and contract not in self.result_contracts:
+            raise RoutingError(
+                f"rule {rule_id!r} uses unknown result contract {contract!r}; "
+                f"expected one of {self.result_contracts}"
+            )
         return Route(
             role=role,
-            squad=self.roles[role].get("squad"),
+            unit=self.roles[role].get("unit"),
             priority=route.get("priority", "P2"),
             rule=rule_id,
             escalate=bool(route.get("escalate", False)),
+            squad=squad,
+            result_contract=contract,
         )
 
     # -- dispatch ------------------------------------------------------
-    def dispatch(self, board: Board, task: Task, *, actor: str = "ceo") -> Route:
-        """Assign ``task`` to a role and move it to ``routed``."""
+    def dispatch(
+        self,
+        board: Board,
+        task: Task,
+        *,
+        actor: str = "ceo",
+        squad: Sequence[str] | None = None,
+    ) -> Route:
+        """Assign ``task`` to a role and move it to ``routed``.
+
+        ``squad`` overrides the rule's suggested crew: squads are assembled per
+        task, not fixed teams.
+        """
         if task.state not in ("intake", "blocked"):
             raise BoardError(f"task {task.id} is not dispatchable from state {task.state}")
         route = self.resolve(task)
         task.role = route.role
-        task.squad = route.squad
+        task.unit = route.unit
+        task.squad = list(squad or route.squad)
         task.priority = route.priority
+        # Rule 9: agree up front how the result comes back. Saturnin dispatches
+        # and moves on; it never blocks on a worker.
+        task.result_contract = route.result_contract
         task.log(
             "dispatch",
             actor=actor,
             role=route.role,
             rule=route.rule,
             escalate=route.escalate,
+            squad=",".join(task.squad),
+            result_contract=route.result_contract,
         )
         # The first dispatch is what dispatch latency measures; a re-dispatch
         # after "blocked" must not reset it.

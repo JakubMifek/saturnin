@@ -41,6 +41,8 @@ class Governance:
         self.review: dict[str, Any] = self.policy.get("review", {})
         self.autonomy: dict[str, Any] = self.policy.get("autonomy", {})
         self.escalation: dict[str, Any] = self.policy.get("escalation", {})
+        self.delegation: dict[str, Any] = self.policy.get("delegation", {})
+        self.tracking: dict[str, Any] = self.policy.get("tracking", {})
 
     # -- branches ------------------------------------------------------
     @property
@@ -213,6 +215,30 @@ class Governance:
             return Decision.ok("systemctl limited to Saturnin-dedicated units")
         return Decision.ok(f"{binary}: no elevated capability required")
 
+    # -- delegation ----------------------------------------------------
+    @property
+    def result_contracts(self) -> list[str]:
+        return list(self.delegation.get("result_contracts", []))
+
+    def check_result_contract(self, contract: str | None) -> Decision:
+        """Rule 9: a dispatch without an agreed result contract would force the
+        CEO to wait for the worker, which is forbidden."""
+        if self.delegation.get("ceo_may_wait_for_workers", False):
+            return Decision.ok("policy permits waiting (not recommended)")
+        allowed = self.result_contracts
+        if not contract:
+            return Decision.deny(
+                "no result contract: the CEO would have to wait for the worker. "
+                f"Pick one of: {', '.join(allowed)}"
+            )
+        if allowed and contract not in allowed:
+            return Decision.deny(f"unknown result contract {contract!r}; expected one of {allowed}")
+        return Decision.ok(f"results arrive via {contract}; the CEO does not wait")
+
+    def mirror_required(self) -> bool:
+        """Rule 8: tasks are mirrored as issues so local loss is survivable."""
+        return bool(self.tracking.get("mirror_tasks_as_issues", False))
+
     # -- self check ----------------------------------------------------
     def audit(self) -> list[str]:
         problems: list[str] = []
@@ -228,4 +254,10 @@ class Governance:
             problems.append("CEO is allowed to execute work; delegation-first is violated")
         if self.config.server_scope.get("user", {}).get("allow_root", False):
             problems.append("server scope allows root")
+        if self.delegation.get("ceo_may_wait_for_workers", False):
+            problems.append("CEO is allowed to wait for workers; dispatch must be non-blocking")
+        if not self.result_contracts:
+            problems.append("no result contracts defined; dispatch cannot be non-blocking")
+        if self.mirror_required() and not self.config.policy("repos").get("repos", {}).get("board"):
+            problems.append("task mirroring is on but policies/repos.yaml names no board repo")
         return problems

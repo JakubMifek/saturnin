@@ -1,0 +1,56 @@
+# Repository topology.
+#
+# This repository is the public engine. Anything private - the board, notes,
+# project context - lives in companion repositories, so that Saturnin's code can
+# be published without leaking operational detail.
+# See docs/adr/0001-system-of-record.md.
+version: 1
+
+repos:
+  # The engine: code, policies, agent contracts. Public.
+  engine:
+    slug: JakubMifek/saturnin
+    visibility: public
+    autonomous_merge: true
+
+  # System of record for work. Every board task is mirrored here as an issue,
+  # so nothing is lost if the local var/ and board/ directories disappear.
+  board:
+    slug: JakubMifek/saturnin-ops
+    visibility: private
+    # Issues carry the board metadata as labels.
+    label_prefix: "saturnin"
+
+  # Long-form notes, decisions and project context (wiki / Obsidian vault).
+  notes:
+    slug: JakubMifek/saturnin-notes
+    visibility: private
+    format: obsidian
+
+tracking:
+  # Rule 8: a task without a mirrored issue is not durable.
+  mirror_tasks_as_issues: true
+  # Improvement findings and automation proposals are mirrored too.
+  mirror_kinds: [objective, epic, feature, task, automation, improvement]
+  # Label scheme applied to the mirrored issue.
+  kind_label: "kind"
+  state_label: "state"
+  role_label: "role"
+  priority_label: "priority"
+
+# Contract every Saturnin-managed project repository must satisfy.
+# Validated with: saturnin repo check <path>
+managed_repo_contract:
+  required_files:
+    - .saturnin/repo.yaml
+    - .github/copilot-instructions.md
+  # Keys .saturnin/repo.yaml must define.
+  required_keys:
+    - project        # human name and one-line purpose
+    - context        # stack, entry points, how to run and test
+    - squad          # roles this project's work usually needs
+    - conventions    # style, testing and review expectations
+  optional_keys:
+    - agents         # project-specific agent contracts (paths)
+    - mcp            # MCP servers this project's agents may use
+    - monitors       # hosted endpoints to watch, with SLOs

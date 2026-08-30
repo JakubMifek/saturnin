@@ -1,0 +1,198 @@
+"""Mirror board tasks as GitHub issues.
+
+The local board is fast and offline; GitHub is durable. ``policies/repos.yaml``
+names the private repository that holds the mirrored issues, and rule 8 of
+``policies/governance.yaml`` says a task without a mirror is not durable.
+
+Rendering is pure and testable; pushing shells out to ``gh`` so that Saturnin
+never has to hold a token itself.
+"""
+
+from __future__ import annotations
+
+import json
+import shutil
+import subprocess
+from dataclasses import dataclass
+from typing import Any, Iterable
+
+from .board import Board, Task
+from .config import Config, default_config
+
+
+class MirrorError(RuntimeError):
+    """Raised when a task cannot be mirrored."""
+
+
+@dataclass
+class IssuePayload:
+    repo: str
+    title: str
+    body: str
+    labels: list[str]
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "repo": self.repo,
+            "title": self.title,
+            "body": self.body,
+            "labels": self.labels,
+        }
+
+
+class IssueMirror:
+    """Render and push the GitHub issue that backs a board task."""
+
+    def __init__(self, config: Config | None = None, board: Board | None = None) -> None:
+        self.config = config or default_config()
+        self.board = board or Board(self.config)
+
+    # -- policy --------------------------------------------------------
+    @property
+    def policy(self) -> dict[str, Any]:
+        return self.config.policy("repos")
+
+    @property
+    def tracking(self) -> dict[str, Any]:
+        return self.policy.get("tracking", {})
+
+    @property
+    def enabled(self) -> bool:
+        return bool(self.tracking.get("mirror_tasks_as_issues", False))
+
+    @property
+    def board_repo(self) -> str:
+        slug = self.policy.get("repos", {}).get("board", {}).get("slug")
+        if not slug:
+            raise MirrorError("policies/repos.yaml defines no board repository")
+        return str(slug)
+
+    def mirrors(self, task: Task) -> bool:
+        kinds = self.tracking.get("mirror_kinds") or []
+        return self.enabled and task.kind in kinds
+
+    # -- rendering -----------------------------------------------------
+    def labels_for(self, task: Task) -> list[str]:
+        prefix = self.policy.get("repos", {}).get("board", {}).get("label_prefix", "saturnin")
+        pairs = [
+            (self.tracking.get("kind_label", "kind"), task.kind),
+            (self.tracking.get("state_label", "state"), task.state),
+            (self.tracking.get("priority_label", "priority"), task.priority),
+        ]
+        if task.role:
+            pairs.append((self.tracking.get("role_label", "role"), task.role))
+        labels = [f"{prefix}:{key}/{value}" for key, value in pairs]
+        return sorted({*labels, *task.labels})
+
+    def render(self, task: Task) -> IssuePayload:
+        if not self.mirrors(task):
+            raise MirrorError(f"{task.id} is a {task.kind}; policy does not mirror it")
+        lines = [
+            f"<!-- saturnin:task:{task.id} -->",
+            "",
+            task.body.strip() or "_No description supplied at intake._",
+            "",
+            "| field | value |",
+            "| --- | --- |",
+            f"| task | `{task.id}` |",
+            f"| kind | {task.kind} |",
+            f"| state | {task.state} |",
+            f"| priority | {task.priority} |",
+            f"| role | {task.role or '_unrouted_'} |",
+            f"| repo | {task.repo or '_n/a_'} |",
+            f"| parent | {task.parent or '_none_'} |",
+            f"| result contract | {task.result_contract or '_not agreed_'} |",
+        ]
+        children = self.board.children(task.id)
+        if children:
+            lines += ["", "### Children", ""]
+            lines += [f"- [{'x' if c.state == 'done' else ' '}] `{c.id}` {c.title}" for c in children]
+        lines += [
+            "",
+            "---",
+            "Mirrored from the Saturnin board. Edit the board, not this issue: "
+            "`saturnin task sync " + task.id + "`.",
+        ]
+        return IssuePayload(
+            repo=self.board_repo,
+            title=f"[{task.kind}] {task.title}",
+            body="\n".join(lines),
+            labels=self.labels_for(task),
+        )
+
+    # -- pushing -------------------------------------------------------
+    def unmirrored(self) -> list[Task]:
+        return [
+            task
+            for task in self.board.list(open_only=True)
+            if self.mirrors(task) and not task.issue
+        ]
+
+    def sync(self, task: Task, *, push: bool = False, actor: str = "chief-of-staff") -> IssuePayload:
+        payload = self.render(task)
+        if not push:
+            return payload
+        url = self._push(task, payload)
+        with self.board.edit(task.id) as stored:
+            stored.issue = url
+            stored.issue_synced_at = _utcnow()
+            stored.log("issue:synced", actor=actor, note=url)
+        task.issue = url
+        return payload
+
+    def sync_all(self, tasks: Iterable[Task], *, push: bool = False) -> list[IssuePayload]:
+        return [self.sync(task, push=push) for task in tasks if self.mirrors(task)]
+
+    def _push(self, task: Task, payload: IssuePayload) -> str:
+        if shutil.which("gh") is None:
+            raise MirrorError(
+                "gh CLI not found; install it or run without --push and file the issue by hand"
+            )
+        if task.issue:
+            self._gh(
+                ["issue", "edit", task.issue, "--body", payload.body, "--title", payload.title]
+            )
+            return task.issue
+        out = self._gh(
+            [
+                "issue",
+                "create",
+                "--repo",
+                payload.repo,
+                "--title",
+                payload.title,
+                "--body",
+                payload.body,
+                *_label_args(payload.labels),
+            ]
+        )
+        url = out.strip().splitlines()[-1].strip() if out.strip() else ""
+        if not url:
+            raise MirrorError("gh issue create returned no URL")
+        return url
+
+    @staticmethod
+    def _gh(args: list[str]) -> str:
+        result = subprocess.run(
+            ["gh", *args], capture_output=True, text=True, check=False
+        )
+        if result.returncode != 0:
+            raise MirrorError(f"gh {' '.join(args[:2])} failed: {result.stderr.strip()}")
+        return result.stdout
+
+
+def _label_args(labels: list[str]) -> list[str]:
+    out: list[str] = []
+    for label in labels:
+        out += ["--label", label]
+    return out
+
+
+def _utcnow() -> str:
+    from .board import utcnow
+
+    return utcnow()
+
+
+def dumps(payloads: list[IssuePayload]) -> str:
+    return json.dumps([p.to_dict() for p in payloads], indent=2)
