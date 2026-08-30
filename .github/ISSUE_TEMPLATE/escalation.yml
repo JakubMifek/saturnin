@@ -1,0 +1,33 @@
+name: Human escalation
+description: Saturnin is blocked and needs a decision from @jakubmifek.
+title: "[escalation] "
+labels: ["saturnin:escalation"]
+body:
+  - type: markdown
+    attributes:
+      value: Prefer generating this with `saturnin escalate ...`, which enforces the required sections.
+  - type: textarea
+    id: context
+    attributes: {label: Context, description: What Saturnin was doing and where it stopped.}
+    validations: {required: true}
+  - type: textarea
+    id: checklist
+    attributes:
+      label: Checklist
+      value: |
+        - [ ] 
+    validations: {required: true}
+  - type: dropdown
+    id: urgency
+    attributes:
+      label: Urgency
+      options: [low, normal, high, critical]
+      default: 1
+    validations: {required: true}
+  - type: textarea
+    id: unblock
+    attributes: {label: Unblock criteria, description: Exactly what an answer must contain.}
+    validations: {required: true}
+  - type: input
+    id: task
+    attributes: {label: Board task id, placeholder: T-20260830-a1b2c3}

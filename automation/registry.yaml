@@ -32,3 +32,15 @@ automations:
     path: automation/library/review_gate.sh
     owner_role: pr-reviewer
     triggers: [review, merge, gate, issue submission]
+
+  - id: bootstrap
+    description: Idempotent day-1 install - virtualenv, package, runtime dirs, doctor.
+    path: scripts/bootstrap.sh
+    owner_role: ops-worker
+    triggers: [bootstrap, install, setup, day-1]
+
+  - id: install-user-units
+    description: Install the user-scope systemd timers for the scheduled workers.
+    path: scripts/install_user_units.sh
+    owner_role: ops-worker
+    triggers: [systemd, timer, schedule, units]

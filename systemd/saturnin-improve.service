@@ -1,0 +1,10 @@
+[Unit]
+Description=Saturnin improvement cycle - measure, detect bottlenecks, dispatch
+Documentation=file://@SATURNIN_HOME@/docs/operating-model.md
+
+[Service]
+Type=oneshot
+WorkingDirectory=@SATURNIN_HOME@
+Environment=SATURNIN_HOME=@SATURNIN_HOME@
+ExecStart=@SATURNIN_HOME@/automation/library/improvement_cycle.sh
+Nice=10

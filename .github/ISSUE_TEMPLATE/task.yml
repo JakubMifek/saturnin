@@ -1,0 +1,27 @@
+name: Task for Saturnin
+description: Something Saturnin should get done. It will be routed, not done by the CEO.
+labels: ["saturnin:task"]
+body:
+  - type: input
+    id: title
+    attributes:
+      label: One-line intent
+      placeholder: Fix the failing nightly deploy
+    validations: {required: true}
+  - type: textarea
+    id: detail
+    attributes:
+      label: Detail
+      description: What is wrong or wanted, and how you will know it is done.
+    validations: {required: true}
+  - type: dropdown
+    id: priority
+    attributes:
+      label: Priority
+      options: ["P0 - drop everything", "P1 - today", "P2 - normal", "P3 - when idle"]
+      default: 2
+  - type: input
+    id: repo
+    attributes:
+      label: Repository it concerns
+      placeholder: JakubMifek/some-project

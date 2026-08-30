@@ -21,6 +21,7 @@ def home(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
     for policy in (REPO_ROOT / "policies").glob("*.yaml"):
         shutil.copy(policy, root / "policies" / policy.name)
     shutil.copytree(REPO_ROOT / "automation", root / "automation")
+    shutil.copytree(REPO_ROOT / "scripts", root / "scripts")
     monkeypatch.setenv("SATURNIN_HOME", str(root))
     return root
 

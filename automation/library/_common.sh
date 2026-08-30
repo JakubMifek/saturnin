@@ -8,7 +8,9 @@ export SATURNIN_HOME
 log() { printf '%s [%s] %s\n' "$(date -Is)" "${SCRIPT_NAME:-automation}" "$*"; }
 
 saturnin() {
-  if command -v saturnin >/dev/null 2>&1; then
+  if [[ -x "${SATURNIN_HOME}/.venv/bin/saturnin" ]]; then
+    "${SATURNIN_HOME}/.venv/bin/saturnin" "$@"
+  elif command -v saturnin >/dev/null 2>&1; then
     command saturnin "$@"
   else
     PYTHONPATH="${SATURNIN_HOME}/src:${PYTHONPATH:-}" python3 -m saturnin "$@"

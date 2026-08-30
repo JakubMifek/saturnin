@@ -1,0 +1,11 @@
+[Unit]
+Description=Daily Saturnin worktree/branch cleanup
+
+[Timer]
+OnCalendar=daily
+RandomizedDelaySec=15m
+Persistent=true
+Unit=saturnin-janitor.service
+
+[Install]
+WantedBy=timers.target
