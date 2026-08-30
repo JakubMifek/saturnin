@@ -1,0 +1,110 @@
+# Role catalog + dispatch rules. The router is deliberately dumb and fast:
+# first matching rule wins, otherwise the default route is used.
+version: 1
+
+roles:
+  ceo:
+    name: Saturnin (CEO)
+    squad: command
+    executes: false
+    description: Routes, decides, escalates. Never writes code, never runs commands.
+  chief-of-staff:
+    name: Chief of Staff
+    squad: command
+    executes: true
+    description: Keeps the board clean, chases stale work, prepares handoffs.
+  code-worker:
+    name: Code Worker
+    squad: engineering
+    executes: true
+    description: Implements changes on a feature branch inside its own worktree.
+  test-worker:
+    name: Test Worker
+    squad: engineering
+    executes: true
+    description: Writes and repairs tests, reproduces bugs.
+  pr-reviewer:
+    name: Independent PR Reviewer
+    squad: assurance
+    executes: true
+    zero_context: true
+    description: Reviews a diff with no prior context of the authoring session.
+  issue-reviewer:
+    name: Independent Issue Reviewer
+    squad: assurance
+    executes: true
+    zero_context: true
+    description: Reviews issue drafts before they are filed in managed repos.
+  ops-worker:
+    name: Server Ops Worker
+    squad: operations
+    executes: true
+    description: Non-root Debian server work inside the Saturnin user scope.
+  janitor:
+    name: Janitor
+    squad: operations
+    executes: true
+    description: Worktree/branch lifecycle, stale cleanup, disk hygiene.
+  automation-smith:
+    name: Automation Smith
+    squad: platform
+    executes: true
+    description: Turns repeated work into reusable scripts in the automation library.
+  improver:
+    name: Improvement Analyst
+    squad: platform
+    executes: true
+    description: Measures throughput, finds bottlenecks, proposes topology/policy upgrades.
+  scribe:
+    name: Scribe
+    squad: platform
+    executes: true
+    description: Docs, runbooks, checkpoints and handoff notes.
+  researcher:
+    name: Researcher
+    squad: platform
+    executes: true
+    description: Investigates options and reports back; no repository writes.
+
+default_route:
+  role: chief-of-staff
+  priority: P2
+
+rules:
+  # The CEO only decides that an escalation is needed; the chief of staff files it.
+  - id: escalation
+    when: {any_label: [escalation, blocked, human-needed]}
+    route: {role: chief-of-staff, priority: P0, escalate: true}
+  - id: incident
+    when: {any_keyword: [outage, incident, broken, failing, down, hotfix]}
+    route: {role: code-worker, priority: P0}
+  - id: review-pr
+    when: {kind: pr-review}
+    route: {role: pr-reviewer, priority: P1}
+  - id: review-issue
+    when: {kind: issue-review}
+    route: {role: issue-reviewer, priority: P1}
+  - id: cleanup
+    when: {any_keyword: [worktree, stale branch, cleanup, prune, disk]}
+    route: {role: janitor, priority: P3}
+  - id: server
+    when: {any_keyword: [debian, server, systemd, timer, cron, service, apt]}
+    route: {role: ops-worker, priority: P2}
+  - id: automation
+    when: {any_keyword: [automate, script, recurring, repeated, workflow]}
+    route: {role: automation-smith, priority: P2}
+  - id: tests
+    when: {any_keyword: [test, pytest, coverage, flaky]}
+    route: {role: test-worker, priority: P2}
+  - id: docs
+    when: {any_keyword: [docs, documentation, readme, runbook]}
+    route: {role: scribe, priority: P3}
+  - id: research
+    when: {any_keyword: [research, investigate, compare, evaluate]}
+    route: {role: researcher, priority: P3}
+  - id: improvement
+    when: {any_keyword: [bottleneck, metric, throughput, improve, refactor process]}
+    route: {role: improver, priority: P2}
+  - id: code
+    when: {any_keyword: [implement, bug, feature, refactor, fix]}
+    route: {role: code-worker, priority: P2}

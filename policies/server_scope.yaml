@@ -1,0 +1,35 @@
+# Rule 7: what Saturnin may do on the local Debian server.
+version: 1
+
+user:
+  # Saturnin runs as a dedicated, unprivileged user.
+  dedicated_user: saturnin
+  allow_root: false
+  # Commands must never be run through these.
+  forbidden_prefixes: [sudo, su, doas, pkexec]
+
+packages:
+  # apt is only allowed for packages that belong to a Saturnin-dedicated service.
+  apt_allowed: true
+  apt_requires_dedicated_service: true
+  apt_allowed_subcommands: [install, update, list, show]
+
+services:
+  # systemctl is limited to units owned by Saturnin.
+  systemctl_allowed: true
+  unit_prefix: saturnin-
+  allowed_subcommands: [start, stop, restart, status, enable, disable, list-timers]
+  # Timers/cron entries live in the Saturnin user scope only.
+  scheduling_scope: user
+  allowed_schedulers: [systemd-user-timer, user-crontab]
+
+filesystem:
+  writable_roots:
+    - /home/saturnin
+    - /home/saturnin/worktrees
+    - /home/saturnin/saturnin
+  forbidden_roots:
+    - /etc
+    - /usr
+    - /var/lib
+    - /root

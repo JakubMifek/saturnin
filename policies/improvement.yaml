@@ -1,0 +1,24 @@
+# Thresholds for the continuous self-improvement loop.
+version: 1
+
+thresholds:
+  # Dispatch must stay fast; anything slower is a CEO bottleneck.
+  max_median_dispatch_latency_s: 60
+  # Work in progress per role before the squad is considered overloaded.
+  max_wip_per_role: 5
+  # Share of open tasks allowed to sit in "blocked".
+  max_blocked_ratio: 0.25
+  # Tasks waiting in intake (undispatched) at any time.
+  max_undispatched: 3
+  # Age of the oldest open task before it must be checkpointed or dropped.
+  max_open_age_days: 14
+  # Median cycle time target (2 days).
+  max_median_cycle_time_s: 172800
+
+actions:
+  # Findings become board tasks routed by the normal router.
+  create_tasks: true
+  labels: [self-improvement]
+  # Topology upgrades (adding/retiring roles) always need a human sign-off.
+  topology_changes_require_escalation: true
+  report_dir: var/reports

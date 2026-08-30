@@ -1,0 +1,287 @@
+"""Worktree and feature-branch lifecycle management.
+
+Parallel execution means one worktree per worker. Worktrees are cheap to create
+and easy to forget, so the janitor gets a policy-driven, dry-run-by-default
+cleanup planner.
+"""
+
+from __future__ import annotations
+
+import subprocess
+from dataclasses import dataclass, field
+from datetime import datetime, timedelta, timezone
+from fnmatch import fnmatch
+from pathlib import Path
+from typing import Any, Iterable, Sequence
+
+from .board import Board
+from .config import Config, default_config
+from .governance import Governance
+
+
+class GitError(RuntimeError):
+    pass
+
+
+def git(args: Sequence[str], cwd: Path) -> str:
+    result = subprocess.run(  # noqa: S603 - fixed executable, arguments are not shell-parsed
+        ["git", *args],
+        cwd=str(cwd),
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    if result.returncode != 0:
+        raise GitError(f"git {' '.join(args)} failed: {result.stderr.strip()}")
+    return result.stdout
+
+
+@dataclass
+class Worktree:
+    path: Path
+    branch: str | None
+    head: str | None = None
+    is_main: bool = False
+    locked: bool = False
+
+    @property
+    def name(self) -> str:
+        return self.path.name
+
+
+@dataclass
+class Action:
+    kind: str  # remove_worktree | delete_branch
+    target: str
+    reason: str
+
+
+@dataclass
+class CleanupPlan:
+    actions: list[Action] = field(default_factory=list)
+    skipped: list[Action] = field(default_factory=list)
+    applied: bool = False
+    errors: list[str] = field(default_factory=list)
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "applied": self.applied,
+            "actions": [vars(a) for a in self.actions],
+            "skipped": [vars(a) for a in self.skipped],
+            "errors": self.errors,
+        }
+
+
+class WorktreeManager:
+    def __init__(
+        self,
+        config: Config | None = None,
+        *,
+        repo: Path | None = None,
+        board: Board | None = None,
+    ) -> None:
+        self.config = config or default_config()
+        self.repo = Path(repo or self.config.root)
+        self.governance = Governance(self.config)
+        self.board = board or Board(self.config)
+        self.policy = self.config.cleanup
+
+    # -- inspection ----------------------------------------------------
+    def list(self) -> list[Worktree]:
+        out = git(["worktree", "list", "--porcelain"], self.repo)
+        worktrees: list[Worktree] = []
+        current: dict[str, Any] = {}
+        for line in out.splitlines() + [""]:
+            if not line.strip():
+                if current:
+                    worktrees.append(
+                        Worktree(
+                            path=Path(current["worktree"]),
+                            branch=current.get("branch"),
+                            head=current.get("HEAD"),
+                            locked=bool(current.get("locked")),
+                        )
+                    )
+                current = {}
+                continue
+            key, _, value = line.partition(" ")
+            if key == "branch":
+                value = value.replace("refs/heads/", "")
+            current[key] = value or True
+        if worktrees:
+            worktrees[0].is_main = True
+        return worktrees
+
+    def branch_last_commit(self, branch: str) -> datetime:
+        raw = git(["log", "-1", "--format=%cI", branch], self.repo).strip()
+        return datetime.fromisoformat(raw)
+
+    def merged_branches(self) -> set[str]:
+        default = self.governance.default_branch
+        try:
+            out = git(["branch", "--merged", default, "--format=%(refname:short)"], self.repo)
+        except GitError:
+            return set()
+        return {line.strip() for line in out.splitlines() if line.strip()}
+
+    def is_clean(self, path: Path) -> bool:
+        try:
+            return not git(["status", "--porcelain"], path).strip()
+        except GitError:
+            return False
+
+    # -- creation ------------------------------------------------------
+    def create(self, branch: str, *, base: str | None = None, path: Path | None = None) -> Worktree:
+        decision = self.governance.check_branch(branch)
+        if not decision.allowed:
+            raise GitError("; ".join(decision.reasons))
+        base = base or self.governance.default_branch
+        root = Path(self.config.governance.get("git", {}).get("worktree_root", "var/worktrees"))
+        if not root.is_absolute():
+            root = self.repo / root
+        root.mkdir(parents=True, exist_ok=True)
+        target = path or root / branch.replace("/", "__")
+        if target.exists():
+            raise GitError(f"worktree path already exists: {target}")
+        git(["worktree", "add", "-b", branch, str(target), base], self.repo)
+        return Worktree(path=target, branch=branch)
+
+    def remove(self, path: Path, *, force: bool = False) -> None:
+        args = ["worktree", "remove", str(path)]
+        if force:
+            args.append("--force")
+        git(args, self.repo)
+
+    # -- cleanup -------------------------------------------------------
+    def plan_cleanup(self, *, now: datetime | None = None) -> CleanupPlan:
+        now = now or datetime.now(timezone.utc)
+        wt_policy = self.policy.get("worktree", {})
+        br_policy = self.policy.get("branch", {})
+        safety = self.policy.get("safety", {})
+        protected = set(self.governance.protected_branches)
+        merged = self.merged_branches()
+        plan = CleanupPlan()
+
+        for worktree in self.list():
+            if worktree.is_main:
+                continue
+            target = str(worktree.path)
+            if worktree.locked:
+                plan.skipped.append(Action("remove_worktree", target, "worktree is locked"))
+                continue
+            if any(fnmatch(target, pattern) for pattern in wt_policy.get("keep_globs", [])):
+                plan.skipped.append(Action("remove_worktree", target, "matches keep_globs"))
+                continue
+            if worktree.branch in protected:
+                plan.skipped.append(Action("remove_worktree", target, "protected branch"))
+                continue
+            if worktree.branch and self.board.open_tasks_for_branch(worktree.branch):
+                plan.skipped.append(Action("remove_worktree", target, "has an open board task"))
+                continue
+            if safety.get("require_clean_worktree", True) and not self.is_clean(worktree.path):
+                plan.skipped.append(
+                    Action("remove_worktree", target, "uncommitted changes present")
+                )
+                continue
+            age = self._age_days(worktree, now)
+            if age is None:
+                plan.skipped.append(Action("remove_worktree", target, "age unknown"))
+                continue
+            is_merged = worktree.branch in merged
+            threshold = (
+                wt_policy.get("merged_stale_after_days", 1)
+                if is_merged
+                else wt_policy.get("stale_after_days", 7)
+            )
+            if age >= threshold:
+                plan.actions.append(
+                    Action(
+                        "remove_worktree",
+                        target,
+                        f"idle {age:.1f}d >= {threshold}d ({'merged' if is_merged else 'unmerged'})",
+                    )
+                )
+            else:
+                plan.skipped.append(
+                    Action("remove_worktree", target, f"idle {age:.1f}d < {threshold}d")
+                )
+
+        if br_policy.get("delete_merged_local", True):
+            grace = timedelta(days=br_policy.get("merged_grace_days", 1))
+            checked_out = {w.branch for w in self.list()}
+            for branch in sorted(merged - protected):
+                if branch in checked_out:
+                    plan.skipped.append(Action("delete_branch", branch, "checked out in a worktree"))
+                    continue
+                if br_policy.get("protect_with_open_tasks", True) and self.board.open_tasks_for_branch(
+                    branch
+                ):
+                    plan.skipped.append(Action("delete_branch", branch, "has an open board task"))
+                    continue
+                try:
+                    last = self.branch_last_commit(branch)
+                except GitError:  # pragma: no cover - defensive
+                    plan.skipped.append(Action("delete_branch", branch, "cannot read history"))
+                    continue
+                if now - last < grace:
+                    plan.skipped.append(Action("delete_branch", branch, "inside merge grace period"))
+                    continue
+                plan.actions.append(Action("delete_branch", branch, "merged into default branch"))
+
+        cap = int(safety.get("max_removals_per_run", 10))
+        if len(plan.actions) > cap:
+            overflow = plan.actions[cap:]
+            plan.actions = plan.actions[:cap]
+            for action in overflow:
+                action.reason += f" (deferred: over cap of {cap} per run)"
+            plan.skipped.extend(overflow)
+        return plan
+
+    def _age_days(self, worktree: Worktree, now: datetime) -> float | None:
+        stamps: list[datetime] = []
+        if worktree.branch:
+            try:
+                stamps.append(self.branch_last_commit(worktree.branch))
+            except GitError:
+                pass
+        if worktree.path.exists():
+            stamps.append(
+                datetime.fromtimestamp(worktree.path.stat().st_mtime, tz=timezone.utc)
+            )
+        if not stamps:
+            return None
+        return (now - max(stamps)).total_seconds() / 86400.0
+
+    def apply(self, plan: CleanupPlan) -> CleanupPlan:
+        for action in plan.actions:
+            try:
+                if action.kind == "remove_worktree":
+                    self.remove(Path(action.target))
+                elif action.kind == "delete_branch":
+                    git(["branch", "-d", action.target], self.repo)
+            except GitError as exc:
+                plan.errors.append(f"{action.kind} {action.target}: {exc}")
+        try:
+            git(["worktree", "prune"], self.repo)
+        except GitError as exc:  # pragma: no cover - defensive
+            plan.errors.append(f"worktree prune: {exc}")
+        plan.applied = True
+        self.log_plan(plan)
+        return plan
+
+    def log_plan(self, plan: CleanupPlan) -> Path:
+        log_file = Path(self.policy.get("safety", {}).get("log_file", "var/logs/janitor.log"))
+        if not log_file.is_absolute():
+            log_file = self.config.root / log_file
+        log_file.parent.mkdir(parents=True, exist_ok=True)
+        stamp = datetime.now(timezone.utc).isoformat(timespec="seconds")
+        lines: Iterable[str] = (
+            f"{stamp} {'APPLY' if plan.applied else 'DRYRUN'} {a.kind} {a.target} :: {a.reason}"
+            for a in plan.actions
+        )
+        with log_file.open("a", encoding="utf-8") as handle:
+            for line in lines:
+                handle.write(line + "\n")
+            for error in plan.errors:
+                handle.write(f"{stamp} ERROR {error}\n")
+        return log_file

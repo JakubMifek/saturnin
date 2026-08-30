@@ -1,0 +1,72 @@
+from __future__ import annotations
+
+import pytest
+
+from saturnin.board import Board
+from saturnin.config import Config
+from saturnin.routing import Router, RoutingError
+
+
+def test_policy_is_healthy(config: Config) -> None:
+    assert Router(config).validate_policy() == []
+
+
+def test_keyword_routing(config: Config, board: Board) -> None:
+    router = Router(config)
+    task = board.create("Fix failing build in the deploy pipeline")
+    assert router.resolve(task).role == "code-worker"
+    docs = board.create("Update the runbook documentation")
+    assert router.resolve(docs).role == "scribe"
+
+
+def test_kind_routing(config: Config, board: Board) -> None:
+    task = board.create("Review PR 12", kind="pr-review")
+    route = Router(config).resolve(task)
+    assert route.role == "pr-reviewer"
+    assert route.priority == "P1"
+
+
+def test_escalation_label_is_p0_and_never_ceo(config: Config, board: Board) -> None:
+    task = board.create("Need a decision", labels=["escalation"])
+    route = Router(config).resolve(task)
+    assert route.escalate is True
+    assert route.priority == "P0"
+    assert route.role != "ceo"
+
+
+def test_default_route(config: Config, board: Board) -> None:
+    task = board.create("Zzzz unclassifiable blurb")
+    assert Router(config).resolve(task).role == "chief-of-staff"
+
+
+def test_dispatch_updates_task(config: Config, board: Board) -> None:
+    task = board.create("Implement the widget")
+    route = Router(config).dispatch(board, task)
+    stored = board.get(task.id)
+    assert stored.state == "routed"
+    assert stored.role == route.role
+    assert stored.squad == "engineering"
+    assert stored.routed_at is not None
+    assert stored.history[-2]["event"] == "dispatch"
+
+
+def test_dispatch_twice_is_refused(config: Config, board: Board) -> None:
+    task = board.create("Implement the widget")
+    router = Router(config)
+    router.dispatch(board, task)
+    with pytest.raises(Exception):
+        router.dispatch(board, board.get(task.id))
+
+
+def test_routing_to_ceo_is_rejected(config: Config, board: Board) -> None:
+    router = Router(config)
+    router.rules = [{"id": "bad", "when": {"kind": "task"}, "route": {"role": "ceo"}}]
+    with pytest.raises(RoutingError, match="CEO never executes"):
+        router.resolve(board.create("anything"))
+    assert any("CEO" in p for p in router.validate_policy())
+
+
+def test_unknown_role_is_rejected(config: Config, board: Board) -> None:
+    router = Router(config)
+    router.rules = [{"id": "bad", "when": {"kind": "task"}, "route": {"role": "ghost"}}]
+    assert router.validate_policy()

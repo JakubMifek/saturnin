@@ -1,0 +1,61 @@
+# Hard governance rules for Saturnin. Machine-readable mirror of docs/operating-model.md.
+# Changing this file requires an independent reviewer approval (see review pipelines).
+version: 1
+
+git:
+  default_branch: main
+  # Branches Saturnin must never commit to, push to, or delete.
+  protected_branches:
+    - main
+    - master
+    - release
+  # Every unit of work happens on a feature branch created from the default branch.
+  branch_prefixes:
+    - feature/
+    - fix/
+    - chore/
+    - docs/
+    - automation/
+    - experiment/
+  branch_name_pattern: '^(feature|fix|chore|docs|automation|experiment)/[a-z0-9._-]+$'
+  worktree_root: var/worktrees
+
+review:
+  # Rule 3: every code PR needs an independent, zero-context reviewer.
+  pr:
+    required: true
+    independent: true
+    zero_context: true
+    min_approvals: 1
+    # The agent that authored the change may never review it.
+    author_may_review: false
+  # Rule 5: issues opened in other Saturnin-managed repos need an issue review.
+  issue:
+    required_for_external_repos: true
+    independent: true
+    author_may_review: false
+
+autonomy:
+  # Rule 4: in this repository Saturnin may merge on its own once review passed.
+  self_repo: JakubMifek/saturnin
+  self_repo_autonomous_merge: true
+  external_repos_allow_issue_creation: true
+  external_repos_allow_direct_push: false
+
+escalation:
+  # Rule 6: humans are reached through a GitHub issue, never silently.
+  channel: github_issue
+  mention: "@jakubmifek"
+  label: "saturnin:escalation"
+  required_sections:
+    - checklist
+    - urgency
+    - unblock_criteria
+  urgency_levels: [low, normal, high, critical]
+
+delegation:
+  # The CEO does no execution work at all - not even trivial work.
+  ceo_role: ceo
+  ceo_may_execute: false
+  max_dispatch_seconds: 60
+  max_deliberation_steps: 3

@@ -1,0 +1,34 @@
+# Index of reusable automations. Search this (`saturnin automation find "<what>"`)
+# before writing any new script - reinvention is the most expensive habit here.
+version: 1
+
+automations:
+  - id: janitor-cleanup
+    description: Plan and optionally apply stale worktree/branch cleanup.
+    path: automation/library/cleanup_worktrees.sh
+    owner_role: janitor
+    triggers: [worktree, stale branch, cleanup, prune]
+
+  - id: improvement-cycle
+    description: Collect board metrics, detect bottlenecks and file improvement tasks.
+    path: automation/library/improvement_cycle.sh
+    owner_role: improver
+    triggers: [metrics, bottleneck, improve, throughput]
+
+  - id: dispatch-sweep
+    description: Route every task sitting in intake and print the resulting board.
+    path: automation/library/dispatch_sweep.sh
+    owner_role: chief-of-staff
+    triggers: [dispatch, intake, route, backlog]
+
+  - id: new-work-session
+    description: Create a feature branch worktree and bind it to a board task.
+    path: automation/library/new_work_session.sh
+    owner_role: code-worker
+    triggers: [worktree, feature branch, start work, session]
+
+  - id: review-gate
+    description: Check whether a PR may be merged or an issue may be filed.
+    path: automation/library/review_gate.sh
+    owner_role: pr-reviewer
+    triggers: [review, merge, gate, issue submission]
