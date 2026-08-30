@@ -29,6 +29,8 @@ Full walkthrough: [`docs/runbooks/day-1-startup.md`](docs/runbooks/day-1-startup
 | Capability | Command |
 | --- | --- |
 | Task intake + centralised board | `saturnin task add\|list\|show\|move\|attach` |
+| Work hierarchy (objective/epic/feature/task) | `saturnin task tree`, `--parent` |
+| Durable copy of every task as a GitHub issue | `saturnin task sync --all --push` |
 | Ultra-fast dispatch (table lookup, no deliberation) | `saturnin dispatch <id> \| --all` |
 | Governance gates (branches, merges, issues, server) | `saturnin check branch\|command` |
 | Independent PR/issue review pipelines | `saturnin review record\|gate` |
@@ -37,26 +39,33 @@ Full walkthrough: [`docs/runbooks/day-1-startup.md`](docs/runbooks/day-1-startup
 | Reusable automation library + repeat detection | `saturnin automation find\|list\|detect` |
 | Human escalation issues | `saturnin escalate` |
 | Continuous self-improvement loop | `saturnin improve`, `saturnin board metrics` |
+| Managed-repo contract validation | `saturnin repo check <path>` |
+| Documentation generated from policy | `saturnin docs render [--check]` |
 
 ## Governance in one screen
 
+<!-- generated:rules-list -->
 1. Never push to the default branch.
-2. Feature branches plus one git worktree per parallel worker.
-3. Every code PR is reviewed by an independent **zero-context** reviewer agent.
-4. In this repository, PRs may be opened and merged autonomously after that review.
-5. In other managed repositories: issues only, and each draft passes an
-   independent issue reviewer first.
-6. Blocked? A GitHub issue tagging `@jakubmifek` with checklist, urgency and
-   unblock criteria - never silence.
-7. Server: non-root only; `apt`/`systemctl` only for Saturnin-dedicated services;
-   timers and cron only in the Saturnin user scope.
+2. Feature branches plus one worktree per parallel worker.
+3. Every code PR is reviewed by an independent zero-context reviewer.
+4. Autonomous PR flow in this repository once that review passed.
+5. Managed repos: issues allowed, each independently reviewed first.
+6. Human escalation via a GitHub issue tagging `@jakubmifek`.
+7. Server: non-root; apt/systemctl only for Saturnin services; user-scope timers.
+8. Every task is mirrored as a GitHub issue, so losing this machine costs nothing.
+9. The CEO never waits for a worker; every dispatch names a result contract.
+<!-- /generated:rules-list -->
 
 The rules are machine-readable in [`policies/`](policies) and enforced by
-`saturnin` itself; `saturnin doctor` fails if code and policy disagree.
+`saturnin` itself. The list above is generated from `policies/governance.yaml`:
+nothing that lives in a policy is re-typed into prose, and `saturnin doctor`
+fails if code, policy, agent contracts or documentation disagree
+([ADR-0004](docs/adr/0004-policy-as-source-of-truth.md)).
 
 ## Layout
 
 ```
+AGENTS.md                         orientation for agents working on this repo
 .github/copilot-instructions.md   how Saturnin (the CEO) must behave
 agents/                           one contract per role, replaceable
 skills/                           shared capability contracts
@@ -64,6 +73,7 @@ policies/                         governance, routing, cleanup, server scope, im
 automation/                       registry.yaml + reusable library scripts
 board/                            tasks, checkpoints, review verdicts (runtime)
 docs/                             architecture, operating model, persona, runbooks
+docs/adr/                         decisions worth not re-litigating
 scripts/, systemd/                bootstrap and the scheduled workers
 src/saturnin/, tests/             the implementation and its tests
 ```

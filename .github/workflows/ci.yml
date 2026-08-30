@@ -24,8 +24,10 @@ jobs:
         run: python -m pip install -e ".[dev]"
       - name: Policy health check
         run: saturnin doctor
-      - name: Tests
-        run: python -m pytest
+      - name: Tests (with the 80% branch-coverage floor)
+        run: python -m pytest --cov --cov-report=term-missing
+      - name: Docs must agree with policy
+        run: saturnin docs render --check
       - name: Shell syntax
         run: bash -n automation/library/*.sh scripts/*.sh
 

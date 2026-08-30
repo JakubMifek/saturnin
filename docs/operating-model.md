@@ -56,12 +56,25 @@ reviewer never sees the authoring session - only the requirement and the diff.
 The ledger enforces both mechanically; a reviewer who *did* have context must
 record it with `--with-context`, and such an approval cannot satisfy the gate.
 
-## 5. Parallelism
+## 5. Squads, parallelism and context
 
-One task, one branch, one worktree. Workers never share a checkout, so two
-squads can run at once without stepping on each other. The janitor removes the
-remains on a schedule; it refuses to touch anything dirty, protected or attached
-to an open task.
+Squads are assembled per task and dissolved when it closes; `unit` in the role
+catalog is an org chart, not a team roster
+([delegation-policy.md](delegation-policy.md)).
+
+One task, one branch, one worktree. Workers never share a checkout, so several
+squads run at once without stepping on each other; the only shared resource is
+the board, and every write there takes a lock
+([board/README.md](../board/README.md)). The janitor removes the remains on a
+schedule; it refuses to touch anything dirty, protected or attached to an open
+task.
+
+Context is rationed, not withheld. A worker gets its own contract, its skills,
+the task, and the project's `.saturnin/repo.yaml` - stack, entry points, how to
+run and test it, house conventions
+([managed-repo-contract.md](managed-repo-contract.md)). A zero-context reviewer
+is denied the *authoring session*, never the project: reviewing a diff without
+knowing what the system is for produces theatre, not findings.
 
 ## 6. Automation and anti-reinvention
 

@@ -11,7 +11,7 @@ requires-python = ">=3.11"
 dependencies = ["PyYAML>=6.0"]
 
 [project.optional-dependencies]
-dev = ["pytest>=8.0"]
+dev = ["pytest>=8.0", "pytest-cov>=5.0"]
 
 [project.scripts]
 saturnin = "saturnin.cli:main"
@@ -22,3 +22,12 @@ where = ["src"]
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 addopts = "-q"
+
+[tool.coverage.run]
+branch = true
+source = ["saturnin"]
+
+[tool.coverage.report]
+# The floor from agents/test-worker.md. A floor, never a target.
+fail_under = 80
+show_missing = true

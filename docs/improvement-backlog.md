@@ -25,6 +25,13 @@ ones here). Ordered by expected effect on throughput per unit of risk.
       minutes, not only on counts.
 - [ ] **Squad-level parallelism** - run several code workers on one epic with a
       shared integration branch.
+- [ ] **JSON Schema for `policies/*.yaml`** - `doctor` checks semantics, not
+      structure; a mistyped key is only caught when some code happens to read it.
+- [ ] **Evaluation harness** - replay recorded dispatches so a routing or policy
+      change can be judged before it ships, instead of by watching the metric
+      drift afterwards (see [gap-analysis.md](gap-analysis.md)).
+- [ ] **Worktree post-create hook** - install the package and dev tooling in a
+      new worktree automatically, rather than leaving it to the worker.
 
 ## Deliberately not doing (yet)
 
@@ -33,9 +40,22 @@ ones here). Ordered by expected effect on throughput per unit of risk.
 - Relaxing the zero-context rule for "small" PRs; small PRs are where mistakes
   hide.
 
+## Work hierarchy
+
+Epics and features exist now: task kinds are `objective > epic > feature > task`,
+with `--parent`, `saturnin task tree` and roll-up progress. Only leaf work is
+dispatched - containers make progress legible, they are not a planning ritual.
+Why the board keeps its own hierarchy instead of leaning entirely on GitHub is
+[ADR-0001](adr/0001-system-of-record.md).
+
 ## How an item gets here
 
-1. `saturnin improve` files a finding as a board task.
+1. `saturnin improve` files a finding as a board task **and** the mirror files it
+   as a GitHub issue (rule 8) - a finding that lives only on one server is a
+   finding that will be lost. Issues carry the board metadata as labels
+   (`saturnin:kind/improvement`, `saturnin:state/...`), which is the practical
+   form of "everything is an issue with a different label and assignee":
+   dispatch stays local and fast, durability and human review happen on GitHub.
 2. The improver picks the worst bottleneck, proposes exactly one change, and
    records the before/after metric on the task.
 3. If the metric moved, the item is closed and noted here. If not, the change is

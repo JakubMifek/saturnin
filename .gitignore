@@ -7,7 +7,21 @@ dist/
 .venv/
 
 # Runtime state (worktrees, logs, reports) never belongs in git.
+# The board is state, not source - its durable copy is a mirrored GitHub issue
+# in the private board repository (rule 8, docs/adr/0001-system-of-record.md),
+# kept in step by `saturnin task sync --all --push` and the saturnin-mirror
+# timer. `saturnin doctor` fails while open tasks are unmirrored, so nothing
+# ends up existing only on one disk.
 var/
 board/tasks/*.json
+board/tasks/*.lock
 board/checkpoints/*.jsonl
 board/reviews/*.jsonl
+
+# Cooperative lock sidecars.
+*.lock
+
+# Coverage artefacts.
+.coverage
+coverage.xml
+htmlcov/

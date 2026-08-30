@@ -1,0 +1,23 @@
+# Preventive checks. `saturnin doctor` is the post-hoc equivalent; this is what
+# stops a malformed policy or a leaked secret reaching a commit at all.
+#   pip install pre-commit && pre-commit install
+repos:
+  - repo: https://github.com/pre-commit/pre-commit-hooks
+    rev: v5.0.0
+    hooks:
+      - id: check-yaml          # a malformed policy is a broken governance rule
+      - id: check-json
+      - id: check-merge-conflict
+      - id: end-of-file-fixer
+      - id: trailing-whitespace
+      - id: check-executables-have-shebangs
+      - id: detect-private-key
+
+  - repo: local
+    hooks:
+      - id: saturnin-doctor
+        name: saturnin doctor (policies, contracts, registry, docs)
+        entry: python -m saturnin doctor
+        language: system
+        pass_filenames: false
+        files: '^(policies/|agents/|skills/|automation/|docs/|src/saturnin/).*'
