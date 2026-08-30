@@ -22,6 +22,8 @@ from .automation import AutomationLibrary
 from .board import CONTAINER_KINDS, Board, BoardError, Task
 from .checkpoints import Checkpoint, CheckpointStore
 from .config import Config
+from .contracts import audit as audit_contracts
+from . import docsync
 from .governance import Governance
 from .improve import ImprovementLoop
 from .issues import IssueMirror, MirrorError
@@ -200,6 +202,14 @@ def build_parser() -> argparse.ArgumentParser:
     repo_check = repo_cmd.add_parser("check", help="validate a managed repo against the contract")
     repo_check.add_argument("path", nargs="?", default=".")
 
+    docs_cmd = sub.add_parser("docs", help="generated documentation blocks").add_subparsers(
+        dest="docs_command", required=True
+    )
+    docs_render = docs_cmd.add_parser("render", help="regenerate policy tables inside the docs")
+    docs_render.add_argument(
+        "--check", action="store_true", help="fail instead of writing when docs are stale"
+    )
+
     sub.add_parser("doctor", help="validate policies and installation")
 
     return parser
@@ -346,6 +356,19 @@ def _run(args: argparse.Namespace, config: Config) -> int:  # noqa: C901 - flat 
             return 2
         _emit({"body": body}, as_json, body)
         return 0
+    if args.command == "docs":
+        stale = docsync.render(config, write=not args.check)
+        names = [str(p.relative_to(config.root)) for p in stale]
+        _emit(
+            {"stale": names, "checked": True},
+            as_json,
+            (
+                ("stale: " if args.check else "rewrote: ") + ", ".join(names)
+                if names
+                else "Documentation agrees with policy."
+            ),
+        )
+        return 2 if (args.check and names) else 0
     if args.command == "repo":
         problems = check_managed_repo(Path(args.path), config)
         _emit(
@@ -373,6 +396,8 @@ def _run(args: argparse.Namespace, config: Config) -> int:  # noqa: C901 - flat 
             Governance(config).audit()
             + Router(config).validate_policy()
             + AutomationLibrary(config).audit()
+            + audit_contracts(config)
+            + docsync.audit(config)
             + _mirror_audit(config, board)
         )
         _emit(

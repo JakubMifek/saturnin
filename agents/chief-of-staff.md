@@ -1,8 +1,9 @@
 ---
 role: chief-of-staff
-squad: command
+unit: command
 executes: true
 skills: [board-ops, escalation, checkpointing]
+mcp: [github]
 ---
 
 # Chief of Staff

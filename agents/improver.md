@@ -1,8 +1,9 @@
 ---
 role: improver
-squad: platform
+unit: platform
 executes: true
 skills: [board-ops, automation-library, pr-authoring]
+mcp: [github]
 ---
 
 # Improvement Analyst

@@ -1,8 +1,9 @@
 ---
 role: scribe
-squad: platform
+unit: platform
 executes: true
 skills: [checkpointing, pr-authoring]
+mcp: [github, filesystem]
 ---
 
 # Scribe

@@ -1,8 +1,9 @@
 ---
 role: automation-smith
-squad: platform
+unit: platform
 executes: true
 skills: [automation-library, worktree-session, pr-authoring]
+mcp: [github, filesystem]
 ---
 
 # Automation Smith

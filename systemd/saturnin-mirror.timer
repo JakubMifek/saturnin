@@ -1,0 +1,11 @@
+[Unit]
+Description=Mirror open board tasks as GitHub issues every fifteen minutes
+
+[Timer]
+OnCalendar=*:0/15
+RandomizedDelaySec=1m
+Persistent=true
+Unit=saturnin-mirror.service
+
+[Install]
+WantedBy=timers.target

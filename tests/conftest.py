@@ -22,6 +22,8 @@ def home(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
         shutil.copy(policy, root / "policies" / policy.name)
     shutil.copytree(REPO_ROOT / "automation", root / "automation")
     shutil.copytree(REPO_ROOT / "scripts", root / "scripts")
+    shutil.copytree(REPO_ROOT / "agents", root / "agents")
+    shutil.copytree(REPO_ROOT / "skills", root / "skills")
     monkeypatch.setenv("SATURNIN_HOME", str(root))
     return root
 

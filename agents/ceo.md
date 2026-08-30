@@ -1,8 +1,9 @@
 ---
 role: ceo
-squad: command
+unit: command
 executes: false
 skills: [board-ops, escalation]
+mcp: []
 ---
 
 # Saturnin (CEO)

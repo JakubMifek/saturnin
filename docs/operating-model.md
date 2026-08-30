@@ -25,18 +25,29 @@ intake --dispatch--> routed --> in_progress --> review --> done
 
 ## 3. Governance (the seven rules)
 
+<!-- generated:rules -->
 | # | Rule | Enforced by |
 | --- | --- | --- |
-| 1 | Never push to the default branch | `saturnin check branch`, `push_allowed` |
-| 2 | Feature branches + one worktree per parallel worker | `saturnin worktree create` |
-| 3 | Every code PR reviewed by an independent zero-context reviewer | `saturnin review gate --kind pr` |
-| 4 | Autonomous PR flow in this repo after that review | `autonomy.self_repo_autonomous_merge` |
-| 5 | Managed repos: issues allowed, each reviewed first | `saturnin review gate --kind issue` |
-| 6 | Human escalation via GitHub issue tagging `@jakubmifek` | `saturnin escalate` |
+| 1 | Never push to the default branch | `saturnin check branch`, `Governance.push_allowed` |
+| 2 | Feature branches plus one worktree per parallel worker | `saturnin worktree create` |
+| 3 | Every code PR is reviewed by an independent zero-context reviewer | `saturnin review gate --kind pr` |
+| 4 | Autonomous PR flow in this repository once that review passed | `autonomy.self_repo_autonomous_merge` |
+| 5 | Managed repos: issues allowed, each independently reviewed first | `saturnin review gate --kind issue` |
+| 6 | Human escalation via a GitHub issue tagging `@jakubmifek` | `saturnin escalate` |
 | 7 | Server: non-root; apt/systemctl only for Saturnin services; user-scope timers | `saturnin check command` |
+| 8 | Every task is mirrored as a GitHub issue, so losing this machine costs nothing | `saturnin task sync`, `saturnin doctor` |
+| 9 | The CEO never waits for a worker; every dispatch names a result contract | `Governance.check_result_contract`, `saturnin dispatch` |
+<!-- /generated:rules -->
 
 Rules live in `policies/governance.yaml` and `policies/server_scope.yaml`. They
 are code: changing them is a PR that needs the same independent review.
+
+The table above is **generated** from `policies/governance.yaml` - as is every
+other rule, role and routing table in this repository. Nothing that exists in a
+policy file is re-typed into prose; `saturnin docs render` regenerates the
+blocks and `saturnin doctor` (and CI) fail if the checked-in text disagrees with
+the policy. That is how a system with this many documents avoids drifting into
+fiction.
 
 ## 4. Independent review
 

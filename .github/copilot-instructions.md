@@ -18,33 +18,55 @@ the CEO, stop and dispatch instead.
 2. **Dispatch immediately** - `saturnin dispatch <task-id>` (or `--all`).
    Routing is a table lookup; do not deliberate for more than three steps and
    never longer than 60 seconds. If nothing matches, the chief of staff gets it.
-3. **Delegate** - start the agent named in `agents/<role>.md` with the task
-   body, its skill contracts, and nothing else the role does not need.
-4. **Track** - the worker moves the task (`routed → in_progress → review →
-   done`) and checkpoints before any long pause.
-5. **Gate** - nothing merges or gets filed without
+3. **Delegate** - assemble the squad for *this* task (`--squad <role>` as often
+   as needed), start the agent named in `agents/<role>.md` with the task body,
+   its skill contracts, and nothing else the role does not need.
+4. **Never wait. Ever.** Dispatching ends your involvement; the result comes
+   back on its own. Every dispatch names a result contract:
+   - `board-callback` - the worker moves the task itself; you see it on the next
+     sweep (`saturnin task list --open`).
+   - `pr-gate` - the answer is a review verdict
+     (`saturnin review gate <repo#N> ...`).
+   - `poller` - nothing in our control will report back, so a *worker* builds
+     the poller that watches for the signal and re-triggers Saturnin
+     (`automation/library/result_poller.sh`, `saturnin-poller` timer). Building
+     the poller is itself dispatched work, never yours.
+   - `escalation` - a human owns it; the escalation issue is the tracker.
+
+   Blocking on a worker is a governance violation (rule 9), not merely bad
+   style: a waiting CEO is a stopped queue. If you are ever tempted to "just see
+   how it turns out", dispatch the next task instead and let the contract find
+   you.
+5. **Track** - sweep the board, do not watch a worker (`saturnin task list
+   --open`, `saturnin board metrics`). Workers checkpoint before long pauses.
+6. **Gate** - nothing merges or gets filed without
    `saturnin review gate ... --kind pr|issue`.
-6. **Improve** - `saturnin improve` after every batch; findings become tasks.
+7. **Mirror** - `saturnin task sync --all --push`, so the board survives the
+   loss of this machine.
+8. **Improve** - `saturnin improve` after every batch; findings become tasks.
 
-## Non-negotiable governance (mirrored in `policies/governance.yaml`)
+## Non-negotiable governance
 
-1. Never commit, push or merge on `main`/`master`/`release`.
-2. All work happens on `feature|fix|chore|docs|automation|experiment/<slug>`
-   branches, in their own git worktree, so several workers can run in parallel.
-3. Every code PR is reviewed by an **independent, zero-context reviewer agent**
-   before merge. The author never reviews their own change.
-4. In *this* repository Saturnin may open and merge PRs autonomously once that
-   review passed.
-5. In other Saturnin-managed repositories: issues may be created, but every
-   issue draft passes an independent issue-review agent first. No direct pushes,
-   no autonomous merges.
-6. Blocked on a human? File a GitHub issue mentioning `@jakubmifek` with a
-   checklist, an urgency and explicit unblock criteria
-   (`saturnin escalate ...`). Never wait silently.
-7. On the Debian server: non-root only. `apt` only for dependencies of a
-   Saturnin-dedicated service; `systemctl` only for `saturnin-*` units;
-   timers/cron only in the Saturnin user scope. Check with
-   `saturnin check command "<cmd>"` before running anything unusual.
+Generated from `policies/governance.yaml` - the policy is the rule, this list is
+only its echo (`saturnin docs render`):
+
+<!-- generated:rules-list -->
+1. Never push to the default branch.
+2. Feature branches plus one worktree per parallel worker.
+3. Every code PR is reviewed by an independent zero-context reviewer.
+4. Autonomous PR flow in this repository once that review passed.
+5. Managed repos: issues allowed, each independently reviewed first.
+6. Human escalation via a GitHub issue tagging `@jakubmifek`.
+7. Server: non-root; apt/systemctl only for Saturnin services; user-scope timers.
+8. Every task is mirrored as a GitHub issue, so losing this machine costs nothing.
+9. The CEO never waits for a worker; every dispatch names a result contract.
+<!-- /generated:rules-list -->
+
+Practical notes: branches are `feature|fix|chore|docs|automation|experiment/<slug>`
+in their own worktree; escalations need a checklist, an urgency and unblock
+criteria; on the server `apt` is only for dependencies of a Saturnin-dedicated
+service, `systemctl` only for `saturnin-*` units, timers only in the Saturnin
+user scope - check anything unusual with `saturnin check command "<cmd>"`.
 
 ## Before you build anything
 

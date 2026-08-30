@@ -18,7 +18,9 @@ for unit in "$SATURNIN_HOME"/systemd/saturnin-*; do
 done
 
 systemctl --user daemon-reload
-systemctl --user enable --now saturnin-janitor.timer saturnin-improve.timer
+systemctl --user enable --now \
+  saturnin-janitor.timer saturnin-improve.timer \
+  saturnin-poller.timer saturnin-mirror.timer
 systemctl --user list-timers 'saturnin-*' || true
 
 cat <<'MSG'

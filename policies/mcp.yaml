@@ -1,0 +1,37 @@
+# MCP servers Saturnin's agents may connect to.
+#
+# Two layers of defence:
+#   1. `servers` lists what exists at all (mirrored in .mcp.json at repo root).
+#   2. each agent contract declares an `mcp:` allow-list; anything not listed is
+#      denied. `saturnin doctor` fails if an agent asks for an unknown server.
+version: 1
+
+servers:
+  github:
+    description: Issues, pull requests and review data for managed repositories.
+    transport: stdio
+    command: npx
+    args: ["-y", "@modelcontextprotocol/server-github"]
+    # Roles allowed to mutate state through this server; everyone else is read-only.
+    write_roles: [chief-of-staff, code-worker, ops-worker]
+  fetch:
+    description: Read-only web fetch for research.
+    transport: stdio
+    command: uvx
+    args: ["mcp-server-fetch"]
+    write_roles: []
+  filesystem:
+    description: Scoped filesystem access inside var/worktrees only.
+    transport: stdio
+    command: npx
+    args: ["-y", "@modelcontextprotocol/server-filesystem", "var/worktrees"]
+    write_roles: [code-worker, test-worker, architect, scribe, automation-smith]
+
+rules:
+  # The zero-context reviewers get the diff and the requirement, nothing that
+  # could leak the authoring session.
+  deny_for_roles:
+    pr-reviewer: [fetch]
+    issue-reviewer: [fetch]
+  # A role that does not execute may not hold any MCP server at all.
+  non_executing_roles_get_none: true

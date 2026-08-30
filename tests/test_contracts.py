@@ -1,0 +1,34 @@
+from __future__ import annotations
+
+import pytest
+
+from saturnin.config import Config
+from saturnin.contracts import audit, load_contracts
+
+
+def test_contracts_match_the_role_catalog(config: Config) -> None:
+    assert audit(config) == []
+
+
+def test_every_role_has_a_contract(config: Config) -> None:
+    roles = set(config.routing["roles"])
+    assert {c.role for c in load_contracts(config)} == roles
+
+
+def test_drift_is_detected(config: Config) -> None:
+    path = config.root / "agents" / "code-worker.md"
+    path.write_text(path.read_text().replace("unit: engineering", "unit: catering"))
+    problems = audit(config)
+    assert any("catering" in problem for problem in problems)
+
+
+def test_unknown_mcp_server_is_rejected(config: Config) -> None:
+    path = config.root / "agents" / "researcher.md"
+    path.write_text(path.read_text().replace("[github, fetch]", "[github, telepathy]"))
+    assert any("telepathy" in problem for problem in audit(config))
+
+
+def test_ceo_gets_no_mcp_servers(config: Config) -> None:
+    path = config.root / "agents" / "ceo.md"
+    path.write_text(path.read_text().replace("mcp: []", "mcp: [github]"))
+    assert any("non-executing" in problem for problem in audit(config))

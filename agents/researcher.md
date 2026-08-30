@@ -1,8 +1,9 @@
 ---
 role: researcher
-squad: platform
+unit: platform
 executes: true
 skills: [board-ops]
+mcp: [github, fetch]
 ---
 
 # Researcher

@@ -2,6 +2,37 @@
 # Changing this file requires an independent reviewer approval (see review pipelines).
 version: 1
 
+# The canonical rule list. Documentation tables are GENERATED from this block
+# (`saturnin docs render`), so prose and policy cannot drift apart.
+rules:
+  - id: 1
+    summary: Never push to the default branch
+    enforced_by: "`saturnin check branch`, `Governance.push_allowed`"
+  - id: 2
+    summary: Feature branches plus one worktree per parallel worker
+    enforced_by: "`saturnin worktree create`"
+  - id: 3
+    summary: Every code PR is reviewed by an independent zero-context reviewer
+    enforced_by: "`saturnin review gate --kind pr`"
+  - id: 4
+    summary: Autonomous PR flow in this repository once that review passed
+    enforced_by: "`autonomy.self_repo_autonomous_merge`"
+  - id: 5
+    summary: "Managed repos: issues allowed, each independently reviewed first"
+    enforced_by: "`saturnin review gate --kind issue`"
+  - id: 6
+    summary: Human escalation via a GitHub issue tagging `@jakubmifek`
+    enforced_by: "`saturnin escalate`"
+  - id: 7
+    summary: "Server: non-root; apt/systemctl only for Saturnin services; user-scope timers"
+    enforced_by: "`saturnin check command`"
+  - id: 8
+    summary: Every task is mirrored as a GitHub issue, so losing this machine costs nothing
+    enforced_by: "`saturnin task sync`, `saturnin doctor`"
+  - id: 9
+    summary: The CEO never waits for a worker; every dispatch names a result contract
+    enforced_by: "`Governance.check_result_contract`, `saturnin dispatch`"
+
 git:
   default_branch: main
   # Branches Saturnin must never commit to, push to, or delete.

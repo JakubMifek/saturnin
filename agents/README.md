@@ -5,24 +5,32 @@ is a contract, not a personality: mission, inputs, allowed actions, procedure,
 definition of done, and escalation path. Swap a file, and the role changes -
 nothing else in the system has to move.
 
-| Agent | Role id | Squad | Executes? |
+<!-- generated:roles -->
+| Role | Unit | Executes | Purpose |
 | --- | --- | --- | --- |
-| [`ceo.md`](ceo.md) | `ceo` | command | **No - delegates only** |
-| [`chief-of-staff.md`](chief-of-staff.md) | `chief-of-staff` | command | yes |
-| [`code-worker.md`](code-worker.md) | `code-worker` | engineering | yes |
-| [`test-worker.md`](test-worker.md) | `test-worker` | engineering | yes |
-| [`pr-reviewer.md`](pr-reviewer.md) | `pr-reviewer` | assurance | yes (zero-context) |
-| [`issue-reviewer.md`](issue-reviewer.md) | `issue-reviewer` | assurance | yes (zero-context) |
-| [`ops-worker.md`](ops-worker.md) | `ops-worker` | operations | yes |
-| [`janitor.md`](janitor.md) | `janitor` | operations | yes |
-| [`automation-smith.md`](automation-smith.md) | `automation-smith` | platform | yes |
-| [`improver.md`](improver.md) | `improver` | platform | yes |
-| [`scribe.md`](scribe.md) | `scribe` | platform | yes |
-| [`researcher.md`](researcher.md) | `researcher` | platform | yes |
+| `ceo` | command | **never** | Routes, decides, escalates. Never writes code, never runs commands. |
+| `chief-of-staff` | command | yes | Keeps the board clean, chases stale work, prepares handoffs. |
+| `code-worker` | engineering | yes | Implements changes on a feature branch inside its own worktree. |
+| `test-worker` | engineering | yes | Writes and repairs tests, reproduces bugs, owns e2e suites and monitors. |
+| `architect` | engineering | yes | Looks across many surgical changes, spots structural drift (scattered APIs, duplicated features, bespoke code where an industry-standard library belongs) and files follow-up tasks for the code worker. |
+| `pr-reviewer` | assurance | yes | Reviews a diff with no prior context of the authoring session. |
+| `issue-reviewer` | assurance | yes | Reviews issue drafts before they are filed in managed repos. |
+| `ops-worker` | operations | yes | Non-root Debian server work inside the Saturnin user scope. |
+| `janitor` | operations | yes | Worktree/branch lifecycle, stale cleanup, disk hygiene. |
+| `automation-smith` | platform | yes | Turns repeated work into reusable scripts in the automation library. |
+| `improver` | platform | yes | Measures throughput, finds bottlenecks, proposes topology/policy upgrades. |
+| `scribe` | platform | yes | Docs, runbooks, checkpoints and handoff notes. |
+| `researcher` | platform | yes | Investigates options and reports back; no repository writes. |
+<!-- /generated:roles -->
 
-The machine-readable half of this catalog lives in `policies/routing.yaml`;
-`saturnin doctor` fails if the two disagree about which roles exist or about the
-CEO's delegation-only status.
+The table above is generated from `policies/routing.yaml` by
+`saturnin docs render`; `saturnin doctor` fails if this file, the role catalog
+and the agent front matter disagree about which roles exist, which unit they
+belong to, or the CEO's delegation-only status.
+
+`unit` is a permanent organizational home, **not** a squad. Squads are put
+together per task by the CEO or the chief of staff out of whatever roles that
+task needs - see [`../docs/delegation-policy.md`](../docs/delegation-policy.md).
 
 ## Skills
 

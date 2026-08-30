@@ -1,8 +1,9 @@
 ---
 role: ops-worker
-squad: operations
+unit: operations
 executes: true
 skills: [server-scope, checkpointing, board-ops]
+mcp: [github]
 ---
 
 # Server Ops Worker

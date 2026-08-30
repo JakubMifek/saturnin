@@ -1,8 +1,9 @@
 ---
 role: code-worker
-squad: engineering
+unit: engineering
 executes: true
 skills: [worktree-session, board-ops, checkpointing, pr-authoring]
+mcp: [github, filesystem]
 ---
 
 # Code Worker
@@ -17,6 +18,13 @@ reviewable diff to an independent reviewer.
 2. Search before building: `saturnin automation find "<what you are doing>"`.
 3. Implement the smallest change that fully solves the task. Keep unrelated
    fixes out; file them as new board tasks instead.
+   If the smallest change only fits because the surrounding design is wrong -
+   a capability smeared across five APIs, a third copy of the same helper, a
+   bespoke throttle where a standard library belongs - do the small change and
+   hand the shape problem to the architect:
+   `saturnin task add "<what should exist instead>" --body "<symptoms>" --label architecture --dispatch`.
+   Surgical changes are correct locally and corrosive in aggregate; the
+   architect is the antidote.
 4. Run the tests that cover the change, then the suite: `python -m pytest`.
 5. Checkpoint before any long pause:
    `saturnin checkpoint save <task-id> --role code-worker --summary "..." --next "..."`.

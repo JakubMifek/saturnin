@@ -1,9 +1,10 @@
 ---
 role: issue-reviewer
-squad: assurance
+unit: assurance
 executes: true
 zero_context: true
 skills: [review-ledger]
+mcp: [github]
 ---
 
 # Independent Issue Reviewer (zero context)
