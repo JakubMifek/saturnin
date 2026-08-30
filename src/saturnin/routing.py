@@ -92,7 +92,6 @@ class Router:
         task.role = route.role
         task.squad = route.squad
         task.priority = route.priority
-        task.routed_at = task.routed_at or None
         task.log(
             "dispatch",
             actor=actor,
@@ -100,7 +99,9 @@ class Router:
             rule=route.rule,
             escalate=route.escalate,
         )
-        task.routed_at = task.history[-1]["ts"]
+        # The first dispatch is what dispatch latency measures; a re-dispatch
+        # after "blocked" must not reset it.
+        task.routed_at = task.routed_at or task.history[-1]["ts"]
         board.transition(task, "routed", actor=actor, note=f"rule={route.rule}")
         return route
 

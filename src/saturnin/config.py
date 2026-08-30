@@ -53,6 +53,7 @@ class Config:
     checkpoints_dir: Path = field(init=False)
     automation_dir: Path = field(init=False)
     var_dir: Path = field(init=False)
+    _cache: dict[str, dict[str, Any]] = field(init=False, default_factory=dict, repr=False)
 
     def __post_init__(self) -> None:
         self.root = Path(self.root).resolve()
@@ -68,7 +69,10 @@ class Config:
         return cls(find_root(Path(root) if root else None))
 
     def policy(self, name: str) -> dict[str, Any]:
-        return load_yaml(self.policies / f"{name}.yaml")
+        """Load a policy file once per configuration instance."""
+        if name not in self._cache:
+            self._cache[name] = load_yaml(self.policies / f"{name}.yaml")
+        return self._cache[name]
 
     @property
     def governance(self) -> dict[str, Any]:
