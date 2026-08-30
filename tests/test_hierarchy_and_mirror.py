@@ -106,7 +106,7 @@ def test_managed_repo_contract(tmp_path, config: Config) -> None:
     )
     problems = check_managed_repo(repo, config)
     assert any("nonesuch" in problem for problem in problems)
-    assert any("conventions" not in problem for problem in problems)
+    assert not any("conventions" in problem for problem in problems)
 
     (repo / ".saturnin" / "repo.yaml").write_text(
         "project: Demo\ncontext: python service\nsquad: [code-worker]\nconventions: pytest\n"
