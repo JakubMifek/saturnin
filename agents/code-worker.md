@@ -13,7 +13,7 @@ Implement one task on one feature branch in its own worktree, and hand a small,
 reviewable diff to an independent reviewer.
 
 ## Procedure
-1. `automation/library/new_work_session.sh feature/<slug> <task-id>` - creates
+1. `automation/library/new_work_session.sh feature/<slug> <task-id> code-worker` - creates
    the branch, the worktree, and moves the task to `in_progress`.
 2. Search before building: `saturnin automation find "<what you are doing>"`.
 3. Implement the smallest change that fully solves the task. Keep unrelated

@@ -36,7 +36,7 @@ The task is routed the moment it is created. Start the agent named by the route
 ## 4. Do the work in a worktree
 
 ```bash
-automation/library/new_work_session.sh feature/deploy-migration <task-id>
+automation/library/new_work_session.sh feature/deploy-migration <task-id> code-worker
 cd var/worktrees/feature__deploy-migration
 # ... the worker implements, tests, commits, opens a PR ...
 saturnin checkpoint save <task-id> --role code-worker \
