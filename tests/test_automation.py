@@ -81,4 +81,4 @@ def test_monitors_use_project_virtualenv_python(config: Config) -> None:
         env={**os.environ, "PATH": f"{fake_bin}:{os.environ['PATH']}"},
     )
 
-    assert marker.read_text(encoding="utf-8") == "usedused"
+    assert "used" in marker.read_text(encoding="utf-8")

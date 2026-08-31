@@ -103,21 +103,21 @@ class CheckpointStore:
         if not path.is_file():
             return []
         lines = [
-            (line_number, line)
+            (line_number, line, line.endswith("\n"))
             for line_number, line in enumerate(
-                path.read_text(encoding="utf-8").splitlines(), start=1
+                path.read_text(encoding="utf-8").splitlines(keepends=True), start=1
             )
             if line.strip()
         ]
         checkpoints: list[Checkpoint] = []
-        for index, (line_number, line) in enumerate(lines):
+        for index, (line_number, line, terminated) in enumerate(lines):
             try:
                 data = json.loads(line)
                 if not isinstance(data, dict):
                     raise TypeError("checkpoint must be a JSON object")
                 checkpoints.append(Checkpoint.from_dict(data))
             except (json.JSONDecodeError, TypeError) as exc:
-                if index == len(lines) - 1:
+                if index == len(lines) - 1 and not terminated:
                     break
                 raise CheckpointError(
                     f"corrupt checkpoint store {path} at line {line_number}: {exc}"
