@@ -270,6 +270,8 @@ def test_allowed_elevated_commands_survive_nested_wrappers(
         "nice -n",
         "stdbuf -oL",
         "timeout 10",
+        "xargs",
+        "ionice -c 3",
         "bash -c",
         "sh -c 'apt install",
         "sh -c 'echo ok ;'",

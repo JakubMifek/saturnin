@@ -10,7 +10,7 @@ from saturnin.board import Board, BoardError
 from saturnin.cli import check_managed_repo, main
 from saturnin.config import Config
 from saturnin.governance import Governance
-from saturnin.issues import IssueMirror, MirrorError
+from saturnin.issues import IssueMirror, MirrorError, run_gh
 
 
 def test_hierarchy_rollup(board: Board) -> None:
@@ -181,6 +181,17 @@ def test_label_provisioning_failure_stops_issue_creation(
     assert board.get(task.id).issue is None
 
 
+def test_missing_gh_error_applies_to_all_integrations(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr("saturnin.issues.shutil.which", lambda _: None)
+
+    with pytest.raises(MirrorError, match="GitHub integrations") as error:
+        run_gh(["issue", "list"])
+
+    assert "--push" not in str(error.value)
+
+
 def test_review_kinds_are_not_mirrored(config: Config, board: Board) -> None:
     task = board.create("Review the diff", kind="pr-review")
     mirror = IssueMirror(config, board)
@@ -227,8 +238,9 @@ def test_managed_repo_contract(tmp_path, config: Config) -> None:
 def test_cli_task_tree_and_sync_preview(config: Config, board: Board, capsys) -> None:
     epic = board.create("Widget platform", kind="epic")
     endpoint = board.create("Endpoint", parent=epic.id)
+    issue = "https://github.com/JakubMifek/saturnin-ops/issues/1"
     with board.edit(endpoint.id) as stored:
-        stored.issue = "https://github.com/JakubMifek/saturnin-ops/issues/1"
+        stored.issue = issue
     assert main(["--home", str(config.root), "task", "tree"]) == 0
     out = capsys.readouterr().out
     assert "(epic)" in out and "Endpoint" in out
@@ -238,4 +250,4 @@ def test_cli_task_tree_and_sync_preview(config: Config, board: Board, capsys) ->
     assert len(payloads) == 2
     # A preview never touches the board.
     assert board.get(epic.id).issue is None
-    assert board.get(endpoint.id).issue == stored.issue
+    assert board.get(endpoint.id).issue == issue

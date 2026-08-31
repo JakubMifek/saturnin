@@ -147,10 +147,6 @@ class IssueMirror:
         return [self.sync(task, push=push) for task in tasks if self.mirrors(task)]
 
     def _push(self, task: Task, payload: IssuePayload) -> str:
-        if shutil.which("gh") is None:
-            raise MirrorError(
-                "gh CLI not found; install it or run without --push and file the issue by hand"
-            )
         ensure_labels(payload.repo, payload.labels)
         if task.issue:
             current = self._issue_labels(task.issue)
@@ -220,7 +216,7 @@ def ensure_labels(repo: str, labels: Iterable[str]) -> None:
 
 def run_gh(args: list[str]) -> str:
     if shutil.which("gh") is None:
-        raise MirrorError("gh CLI not found; install it or run without --push")
+        raise MirrorError("gh CLI not found; install it to use GitHub integrations")
     result = subprocess.run(
         ["gh", *args], capture_output=True, text=True, check=False
     )

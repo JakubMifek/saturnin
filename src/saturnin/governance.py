@@ -244,7 +244,7 @@ class Governance:
             except ValueError as exc:
                 return Decision.deny(f"malformed {binary} wrapper: {exc}")
             if not wrapped:
-                return Decision.ok(f"{binary}: no wrapped command")
+                return Decision.deny(f"malformed {binary} wrapper: expected a command")
             return self._check_scoped_command(
                 wrapped,
                 dedicated_service=dedicated_service,
@@ -381,7 +381,6 @@ def _wrapped_command(binary: str, args: list[str]) -> list[str]:
                 "-c", "--class", "-n", "--classdata", "-p", "--pid",
                 "-P", "--pgid", "-u", "--uid",
             },
-            command_optional=True,
         )
     if binary == "stdbuf":
         return _after_options(
@@ -403,7 +402,6 @@ def _wrapped_command(binary: str, args: list[str]) -> list[str]:
             "-I", "--replace", "-L", "--max-lines", "-n", "--max-args",
             "-P", "--max-procs", "-s", "--max-chars",
         },
-        command_optional=True,
     )
 
 
@@ -412,7 +410,6 @@ def _after_options(
     *,
     value_options: set[str],
     assignments: bool = False,
-    command_optional: bool = False,
     stop_at_first: bool = False,
 ) -> list[str]:
     index = 0
@@ -436,6 +433,6 @@ def _after_options(
         if stop_at_first and index < len(args) and not args[index].startswith("-"):
             break
     command = args[index:]
-    if not command and not command_optional:
+    if not command:
         raise ValueError("expected a command")
     return command
