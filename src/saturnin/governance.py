@@ -19,6 +19,12 @@ from .review import ReviewRecord
 _MAX_COMMAND_DEPTH = 8
 _WRAPPERS = {"env", "nice", "ionice", "stdbuf", "timeout", "exec", "command"}
 _ASSIGNMENT = re.compile(r"[A-Za-z_][A-Za-z0-9_]*=.*", re.DOTALL)
+_SHELL_RESERVED = {
+    "!", "case", "coproc", "do", "done", "elif", "else", "esac", "fi",
+    "for", "function", "if", "in", "select", "then", "time", "until",
+    "while", "{", "}",
+}
+_DYNAMIC_COMMANDS = {".", "eval", "source"}
 
 
 @dataclass
@@ -223,6 +229,8 @@ class Governance:
         if not parts:
             return Decision.deny("wrapper contains no command")
         binary = parts[0].rsplit("/", 1)[-1]
+        if binary in _SHELL_RESERVED or binary in _DYNAMIC_COMMANDS:
+            return Decision.deny(f"shell keyword {binary!r} is not allowed")
         if binary in ("sh", "bash"):
             return Decision.deny(
                 f"{binary} execution is not allowed because shell commands are dynamic"
@@ -364,7 +372,7 @@ def _unsafe_shell_syntax(command: str) -> str | None:
             escaped = True
         elif character in "'\"":
             quote = character
-        elif character in ";&|<>()\n":
+        elif character in "!;&|<>()\n":
             return f"shell operator {character!r}"
         elif character in "$`*?[]{}~":
             return f"shell expansion token {character!r}"
@@ -372,20 +380,27 @@ def _unsafe_shell_syntax(command: str) -> str | None:
 
 
 def _wrapped_command(binary: str, args: list[str]) -> list[str]:
-    if binary in {"exec", "command"}:
-        if args and args[0].startswith("-"):
-            raise ValueError("options make the executable position ambiguous")
-        if not args:
-            raise ValueError("expected a command")
-        return args
+    if binary == "exec":
+        return _after_options(
+            args, value_options={"-a"}, flag_options={"-c", "-l"}
+        )
+    if binary == "command":
+        return _after_options(args, value_options=set(), flag_options={"-p"})
     if binary == "env":
         return _after_options(
             args,
-            value_options={"-u", "--unset", "-C", "--chdir", "-S", "--split-string"},
+            value_options={"-u", "--unset", "-C", "--chdir", "-a", "--argv0"},
+            flag_options={"-i", "--ignore-environment", "-0", "--null", "--debug"},
+            optional_value_options={
+                "--default-signal", "--ignore-signal", "--block-signal"
+            },
+            forbidden_options={"-S", "--split-string"},
             assignments=True,
         )
     if binary == "nice":
-        return _after_options(args, value_options={"-n", "--adjustment"})
+        return _after_options(
+            args, value_options={"-n", "--adjustment"}, flag_options=set()
+        )
     if binary == "ionice":
         return _after_options(
             args,
@@ -393,16 +408,19 @@ def _wrapped_command(binary: str, args: list[str]) -> list[str]:
                 "-c", "--class", "-n", "--classdata", "-p", "--pid",
                 "-P", "--pgid", "-u", "--uid",
             },
+            flag_options={"-t", "--ignore"},
         )
     if binary == "stdbuf":
         return _after_options(
-            args, value_options={"-i", "--input", "-o", "--output", "-e", "--error"}
+            args,
+            value_options={"-i", "--input", "-o", "--output", "-e", "--error"},
+            flag_options=set(),
         )
     if binary == "timeout":
         remainder = _after_options(
             args,
             value_options={"-k", "--kill-after", "-s", "--signal"},
-            stop_at_first=True,
+            flag_options={"--preserve-status", "--foreground", "--verbose"},
         )
         if len(remainder) < 2:
             raise ValueError("expected duration and command")
@@ -414,9 +432,13 @@ def _after_options(
     args: list[str],
     *,
     value_options: set[str],
+    flag_options: set[str],
+    optional_value_options: set[str] | None = None,
+    forbidden_options: set[str] | None = None,
     assignments: bool = False,
-    stop_at_first: bool = False,
 ) -> list[str]:
+    optional_value_options = optional_value_options or set()
+    forbidden_options = forbidden_options or set()
     index = 0
     while index < len(args):
         token = args[index]
@@ -429,14 +451,24 @@ def _after_options(
         if not token.startswith("-") or token == "-":
             break
         option = token.split("=", 1)[0]
-        short_with_value = len(token) > 2 and token[:2] in value_options
-        if option in value_options and "=" not in token and not short_with_value:
+        short_option = token[:2]
+        short_with_value = len(token) > 2 and short_option in value_options
+        if option in forbidden_options or short_option in forbidden_options:
+            raise ValueError(f"option {option!r} makes the executable position ambiguous")
+        if option in optional_value_options:
+            pass
+        elif option in value_options or short_with_value:
+            if "=" in token and not token.split("=", 1)[1]:
+                raise ValueError(f"{option} has an empty value")
+            if "=" in token or short_with_value:
+                index += 1
+                continue
             index += 1
             if index >= len(args):
                 raise ValueError(f"{option} needs a value")
+        elif token not in flag_options:
+            raise ValueError(f"unknown option {token!r}")
         index += 1
-        if stop_at_first and index < len(args) and not args[index].startswith("-"):
-            break
     command = args[index:]
     if not command:
         raise ValueError("expected a command")

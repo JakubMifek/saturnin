@@ -206,6 +206,8 @@ def test_in_scope_server_commands(governance: Governance, command: str) -> None:
     "command",
     [
         "true && apt remove python3",
+        "! systemctl --user restart saturnin-janitor.timer",
+        "time apt install ripgrep",
         "true; xargs apt remove",
         "true | systemctl restart nginx",
         "true > result.txt",
@@ -223,7 +225,7 @@ def test_top_level_dynamic_shell_syntax_fails_closed(
 ) -> None:
     decision = governance.check_server_command(command)
     assert not decision.allowed
-    assert "dynamic shell syntax" in decision.reasons[0]
+    assert "not allowed" in decision.reasons[0]
 
 
 def test_quoted_shell_metacharacters_are_literal(governance: Governance) -> None:
@@ -256,6 +258,8 @@ def test_apt_requires_a_saturnin_dedicated_service(governance: Governance) -> No
     "command",
     [
         "env nice -n 5 /usr/bin/apt remove ripgrep",
+        "env -a harmless apt remove ripgrep",
+        "env --argv0 harmless apt remove ripgrep",
         "timeout 10 bash -c 'ionice -c 3 apt remove ripgrep'",
         "stdbuf -oL /usr/bin/systemctl --user restart nginx.service",
         "xargs sh -c 'systemctl --user restart nginx.service'",
@@ -287,10 +291,16 @@ def test_wrapped_apt_still_requires_dedicated_service(governance: Governance) ->
     "command",
     [
         "env nice -n 5 /usr/bin/apt install ripgrep",
+        "env -a apt apt install ripgrep",
+        "env --argv0=apt apt install ripgrep",
+        "env --default-signal= apt install ripgrep",
         "timeout 10 ionice -c 3 apt install ripgrep",
         "stdbuf -oL /usr/bin/systemctl --user restart saturnin-janitor.timer",
         "exec apt install ripgrep",
         "command /usr/bin/systemctl --user status saturnin-improve.service",
+        "exec -a apt apt install ripgrep",
+        "command -p /usr/bin/systemctl --user status saturnin-improve.service",
+        "env printf '%s' -S",
     ],
 )
 def test_allowed_elevated_commands_survive_nested_wrappers(
@@ -305,6 +315,23 @@ def test_allowed_elevated_commands_survive_nested_wrappers(
     "command",
     [
         "env -u",
+        "env -a",
+        "env --argv0",
+        "env --argv0=",
+        "env -x apt install ripgrep",
+        "env --unknown apt install ripgrep",
+        "env -S 'apt install ripgrep'",
+        "nice --unknown apt install ripgrep",
+        "nice --adjustment",
+        "ionice --unknown apt install ripgrep",
+        "ionice --class",
+        "stdbuf --unknown apt install ripgrep",
+        "stdbuf --output",
+        "timeout --unknown 10 apt install ripgrep",
+        "timeout --signal",
+        "exec --unknown apt install ripgrep",
+        "exec -a",
+        "command --unknown apt install ripgrep",
         "nice -n",
         "stdbuf -oL",
         "timeout 10",
