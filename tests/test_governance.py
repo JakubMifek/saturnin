@@ -202,6 +202,36 @@ def test_in_scope_server_commands(governance: Governance, command: str) -> None:
     assert governance.check_server_command(command).allowed
 
 
+@pytest.mark.parametrize(
+    "command",
+    [
+        "true && apt remove python3",
+        "true; xargs apt remove",
+        "true | systemctl restart nginx",
+        "true > result.txt",
+        "cat < input.txt",
+        "echo $(apt remove python3)",
+        "echo `apt remove python3`",
+        "echo ${COMMAND}",
+        'exec "$CMD" remove python3',
+        "env CMD=apt exec $CMD remove python3",
+        "/usr/bin/a* remove python3",
+    ],
+)
+def test_top_level_dynamic_shell_syntax_fails_closed(
+    governance: Governance, command: str
+) -> None:
+    decision = governance.check_server_command(command)
+    assert not decision.allowed
+    assert "dynamic shell syntax" in decision.reasons[0]
+
+
+def test_quoted_shell_metacharacters_are_literal(governance: Governance) -> None:
+    assert governance.check_server_command(
+        "printf '%s' '&& $HOME > file * {one,two}'"
+    ).allowed
+
+
 def test_server_commands_are_rejected_when_running_as_root(
     governance: Governance, monkeypatch: pytest.MonkeyPatch
 ) -> None:

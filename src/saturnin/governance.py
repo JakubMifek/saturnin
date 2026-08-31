@@ -180,6 +180,9 @@ class Governance:
     ) -> Decision:
         """Rule 7: non-root only, apt/systemctl only for Saturnin-dedicated services."""
         scope = self.config.server_scope
+        unsafe_syntax = _unsafe_shell_syntax(command)
+        if unsafe_syntax:
+            return Decision.deny(f"dynamic shell syntax is not allowed: {unsafe_syntax}")
         try:
             parts = shlex.split(command)
         except ValueError as exc:
@@ -336,6 +339,36 @@ class Governance:
         if self.mirror_required() and not self.config.policy("repos").get("repos", {}).get("board"):
             problems.append("task mirroring is on but policies/repos.yaml names no board repo")
         return problems
+
+
+def _unsafe_shell_syntax(command: str) -> str | None:
+    quote: str | None = None
+    escaped = False
+    for character in command:
+        if escaped:
+            escaped = False
+            continue
+        if quote == "'":
+            if character == "'":
+                quote = None
+            continue
+        if quote == '"':
+            if character == '"':
+                quote = None
+            elif character == "\\":
+                escaped = True
+            elif character in "$`":
+                return "expansion inside double quotes"
+            continue
+        if character == "\\":
+            escaped = True
+        elif character in "'\"":
+            quote = character
+        elif character in ";&|<>()\n":
+            return f"shell operator {character!r}"
+        elif character in "$`*?[]{}~":
+            return f"shell expansion token {character!r}"
+    return None
 
 
 def _wrapped_command(binary: str, args: list[str]) -> list[str]:
