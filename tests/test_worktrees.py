@@ -6,6 +6,7 @@ from pathlib import Path
 
 import pytest
 
+from saturnin import worktrees
 from saturnin.board import Board
 from saturnin.config import Config
 from saturnin.worktrees import GitError, WorktreeManager
@@ -38,6 +39,21 @@ def test_create_and_list(manager: WorktreeManager) -> None:
     branches = {w.branch for w in manager.list()}
     assert {"main", "feature/alpha"} <= branches
     assert manager.is_clean(worktree.path)
+
+
+def test_list_identifies_main_worktree_by_path(
+    manager: WorktreeManager, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    linked = manager.repo / "var" / "worktrees" / "feature__alpha"
+    output = (
+        f"worktree {linked}\nHEAD abc\nbranch refs/heads/feature/alpha\n\n"
+        f"worktree {manager.repo}\nHEAD def\nbranch refs/heads/main\n"
+    )
+    monkeypatch.setattr(worktrees, "git", lambda args, cwd: output)
+
+    listed = manager.list()
+
+    assert [worktree.is_main for worktree in listed] == [False, True]
 
 
 def test_dirty_worktree_is_never_removed(manager: WorktreeManager) -> None:

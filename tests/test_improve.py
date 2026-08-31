@@ -9,6 +9,11 @@ from saturnin.improve import ImprovementLoop
 from saturnin.routing import Router
 
 
+def test_median_ignores_missing_values() -> None:
+    assert telemetry._median(value for value in [None, 1.0, 3.0]) == 2.0
+    assert telemetry._median([None]) is None
+
+
 def test_metrics_reflect_the_board(config: Config, board: Board) -> None:
     router = Router(config)
     done = board.create("Implement a widget")

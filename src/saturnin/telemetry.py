@@ -29,9 +29,9 @@ def cycle_time_seconds(task: Task) -> float | None:
     return (parse_ts(task.closed_at) - parse_ts(task.created_at)).total_seconds()
 
 
-def _median(values: Iterable[float]) -> float | None:
-    values = [v for v in values if v is not None]
-    return round(statistics.median(values), 2) if values else None
+def _median(values: Iterable[float | None]) -> float | None:
+    cleaned = [value for value in values if value is not None]
+    return round(statistics.median(cleaned), 2) if cleaned else None
 
 
 def collect(board: Board, *, now: datetime | None = None) -> dict[str, Any]:

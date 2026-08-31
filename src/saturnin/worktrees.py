@@ -94,11 +94,13 @@ class WorktreeManager:
         for line in out.splitlines() + [""]:
             if not line.strip():
                 if current:
+                    path = Path(current["worktree"])
                     worktrees.append(
                         Worktree(
-                            path=Path(current["worktree"]),
+                            path=path,
                             branch=current.get("branch"),
                             head=current.get("HEAD"),
+                            is_main=path.resolve() == self.repo.resolve(),
                             locked=bool(current.get("locked")),
                         )
                     )
@@ -108,8 +110,6 @@ class WorktreeManager:
             if key == "branch":
                 value = value.replace("refs/heads/", "")
             current[key] = value or True
-        if worktrees:
-            worktrees[0].is_main = True
         return worktrees
 
     def branch_last_commit(self, branch: str) -> datetime:
