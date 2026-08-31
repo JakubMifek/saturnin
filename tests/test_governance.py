@@ -218,6 +218,9 @@ def test_in_scope_server_commands(governance: Governance, command: str) -> None:
         'exec "$CMD" remove python3',
         "env CMD=apt exec $CMD remove python3",
         "/usr/bin/a* remove python3",
+        "a\\\npt remove python3",
+        "a\\\r\npt remove python3",
+        "su\\\ndo systemctl restart nginx",
     ],
 )
 def test_top_level_dynamic_shell_syntax_fails_closed(
@@ -258,6 +261,7 @@ def test_apt_requires_a_saturnin_dedicated_service(governance: Governance) -> No
     "command",
     [
         "env nice -n 5 /usr/bin/apt remove ripgrep",
+        "env - apt remove ripgrep",
         "env -a harmless apt remove ripgrep",
         "env --argv0 harmless apt remove ripgrep",
         "timeout 10 bash -c 'ionice -c 3 apt remove ripgrep'",
@@ -269,6 +273,11 @@ def test_apt_requires_a_saturnin_dedicated_service(governance: Governance) -> No
         "bash -c 'command systemctl --user restart saturnin-janitor.timer'",
         "bash -c '$(printf apt) remove python3'",
         "bash -c 'f(){ apt remove python3; }; f'",
+        "/bin/dash -c 'apt remove python3'",
+        "/usr/bin/zsh -c 'apt remove python3'",
+        "busybox sh -c 'apt remove python3'",
+        "/bin/busybox ash -c 'apt remove python3'",
+        "toybox sh -c 'apt remove python3'",
         "exec apt remove python3",
         "command systemctl --user restart nginx.service",
     ],
@@ -291,6 +300,7 @@ def test_wrapped_apt_still_requires_dedicated_service(governance: Governance) ->
     "command",
     [
         "env nice -n 5 /usr/bin/apt install ripgrep",
+        "env - apt install ripgrep",
         "env -a apt apt install ripgrep",
         "env --argv0=apt apt install ripgrep",
         "env --default-signal= apt install ripgrep",
@@ -315,6 +325,7 @@ def test_allowed_elevated_commands_survive_nested_wrappers(
     "command",
     [
         "env -u",
+        "env -",
         "env -a",
         "env --argv0",
         "env --argv0=",
@@ -340,6 +351,9 @@ def test_allowed_elevated_commands_survive_nested_wrappers(
         "bash -c",
         "sh -c 'apt install",
         "sh -c 'echo ok ;'",
+        "dash",
+        "busybox",
+        "toybox",
     ],
 )
 def test_malformed_wrappers_fail_closed(governance: Governance, command: str) -> None:

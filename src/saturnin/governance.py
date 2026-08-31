@@ -25,6 +25,12 @@ _SHELL_RESERVED = {
     "while", "{", "}",
 }
 _DYNAMIC_COMMANDS = {".", "eval", "source"}
+_SHELL_BINARIES = {
+    "ash", "bash", "csh", "dash", "fish", "ksh", "ksh93", "mksh", "nu",
+    "osh", "posh", "powershell", "pwsh", "rbash", "sh", "tcsh", "xonsh",
+    "yash", "zsh",
+}
+_MULTICALL_BINARIES = {"busybox", "toybox"}
 
 
 @dataclass
@@ -231,9 +237,13 @@ class Governance:
         binary = parts[0].rsplit("/", 1)[-1]
         if binary in _SHELL_RESERVED or binary in _DYNAMIC_COMMANDS:
             return Decision.deny(f"shell keyword {binary!r} is not allowed")
-        if binary in ("sh", "bash"):
+        if binary in _SHELL_BINARIES:
             return Decision.deny(
                 f"{binary} execution is not allowed because shell commands are dynamic"
+            )
+        if binary in _MULTICALL_BINARIES:
+            return Decision.deny(
+                f"{binary} execution is not allowed because applet dispatch is dynamic"
             )
         if binary == "xargs":
             return Decision.deny(
@@ -350,6 +360,8 @@ class Governance:
 
 
 def _unsafe_shell_syntax(command: str) -> str | None:
+    if "\\\n" in command or "\\\r\n" in command:
+        return "backslash-newline continuation"
     quote: str | None = None
     escaped = False
     for character in command:
@@ -372,7 +384,7 @@ def _unsafe_shell_syntax(command: str) -> str | None:
             escaped = True
         elif character in "'\"":
             quote = character
-        elif character in "!;&|<>()\n":
+        elif character in "!;&|<>()\r\n":
             return f"shell operator {character!r}"
         elif character in "$`*?[]{}~":
             return f"shell expansion token {character!r}"
@@ -390,7 +402,7 @@ def _wrapped_command(binary: str, args: list[str]) -> list[str]:
         return _after_options(
             args,
             value_options={"-u", "--unset", "-C", "--chdir", "-a", "--argv0"},
-            flag_options={"-i", "--ignore-environment", "-0", "--null", "--debug"},
+            flag_options={"-", "-i", "--ignore-environment", "-0", "--null", "--debug"},
             optional_value_options={
                 "--default-signal", "--ignore-signal", "--block-signal"
             },
@@ -446,6 +458,9 @@ def _after_options(
             index += 1
             break
         if assignments and _ASSIGNMENT.fullmatch(token):
+            index += 1
+            continue
+        if token == "-" and token in flag_options:
             index += 1
             continue
         if not token.startswith("-") or token == "-":
