@@ -32,6 +32,15 @@ def test_detect_repeats(config: Config, board: Board) -> None:
     assert candidates[0].existing is None
 
 
+def test_detect_repeats_normalises_punctuated_titles(config: Config, board: Board) -> None:
+    board.create("Clean worktree/branch for e2e")
+    board.create("Clean worktree branch for e 2 e")
+    board.create("Clean worktree-branch for e2e")
+    candidates = AutomationLibrary(config).detect_repeats(board, threshold=3)
+    assert len(candidates) == 1
+    assert candidates[0].count == 3
+
+
 def test_propose_files_one_task_only(config: Config, board: Board) -> None:
     library = AutomationLibrary(config)
     for _ in range(3):

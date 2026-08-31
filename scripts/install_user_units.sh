@@ -11,9 +11,10 @@ if [[ "$(id -u)" -eq 0 ]]; then
 fi
 
 mkdir -p "$UNIT_DIR"
+escaped_home="$(printf '%s\n' "$SATURNIN_HOME" | sed 's/[&|\\]/\\&/g')"
 for unit in "$SATURNIN_HOME"/systemd/saturnin-*; do
   name="$(basename "$unit")"
-  sed "s|@SATURNIN_HOME@|$SATURNIN_HOME|g" "$unit" > "$UNIT_DIR/$name"
+  sed "s|@SATURNIN_HOME@|$escaped_home|g" "$unit" > "$UNIT_DIR/$name"
   echo "installed $UNIT_DIR/$name"
 done
 

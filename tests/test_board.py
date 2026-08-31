@@ -75,3 +75,10 @@ def test_signature_is_normalised(board: Board) -> None:
     a = board.create("Rotate the backup keys")
     b = board.create("rotate backup the keys")
     assert a.signature == b.signature
+
+
+def test_signature_extracts_words_from_punctuated_tokens(board: Board) -> None:
+    punctuated = board.create("Clean worktree/branch for e2e")
+    spaced = board.create("clean worktree branch for e 2 e")
+    assert punctuated.signature == spaced.signature
+    assert "café" in board.create("Réparer café/db").signature

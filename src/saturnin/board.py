@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import secrets
 from contextlib import contextmanager
 from dataclasses import asdict, dataclass, field
@@ -108,7 +109,7 @@ class Task:
     @property
     def signature(self) -> str:
         """Normalised fingerprint used to detect repeated work."""
-        words = [w for w in self.title.lower().split() if w.isalpha()]
+        words = re.findall(r"[^\W\d_]+", self.title.lower())
         return " ".join(sorted(set(words))[:8]) or self.kind
 
 
