@@ -66,8 +66,8 @@ print(monitor["name"], monitor["url"], monitor.get("expect_status", 200),
     if (( recent_failures >= 2 )); then
       saturnin escalate "Monitor $app/$name failing repeatedly" \
         --context "Expected HTTP $expect from $url, got $code twice in a row." \
-        --checklist "Confirm the service is meant to be up" \
-        --checklist "Check deploy history and infrastructure" \
+        --item "Confirm the service is meant to be up" \
+        --item "Check deploy history and infrastructure" \
         --urgency high \
         --unblock "State whether to roll back, patch or accept the outage" || true
     else
