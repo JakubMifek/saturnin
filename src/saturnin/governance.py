@@ -183,9 +183,19 @@ class Governance:
             return Decision.deny("empty command")
         binary = parts[0].rsplit("/", 1)[-1]
         user = scope.get("user", {})
-        for forbidden in user.get("forbidden_prefixes", []):
-            if forbidden in (parts[0], binary):
-                return Decision.deny(f"privilege escalation via {forbidden!r} is not allowed")
+        forbidden_binaries = user.get("forbidden_prefixes", [])
+        for part in parts:
+            candidates = [part]
+            try:
+                candidates.extend(shlex.split(part))
+            except ValueError:
+                pass
+            for candidate in candidates:
+                candidate_binary = candidate.rsplit("/", 1)[-1]
+                if candidate_binary in forbidden_binaries:
+                    return Decision.deny(
+                        f"privilege escalation via {candidate_binary!r} is not allowed"
+                    )
         services = scope.get("services", {})
         packages = scope.get("packages", {})
         if binary == "apt" or binary.startswith("apt-"):

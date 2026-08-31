@@ -179,6 +179,10 @@ def test_push_rules(governance: Governance) -> None:
         "apt install ripgrep",
         "su - root",
         "/usr/bin/sudo systemctl --user restart saturnin-janitor.timer",
+        "bash -c 'sudo systemctl --user restart saturnin-janitor.timer'",
+        "sh -c '/usr/bin/doas systemctl --user restart saturnin-janitor.timer'",
+        "env sudo systemctl --user restart saturnin-janitor.timer",
+        "env /usr/local/bin/pkexec systemctl --user restart saturnin-janitor.timer",
         "systemctl --user --system restart saturnin-janitor.timer",
     ],
 )
