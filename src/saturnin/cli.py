@@ -182,6 +182,10 @@ def build_parser() -> argparse.ArgumentParser:
     branch.add_argument("branch")
     command = gov.add_parser("command", help="is this server command inside scope?")
     command.add_argument("cmdline", help="the shell command Saturnin wants to run")
+    command.add_argument(
+        "--service",
+        help="Saturnin-dedicated service that requires an apt command",
+    )
 
     # escalate ---------------------------------------------------------
     esc = sub.add_parser("escalate", help="render a human escalation issue body")
@@ -377,7 +381,7 @@ def _run(args: argparse.Namespace, config: Config) -> int:  # noqa: C901 - flat 
         decision = (
             governance.check_branch(args.branch)
             if args.check_command == "branch"
-            else governance.check_server_command(args.cmdline)
+            else governance.check_server_command(args.cmdline, dedicated_service=args.service)
         )
         _emit(
             {"allowed": decision.allowed, "reasons": decision.reasons},
@@ -517,17 +521,17 @@ def _run_task(args: argparse.Namespace, config: Config, board: Board, as_json: b
         )
         return 0
     if args.task_command == "attach":
-        task = board.get(args.task_id)
         if args.branch:
             decision = Governance(config).check_branch(args.branch)
             if not decision.allowed:
                 print("; ".join(decision.reasons), file=sys.stderr)
                 return 2
-            task.branch = args.branch
-        if args.worktree:
-            task.worktree = args.worktree
-        task.log("attach", branch=task.branch, worktree=task.worktree)
-        board.save(task)
+        with board.edit(args.task_id) as task:
+            if args.branch:
+                task.branch = args.branch
+            if args.worktree:
+                task.worktree = args.worktree
+            task.log("attach", branch=task.branch, worktree=task.worktree)
         _emit(task.to_dict(), as_json, _task_line(task))
         return 0
     task = board.get(args.task_id)
@@ -600,11 +604,10 @@ def _run_worktree(args: argparse.Namespace, config: Config, board: Board, as_jso
     if args.worktree_command == "create":
         worktree = manager.create(args.branch, base=args.base)
         if args.task:
-            task = board.get(args.task)
-            task.branch = args.branch
-            task.worktree = str(worktree.path)
-            task.log("worktree", branch=args.branch, worktree=str(worktree.path))
-            board.save(task)
+            with board.edit(args.task) as task:
+                task.branch = args.branch
+                task.worktree = str(worktree.path)
+                task.log("worktree", branch=args.branch, worktree=str(worktree.path))
         _emit(
             {"branch": worktree.branch, "path": str(worktree.path)},
             as_json,

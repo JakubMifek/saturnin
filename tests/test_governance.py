@@ -156,6 +156,7 @@ def test_push_rules(governance: Governance) -> None:
         "systemctl restart nginx",
         "systemctl restart",
         "apt remove python3",
+        "apt install ripgrep",
         "su - root",
     ],
 )
@@ -168,12 +169,20 @@ def test_out_of_scope_server_commands(governance: Governance, command: str) -> N
     [
         "systemctl --user restart saturnin-janitor.timer",
         "systemctl --user status saturnin-improve.service",
-        "apt install ripgrep",
         "python3 -m saturnin doctor",
     ],
 )
 def test_in_scope_server_commands(governance: Governance, command: str) -> None:
     assert governance.check_server_command(command).allowed
+
+
+def test_apt_requires_a_saturnin_dedicated_service(governance: Governance) -> None:
+    assert governance.check_server_command(
+        "apt install ripgrep", dedicated_service="saturnin-discovery.service"
+    ).allowed
+    assert not governance.check_server_command(
+        "apt install ripgrep", dedicated_service="unrelated.service"
+    ).allowed
 
 
 def test_escalation_body_must_be_complete(governance: Governance) -> None:

@@ -4,8 +4,8 @@
 
 - Non-root only. `sudo`, `su`, `doas`, `pkexec` are refused by
   `saturnin check command`, and that refusal is final.
-- `apt install|update|list|show` only, and only for dependencies of a
-  Saturnin-dedicated service.
+- `apt install|update|list|show` only, and only when `--service saturnin-*`
+  identifies the dedicated service that needs the dependency.
 - `systemctl` only for `saturnin-*` units; scheduling only through user-scope
   timers or the Saturnin user's crontab.
 - Writes stay under `/home/saturnin`.
@@ -14,6 +14,7 @@ Check anything unusual first:
 
 ```bash
 saturnin check command "systemctl --user restart saturnin-janitor.timer"   # 0
+saturnin check command "apt install ripgrep" --service saturnin-api.service # 0
 saturnin check command "sudo apt install nginx"                            # 2
 ```
 

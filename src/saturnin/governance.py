@@ -167,7 +167,12 @@ class Governance:
         return Decision(True, reasons)
 
     # -- server scope --------------------------------------------------
-    def check_server_command(self, command: str) -> Decision:
+    def check_server_command(
+        self,
+        command: str,
+        *,
+        dedicated_service: str | None = None,
+    ) -> Decision:
         """Rule 7: non-root only, apt/systemctl only for Saturnin-dedicated services."""
         scope = self.config.server_scope
         try:
@@ -190,8 +195,14 @@ class Governance:
             allowed = packages.get("apt_allowed_subcommands", [])
             if allowed and sub not in allowed:
                 return Decision.deny(f"apt {sub!r} is not in the allow list {allowed}")
+            if packages.get("apt_requires_dedicated_service", False):
+                prefix = services.get("unit_prefix", "saturnin-")
+                if not dedicated_service or not dedicated_service.startswith(prefix):
+                    return Decision.deny(
+                        f"apt requires a dedicated {prefix}* service via --service"
+                    )
             return Decision.ok(
-                "apt allowed only when installing dependencies of a Saturnin-dedicated service"
+                f"apt allowed for dependency of dedicated service {dedicated_service}"
             )
         if binary == "systemctl":
             if not services.get("systemctl_allowed", False):

@@ -2,11 +2,13 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
 from saturnin.board import Board
 from saturnin.cli import main
+from saturnin.worktrees import WorktreeManager
 
 
 def run(capsys: pytest.CaptureFixture[str], *argv: str) -> tuple[int, str]:
@@ -48,6 +50,18 @@ def test_branch_and_command_checks(home: Path, capsys: pytest.CaptureFixture[str
     assert run(capsys, "check", "branch", "main")[0] == 2
     assert run(capsys, "check", "command", "systemctl --user restart saturnin-janitor.timer")[0] == 0
     assert run(capsys, "check", "command", "sudo rm -rf /")[0] == 2
+    assert run(capsys, "check", "command", "apt install ripgrep")[0] == 2
+    assert (
+        run(
+            capsys,
+            "check",
+            "command",
+            "apt install ripgrep",
+            "--service",
+            "saturnin-discovery.service",
+        )[0]
+        == 0
+    )
 
 
 def test_review_gate_flow(home: Path, capsys: pytest.CaptureFixture[str]) -> None:
@@ -171,3 +185,50 @@ def test_attach_rejects_protected_branch(home: Path, capsys: pytest.CaptureFixtu
     assert main(["task", "attach", task["id"], "--branch", "feature/ok"]) == 0
     board = Board()
     assert board.get(task["id"]).branch == "feature/ok"
+
+
+def test_attach_uses_locked_edit(
+    home: Path, capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    task = Board().create("Attach atomically")
+
+    def reject_save(*args: object, **kwargs: object) -> None:
+        raise AssertionError("attach must not use Board.save()")
+
+    monkeypatch.setattr(Board, "save", reject_save)
+    assert main(["task", "attach", task.id, "--branch", "feature/atomic"]) == 0
+    assert Board().get(task.id).branch == "feature/atomic"
+
+
+def test_worktree_task_attachment_uses_locked_edit(
+    home: Path, capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    task = Board().create("Create worktree atomically")
+    worktree_path = home / "worktree"
+    monkeypatch.setattr(
+        WorktreeManager,
+        "create",
+        lambda *args, **kwargs: SimpleNamespace(
+            branch="feature/atomic-worktree", path=worktree_path
+        ),
+    )
+
+    def reject_save(*args: object, **kwargs: object) -> None:
+        raise AssertionError("worktree attachment must not use Board.save()")
+
+    monkeypatch.setattr(Board, "save", reject_save)
+    assert (
+        main(
+            [
+                "worktree",
+                "create",
+                "feature/atomic-worktree",
+                "--task",
+                task.id,
+            ]
+        )
+        == 0
+    )
+    stored = Board().get(task.id)
+    assert stored.branch == "feature/atomic-worktree"
+    assert stored.worktree == str(worktree_path)

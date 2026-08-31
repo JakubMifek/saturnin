@@ -11,7 +11,7 @@ from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import Any, Iterator
 
-from .board import Board, Task, utcnow
+from .board import Board, BoardError, utcnow
 from .config import Config, default_config
 
 REQUIRED_FIELDS = ("task_id", "role", "summary", "next_steps")
@@ -86,12 +86,12 @@ class CheckpointStore:
         with path.open("a", encoding="utf-8") as handle:
             handle.write(json.dumps(checkpoint.to_dict()) + "\n")
         try:
-            task: Task = self.board.get(checkpoint.task_id)
-        except Exception:  # noqa: BLE001 - checkpoints may outlive their task file
+            with self.board.edit(checkpoint.task_id) as task:
+                task.checkpoint = checkpoint.created_at
+                task.log("checkpoint", actor=checkpoint.role, summary=checkpoint.summary[:120])
+        except BoardError:
+            # Checkpoints may outlive their task file.
             return checkpoint
-        task.checkpoint = checkpoint.created_at
-        task.log("checkpoint", actor=checkpoint.role, summary=checkpoint.summary[:120])
-        self.board.save(task)
         return checkpoint
 
     def latest(self, task_id: str) -> Checkpoint | None:

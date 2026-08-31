@@ -122,29 +122,34 @@ class Router:
         ``squad`` overrides the rule's suggested crew: squads are assembled per
         task, not fixed teams.
         """
-        if task.state not in ("intake", "blocked"):
-            raise BoardError(f"task {task.id} is not dispatchable from state {task.state}")
-        route = self.resolve(task)
-        task.role = route.role
-        task.unit = route.unit
-        task.squad = list(squad or route.squad)
-        task.priority = route.priority
-        # Rule 9: agree up front how the result comes back. Saturnin dispatches
-        # and moves on; it never blocks on a worker.
-        task.result_contract = route.result_contract
-        task.log(
-            "dispatch",
-            actor=actor,
-            role=route.role,
-            rule=route.rule,
-            escalate=route.escalate,
-            squad=",".join(task.squad),
-            result_contract=route.result_contract,
-        )
-        # The first dispatch is what dispatch latency measures; a re-dispatch
-        # after "blocked" must not reset it.
-        task.routed_at = task.routed_at or task.history[-1]["ts"]
-        board.transition(task, "routed", actor=actor, note=f"rule={route.rule}")
+        with board.edit(task.id) as current:
+            if current.state not in ("intake", "blocked"):
+                raise BoardError(
+                    f"task {current.id} is not dispatchable from state {current.state}"
+                )
+            route = self.resolve(current)
+            current.role = route.role
+            current.unit = route.unit
+            current.squad = list(squad or route.squad)
+            current.priority = route.priority
+            # Rule 9: agree up front how the result comes back. Saturnin dispatches
+            # and moves on; it never blocks on a worker.
+            current.result_contract = route.result_contract
+            current.log(
+                "dispatch",
+                actor=actor,
+                role=route.role,
+                rule=route.rule,
+                escalate=route.escalate,
+                squad=",".join(current.squad),
+                result_contract=route.result_contract,
+            )
+            # The first dispatch is what dispatch latency measures; a re-dispatch
+            # after "blocked" must not reset it.
+            current.routed_at = current.routed_at or current.history[-1]["ts"]
+            current.state = "routed"
+            current.log("state:routed", actor=actor, note=f"rule={route.rule}")
+        task.__dict__.update(current.__dict__)
         return route
 
     def validate_policy(self) -> list[str]:

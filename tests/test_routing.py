@@ -54,6 +54,18 @@ def test_dispatch_updates_task(config: Config, board: Board) -> None:
     assert stored.history[-2]["event"] == "dispatch"
 
 
+def test_dispatch_preserves_updates_made_after_task_was_loaded(
+    config: Config, board: Board
+) -> None:
+    stale = board.create("Implement the widget")
+    with board.edit(stale.id) as current:
+        current.body = "updated by another squad"
+
+    Router(config).dispatch(board, stale)
+
+    assert board.get(stale.id).body == "updated by another squad"
+
+
 def test_dispatch_twice_is_refused(config: Config, board: Board) -> None:
     task = board.create("Implement the widget")
     router = Router(config)

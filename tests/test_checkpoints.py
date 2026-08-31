@@ -38,6 +38,26 @@ def test_latest_wins(config: Config, board: Board) -> None:
     assert [c.summary for c in store] == ["second"]
 
 
+def test_save_uses_locked_board_edit(
+    config: Config, board: Board, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    task = board.create("Parallel work")
+    with board.edit(task.id) as current:
+        current.body = "updated by another squad"
+
+    def reject_save(*args: object, **kwargs: object) -> None:
+        raise AssertionError("checkpoint mutation must not use Board.save()")
+
+    monkeypatch.setattr(board, "save", reject_save)
+    CheckpointStore(config, board).save(
+        Checkpoint(task_id=task.id, role="scribe", summary="saved", next_steps=["continue"])
+    )
+
+    stored = board.get(task.id)
+    assert stored.body == "updated by another squad"
+    assert stored.history[-1]["event"] == "checkpoint"
+
+
 def test_incomplete_checkpoint_rejected(config: Config, board: Board) -> None:
     task = board.create("Work")
     store = CheckpointStore(config, board)
