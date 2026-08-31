@@ -202,6 +202,17 @@ def test_in_scope_server_commands(governance: Governance, command: str) -> None:
     assert governance.check_server_command(command).allowed
 
 
+def test_server_commands_are_rejected_when_running_as_root(
+    governance: Governance, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr("saturnin.governance.os.geteuid", lambda: 0)
+
+    decision = governance.check_server_command("python3 -m saturnin doctor")
+
+    assert not decision.allowed
+    assert decision.reasons == ["server commands may not run as root"]
+
+
 def test_apt_requires_a_saturnin_dedicated_service(governance: Governance) -> None:
     assert governance.check_server_command(
         "apt install ripgrep", dedicated_service="saturnin-discovery.service"

@@ -7,6 +7,7 @@ pass through here first. The rules themselves live in
 
 from __future__ import annotations
 
+import os
 import re
 import shlex
 from dataclasses import dataclass, field
@@ -183,6 +184,8 @@ class Governance:
             return Decision.deny("empty command")
         binary = parts[0].rsplit("/", 1)[-1]
         user = scope.get("user", {})
+        if not user.get("allow_root", False) and os.geteuid() == 0:
+            return Decision.deny("server commands may not run as root")
         forbidden_binaries = user.get("forbidden_prefixes", [])
         for part in parts:
             try:

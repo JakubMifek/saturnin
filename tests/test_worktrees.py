@@ -72,6 +72,29 @@ def test_fresh_worktree_is_kept(manager: WorktreeManager) -> None:
     assert str(worktree.path) not in {a.target for a in plan.actions}
 
 
+def test_unmerged_worktree_uses_hard_stale_threshold(manager: WorktreeManager) -> None:
+    worktree = manager.create("feature/local-commit")
+    (worktree.path / "local.txt").write_text("unmerged\n", encoding="utf-8")
+    git(["add", "local.txt"], worktree.path)
+    git(
+        ["-c", "user.email=a@b.c", "-c", "user.name=w", "commit", "-m", "local"],
+        worktree.path,
+    )
+    now = datetime.now(timezone.utc)
+    threshold = manager.policy["worktree"]["hard_stale_after_days"]
+
+    before_hard_stale = manager.plan_cleanup(now=now + timedelta(days=threshold - 1))
+    at_hard_stale = manager.plan_cleanup(now=now + timedelta(days=threshold + 1))
+
+    assert str(worktree.path) not in {a.target for a in before_hard_stale.actions}
+    assert str(worktree.path) in {a.target for a in at_hard_stale.actions}
+    assert any(
+        f"{threshold}d (unmerged)" in action.reason
+        for action in at_hard_stale.actions
+        if action.target == str(worktree.path)
+    )
+
+
 def test_open_task_protects_worktree(manager: WorktreeManager, board: Board) -> None:
     worktree = manager.create("feature/guarded")
     task = board.create("guarded work")

@@ -191,7 +191,7 @@ class WorktreeManager:
             threshold = (
                 wt_policy.get("merged_stale_after_days", 1)
                 if is_merged
-                else wt_policy.get("stale_after_days", 7)
+                else wt_policy.get("hard_stale_after_days", 30)
             )
             if age >= threshold:
                 plan.actions.append(
