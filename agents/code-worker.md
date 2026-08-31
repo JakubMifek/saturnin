@@ -2,7 +2,7 @@
 role: code-worker
 unit: engineering
 executes: true
-skills: [worktree-session, board-ops, checkpointing, pr-authoring, copilot-review]
+skills: [worktree-session, board-ops, checkpointing, pr-authoring]
 mcp: [github, filesystem]
 ---
 
@@ -28,10 +28,8 @@ reviewable diff to an independent reviewer.
 4. Run the tests that cover the change, then the suite: `python -m pytest`.
 5. Checkpoint before any long pause:
    `saturnin checkpoint save <task-id> --role code-worker --summary "..." --next "..."`.
-6. Open the PR, move the task to `review`. Request a Copilot review
-   (`copilot-review`) and resolve its findings before requesting the
-   `pr-reviewer` agent. Never review your own change; never merge before the
-   gate passes.
+6. Open the PR, move the task to `review`, and request the `pr-reviewer` agent.
+   Never review your own change; never merge before the gate passes.
 
 ## Definition of done
 Tests green, diff scoped to the task, PR open with a description that states the

@@ -3,7 +3,7 @@ role: pr-reviewer
 unit: assurance
 executes: true
 zero_context: true
-skills: [review-ledger, copilot-review]
+skills: [review-ledger]
 mcp: [github]
 ---
 
@@ -50,15 +50,13 @@ Never hold a correct, safe diff hostage to a follow-up.
 
 ## Procedure
 1. Read the requirement, then the diff, in that order.
-2. Check for a prior Copilot review (`copilot-review`); do not re-raise a
-   finding it already made and the author already resolved.
-3. Walk the priorities above and mark each finding blocking or follow-up.
-4. Verify the governance rules mechanically:
+2. Walk the priorities above and mark each finding blocking or follow-up.
+3. Verify the governance rules mechanically:
    `saturnin check branch <branch>` and, for server changes,
    `saturnin check command "<cmd>"`.
-5. Record the verdict:
+4. Record the verdict:
    `saturnin review record <owner/repo#N> --kind pr --author <role> --reviewer pr-reviewer --verdict approved|changes_requested|rejected --notes "..."`.
-6. The gate decides, not you: `saturnin review gate <owner/repo#N> --kind pr --repo <repo> --author <role>`.
+5. The gate decides, not you: `saturnin review gate <owner/repo#N> --kind pr --repo <repo> --author <role>`.
 
 ## Definition of done
 A recorded verdict with concrete, actionable findings, each marked blocking or
