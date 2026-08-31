@@ -229,7 +229,14 @@ def test_apt_requires_a_saturnin_dedicated_service(governance: Governance) -> No
         "timeout 10 bash -c 'ionice -c 3 apt remove ripgrep'",
         "stdbuf -oL /usr/bin/systemctl --user restart nginx.service",
         "xargs sh -c 'systemctl --user restart nginx.service'",
+        "xargs -I{} apt remove {}",
         "bash -c 'echo ready && /usr/bin/apt remove python3'",
+        "bash -c 'exec apt remove python3'",
+        "bash -c 'command systemctl --user restart saturnin-janitor.timer'",
+        "bash -c '$(printf apt) remove python3'",
+        "bash -c 'f(){ apt remove python3; }; f'",
+        "exec apt remove python3",
+        "command systemctl --user restart nginx.service",
     ],
 )
 def test_wrapped_elevated_commands_remain_restricted(
@@ -250,9 +257,10 @@ def test_wrapped_apt_still_requires_dedicated_service(governance: Governance) ->
     "command",
     [
         "env nice -n 5 /usr/bin/apt install ripgrep",
-        "timeout 10 sh -c 'ionice -c 3 apt install ripgrep'",
+        "timeout 10 ionice -c 3 apt install ripgrep",
         "stdbuf -oL /usr/bin/systemctl --user restart saturnin-janitor.timer",
-        "xargs /usr/bin/systemctl --user status saturnin-improve.service",
+        "exec apt install ripgrep",
+        "command /usr/bin/systemctl --user status saturnin-improve.service",
     ],
 )
 def test_allowed_elevated_commands_survive_nested_wrappers(

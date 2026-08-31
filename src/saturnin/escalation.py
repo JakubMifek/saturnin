@@ -60,14 +60,17 @@ def submit(*, title: str, body: str, config: Config | None = None) -> str:
     config = config or default_config()
     mirror = IssueMirror(config)
     repo = mirror.board_repo
-    ensure_labels(repo, ["escalation"])
+    label = config.governance.get("escalation", {}).get("label")
+    if not label:
+        raise MirrorError("governance escalation policy defines no issue label")
+    ensure_labels(repo, [str(label)])
     output = run_gh(
         [
             "issue", "create",
             "--repo", repo,
             "--title", title,
             "--body", body,
-            "--label", "escalation",
+            "--label", str(label),
         ]
     )
     url = output.strip().splitlines()[-1].strip() if output.strip() else ""

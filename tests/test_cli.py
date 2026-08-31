@@ -163,7 +163,11 @@ def test_escalation_push_submits_safely_to_board_repo(
 
     def fake_run(args, **kwargs):
         calls.append(args)
-        stdout = "https://github.com/JakubMifek/saturnin-ops/issues/7\n"
+        stdout = (
+            "[]"
+            if args[1:3] == ["label", "list"]
+            else "https://github.com/JakubMifek/saturnin-ops/issues/7\n"
+        )
         return subprocess.CompletedProcess(args, 0, stdout, "")
 
     monkeypatch.setattr("saturnin.issues.subprocess.run", fake_run)
@@ -176,6 +180,9 @@ def test_escalation_push_submits_safely_to_board_repo(
     create = next(call for call in calls if call[1:3] == ["issue", "create"])
     assert create[create.index("--repo") + 1] == "JakubMifek/saturnin-ops"
     assert create[create.index("--title") + 1] == title
+    assert create[create.index("--label") + 1] == "saturnin:escalation"
+    provision = next(call for call in calls if call[1:3] == ["label", "create"])
+    assert provision[3] == "saturnin:escalation"
 
 
 def test_escalation_push_failure_is_reported(

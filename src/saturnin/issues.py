@@ -210,8 +210,26 @@ def _label_args(labels: list[str], *, option: str = "--label") -> list[str]:
 
 
 def ensure_labels(repo: str, labels: Iterable[str]) -> None:
-    for label in sorted(set(labels)):
-        run_gh(["label", "create", label, "--repo", repo, "--force"])
+    existing = _repo_labels(repo)
+    for label in sorted(set(labels) - existing):
+        try:
+            run_gh(["label", "create", label, "--repo", repo])
+        except MirrorError as create_error:
+            try:
+                created_by_race = label in _repo_labels(repo)
+            except MirrorError:
+                raise create_error
+            if not created_by_race:
+                raise create_error
+
+
+def _repo_labels(repo: str) -> set[str]:
+    output = run_gh(["label", "list", "--repo", repo, "--limit", "1000", "--json", "name"])
+    try:
+        data = json.loads(output)
+        return {str(item["name"]) for item in data}
+    except (json.JSONDecodeError, KeyError, TypeError) as exc:
+        raise MirrorError("gh label list returned invalid label data") from exc
 
 
 def run_gh(args: list[str]) -> str:

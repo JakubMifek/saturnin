@@ -17,7 +17,7 @@ from .config import Config, default_config
 from .review import ReviewRecord
 
 _MAX_COMMAND_DEPTH = 8
-_WRAPPERS = {"env", "nice", "ionice", "stdbuf", "timeout", "xargs"}
+_WRAPPERS = {"env", "nice", "ionice", "stdbuf", "timeout", "exec", "command"}
 _ASSIGNMENT = re.compile(r"[A-Za-z_][A-Za-z0-9_]*=.*", re.DOTALL)
 
 
@@ -221,23 +221,13 @@ class Governance:
             return Decision.deny("wrapper contains no command")
         binary = parts[0].rsplit("/", 1)[-1]
         if binary in ("sh", "bash"):
-            if len(parts) < 3 or parts[1] != "-c" or not parts[2].strip():
-                return Decision.deny(f"malformed {binary} -c wrapper")
-            try:
-                commands = _split_shell_commands(parts[2])
-            except ValueError as exc:
-                return Decision.deny(f"unparsable wrapped command: {exc}")
-            if not commands:
-                return Decision.deny(f"malformed {binary} -c wrapper")
-            for command in commands:
-                decision = self._check_scoped_command(
-                    command,
-                    dedicated_service=dedicated_service,
-                    depth=depth + 1,
-                )
-                if not decision.allowed:
-                    return decision
-            return Decision.ok(f"{binary} wrapper contains only allowed commands")
+            return Decision.deny(
+                f"{binary} execution is not allowed because shell commands are dynamic"
+            )
+        if binary == "xargs":
+            return Decision.deny(
+                "xargs execution is not allowed because its command is input-dependent"
+            )
         if binary in _WRAPPERS:
             try:
                 wrapped = _wrapped_command(binary, parts[1:])
@@ -348,24 +338,13 @@ class Governance:
         return problems
 
 
-def _split_shell_commands(command: str) -> list[list[str]]:
-    lexer = shlex.shlex(command, posix=True, punctuation_chars=";&|")
-    lexer.whitespace_split = True
-    lexer.commenters = ""
-    commands: list[list[str]] = [[]]
-    for token in lexer:
-        if token and set(token) <= {";", "&", "|"}:
-            if not commands[-1]:
-                raise ValueError("empty command around shell operator")
-            commands.append([])
-        else:
-            commands[-1].append(token)
-    if not commands[-1]:
-        raise ValueError("trailing shell operator")
-    return commands
-
-
 def _wrapped_command(binary: str, args: list[str]) -> list[str]:
+    if binary in {"exec", "command"}:
+        if args and args[0].startswith("-"):
+            raise ValueError("options make the executable position ambiguous")
+        if not args:
+            raise ValueError("expected a command")
+        return args
     if binary == "env":
         return _after_options(
             args,
@@ -395,14 +374,7 @@ def _wrapped_command(binary: str, args: list[str]) -> list[str]:
         if len(remainder) < 2:
             raise ValueError("expected duration and command")
         return remainder[1:]
-    return _after_options(
-        args,
-        value_options={
-            "-a", "--arg-file", "-d", "--delimiter", "-E", "--eof",
-            "-I", "--replace", "-L", "--max-lines", "-n", "--max-args",
-            "-P", "--max-procs", "-s", "--max-chars",
-        },
-    )
+    raise ValueError(f"unsupported wrapper {binary}")
 
 
 def _after_options(

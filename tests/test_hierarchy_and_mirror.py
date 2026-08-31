@@ -104,7 +104,9 @@ def test_existing_mirror_updates_content_and_reconciles_metadata_labels(
     def fake_run(args, **kwargs):
         calls.append(args)
         stdout = ""
-        if args[1:3] == ["issue", "view"]:
+        if args[1:3] == ["label", "list"]:
+            stdout = "[]"
+        elif args[1:3] == ["issue", "view"]:
             stdout = json.dumps(
                 {
                     "labels": [
@@ -141,11 +143,12 @@ def test_labels_are_provisioned_before_create(
 
     def fake_run(args, **kwargs):
         calls.append(args)
-        stdout = (
-            "https://github.com/JakubMifek/saturnin-ops/issues/2\n"
-            if args[1:3] == ["issue", "create"]
-            else ""
-        )
+        if args[1:3] == ["label", "list"]:
+            stdout = json.dumps([{"name": "dynamic"}])
+        elif args[1:3] == ["issue", "create"]:
+            stdout = "https://github.com/JakubMifek/saturnin-ops/issues/2\n"
+        else:
+            stdout = ""
         return subprocess.CompletedProcess(args, 0, stdout, "")
 
     monkeypatch.setattr("saturnin.issues.subprocess.run", fake_run)
@@ -158,8 +161,10 @@ def test_labels_are_provisioned_before_create(
         for call in calls[:create_index]
         if call[1:3] == ["label", "create"]
     }
-    assert provisioned == set(IssueMirror(config, board).labels_for(task))
-    assert all("--force" in call for call in calls[:create_index])
+    expected = set(IssueMirror(config, board).labels_for(task))
+    assert provisioned == expected - {"dynamic"}
+    assert "dynamic" not in provisioned
+    assert not any("--force" in call for call in calls[:create_index])
 
 
 def test_label_provisioning_failure_stops_issue_creation(
@@ -171,6 +176,10 @@ def test_label_provisioning_failure_stops_issue_creation(
 
     def fake_run(args, **kwargs):
         calls.append(args)
+        if args[1:3] == ["label", "list"]:
+            if sum(call[1:3] == ["label", "list"] for call in calls) == 1:
+                return subprocess.CompletedProcess(args, 0, "[]", "")
+            return subprocess.CompletedProcess(args, 1, "", "network unavailable")
         return subprocess.CompletedProcess(args, 1, "", "permission denied")
 
     monkeypatch.setattr("saturnin.issues.subprocess.run", fake_run)
