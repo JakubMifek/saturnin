@@ -78,7 +78,8 @@ print(monitor["name"], monitor["url"], monitor.get("expect_status", 200),
         --item "Confirm the service is meant to be up" \
         --item "Check deploy history and infrastructure" \
         --urgency high \
-        --unblock "State whether to roll back, patch or accept the outage" || true
+        --unblock "State whether to roll back, patch or accept the outage" \
+        --push
     else
       saturnin task add "Monitor $app/$name failed: HTTP $code from $url" \
         --body "Expected $expect, observed $code at $started. Monitor declared in $manifest." \

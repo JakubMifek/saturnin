@@ -91,3 +91,12 @@ def test_monitors_use_project_virtualenv_python(config: Config) -> None:
     )
 
     assert "used" in marker.read_text(encoding="utf-8")
+
+
+def test_monitor_escalations_are_pushed_and_not_silenced(config: Config) -> None:
+    script = (config.root / "automation/library/run_monitors.sh").read_text(
+        encoding="utf-8"
+    )
+    escalation = script.split("saturnin escalate", 1)[1].split("else", 1)[0]
+    assert "--push" in escalation
+    assert "|| true" not in escalation

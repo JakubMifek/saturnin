@@ -93,7 +93,7 @@ sibling state labels. Anything that was never mirrored is lost - which is what
 
 1. `systemctl --user stop 'saturnin-*.timer'` - stop the schedulers.
 2. `saturnin task list --open` - see what is in flight.
-3. Escalate with `saturnin escalate ... --urgency critical`.
+3. Escalate with `saturnin escalate ... --urgency critical --push`.
 4. Nothing merges while the gates are unavailable; that is the intended failure
    mode.
 

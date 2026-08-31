@@ -28,8 +28,37 @@ def find_root(start: Path | None = None) -> Path:
     current = (start or Path.cwd()).resolve()
     for candidate in [current, *current.parents]:
         if (candidate / "policies" / "governance.yaml").is_file():
-            return candidate
+            return _canonical_worktree(candidate)
     return current
+
+
+def _canonical_worktree(candidate: Path) -> Path:
+    git_file = candidate / ".git"
+    if not git_file.is_file():
+        return candidate
+    try:
+        marker, value = git_file.read_text(encoding="utf-8").strip().split(":", 1)
+        if marker.lower() != "gitdir":
+            return candidate
+        git_dir = Path(value.strip())
+        if not git_dir.is_absolute():
+            git_dir = candidate / git_dir
+        git_dir = git_dir.resolve()
+        common_file = git_dir / "commondir"
+        if not common_file.is_file():
+            return candidate
+        common_dir = Path(common_file.read_text(encoding="utf-8").strip())
+        if not common_dir.is_absolute():
+            common_dir = git_dir / common_dir
+        common_dir = common_dir.resolve()
+        checkout = common_dir.parent
+        if common_dir.name == ".git" and (
+            checkout / "policies" / "governance.yaml"
+        ).is_file():
+            return checkout
+    except (OSError, ValueError):
+        pass
+    return candidate
 
 
 def load_yaml(path: Path) -> dict[str, Any]:

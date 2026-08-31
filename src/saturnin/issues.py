@@ -128,6 +128,9 @@ class IssueMirror:
             if self.mirrors(task) and not task.issue
         ]
 
+    def syncable(self) -> list[Task]:
+        return [task for task in self.board.list(open_only=True) if self.mirrors(task)]
+
     def sync(self, task: Task, *, push: bool = False, actor: str = "chief-of-staff") -> IssuePayload:
         payload = self.render(task)
         if not push:
@@ -148,12 +151,24 @@ class IssueMirror:
             raise MirrorError(
                 "gh CLI not found; install it or run without --push and file the issue by hand"
             )
+        ensure_labels(payload.repo, payload.labels)
         if task.issue:
-            self._gh(
-                ["issue", "edit", task.issue, "--body", payload.body, "--title", payload.title]
+            current = self._issue_labels(task.issue)
+            stale = sorted(
+                label
+                for label in current
+                if self._is_metadata_label(label) and label not in payload.labels
             )
+            args = [
+                "issue", "edit", task.issue,
+                "--body", payload.body,
+                "--title", payload.title,
+                *_label_args(payload.labels, option="--add-label"),
+                *_label_args(stale, option="--remove-label"),
+            ]
+            run_gh(args)
             return task.issue
-        out = self._gh(
+        out = run_gh(
             [
                 "issue",
                 "create",
@@ -171,21 +186,47 @@ class IssueMirror:
             raise MirrorError("gh issue create returned no URL")
         return url
 
-    @staticmethod
-    def _gh(args: list[str]) -> str:
-        result = subprocess.run(
-            ["gh", *args], capture_output=True, text=True, check=False
+    def _issue_labels(self, issue: str) -> set[str]:
+        output = run_gh(["issue", "view", issue, "--json", "labels"])
+        try:
+            data = json.loads(output)
+            return {str(label["name"]) for label in data.get("labels", [])}
+        except (json.JSONDecodeError, KeyError, TypeError) as exc:
+            raise MirrorError("gh issue view returned invalid label data") from exc
+
+    def _is_metadata_label(self, label: str) -> bool:
+        prefix = self.policy.get("repos", {}).get("board", {}).get(
+            "label_prefix", "saturnin"
         )
-        if result.returncode != 0:
-            raise MirrorError(f"gh {' '.join(args[:2])} failed: {result.stderr.strip()}")
-        return result.stdout
+        keys = (
+            self.tracking.get("kind_label", "kind"),
+            self.tracking.get("state_label", "state"),
+            self.tracking.get("priority_label", "priority"),
+            self.tracking.get("role_label", "role"),
+        )
+        return any(label.startswith(f"{prefix}:{key}/") for key in keys)
 
-
-def _label_args(labels: list[str]) -> list[str]:
+def _label_args(labels: list[str], *, option: str = "--label") -> list[str]:
     out: list[str] = []
     for label in labels:
-        out += ["--label", label]
+        out += [option, label]
     return out
+
+
+def ensure_labels(repo: str, labels: Iterable[str]) -> None:
+    for label in sorted(set(labels)):
+        run_gh(["label", "create", label, "--repo", repo, "--force"])
+
+
+def run_gh(args: list[str]) -> str:
+    if shutil.which("gh") is None:
+        raise MirrorError("gh CLI not found; install it or run without --push")
+    result = subprocess.run(
+        ["gh", *args], capture_output=True, text=True, check=False
+    )
+    if result.returncode != 0:
+        raise MirrorError(f"gh {' '.join(args[:2])} failed: {result.stderr.strip()}")
+    return result.stdout
 
 
 def _utcnow() -> str:

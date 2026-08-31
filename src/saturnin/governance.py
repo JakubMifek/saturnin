@@ -16,6 +16,10 @@ from typing import Any, Iterable, Sequence
 from .config import Config, default_config
 from .review import ReviewRecord
 
+_MAX_COMMAND_DEPTH = 8
+_WRAPPERS = {"env", "nice", "ionice", "stdbuf", "timeout", "xargs"}
+_ASSIGNMENT = re.compile(r"[A-Za-z_][A-Za-z0-9_]*=.*", re.DOTALL)
+
 
 @dataclass
 class Decision:
@@ -182,7 +186,6 @@ class Governance:
             return Decision.deny(f"unparsable command: {exc}")
         if not parts:
             return Decision.deny("empty command")
-        binary = parts[0].rsplit("/", 1)[-1]
         user = scope.get("user", {})
         if not user.get("allow_root", False) and os.geteuid() == 0:
             return Decision.deny("server commands may not run as root")
@@ -198,6 +201,57 @@ class Governance:
                     return Decision.deny(
                         f"privilege escalation via {candidate_binary!r} is not allowed"
                     )
+        return self._check_scoped_command(
+            parts, dedicated_service=dedicated_service, depth=0
+        )
+
+    def _check_scoped_command(
+        self,
+        parts: Sequence[str],
+        *,
+        dedicated_service: str | None,
+        depth: int,
+    ) -> Decision:
+        if depth >= _MAX_COMMAND_DEPTH:
+            return Decision.deny("command wrappers are nested too deeply")
+        parts = list(parts)
+        while parts and _ASSIGNMENT.fullmatch(parts[0]):
+            parts.pop(0)
+        if not parts:
+            return Decision.deny("wrapper contains no command")
+        binary = parts[0].rsplit("/", 1)[-1]
+        if binary in ("sh", "bash"):
+            if len(parts) < 3 or parts[1] != "-c" or not parts[2].strip():
+                return Decision.deny(f"malformed {binary} -c wrapper")
+            try:
+                commands = _split_shell_commands(parts[2])
+            except ValueError as exc:
+                return Decision.deny(f"unparsable wrapped command: {exc}")
+            if not commands:
+                return Decision.deny(f"malformed {binary} -c wrapper")
+            for command in commands:
+                decision = self._check_scoped_command(
+                    command,
+                    dedicated_service=dedicated_service,
+                    depth=depth + 1,
+                )
+                if not decision.allowed:
+                    return decision
+            return Decision.ok(f"{binary} wrapper contains only allowed commands")
+        if binary in _WRAPPERS:
+            try:
+                wrapped = _wrapped_command(binary, parts[1:])
+            except ValueError as exc:
+                return Decision.deny(f"malformed {binary} wrapper: {exc}")
+            if not wrapped:
+                return Decision.ok(f"{binary}: no wrapped command")
+            return self._check_scoped_command(
+                wrapped,
+                dedicated_service=dedicated_service,
+                depth=depth + 1,
+            )
+
+        scope = self.config.server_scope
         services = scope.get("services", {})
         packages = scope.get("packages", {})
         if binary == "apt" or binary.startswith("apt-"):
@@ -292,3 +346,96 @@ class Governance:
         if self.mirror_required() and not self.config.policy("repos").get("repos", {}).get("board"):
             problems.append("task mirroring is on but policies/repos.yaml names no board repo")
         return problems
+
+
+def _split_shell_commands(command: str) -> list[list[str]]:
+    lexer = shlex.shlex(command, posix=True, punctuation_chars=";&|")
+    lexer.whitespace_split = True
+    lexer.commenters = ""
+    commands: list[list[str]] = [[]]
+    for token in lexer:
+        if token and set(token) <= {";", "&", "|"}:
+            if not commands[-1]:
+                raise ValueError("empty command around shell operator")
+            commands.append([])
+        else:
+            commands[-1].append(token)
+    if not commands[-1]:
+        raise ValueError("trailing shell operator")
+    return commands
+
+
+def _wrapped_command(binary: str, args: list[str]) -> list[str]:
+    if binary == "env":
+        return _after_options(
+            args,
+            value_options={"-u", "--unset", "-C", "--chdir", "-S", "--split-string"},
+            assignments=True,
+        )
+    if binary == "nice":
+        return _after_options(args, value_options={"-n", "--adjustment"})
+    if binary == "ionice":
+        return _after_options(
+            args,
+            value_options={
+                "-c", "--class", "-n", "--classdata", "-p", "--pid",
+                "-P", "--pgid", "-u", "--uid",
+            },
+            command_optional=True,
+        )
+    if binary == "stdbuf":
+        return _after_options(
+            args, value_options={"-i", "--input", "-o", "--output", "-e", "--error"}
+        )
+    if binary == "timeout":
+        remainder = _after_options(
+            args,
+            value_options={"-k", "--kill-after", "-s", "--signal"},
+            stop_at_first=True,
+        )
+        if len(remainder) < 2:
+            raise ValueError("expected duration and command")
+        return remainder[1:]
+    return _after_options(
+        args,
+        value_options={
+            "-a", "--arg-file", "-d", "--delimiter", "-E", "--eof",
+            "-I", "--replace", "-L", "--max-lines", "-n", "--max-args",
+            "-P", "--max-procs", "-s", "--max-chars",
+        },
+        command_optional=True,
+    )
+
+
+def _after_options(
+    args: list[str],
+    *,
+    value_options: set[str],
+    assignments: bool = False,
+    command_optional: bool = False,
+    stop_at_first: bool = False,
+) -> list[str]:
+    index = 0
+    while index < len(args):
+        token = args[index]
+        if token == "--":
+            index += 1
+            break
+        if assignments and _ASSIGNMENT.fullmatch(token):
+            index += 1
+            continue
+        if not token.startswith("-") or token == "-":
+            break
+        option = token.split("=", 1)[0]
+        short_with_value = len(token) > 2 and token[:2] in value_options
+        if option in value_options and "=" not in token and not short_with_value:
+            index += 1
+            if index >= len(args):
+                raise ValueError(f"{option} needs a value")
+        index += 1
+        if stop_at_first and index < len(args) and not args[index].startswith("-"):
+            break
+    command = args[index:]
+    if not command and not command_optional:
+        raise ValueError("expected a command")
+    return command

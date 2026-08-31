@@ -95,6 +95,22 @@ def test_squad_is_assembled_per_task(config: Config, board: Board) -> None:
     assert board.get(task.id).squad == ["code-worker", "scribe"]
 
 
+@pytest.mark.parametrize(
+    ("squad", "message"),
+    [(["ceo"], "CEO never executes"), (["ghost"], "unknown squad")],
+)
+def test_invalid_squad_override_is_rejected_before_board_mutation(
+    config: Config, board: Board, squad: list[str], message: str
+) -> None:
+    task = board.create("Implement the widget")
+    before = task.to_dict()
+
+    with pytest.raises(RoutingError, match=message):
+        Router(config).dispatch(board, task, squad=squad)
+
+    assert board.get(task.id).to_dict() == before
+
+
 def test_unknown_result_contract_is_rejected(config: Config) -> None:
     router = Router(config)
     with pytest.raises(RoutingError):

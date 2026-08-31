@@ -87,7 +87,9 @@ def build_parser() -> argparse.ArgumentParser:
 
     sync = task.add_parser("sync", help="mirror tasks as GitHub issues (rule 8)")
     sync.add_argument("task_id", nargs="?")
-    sync.add_argument("--all", action="store_true", help="every open unmirrored task")
+    sync.add_argument(
+        "--all", action="store_true", help="every open task eligible for mirroring"
+    )
     sync.add_argument("--push", action="store_true", help="actually call gh; default is a preview")
 
     attach = task.add_parser("attach", help="attach a branch/worktree to a task")
@@ -197,6 +199,7 @@ def build_parser() -> argparse.ArgumentParser:
     esc.add_argument("--unblock", action="append", default=[], dest="unblock")
     esc.add_argument("--urgency", default="normal")
     esc.add_argument("--task")
+    esc.add_argument("--push", action="store_true", help="submit to the configured board repo")
 
     # automation -------------------------------------------------------
     automation = sub.add_parser("automation", help="reusable automation library").add_subparsers(
@@ -405,7 +408,12 @@ def _run(args: argparse.Namespace, config: Config) -> int:  # noqa: C901 - flat 
         if not decision.allowed:
             print("; ".join(decision.reasons), file=sys.stderr)
             return 2
-        _emit({"body": body}, as_json, body)
+        url = (
+            escalation_mod.submit(title=args.title, body=body, config=config)
+            if args.push
+            else None
+        )
+        _emit({"body": body, "url": url}, as_json, url or body)
         return 0
     if args.command == "docs":
         stale = docsync.render(config, write=not args.check)
@@ -509,7 +517,7 @@ def _run_task(args: argparse.Namespace, config: Config, board: Board, as_json: b
     if args.task_command == "sync":
         mirror = IssueMirror(config, board)
         if args.all:
-            targets = mirror.unmirrored()
+            targets = mirror.syncable()
         elif args.task_id:
             targets = [board.get(args.task_id)]
         else:

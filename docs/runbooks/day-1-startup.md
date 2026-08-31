@@ -98,7 +98,7 @@ saturnin escalate "Need a scoped deploy token" \
   --context "The deploy worker cannot reach the registry." \
   --item "Create a token with registry:write" \
   --unblock "Token in the vault under saturnin/registry" \
-  --urgency high --task <task-id>
+  --urgency high --task <task-id> --push
 ```
 
-Open the printed body as a GitHub issue with the label `saturnin:escalation`.
+Without `--push`, the same command prints a preview instead of filing the issue.

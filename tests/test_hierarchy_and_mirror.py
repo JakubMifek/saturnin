@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import subprocess
 from concurrent.futures import ThreadPoolExecutor
 
 import pytest
@@ -71,6 +72,115 @@ def test_unmirrored_lists_open_tasks_without_an_issue(config: Config, board: Boa
     assert mirror.unmirrored() == []
 
 
+def test_syncable_revisits_existing_open_mirrors(config: Config, board: Board) -> None:
+    existing = board.create("Existing")
+    fresh = board.create("Fresh")
+    closed = board.create("Closed")
+    with board.edit(existing.id) as stored:
+        stored.issue = "https://github.com/JakubMifek/saturnin-ops/issues/1"
+    board.transition(closed, "cancelled")
+
+    assert {task.id for task in IssueMirror(config, board).syncable()} == {
+        existing.id,
+        fresh.id,
+    }
+
+
+def test_existing_mirror_updates_content_and_reconciles_metadata_labels(
+    config: Config, board: Board, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    task = board.create("Old title", labels=["incident"])
+    with board.edit(task.id) as stored:
+        stored.issue = "https://github.com/JakubMifek/saturnin-ops/issues/1"
+        stored.title = "New title"
+        stored.body = "New body"
+        stored.state = "in_progress"
+        stored.priority = "P0"
+        stored.role = "code-worker"
+    calls: list[list[str]] = []
+
+    monkeypatch.setattr("saturnin.issues.shutil.which", lambda _: "/usr/bin/gh")
+
+    def fake_run(args, **kwargs):
+        calls.append(args)
+        stdout = ""
+        if args[1:3] == ["issue", "view"]:
+            stdout = json.dumps(
+                {
+                    "labels": [
+                        {"name": "saturnin:state/intake"},
+                        {"name": "saturnin:priority/P2"},
+                        {"name": "keep-me"},
+                    ]
+                }
+            )
+        return subprocess.CompletedProcess(args, 0, stdout, "")
+
+    monkeypatch.setattr("saturnin.issues.subprocess.run", fake_run)
+
+    IssueMirror(config, board).sync(board.get(task.id), push=True)
+
+    edit = next(call for call in calls if call[1:3] == ["issue", "edit"])
+    assert edit[edit.index("--title") + 1] == "[task] New title"
+    assert "New body" in edit[edit.index("--body") + 1]
+    removed = [edit[index + 1] for index, arg in enumerate(edit) if arg == "--remove-label"]
+    assert removed == ["saturnin:priority/P2", "saturnin:state/intake"]
+    assert "keep-me" not in removed
+    assert "saturnin:state/in_progress" in edit
+    stored = board.get(task.id)
+    assert stored.issue_synced_at is not None
+    assert stored.history[-1]["event"] == "issue:synced"
+
+
+def test_labels_are_provisioned_before_create(
+    config: Config, board: Board, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    task = board.create("Fresh", labels=["dynamic"])
+    calls: list[list[str]] = []
+    monkeypatch.setattr("saturnin.issues.shutil.which", lambda _: "/usr/bin/gh")
+
+    def fake_run(args, **kwargs):
+        calls.append(args)
+        stdout = (
+            "https://github.com/JakubMifek/saturnin-ops/issues/2\n"
+            if args[1:3] == ["issue", "create"]
+            else ""
+        )
+        return subprocess.CompletedProcess(args, 0, stdout, "")
+
+    monkeypatch.setattr("saturnin.issues.subprocess.run", fake_run)
+
+    IssueMirror(config, board).sync(task, push=True)
+
+    create_index = next(i for i, call in enumerate(calls) if call[1:3] == ["issue", "create"])
+    provisioned = {
+        call[3]
+        for call in calls[:create_index]
+        if call[1:3] == ["label", "create"]
+    }
+    assert provisioned == set(IssueMirror(config, board).labels_for(task))
+    assert all("--force" in call for call in calls[:create_index])
+
+
+def test_label_provisioning_failure_stops_issue_creation(
+    config: Config, board: Board, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    task = board.create("Fresh")
+    calls: list[list[str]] = []
+    monkeypatch.setattr("saturnin.issues.shutil.which", lambda _: "/usr/bin/gh")
+
+    def fake_run(args, **kwargs):
+        calls.append(args)
+        return subprocess.CompletedProcess(args, 1, "", "permission denied")
+
+    monkeypatch.setattr("saturnin.issues.subprocess.run", fake_run)
+
+    with pytest.raises(MirrorError, match="permission denied"):
+        IssueMirror(config, board).sync(task, push=True)
+    assert not any(call[1:3] == ["issue", "create"] for call in calls)
+    assert board.get(task.id).issue is None
+
+
 def test_review_kinds_are_not_mirrored(config: Config, board: Board) -> None:
     task = board.create("Review the diff", kind="pr-review")
     mirror = IssueMirror(config, board)
@@ -116,7 +226,9 @@ def test_managed_repo_contract(tmp_path, config: Config) -> None:
 
 def test_cli_task_tree_and_sync_preview(config: Config, board: Board, capsys) -> None:
     epic = board.create("Widget platform", kind="epic")
-    board.create("Endpoint", parent=epic.id)
+    endpoint = board.create("Endpoint", parent=epic.id)
+    with board.edit(endpoint.id) as stored:
+        stored.issue = "https://github.com/JakubMifek/saturnin-ops/issues/1"
     assert main(["--home", str(config.root), "task", "tree"]) == 0
     out = capsys.readouterr().out
     assert "(epic)" in out and "Endpoint" in out
@@ -126,3 +238,4 @@ def test_cli_task_tree_and_sync_preview(config: Config, board: Board, capsys) ->
     assert len(payloads) == 2
     # A preview never touches the board.
     assert board.get(epic.id).issue is None
+    assert board.get(endpoint.id).issue == stored.issue

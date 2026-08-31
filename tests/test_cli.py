@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import subprocess
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -152,6 +153,44 @@ def test_escalation_body_is_complete(home: Path, capsys: pytest.CaptureFixture[s
 
 def test_escalation_rejects_unknown_urgency(home: Path, capsys: pytest.CaptureFixture[str]) -> None:
     assert run(capsys, "escalate", "Help", "--urgency", "apocalyptic")[0] == 2
+
+
+def test_escalation_push_submits_safely_to_board_repo(
+    home: Path, capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    calls: list[list[str]] = []
+    monkeypatch.setattr("saturnin.issues.shutil.which", lambda _: "/usr/bin/gh")
+
+    def fake_run(args, **kwargs):
+        calls.append(args)
+        stdout = "https://github.com/JakubMifek/saturnin-ops/issues/7\n"
+        return subprocess.CompletedProcess(args, 0, stdout, "")
+
+    monkeypatch.setattr("saturnin.issues.subprocess.run", fake_run)
+    title = "Need help; echo not-a-command"
+
+    code, out = run(capsys, "escalate", title, "--urgency", "high", "--push")
+
+    assert code == 0
+    assert out.strip().endswith("/issues/7")
+    create = next(call for call in calls if call[1:3] == ["issue", "create"])
+    assert create[create.index("--repo") + 1] == "JakubMifek/saturnin-ops"
+    assert create[create.index("--title") + 1] == title
+
+
+def test_escalation_push_failure_is_reported(
+    home: Path, capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr("saturnin.issues.shutil.which", lambda _: "/usr/bin/gh")
+    monkeypatch.setattr(
+        "saturnin.issues.subprocess.run",
+        lambda args, **kwargs: subprocess.CompletedProcess(
+            args, 1, "", "authentication failed"
+        ),
+    )
+
+    assert main(["escalate", "Need help", "--push"]) == 1
+    assert "authentication failed" in capsys.readouterr().err
 
 
 def test_automation_and_improve(home: Path, capsys: pytest.CaptureFixture[str]) -> None:

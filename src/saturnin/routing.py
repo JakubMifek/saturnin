@@ -87,11 +87,7 @@ class Router:
         if not self.roles[role].get("executes", True):
             raise RoutingError(f"role {role!r} is not an executing role")
         squad = tuple(route.get("squad", (role,))) or (role,)
-        unknown = [member for member in squad if member not in self.roles]
-        if unknown:
-            raise RoutingError(f"rule {rule_id!r} suggests unknown squad members: {unknown}")
-        if self.ceo_role in squad:
-            raise RoutingError(f"rule {rule_id!r} puts the CEO in a squad; the CEO never executes")
+        self._validate_squad(squad, f"rule {rule_id!r}")
         contract = route.get("result_contract", self.default_result_contract)
         if self.result_contracts and contract not in self.result_contracts:
             raise RoutingError(
@@ -108,6 +104,15 @@ class Router:
             result_contract=contract,
         )
 
+    def _validate_squad(self, squad: Sequence[str], source: str) -> None:
+        unknown = [member for member in squad if member not in self.roles]
+        if unknown:
+            raise RoutingError(f"{source} suggests unknown squad members: {unknown}")
+        if self.ceo_role in squad:
+            raise RoutingError(
+                f"{source} puts the CEO in a squad; the CEO never executes"
+            )
+
     # -- dispatch ------------------------------------------------------
     def dispatch(
         self,
@@ -122,6 +127,8 @@ class Router:
         ``squad`` overrides the rule's suggested crew: squads are assembled per
         task, not fixed teams.
         """
+        if squad is not None:
+            self._validate_squad(squad, "dispatch override")
         with board.edit(task.id) as current:
             if current.state not in ("intake", "blocked"):
                 raise BoardError(

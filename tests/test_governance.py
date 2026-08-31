@@ -222,5 +222,62 @@ def test_apt_requires_a_saturnin_dedicated_service(governance: Governance) -> No
     ).allowed
 
 
+@pytest.mark.parametrize(
+    "command",
+    [
+        "env nice -n 5 /usr/bin/apt remove ripgrep",
+        "timeout 10 bash -c 'ionice -c 3 apt remove ripgrep'",
+        "stdbuf -oL /usr/bin/systemctl --user restart nginx.service",
+        "xargs sh -c 'systemctl --user restart nginx.service'",
+        "bash -c 'echo ready && /usr/bin/apt remove python3'",
+    ],
+)
+def test_wrapped_elevated_commands_remain_restricted(
+    governance: Governance, command: str
+) -> None:
+    assert not governance.check_server_command(
+        command, dedicated_service="saturnin-discovery.service"
+    ).allowed
+
+
+def test_wrapped_apt_still_requires_dedicated_service(governance: Governance) -> None:
+    assert not governance.check_server_command(
+        "env timeout 10 apt install ripgrep"
+    ).allowed
+
+
+@pytest.mark.parametrize(
+    "command",
+    [
+        "env nice -n 5 /usr/bin/apt install ripgrep",
+        "timeout 10 sh -c 'ionice -c 3 apt install ripgrep'",
+        "stdbuf -oL /usr/bin/systemctl --user restart saturnin-janitor.timer",
+        "xargs /usr/bin/systemctl --user status saturnin-improve.service",
+    ],
+)
+def test_allowed_elevated_commands_survive_nested_wrappers(
+    governance: Governance, command: str
+) -> None:
+    assert governance.check_server_command(
+        command, dedicated_service="saturnin-discovery.service"
+    ).allowed
+
+
+@pytest.mark.parametrize(
+    "command",
+    [
+        "env -u",
+        "nice -n",
+        "stdbuf -oL",
+        "timeout 10",
+        "bash -c",
+        "sh -c 'apt install",
+        "sh -c 'echo ok ;'",
+    ],
+)
+def test_malformed_wrappers_fail_closed(governance: Governance, command: str) -> None:
+    assert not governance.check_server_command(command).allowed
+
+
 def test_escalation_body_must_be_complete(governance: Governance) -> None:
     assert not governance.check_escalation("please help", urgency="normal").allowed

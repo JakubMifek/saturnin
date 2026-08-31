@@ -10,6 +10,7 @@ from typing import Iterable
 
 from .config import Config, default_config
 from .governance import Decision, Governance
+from .issues import IssueMirror, MirrorError, ensure_labels, run_gh
 
 
 def render(
@@ -53,3 +54,23 @@ def render(
 
 def validate(body: str, *, urgency: str, config: Config | None = None) -> Decision:
     return Governance(config or default_config()).check_escalation(body, urgency=urgency)
+
+
+def submit(*, title: str, body: str, config: Config | None = None) -> str:
+    config = config or default_config()
+    mirror = IssueMirror(config)
+    repo = mirror.board_repo
+    ensure_labels(repo, ["escalation"])
+    output = run_gh(
+        [
+            "issue", "create",
+            "--repo", repo,
+            "--title", title,
+            "--body", body,
+            "--label", "escalation",
+        ]
+    )
+    url = output.strip().splitlines()[-1].strip() if output.strip() else ""
+    if not url:
+        raise MirrorError("gh issue create returned no URL")
+    return url
