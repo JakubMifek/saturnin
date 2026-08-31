@@ -181,11 +181,11 @@ class Governance:
             return Decision.deny(f"unparsable command: {exc}")
         if not parts:
             return Decision.deny("empty command")
+        binary = parts[0].rsplit("/", 1)[-1]
         user = scope.get("user", {})
         for forbidden in user.get("forbidden_prefixes", []):
-            if parts[0] == forbidden:
+            if forbidden in (parts[0], binary):
                 return Decision.deny(f"privilege escalation via {forbidden!r} is not allowed")
-        binary = parts[0].rsplit("/", 1)[-1]
         services = scope.get("services", {})
         packages = scope.get("packages", {})
         if binary == "apt" or binary.startswith("apt-"):
@@ -208,10 +208,16 @@ class Governance:
             if not services.get("systemctl_allowed", False):
                 return Decision.deny("systemctl is not allowed")
             raw_args = parts[1:]
-            user_scope = "--user" in raw_args
+            flags = [p for p in raw_args if p.startswith("-")]
+            unknown = [flag for flag in flags if flag != "--user"]
+            if unknown:
+                return Decision.deny(
+                    f"systemctl option(s) not allowed: {', '.join(unknown)}"
+                )
+            user_scope = "--user" in flags
             if services.get("scheduling_scope") == "user" and not user_scope:
                 return Decision.deny("systemctl must use --user scope")
-            args = [p for p in raw_args if p != "--user" and not p.startswith("-")]
+            args = [p for p in raw_args if not p.startswith("-")]
             sub = args[0] if args else ""
             allowed = services.get("allowed_subcommands", [])
             if allowed and sub not in allowed:

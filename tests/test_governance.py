@@ -178,6 +178,8 @@ def test_push_rules(governance: Governance) -> None:
         "apt remove python3",
         "apt install ripgrep",
         "su - root",
+        "/usr/bin/sudo systemctl --user restart saturnin-janitor.timer",
+        "systemctl --user --system restart saturnin-janitor.timer",
     ],
 )
 def test_out_of_scope_server_commands(governance: Governance, command: str) -> None:
