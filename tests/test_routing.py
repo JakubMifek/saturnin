@@ -54,6 +54,26 @@ def test_dispatch_updates_task(config: Config, board: Board) -> None:
     assert stored.history[-2]["event"] == "dispatch"
 
 
+def test_dispatch_never_downgrades_a_preset_priority(
+    config: Config, board: Board
+) -> None:
+    # A P0 incident (or a discovery-mapped priority) must survive dispatch even
+    # if the matched rule's own priority is less urgent (rule 9: never silently
+    # downgrade urgent work).
+    task = board.create("Update the runbook documentation", priority="P0")
+    Router(config).dispatch(board, task)
+    assert board.get(task.id).priority == "P0"
+
+
+def test_dispatch_still_raises_priority_when_rule_is_more_urgent(
+    config: Config, board: Board
+) -> None:
+    task = board.create("Need a decision", labels=["escalation"], priority="P3")
+    route = Router(config).dispatch(board, task)
+    assert route.priority == "P0"
+    assert board.get(task.id).priority == "P0"
+
+
 def test_dispatch_preserves_updates_made_after_task_was_loaded(
     config: Config, board: Board
 ) -> None:

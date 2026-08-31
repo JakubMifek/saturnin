@@ -10,7 +10,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Any, Sequence
 
-from .board import Board, BoardError, Task
+from .board import PRIORITIES, Board, BoardError, Task
 from .config import Config, default_config
 
 
@@ -138,7 +138,11 @@ class Router:
             current.role = route.role
             current.unit = route.unit
             current.squad = list(squad or route.squad)
-            current.priority = route.priority
+            # A pre-set priority (P0 incidents, discovery's own priority mapping)
+            # reflects urgency already known at intake; a rule must never
+            # silently downgrade it, only raise it.
+            if PRIORITIES.index(route.priority) < PRIORITIES.index(current.priority):
+                current.priority = route.priority
             # Rule 9: agree up front how the result comes back. Saturnin dispatches
             # and moves on; it never blocks on a worker.
             current.result_contract = route.result_contract
