@@ -14,3 +14,4 @@ front matter; anything not declared is out of scope for that agent.
 | [automation-library](automation-library.md) | `saturnin automation` | automation smith, improver |
 | [server-scope](server-scope.md) | `saturnin check command` | ops worker, janitor |
 | [pr-authoring](pr-authoring.md) | git + gh, gated by `saturnin review gate` | authoring roles |
+| [copilot-review](copilot-review.md) | `gh pr comment`, github MCP review reads | code-worker, pr-reviewer |
