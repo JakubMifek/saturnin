@@ -69,6 +69,10 @@ systemctl --user list-timers 'saturnin-*'
   answer cannot report back on its own, so nobody ever waits (rule 9).
 - `saturnin-mirror.timer` - every fifteen minutes, mirrors open tasks as GitHub
   issues so the board survives this machine (rule 8).
+- `saturnin-discovery.timer` - every ten minutes, adopts labelled issues raised
+  in managed repositories (alerts, CI, humans) as board tasks. It does nothing
+  until `discovery.sources` in `policies/repos.yaml` names a repository; see
+  [observability](../observability.md).
 
 Without a login session, keep the timers alive across logouts:
 `loginctl enable-linger $USER`.
@@ -82,6 +86,7 @@ Without a login session, keep the timers alive across logouts:
 | Daily (timer) | `automation/library/cleanup_worktrees.sh` | janitor |
 | Every 5 min (timer) | `automation/library/result_poller.sh` | chief-of-staff |
 | Every 15 min (timer) | `automation/library/mirror_tasks.sh` | chief-of-staff |
+| Every 10 min (timer) | `automation/library/discover_issues.sh` | chief-of-staff |
 | Weekly | read `var/reports/`, groom `docs/improvement-backlog.md` | improver |
 
 ## 8. When something is unclear

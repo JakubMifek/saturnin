@@ -93,7 +93,10 @@ is only an integration helper: tests, policy health and the branch gate on PRs.
 - [Day-1 startup](docs/runbooks/day-1-startup.md) ·
   [Ops and safety](docs/runbooks/ops-safety.md) ·
   [Checkpoint and handoff](docs/runbooks/checkpoint-handoff.md)
-- [Improvement backlog](docs/improvement-backlog.md)
+- [Managed repository contract](docs/managed-repo-contract.md) ·
+  [Observability and inbound work](docs/observability.md)
+- [Improvement backlog](docs/improvement-backlog.md) ·
+  [Gap analysis](docs/gap-analysis.md)
 
 ## Development
 

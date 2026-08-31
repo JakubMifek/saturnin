@@ -26,6 +26,7 @@ class Finding:
     detail: str
     recommendation: str
     metric: float | None = None
+    title: str | None = None
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -34,6 +35,7 @@ class Finding:
             "detail": self.detail,
             "recommendation": self.recommendation,
             "metric": self.metric,
+            "title": self.title,
         }
 
 
@@ -41,12 +43,14 @@ class Finding:
 class ImprovementReport:
     metrics: dict[str, Any]
     findings: list[Finding] = field(default_factory=list)
+    backlog: list[Finding] = field(default_factory=list)
     proposed_tasks: list[str] = field(default_factory=list)
 
     def to_dict(self) -> dict[str, Any]:
         return {
             "metrics": self.metrics,
             "findings": [f.to_dict() for f in self.findings],
+            "backlog": [f.to_dict() for f in self.backlog],
             "proposed_tasks": self.proposed_tasks,
         }
 
@@ -148,20 +152,46 @@ class ImprovementLoop:
             )
         return findings
 
+    # -- known gaps ----------------------------------------------------
+    def backlog(self) -> list[Finding]:
+        """Known gaps in Saturnin itself, declared in the improvement policy.
+
+        A gap that lives only in a document has no owner and no state, so each
+        entry becomes a board task on the next run of the loop.
+        """
+        items = self.policy.get("backlog") or []
+        return [
+            Finding(
+                str(item["id"]),
+                str(item.get("severity", "warn")),
+                " ".join(str(item.get("detail", "")).split()),
+                " ".join(str(item.get("recommendation", "")).split()),
+                title=str(item.get("title") or item["id"]),
+            )
+            for item in items
+        ]
+
     # -- loop ----------------------------------------------------------
     def run(self, *, now: datetime | None = None, create_tasks: bool | None = None) -> ImprovementReport:
         metrics = telemetry.collect(self.board, now=now)
-        report = ImprovementReport(metrics=metrics, findings=self.detect(metrics))
+        report = ImprovementReport(
+            metrics=metrics, findings=self.detect(metrics), backlog=self.backlog()
+        )
         if create_tasks is None:
             create_tasks = bool(self.actions.get("create_tasks", True))
         if create_tasks:
             report.proposed_tasks = [task.id for task in self._file_tasks(report.findings)]
+            report.proposed_tasks += [
+                task.id for task in self._file_tasks(report.backlog, prefix="Gap", label="gap")
+            ]
         library = AutomationLibrary(self.config)
         report.proposed_tasks += [t.id for t in library.propose(self.board)] if create_tasks else []
         self.write_report(report, now=now)
         return report
 
-    def _file_tasks(self, findings: list[Finding]) -> list[Task]:
+    def _file_tasks(
+        self, findings: list[Finding], *, prefix: str = "Improve", label: str = "improve"
+    ) -> list[Task]:
         labels = list(self.actions.get("labels", ["self-improvement"]))
         known = {label for task in self.board for label in task.labels}
         created: list[Task] = []
@@ -171,10 +201,10 @@ class ImprovementLoop:
                 continue
             created.append(
                 self.board.create(
-                    f"Improve: {finding.detail}",
+                    f"{prefix}: {finding.title or finding.detail}",
                     kind="improvement",
                     body=f"{finding.detail}\n\nRecommendation: {finding.recommendation}",
-                    labels=[*labels, "improve", marker],
+                    labels=[*labels, label, marker],
                     priority="P1" if finding.severity == "critical" else "P2",
                     source="improvement-loop",
                 )

@@ -1,0 +1,11 @@
+[Unit]
+Description=Look for new work in managed repositories every ten minutes
+
+[Timer]
+OnCalendar=*:0/10
+RandomizedDelaySec=1m
+Persistent=true
+Unit=saturnin-discovery.service
+
+[Install]
+WantedBy=timers.target

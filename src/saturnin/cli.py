@@ -23,6 +23,7 @@ from .board import CONTAINER_KINDS, Board, BoardError, Task
 from .checkpoints import Checkpoint, CheckpointStore
 from .config import Config
 from .contracts import audit as audit_contracts
+from .discovery import DiscoveryError, IssueDiscovery
 from . import docsync
 from .governance import Governance
 from .improve import ImprovementLoop
@@ -104,6 +105,15 @@ def build_parser() -> argparse.ArgumentParser:
         action="append",
         default=[],
         help="assemble an ad-hoc squad for this task (repeatable)",
+    )
+
+    # discover ---------------------------------------------------------
+    discover = sub.add_parser(
+        "discover", help="adopt issues from managed repositories as board tasks"
+    )
+    discover.add_argument("--dry-run", action="store_true", help="list what would be adopted")
+    discover.add_argument(
+        "--no-dispatch", action="store_true", help="adopt without routing immediately"
     )
 
     # board ------------------------------------------------------------
@@ -274,6 +284,41 @@ def check_managed_repo(path: Path, config: Config) -> list[str]:
             problems.append(f"squad names roles that are not in the catalog: {', '.join(unknown)}")
     else:
         problems.append("squad must be a list of role ids")
+    problems += _check_project_agents(path, manifest, contract, roles)
+    return problems
+
+
+def _check_project_agents(
+    path: Path, manifest: dict[str, Any], contract: dict[str, Any], roles: dict[str, Any]
+) -> list[str]:
+    """A project-specific role must live inside the project it belongs to.
+
+    Keeping it there means it is reviewed by the people who own the code it
+    touches, travels with the repository, and cannot quietly become a
+    dependency of the global catalog.
+    """
+    entries = manifest.get("agents") or []
+    if not isinstance(entries, list):
+        return ["agents must be a list of paths inside the repository"]
+    agents_dir = str(contract.get("agents_dir", ".saturnin/agents"))
+    problems: list[str] = []
+    for entry in entries:
+        rel = str(entry)
+        if Path(rel).is_absolute() or ".." in Path(rel).parts:
+            problems.append(f"agent path must stay inside the repository: {rel}")
+            continue
+        if not rel.startswith(f"{agents_dir}/"):
+            problems.append(f"project agents belong in {agents_dir}/: {rel}")
+            continue
+        if not (path / rel).is_file():
+            problems.append(f"agent contract declared but missing: {rel}")
+            continue
+        role_id = Path(rel).stem
+        if role_id in roles:
+            problems.append(
+                f"project agent {rel} shadows the global role '{role_id}'; "
+                "give the project role its own id"
+            )
     return problems
 
 def _config(args: argparse.Namespace) -> Config:
@@ -377,6 +422,8 @@ def _run(args: argparse.Namespace, config: Config) -> int:  # noqa: C901 - flat 
             "\n".join(problems) if problems else "Repository satisfies the Saturnin contract.",
         )
         return 0 if not problems else 2
+    if args.command == "discover":
+        return _run_discover(args, config, board, as_json)
     if args.command == "automation":
         return _run_automation(args, config, board, as_json)
     if args.command == "improve":
@@ -486,6 +533,31 @@ def _run_task(args: argparse.Namespace, config: Config, board: Board, as_json: b
     task = board.get(args.task_id)
     board.transition(task, args.state, actor=args.actor, note=args.note)
     _emit(task.to_dict(), as_json, _task_line(task))
+    return 0
+
+
+def _run_discover(args: argparse.Namespace, config: Config, board: Board, as_json: bool) -> int:
+    discovery = IssueDiscovery(config, board)
+    issues = discovery.poll()
+    if args.dry_run:
+        pending = [i for i in issues if discovery.marker(i) not in discovery.known_markers()]
+        _emit(
+            {"found": len(issues), "adoptable": [i.ref for i in pending]},
+            as_json,
+            "\n".join(f"{i.ref}  {i.title}" for i in pending) or "(nothing new to adopt)",
+        )
+        return 0
+    adopted = discovery.ingest(issues)
+    router = Router(config)
+    for task in adopted:
+        if not args.no_dispatch:
+            router.dispatch(board, task)
+    _emit(
+        [task.to_dict() for task in adopted],
+        as_json,
+        "\n".join(f"{t.id}  {t.repo}  {t.title} -> {t.role or 'unrouted'}" for t in adopted)
+        or "(nothing new to adopt)",
+    )
     return 0
 
 

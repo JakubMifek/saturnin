@@ -1,0 +1,10 @@
+[Unit]
+Description=Saturnin discovery - adopt issues from managed repositories
+Documentation=file://@SATURNIN_HOME@/docs/observability.md
+
+[Service]
+Type=oneshot
+WorkingDirectory=@SATURNIN_HOME@
+Environment=SATURNIN_HOME=@SATURNIN_HOME@
+ExecStart=@SATURNIN_HOME@/automation/library/discover_issues.sh
+Nice=10

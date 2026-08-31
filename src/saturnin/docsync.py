@@ -69,6 +69,16 @@ def _routing_table(config: Config) -> str:
     return "\n".join(lines)
 
 
+def _backlog_table(config: Config) -> str:
+    items = config.policy("improvement").get("backlog", [])
+    lines = ["| Gap | Severity | Fix |", "| --- | --- | --- |"]
+    for item in items:
+        title = " ".join(str(item.get("title") or item["id"]).split())
+        fix = " ".join(str(item.get("recommendation", "")).split())
+        lines.append(f"| `{item['id']}` - {title} | {item.get('severity', 'warn')} | {fix} |")
+    return "\n".join(lines)
+
+
 def _aslist(value: Any) -> list[Any]:
     return value if isinstance(value, list) else [value]
 
@@ -78,6 +88,7 @@ GENERATORS: dict[str, Callable[[Config], str]] = {
     "rules-list": _rules_list,
     "roles": _roles_table,
     "routing": _routing_table,
+    "backlog": _backlog_table,
 }
 
 

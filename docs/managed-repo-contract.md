@@ -52,7 +52,9 @@ conventions:
   review: no merge without an independent zero-context reviewer
   commits: conventional commits
 
-# Optional: project-specific agent contracts layered on top of agents/.
+# Optional: roles that only exist for this project. They live here, in the
+# project, never in the engine's global catalog, and their ids must not clash
+# with it.
 agents:
   - .saturnin/agents/db-migrator.md
 
@@ -78,10 +80,19 @@ monitors:
 - **`conventions`** is what stops every PR review re-deciding house style.
 - **`agents`** lets a project ship a role that only makes sense there (a
   migration specialist, a protocol expert) without polluting the global catalog.
+  Those contracts live **inside the project**, under `.saturnin/agents/`, and
+  nowhere else. `saturnin repo check` enforces it: an absolute path, a `..`, a
+  file outside `.saturnin/agents/` or a missing file is a contract violation,
+  and so is reusing the id of a role that already exists globally. The reasons
+  are practical - a project role is reviewed by the people who own the code it
+  touches, it travels with the repository when the repository moves, it is
+  deleted when the project is, and the global catalog never acquires an entry
+  that only one repository can explain.
   These are layered on top of `agents/`, never replacements for governance.
 - **`mcp`** narrows tool access per project, on top of the per-role allow-list.
-- **`monitors`** is how a hosted application gets autonomous end-to-end watching
-  without any per-project code in Saturnin.
+- **`monitors`** is the fallback watch for a project with no alerting stack yet;
+  once it emits to Prometheus/Loki, the project alerts and Saturnin adopts the
+  resulting issue instead. See [docs/observability.md](observability.md).
 
 ## Onboarding a repository
 
@@ -91,6 +102,7 @@ monitors:
    must never do, how to run and test it. Link to this repository's governance
    rather than restating it (ADR-0004).
 3. `saturnin repo check .` until it exits 0.
-4. Register the repository in `policies/repos.yaml` if Saturnin should file
-   issues there. Remember rule 5: in managed repositories Saturnin may open
+4. Register the repository in `policies/repos.yaml` - under `discovery.sources`
+   so its labelled issues reach the board, and so Saturnin may file issues
+   there. Remember rule 5: in managed repositories Saturnin may open
    issues, each one independently reviewed first - it never pushes directly.

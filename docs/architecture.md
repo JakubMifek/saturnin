@@ -47,6 +47,7 @@ everything else is a thin Python module with tests.
 | Escalation | `saturnin/escalation.py` | Well-formed human escalation bodies. |
 | Locking | `saturnin/locking.py` | Cooperative `flock` so parallel squads cannot lose board updates. |
 | Issue mirror | `saturnin/issues.py` | Renders and pushes the GitHub issue that makes a task durable (rule 8). |
+| Discovery | `saturnin/discovery.py` | The inbound door: adopts labelled issues from managed repositories - alerts, CI, humans - as routed board tasks, deduplicated by a `source:<repo>#<n>` label. |
 | Contracts | `saturnin/contracts.py` | Cross-checks `agents/*.md` front matter against the role catalog and MCP policy. |
 | Doc sync | `saturnin/docsync.py` | Regenerates policy tables inside the docs; fails the build on drift. |
 | CLI | `saturnin/cli.py` | The only supported interface for agents and humans. |

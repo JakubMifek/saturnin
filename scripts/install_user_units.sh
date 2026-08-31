@@ -20,7 +20,7 @@ done
 systemctl --user daemon-reload
 systemctl --user enable --now \
   saturnin-janitor.timer saturnin-improve.timer \
-  saturnin-poller.timer saturnin-mirror.timer
+  saturnin-poller.timer saturnin-mirror.timer saturnin-discovery.timer
 systemctl --user list-timers 'saturnin-*' || true
 
 cat <<'MSG'

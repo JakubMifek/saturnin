@@ -1,6 +1,13 @@
 #!/usr/bin/env bash
 # Run the synthetic monitors of every managed application, unattended.
 #
+# This is the FALLBACK path for projects that do not yet emit metrics and logs
+# to a stack that can alert on them. Preferred is the pipeline in
+# docs/observability.md: the project alerts, the alert becomes an issue, and
+# `saturnin discover` adopts it. A curl from this host proves an endpoint
+# answers and nothing more - it cannot tell an outage from a local network
+# problem, and it never sees a slow burn.
+#
 # Monitors are declared per repository in .saturnin/repo.yaml under `monitors:`
 # and are the autonomous half of the end-to-end tests: same assertions, run
 # against the live system on a timer. A failure is not a log line - it becomes a

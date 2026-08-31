@@ -34,18 +34,21 @@ Every hosted application Saturnin manages gets, in this order:
 1. **An end-to-end suite** that drives the deployed system the way a user does
    (HTTP in, assertions on observable output), runnable unattended against any
    environment: `E2E_BASE_URL=https://... python -m pytest tests/e2e`.
-2. **A synthetic monitor** built from the same suite, scheduled by a
-   Saturnin user timer, writing results to `var/monitors/<app>.jsonl`:
-   `automation/library/run_monitors.sh`.
-3. **An alert path that is a board task, not a log line.** A failing monitor
-   files a P0 task automatically (`--label incident`), which the router sends
-   straight to the code worker. Two consecutive failures escalate to a human
-   (`saturnin escalate ...`).
+2. **Alerting that the project owns.** Metrics and logs go to the project's own
+   stack (Prometheus/Loki with Grafana alert rules); alert rules are reviewed
+   like code and live beside the dashboards. Saturnin does not watch the
+   application from outside - see [docs/observability.md](../docs/observability.md).
+3. **An alert path that is a board task, not a log line.** A firing alert opens
+   a labelled issue in the project repository, and `saturnin discover` adopts it
+   as a P0 task on the next pass. Deduplicate upstream: one issue per firing
+   alert, closed when it resolves.
 
-Monitors are declared per repository in `.saturnin/repo.yaml` under `monitors:`
-(name, url, method, expected status, SLO), so that a project carries its own
-checks. Never point a monitor at production write endpoints; use a dedicated
-health or canary route.
+Until a project has that stack, the fallback is a synthetic monitor built from
+the same suite - declared in `.saturnin/repo.yaml` under `monitors:` (name, url,
+method, expected status, SLO) and run by `automation/library/run_monitors.sh`,
+which files the P0 task itself and escalates after two consecutive failures.
+Treat it as scaffolding, not the destination. Never point a monitor at
+production write endpoints; use a dedicated health or canary route.
 
 ## Definition of done
 The test suite is deterministic, branch coverage is at or above 80%, the new

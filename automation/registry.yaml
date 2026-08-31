@@ -33,6 +33,12 @@ automations:
     owner_role: pr-reviewer
     triggers: [review, merge, gate, issue submission]
 
+  - id: issue-discovery
+    description: Adopt issues raised in managed repositories (alerts, CI, humans) as board tasks.
+    path: automation/library/discover_issues.sh
+    owner_role: chief-of-staff
+    triggers: [discover, inbound, alert, monitoring, issue intake]
+
   - id: result-poller
     description: Poll external signals for tasks whose result cannot report back on its own.
     path: automation/library/result_poller.sh

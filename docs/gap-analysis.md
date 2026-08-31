@@ -36,25 +36,26 @@ keep running while nobody is looking (ADR-0003).
 | No security model written down | `SECURITY.md` | done |
 | Coverage was unmeasured | 80% branch-coverage floor in the test worker contract and CI | done |
 
-## Holes still open (filed, not fixed here)
+## Holes still open
 
-1. **JSON Schema for `policies/*.yaml`.** `doctor` validates semantics but not
-   structure, so a typo in a key name is only caught if some code happens to
-   read it. A schema per policy file plus a `jsonschema` check in `doctor` would
-   catch it at the edge. *Medium effort, high value.*
-2. **A real evaluation harness.** Aider and SWE-agent both replay recorded
-   trajectories to detect regressions in agent behaviour. Saturnin can measure
-   its board but cannot yet answer "did that routing change make dispatch
-   worse?" other than by watching the metric drift. *High effort, high value -
-   the natural next step for the improver role.*
-3. **Worktree post-create hooks.** AutoGPT's `.branchlet.json` runs a setup
-   command in each new worktree. Saturnin creates the worktree but leaves
-   `pip install -e .` to the worker. *Low effort.*
-4. **Changelog.** No release notes; `version` in `pyproject.toml` is decorative.
-   Worth having once the engine is public. *Low effort.*
-5. **Secrets handling.** Saturnin shells out to `gh` and holds no token itself,
-   which is right, but there is no documented story for project credentials that
-   workers legitimately need. *Needs a human decision.*
+These are not a list in a document - they live in `policies/improvement.yaml`
+under `backlog:`, and `saturnin improve` files each one as a board task
+(deduplicated by its `finding:<id>` marker) which is then mirrored as an issue
+under rule 8. A gap therefore has an owner and a state, and closing one means
+deleting its entry from the policy, not editing this table.
+
+<!-- generated:backlog -->
+| Gap | Severity | Fix |
+| --- | --- | --- |
+| `cost-accounting` - measure cost per role, task and repository | warn | Record model, token counts and elapsed time per dispatch in var/telemetry, surface cost per role in `saturnin board metrics`, and add a spend threshold to policies/improvement.yaml so the loop can flag an expensive role the same way it flags a slow one. |
+| `quality-regression-blindspot` - detect quality regressions, not only slow ones | warn | Track review outcomes per role - changes requested, follow-up findings, reverted merges - and treat a rising rejection rate as a finding. |
+| `policy-rollback` - make a bad policy change reversible | warn | Version policy changes, keep the previous revision in var/, and add `saturnin policy rollback` plus a dry run that replays the last N dispatches through the proposed routing table. |
+| `policy-schema` - validate policy structure with a schema | info | Add a JSON Schema per policy file and validate all of them in `doctor`. |
+| `evaluation-harness` - replay dispatches to evaluate a policy change | info | Record dispatch trajectories and replay them against a candidate policy, as Aider and SWE-agent do for agent behaviour. |
+| `observability-pipeline` - replace polled monitors with an alerting pipeline | warn | Adopt the Loki/Grafana path in docs/observability.md - projects alert, alerts become issues, the discovery loop turns issues into board tasks - and demote run_monitors.sh to the fallback for projects without a stack. |
+| `worktree-post-create-hook` - run project setup when a worktree is created | info | Read a post-create command from the managed repo manifest and run it in new_work_session.sh. |
+| `project-credentials` - document how workers obtain project credentials | info | Decide on a secret source (host keyring or pass), document it in SECURITY.md, and give workers a read-only accessor rather than the store. |
+<!-- /generated:backlog -->
 
 ## Anti-patterns deliberately not adopted
 
