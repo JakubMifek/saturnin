@@ -540,7 +540,8 @@ def _run_discover(args: argparse.Namespace, config: Config, board: Board, as_jso
     discovery = IssueDiscovery(config, board)
     issues = discovery.poll()
     if args.dry_run:
-        pending = [i for i in issues if discovery.marker(i) not in discovery.known_markers()]
+        known = discovery.known_markers()
+        pending = [i for i in issues if discovery.marker(i) not in known]
         _emit(
             {"found": len(issues), "adoptable": [i.ref for i in pending]},
             as_json,
