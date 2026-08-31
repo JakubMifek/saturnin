@@ -26,7 +26,7 @@ _SHELL_RESERVED = {
 }
 _DYNAMIC_COMMANDS = {".", "eval", "source"}
 _SHELL_BINARIES = {
-    "ash", "bash", "csh", "dash", "fish", "ksh", "ksh93", "mksh", "nu",
+    "ash", "bash", "csh", "dash", "fish", "hush", "ksh", "ksh93", "mksh", "nu",
     "osh", "posh", "powershell", "pwsh", "rbash", "sh", "tcsh", "xonsh",
     "yash", "zsh",
 }

@@ -274,6 +274,7 @@ def test_apt_requires_a_saturnin_dedicated_service(governance: Governance) -> No
         "bash -c '$(printf apt) remove python3'",
         "bash -c 'f(){ apt remove python3; }; f'",
         "/bin/dash -c 'apt remove python3'",
+        "/bin/hush -c 'apt remove python3'",
         "/usr/bin/zsh -c 'apt remove python3'",
         "busybox sh -c 'apt remove python3'",
         "/bin/busybox ash -c 'apt remove python3'",
