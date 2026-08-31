@@ -21,6 +21,15 @@ source "$(dirname "${BASH_SOURCE[0]}")/_common.sh"
 RESULTS_DIR="${SATURNIN_HOME}/var/monitors"
 mkdir -p "$RESULTS_DIR"
 
+if [[ -x "${SATURNIN_HOME}/.venv/bin/python" ]]; then
+  PYTHON="${SATURNIN_HOME}/.venv/bin/python"
+elif command -v python3 >/dev/null 2>&1; then
+  PYTHON="$(command -v python3)"
+else
+  log "Python interpreter not found"
+  exit 69
+fi
+
 if (( $# == 0 )); then
   log "usage: run_monitors.sh <managed-repo-path> [...]"
   exit 64
@@ -36,13 +45,13 @@ for repo_path in "$@"; do
   results="${RESULTS_DIR}/${app}.jsonl"
 
   # monitors: [{name, url, expect_status, timeout_seconds}]
-  count="$(python3 -c '
+  count="$("$PYTHON" -c '
 import sys, yaml
 data = yaml.safe_load(open(sys.argv[1])) or {}
 print(len(data.get("monitors") or []))' "$manifest")"
 
   for (( i = 0; i < count; i++ )); do
-    read -r name url expect timeout < <(python3 -c '
+    read -r name url expect timeout < <("$PYTHON" -c '
 import sys, yaml
 monitor = (yaml.safe_load(open(sys.argv[1])) or {})["monitors"][int(sys.argv[2])]
 print(monitor["name"], monitor["url"], monitor.get("expect_status", 200),

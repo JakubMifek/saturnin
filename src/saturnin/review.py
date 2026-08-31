@@ -91,11 +91,7 @@ class ReviewLedger:
         path = self.dir / f"{kind}-{slugify(subject)}.jsonl"
         if not path.is_file():
             return []
-        records = [
-            ReviewRecord.from_dict(json.loads(line))
-            for line in path.read_text(encoding="utf-8").splitlines()
-            if line.strip()
-        ]
+        records = list(self._records(path))
         # Only the latest verdict per reviewer counts.
         latest: dict[str, ReviewRecord] = {}
         for record in records:
@@ -104,6 +100,21 @@ class ReviewLedger:
 
     def __iter__(self) -> Iterator[ReviewRecord]:
         for path in sorted(self.dir.glob("*.jsonl")):
-            for line in path.read_text(encoding="utf-8").splitlines():
-                if line.strip():
-                    yield ReviewRecord.from_dict(json.loads(line))
+            yield from self._records(path)
+
+    @staticmethod
+    def _records(path: Path) -> Iterator[ReviewRecord]:
+        for line_number, line in enumerate(
+            path.read_text(encoding="utf-8").splitlines(), start=1
+        ):
+            if not line.strip():
+                continue
+            try:
+                data = json.loads(line)
+                if not isinstance(data, dict):
+                    raise TypeError("record must be a JSON object")
+                yield ReviewRecord.from_dict(data)
+            except (json.JSONDecodeError, TypeError) as exc:
+                raise ReviewError(
+                    f"corrupt review ledger {path} at line {line_number}: {exc}"
+                ) from exc

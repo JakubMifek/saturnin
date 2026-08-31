@@ -38,6 +38,29 @@ def test_latest_wins(config: Config, board: Board) -> None:
     assert [c.summary for c in store] == ["second"]
 
 
+def test_incomplete_trailing_checkpoint_is_ignored(config: Config, board: Board) -> None:
+    task = board.create("Interrupted checkpoint")
+    store = CheckpointStore(config, board)
+    store.save(Checkpoint(task_id=task.id, role="scribe", summary="safe", next_steps=["a"]))
+    with store.path_for(task.id).open("a", encoding="utf-8") as handle:
+        handle.write('{"task_id":')
+
+    assert store.latest(task.id).summary == "safe"
+    assert [checkpoint.summary for checkpoint in store.history(task.id)] == ["safe"]
+
+
+def test_corrupt_checkpoint_before_latest_is_reported(config: Config, board: Board) -> None:
+    task = board.create("Corrupt checkpoint")
+    store = CheckpointStore(config, board)
+    store.save(Checkpoint(task_id=task.id, role="scribe", summary="first", next_steps=["a"]))
+    with store.path_for(task.id).open("a", encoding="utf-8") as handle:
+        handle.write("not-json\n")
+        handle.write('{"task_id":"later"}\n')
+
+    with pytest.raises(CheckpointError, match=r"line 2"):
+        store.history(task.id)
+
+
 def test_save_uses_locked_board_edit(
     config: Config, board: Board, monkeypatch: pytest.MonkeyPatch
 ) -> None:

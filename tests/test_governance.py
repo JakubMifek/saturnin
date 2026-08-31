@@ -99,6 +99,26 @@ def test_self_review_is_impossible(config: Config) -> None:
         )
 
 
+def test_corrupt_review_ledger_reports_file_and_line(config: Config) -> None:
+    ledger = ReviewLedger(config)
+    subject = "JakubMifek/saturnin#corrupt"
+    ledger.record(
+        subject=subject,
+        kind="pr",
+        author="code-worker",
+        reviewer="pr-reviewer",
+        verdict="approved",
+    )
+    path = next(ledger.dir.glob("*.jsonl"))
+    with path.open("a", encoding="utf-8") as handle:
+        handle.write("not-json\n")
+
+    with pytest.raises(ReviewError, match=rf"{path} at line 2"):
+        ledger.for_subject(subject, "pr")
+    with pytest.raises(ReviewError, match=rf"{path} at line 2"):
+        list(ledger)
+
+
 def test_merge_in_managed_repo_is_never_autonomous(
     governance: Governance, config: Config
 ) -> None:

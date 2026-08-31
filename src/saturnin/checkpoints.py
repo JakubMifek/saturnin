@@ -95,23 +95,34 @@ class CheckpointStore:
         return checkpoint
 
     def latest(self, task_id: str) -> Checkpoint | None:
-        path = self.path_for(task_id)
-        if not path.is_file():
-            return None
-        lines = [line for line in path.read_text(encoding="utf-8").splitlines() if line.strip()]
-        if not lines:
-            return None
-        return Checkpoint.from_dict(json.loads(lines[-1]))
+        checkpoints = self.history(task_id)
+        return checkpoints[-1] if checkpoints else None
 
     def history(self, task_id: str) -> list[Checkpoint]:
         path = self.path_for(task_id)
         if not path.is_file():
             return []
-        return [
-            Checkpoint.from_dict(json.loads(line))
-            for line in path.read_text(encoding="utf-8").splitlines()
+        lines = [
+            (line_number, line)
+            for line_number, line in enumerate(
+                path.read_text(encoding="utf-8").splitlines(), start=1
+            )
             if line.strip()
         ]
+        checkpoints: list[Checkpoint] = []
+        for index, (line_number, line) in enumerate(lines):
+            try:
+                data = json.loads(line)
+                if not isinstance(data, dict):
+                    raise TypeError("checkpoint must be a JSON object")
+                checkpoints.append(Checkpoint.from_dict(data))
+            except (json.JSONDecodeError, TypeError) as exc:
+                if index == len(lines) - 1:
+                    break
+                raise CheckpointError(
+                    f"corrupt checkpoint store {path} at line {line_number}: {exc}"
+                ) from exc
+        return checkpoints
 
     def __iter__(self) -> Iterator[Checkpoint]:
         for path in sorted(self.dir.glob("*.jsonl")):
