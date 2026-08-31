@@ -94,6 +94,7 @@ def build_parser() -> argparse.ArgumentParser:
     attach.add_argument("task_id")
     attach.add_argument("--branch")
     attach.add_argument("--worktree")
+    attach.add_argument("--actor")
 
     # dispatch ---------------------------------------------------------
     dispatch = sub.add_parser("dispatch", help="route tasks to executing roles")
@@ -131,6 +132,7 @@ def build_parser() -> argparse.ArgumentParser:
     create.add_argument("branch")
     create.add_argument("--base")
     create.add_argument("--task")
+    create.add_argument("--actor")
     worktree.add_parser("list", help="list worktrees")
     cleanup = worktree.add_parser("cleanup", help="plan (and optionally apply) stale cleanup")
     cleanup.add_argument("--apply", action="store_true", help="actually remove things")
@@ -531,7 +533,12 @@ def _run_task(args: argparse.Namespace, config: Config, board: Board, as_json: b
                 task.branch = args.branch
             if args.worktree:
                 task.worktree = args.worktree
-            task.log("attach", branch=task.branch, worktree=task.worktree)
+            task.log(
+                "attach",
+                actor=args.actor or task.role or "cli",
+                branch=task.branch,
+                worktree=task.worktree,
+            )
         _emit(task.to_dict(), as_json, _task_line(task))
         return 0
     task = board.get(args.task_id)
@@ -607,7 +614,12 @@ def _run_worktree(args: argparse.Namespace, config: Config, board: Board, as_jso
             with board.edit(args.task) as task:
                 task.branch = args.branch
                 task.worktree = str(worktree.path)
-                task.log("worktree", branch=args.branch, worktree=str(worktree.path))
+                task.log(
+                    "worktree",
+                    actor=args.actor or task.role or "cli",
+                    branch=args.branch,
+                    worktree=str(worktree.path),
+                )
         _emit(
             {"branch": worktree.branch, "path": str(worktree.path)},
             as_json,

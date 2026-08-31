@@ -196,8 +196,23 @@ def test_attach_uses_locked_edit(
         raise AssertionError("attach must not use Board.save()")
 
     monkeypatch.setattr(Board, "save", reject_save)
-    assert main(["task", "attach", task.id, "--branch", "feature/atomic"]) == 0
-    assert Board().get(task.id).branch == "feature/atomic"
+    assert (
+        main(
+            [
+                "task",
+                "attach",
+                task.id,
+                "--branch",
+                "feature/atomic",
+                "--actor",
+                "code-worker",
+            ]
+        )
+        == 0
+    )
+    stored = Board().get(task.id)
+    assert stored.branch == "feature/atomic"
+    assert stored.history[-1]["actor"] == "code-worker"
 
 
 def test_worktree_task_attachment_uses_locked_edit(
@@ -225,6 +240,8 @@ def test_worktree_task_attachment_uses_locked_edit(
                 "feature/atomic-worktree",
                 "--task",
                 task.id,
+                "--actor",
+                "code-worker",
             ]
         )
         == 0
@@ -232,3 +249,4 @@ def test_worktree_task_attachment_uses_locked_edit(
     stored = Board().get(task.id)
     assert stored.branch == "feature/atomic-worktree"
     assert stored.worktree == str(worktree_path)
+    assert stored.history[-1]["actor"] == "code-worker"
