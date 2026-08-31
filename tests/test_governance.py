@@ -167,7 +167,7 @@ def test_out_of_scope_server_commands(governance: Governance, command: str) -> N
     "command",
     [
         "systemctl --user restart saturnin-janitor.timer",
-        "systemctl status saturnin-improve.service",
+        "systemctl --user status saturnin-improve.service",
         "apt install ripgrep",
         "python3 -m saturnin doctor",
     ],

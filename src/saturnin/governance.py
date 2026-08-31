@@ -196,9 +196,11 @@ class Governance:
         if binary == "systemctl":
             if not services.get("systemctl_allowed", False):
                 return Decision.deny("systemctl is not allowed")
-            args = [p for p in parts[1:] if not p.startswith("-")]
-            if args and args[0] == "--user":  # pragma: no cover - defensive
-                args = args[1:]
+            raw_args = parts[1:]
+            user_scope = "--user" in raw_args
+            if services.get("scheduling_scope") == "user" and not user_scope:
+                return Decision.deny("systemctl must use --user scope")
+            args = [p for p in raw_args if p != "--user" and not p.startswith("-")]
             sub = args[0] if args else ""
             allowed = services.get("allowed_subcommands", [])
             if allowed and sub not in allowed:
