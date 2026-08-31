@@ -185,11 +185,10 @@ class Governance:
         user = scope.get("user", {})
         forbidden_binaries = user.get("forbidden_prefixes", [])
         for part in parts:
-            candidates = [part]
             try:
-                candidates.extend(shlex.split(part))
+                candidates = shlex.split(part)
             except ValueError:
-                pass
+                continue
             for candidate in candidates:
                 candidate_binary = candidate.rsplit("/", 1)[-1]
                 if candidate_binary in forbidden_binaries:
