@@ -11,7 +11,7 @@ task="${2:-}"
 saturnin check branch "$branch"
 if [[ -n "$task" ]]; then
   saturnin worktree create "$branch" --task "$task"
-  saturnin task move "$task" in_progress --note "work session started on $branch"
+  saturnin task move "$task" in_progress --actor "$SCRIPT_NAME" --note "work session started on $branch"
 else
   saturnin worktree create "$branch"
 fi
