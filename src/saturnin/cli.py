@@ -541,8 +541,7 @@ def _run_task(args: argparse.Namespace, config: Config, board: Board, as_json: b
             )
         _emit(task.to_dict(), as_json, _task_line(task))
         return 0
-    task = board.get(args.task_id)
-    board.transition(task, args.state, actor=args.actor, note=args.note)
+    task = board.transition_id(args.task_id, args.state, actor=args.actor, note=args.note)
     _emit(task.to_dict(), as_json, _task_line(task))
     return 0
 

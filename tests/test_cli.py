@@ -215,6 +215,21 @@ def test_attach_uses_locked_edit(
     assert stored.history[-1]["actor"] == "code-worker"
 
 
+def test_task_move_uses_locked_edit(
+    home: Path, capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    task = Board().create("Move atomically")
+
+    def reject_save(*args: object, **kwargs: object) -> None:
+        raise AssertionError("task move must not use Board.save()")
+
+    monkeypatch.setattr(Board, "save", reject_save)
+    assert main(["task", "move", task.id, "routed", "--actor", "router"]) == 0
+    stored = Board().get(task.id)
+    assert stored.state == "routed"
+    assert stored.history[-1]["actor"] == "router"
+
+
 def test_worktree_task_attachment_uses_locked_edit(
     home: Path, capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch
 ) -> None:

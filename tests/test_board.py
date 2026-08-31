@@ -37,6 +37,17 @@ def test_transitions_are_validated(board: Board) -> None:
         board.transition(task, "in_progress")
 
 
+def test_transition_id_is_read_modify_write_under_lock(board: Board) -> None:
+    task = board.create("Implement widget")
+    updated = board.transition_id(task.id, "routed", actor="router", note="dispatched")
+    assert updated.state == "routed"
+    assert updated.history[-1]["event"] == "state:routed"
+    assert updated.history[-1]["actor"] == "router"
+    assert board.get(task.id).state == "routed"
+    with pytest.raises(BoardError):
+        board.transition_id(task.id, "done")
+
+
 def test_listing_orders_by_priority(board: Board) -> None:
     low = board.create("low", priority="P3")
     high = board.create("high", priority="P0")

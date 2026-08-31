@@ -30,9 +30,12 @@ for probe in "${probes[@]}"; do
   case "$status" in
     0)
       log "$task_id: signal received - handing back to the board"
-      saturnin task move "$task_id" review --actor result-poller \
-        --note "poller reported completion: ${output:0:200}" || true
-      mv "$probe" "$probe.done"
+      if saturnin task move "$task_id" review --actor result-poller \
+        --note "poller reported completion: ${output:0:200}"; then
+        mv "$probe" "$probe.done"
+      else
+        log "$task_id: failed to move task to review; leaving probe for retry"
+      fi
       ;;
     2)
       log "$task_id: still pending"

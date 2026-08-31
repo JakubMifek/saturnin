@@ -165,7 +165,8 @@ class Board:
 
     def __iter__(self) -> Iterator[Task]:
         for path in sorted(self.config.tasks_dir.glob("*.json")):
-            yield Task.from_dict(json.loads(path.read_text(encoding="utf-8")))
+            with file_lock(path, exclusive=False):
+                yield Task.from_dict(json.loads(path.read_text(encoding="utf-8")))
 
     # -- operations ----------------------------------------------------
     def create(
@@ -202,6 +203,17 @@ class Board:
         return self.save(task)
 
     def transition(self, task: Task, state: str, *, actor: str = "ceo", note: str = "") -> Task:
+        self._apply_transition(task, state, actor=actor, note=note)
+        return self.save(task)
+
+    def transition_id(self, task_id: str, state: str, *, actor: str = "ceo", note: str = "") -> Task:
+        """Read-modify-write a state transition under the task's exclusive lock."""
+        with self.edit(task_id) as task:
+            self._apply_transition(task, state, actor=actor, note=note)
+        return task
+
+    @staticmethod
+    def _apply_transition(task: Task, state: str, *, actor: str, note: str) -> None:
         if state not in STATES:
             raise BoardError(f"unknown state: {state}")
         allowed = TRANSITIONS[task.state]
@@ -213,7 +225,6 @@ class Board:
         if state in TERMINAL_STATES:
             task.closed_at = utcnow()
         task.log(f"state:{state}", actor=actor, note=note)
-        return self.save(task)
 
     def list(
         self,
