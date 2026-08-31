@@ -83,7 +83,7 @@ print(monitor["name"], monitor["url"], monitor.get("expect_status", 200),
     else
       saturnin task add "Monitor $app/$name failed: HTTP $code from $url" \
         --body "Expected $expect, observed $code at $started. Monitor declared in $manifest." \
-        --label incident --label monitor --priority P0 --dispatch || true
+        --label incident --label monitor --priority P0 --dispatch
     fi
   done
 done
