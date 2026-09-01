@@ -151,3 +151,30 @@ def test_removal_cap_defers_extra_actions(manager: WorktreeManager) -> None:
     plan = manager.plan_cleanup(now=datetime.now(timezone.utc) + timedelta(days=30))
     assert len(plan.actions) == 1
     assert any("deferred" in a.reason for a in plan.skipped)
+
+
+def test_fresh_worktree_uses_stale_after_days_threshold(
+    manager: WorktreeManager, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Clean unmerged branch with no local commits uses stale_after_days, not hard_stale."""
+    worktree = manager.create("feature/never-used")
+    stale_threshold = manager.policy["worktree"]["stale_after_days"]
+    hard_threshold = manager.policy["worktree"]["hard_stale_after_days"]
+    assert stale_threshold < hard_threshold, "policy invariant violated"
+    now = datetime.now(timezone.utc)
+
+    # Simulate: branch is not yet merged into the default branch, but has no local commits.
+    monkeypatch.setattr(manager, "merged_branches", lambda: set())
+    monkeypatch.setattr(manager, "has_local_commits", lambda branch: False)
+
+    # Not yet stale (age < stale_after_days).
+    before = manager.plan_cleanup(now=now + timedelta(days=stale_threshold - 1))
+    assert str(worktree.path) not in {a.target for a in before.actions}, (
+        "should not be removed before stale_after_days"
+    )
+
+    # Past stale (but still before hard_stale) → must be cleaned via stale_after_days.
+    at_stale = manager.plan_cleanup(now=now + timedelta(days=stale_threshold + 1))
+    assert str(worktree.path) in {a.target for a in at_stale.actions}, (
+        "fresh worktree should be removed at stale_after_days, not hard_stale_after_days"
+    )

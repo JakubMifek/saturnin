@@ -130,6 +130,15 @@ class WorktreeManager:
         except GitError:
             return False
 
+    def has_local_commits(self, branch: str) -> bool:
+        """Return True if *branch* has commits not present in the default branch."""
+        default = self.governance.default_branch
+        try:
+            out = git(["log", f"{default}..{branch}", "--oneline"], self.repo)
+            return bool(out.strip())
+        except GitError:
+            return True  # Treat indeterminate as having local work (safer default).
+
     # -- creation ------------------------------------------------------
     def create(self, branch: str, *, base: str | None = None, path: Path | None = None) -> Worktree:
         decision = self.governance.check_branch(branch)
@@ -188,11 +197,14 @@ class WorktreeManager:
                 plan.skipped.append(Action("remove_worktree", target, "age unknown"))
                 continue
             is_merged = worktree.branch in merged
-            threshold = (
-                wt_policy.get("merged_stale_after_days", 1)
-                if is_merged
-                else wt_policy.get("hard_stale_after_days", 30)
-            )
+            if is_merged:
+                threshold = wt_policy.get("merged_stale_after_days", 1)
+            elif worktree.branch and self.has_local_commits(worktree.branch):
+                # Branch has commits not yet in the default branch: be conservative.
+                threshold = wt_policy.get("hard_stale_after_days", 30)
+            else:
+                # No local commits; use the normal stale threshold.
+                threshold = wt_policy.get("stale_after_days", 7)
             if age >= threshold:
                 plan.actions.append(
                     Action(

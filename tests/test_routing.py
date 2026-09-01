@@ -141,3 +141,29 @@ def test_ceo_may_not_be_in_a_squad(config: Config) -> None:
     router = Router(config)
     with pytest.raises(RoutingError):
         router._build({"role": "code-worker", "squad": ["ceo"]}, "bad")
+
+
+def test_dispatch_default_actor_uses_configured_ceo_role(
+    config: Config, board: Board
+) -> None:
+    """dispatch() must stamp the configured ceo_role, not the hardcoded literal 'ceo'."""
+    router = Router(config)
+    original_role = router.ceo_role
+    router.ceo_role = "chief"
+    task = board.create("Implement something")
+    router.dispatch(board, task)
+    stored = board.get(task.id)
+    dispatch_events = [e for e in stored.history if e["event"] == "dispatch"]
+    assert dispatch_events, "dispatch event not recorded"
+    assert dispatch_events[-1]["actor"] == "chief"
+    # Restore so the fixture stays clean.
+    router.ceo_role = original_role
+
+
+def test_dispatch_accepts_explicit_actor(config: Config, board: Board) -> None:
+    """Caller-supplied actor (e.g., 'discovery') overrides the default."""
+    task = board.create("Fix a build issue")
+    Router(config).dispatch(board, task, actor="discovery")
+    stored = board.get(task.id)
+    dispatch_events = [e for e in stored.history if e["event"] == "dispatch"]
+    assert dispatch_events[-1]["actor"] == "discovery"

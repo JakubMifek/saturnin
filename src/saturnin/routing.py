@@ -119,7 +119,7 @@ class Router:
         board: Board,
         task: Task,
         *,
-        actor: str = "ceo",
+        actor: str | None = None,
         squad: Sequence[str] | None = None,
     ) -> Route:
         """Assign ``task`` to a role and move it to ``routed``.
@@ -127,6 +127,9 @@ class Router:
         ``squad`` overrides the rule's suggested crew: squads are assembled per
         task, not fixed teams.
         """
+        # Fall back to the configured CEO role so audit trails are consistent
+        # even if the policy ever renames that role.
+        effective_actor = actor if actor is not None else self.ceo_role
         if squad is not None:
             self._validate_squad(squad, "dispatch override")
         with board.edit(task.id) as current:
@@ -148,7 +151,7 @@ class Router:
             current.result_contract = route.result_contract
             current.log(
                 "dispatch",
-                actor=actor,
+                actor=effective_actor,
                 role=route.role,
                 rule=route.rule,
                 escalate=route.escalate,
@@ -159,7 +162,7 @@ class Router:
             # after "blocked" must not reset it.
             current.routed_at = current.routed_at or current.history[-1]["ts"]
             current.state = "routed"
-            current.log("state:routed", actor=actor, note=f"rule={route.rule}")
+            current.log("state:routed", actor=effective_actor, note=f"rule={route.rule}")
         task.__dict__.update(current.__dict__)
         return route
 

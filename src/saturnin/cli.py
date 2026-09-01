@@ -570,7 +570,7 @@ def _run_discover(args: argparse.Namespace, config: Config, board: Board, as_jso
     router = Router(config)
     for task in adopted:
         if not args.no_dispatch:
-            router.dispatch(board, task)
+            router.dispatch(board, task, actor="discovery")
     _emit(
         [task.to_dict() for task in adopted],
         as_json,
