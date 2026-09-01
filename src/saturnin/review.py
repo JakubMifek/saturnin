@@ -14,6 +14,7 @@ from typing import Any, Iterator
 
 from .board import utcnow
 from .config import Config, default_config
+from .locking import file_lock
 
 VERDICTS = ("approved", "changes_requested", "rejected")
 KINDS = ("pr", "issue")
@@ -83,8 +84,9 @@ class ReviewLedger:
             notes=notes,
         )
         path = self.dir / f"{kind}-{slugify(subject)}.jsonl"
-        with path.open("a", encoding="utf-8") as handle:
-            handle.write(json.dumps(entry.to_dict()) + "\n")
+        with file_lock(path):
+            with path.open("a", encoding="utf-8") as handle:
+                handle.write(json.dumps(entry.to_dict()) + "\n")
         return entry
 
     def for_subject(self, subject: str, kind: str) -> list[ReviewRecord]:
@@ -104,9 +106,9 @@ class ReviewLedger:
 
     @staticmethod
     def _records(path: Path) -> Iterator[ReviewRecord]:
-        for line_number, line in enumerate(
-            path.read_text(encoding="utf-8").splitlines(), start=1
-        ):
+        with file_lock(path, exclusive=False):
+            text = path.read_text(encoding="utf-8")
+        for line_number, line in enumerate(text.splitlines(), start=1):
             if not line.strip():
                 continue
             try:
