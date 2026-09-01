@@ -11,6 +11,7 @@ import os
 import re
 import shlex
 from dataclasses import dataclass, field
+from pathlib import Path
 from typing import Any, Iterable, Sequence
 
 from .config import Config, default_config
@@ -31,6 +32,22 @@ _SHELL_BINARIES = {
     "yash", "zsh",
 }
 _MULTICALL_BINARIES = {"busybox", "toybox"}
+_ALL_OPERANDS_WRITABLE = {
+    "chmod",
+    "chgrp",
+    "chown",
+    "mkdir",
+    "mkfifo",
+    "mknod",
+    "rm",
+    "rmdir",
+    "setfacl",
+    "tee",
+    "touch",
+    "truncate",
+    "unlink",
+}
+_DESTINATION_WRITABLE = {"cp", "install", "ln", "mv", "rsync"}
 
 
 @dataclass
@@ -265,6 +282,11 @@ class Governance:
         scope = self.config.server_scope
         services = scope.get("services", {})
         packages = scope.get("packages", {})
+        filesystem_decision = _check_filesystem_scope(
+            binary, parts[1:], scope.get("filesystem", {})
+        )
+        if not filesystem_decision.allowed:
+            return filesystem_decision
         if binary == "apt" or binary.startswith("apt-"):
             if not packages.get("apt_allowed", False):
                 return Decision.deny("apt is not allowed")
@@ -389,6 +411,107 @@ def _unsafe_shell_syntax(command: str) -> str | None:
         elif character in "$`*?[]{}~":
             return f"shell expansion token {character!r}"
     return None
+
+
+def _check_filesystem_scope(
+    binary: str, arguments: Sequence[str], filesystem: dict[str, Any]
+) -> Decision:
+    forbidden_roots = _policy_roots(filesystem.get("forbidden_roots", []))
+    targets = _writable_targets(binary, arguments)
+    if not targets:
+        return Decision.ok("command has no explicit filesystem write target")
+
+    writable_roots = _policy_roots(filesystem.get("writable_roots", []))
+    for raw_path in targets:
+        path = _resolve_command_path(raw_path)
+        forbidden = _containing_root(path, forbidden_roots)
+        if forbidden is not None:
+            return Decision.deny(
+                f"filesystem write target {str(path)!r} is under forbidden root "
+                f"{str(forbidden)!r}"
+            )
+        if _containing_root(path, writable_roots) is None:
+            return Decision.deny(
+                f"filesystem write target {str(path)!r} is outside writable roots"
+            )
+    return Decision.ok("filesystem write targets are within writable roots")
+
+
+def _policy_roots(values: Iterable[Any]) -> list[Path]:
+    return [_resolve_command_path(str(value)) for value in values]
+
+
+def _resolve_command_path(value: str) -> Path:
+    return Path(value).expanduser().resolve(strict=False)
+
+
+def _containing_root(path: Path, roots: Sequence[Path]) -> Path | None:
+    return next((root for root in roots if path == root or root in path.parents), None)
+
+
+def _writable_targets(binary: str, arguments: Sequence[str]) -> list[str]:
+    positional = _positional_arguments(arguments)
+    if binary in _ALL_OPERANDS_WRITABLE:
+        return positional
+    if binary in _DESTINATION_WRITABLE:
+        target_directory = _target_directory(arguments)
+        if target_directory is not None:
+            return [target_directory]
+        return positional[-1:]
+    if binary == "dd":
+        return [
+            argument.split("=", 1)[1]
+            for argument in arguments
+            if argument.startswith("of=")
+        ]
+    if binary == "sed" and any(
+        argument == "-i" or argument.startswith("--in-place") for argument in arguments
+    ):
+        return _sed_targets(arguments)
+    return []
+
+
+def _positional_arguments(arguments: Sequence[str]) -> list[str]:
+    positional: list[str] = []
+    after_options = False
+    for argument in arguments:
+        if argument == "--":
+            after_options = True
+        elif after_options or not argument.startswith("-"):
+            positional.append(argument)
+    return positional
+
+
+def _target_directory(arguments: Sequence[str]) -> str | None:
+    for index, argument in enumerate(arguments):
+        if argument in {"-t", "--target-directory"}:
+            return arguments[index + 1] if index + 1 < len(arguments) else None
+        if argument.startswith("--target-directory="):
+            return argument.split("=", 1)[1]
+        if argument.startswith("-t") and len(argument) > 2:
+            return argument[2:].removeprefix("=")
+    return None
+
+
+def _sed_targets(arguments: Sequence[str]) -> list[str]:
+    targets: list[str] = []
+    script_supplied = False
+    skip_value = False
+    for argument in arguments:
+        if skip_value:
+            skip_value = False
+            script_supplied = True
+        elif argument in {"-e", "--expression", "-f", "--file"}:
+            skip_value = True
+        elif argument.startswith(("-e", "--expression=", "-f", "--file=")):
+            script_supplied = True
+        elif argument.startswith("-"):
+            continue
+        elif not script_supplied:
+            script_supplied = True
+        else:
+            targets.append(argument)
+    return targets
 
 
 def _wrapped_command(binary: str, args: list[str]) -> list[str]:

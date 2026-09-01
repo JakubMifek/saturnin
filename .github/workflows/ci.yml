@@ -25,7 +25,7 @@ jobs:
       - name: Policy health check
         run: saturnin doctor
       - name: Tests (with the 80% branch-coverage floor)
-        run: python -m pytest --cov --cov-report=term-missing
+        run: python -m pytest --cov=saturnin --cov-branch --cov-report=term-missing --cov-fail-under=80
       - name: Docs must agree with policy
         run: saturnin docs render --check
       - name: Shell syntax

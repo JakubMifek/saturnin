@@ -51,6 +51,7 @@ def test_branch_and_command_checks(home: Path, capsys: pytest.CaptureFixture[str
     assert run(capsys, "check", "branch", "main")[0] == 2
     assert run(capsys, "check", "command", "systemctl --user restart saturnin-janitor.timer")[0] == 0
     assert run(capsys, "check", "command", "sudo rm -rf /")[0] == 2
+    assert run(capsys, "check", "command", "rm -rf /etc")[0] == 2
     assert run(capsys, "check", "command", "apt install ripgrep")[0] == 2
     assert (
         run(

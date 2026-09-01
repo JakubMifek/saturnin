@@ -203,6 +203,80 @@ def test_in_scope_server_commands(governance: Governance, command: str) -> None:
 
 
 @pytest.mark.parametrize(
+    ("command", "reason"),
+    [
+        ("rm -rf /etc", "forbidden root"),
+        ("touch /usr/local/unsafe", "forbidden root"),
+        ("mkdir /var/lib/saturnin", "forbidden root"),
+        ("rm -rf /home/saturnin-other", "outside writable roots"),
+        ("rm -- -outside-writable-roots", "outside writable roots"),
+        ("cp --target-directory /opt source", "outside writable roots"),
+        ("sed -i s/foo/bar/ /opt/status", "outside writable roots"),
+    ],
+)
+def test_filesystem_writes_outside_policy_are_rejected(
+    governance: Governance, command: str, reason: str
+) -> None:
+    decision = governance.check_server_command(command)
+
+    assert not decision.allowed
+    assert reason in decision.reasons[0]
+
+
+@pytest.mark.parametrize(
+    "command",
+    [
+        "rm -rf /home/saturnin/worktrees/stale",
+        "touch /home/saturnin/status",
+        "cp source /home/saturnin/worktrees/destination",
+        "sed -i s/foo/bar/ /home/saturnin/status",
+    ],
+)
+def test_filesystem_writes_within_writable_roots_are_allowed(
+    governance: Governance, command: str
+) -> None:
+    assert governance.check_server_command(command).allowed
+
+
+@pytest.mark.parametrize("binary", ["cp", "install", "ln", "mv", "rsync"])
+def test_single_destination_operand_is_checked(
+    governance: Governance, binary: str
+) -> None:
+    decision = governance.check_server_command(f"{binary} /opt/destination")
+
+    assert not decision.allowed
+    assert "outside writable roots" in decision.reasons[0]
+
+
+@pytest.mark.parametrize("binary", ["cp", "install", "ln", "mv", "rsync"])
+def test_only_final_operand_is_destination_for_multiple_operands(
+    governance: Governance, binary: str
+) -> None:
+    decision = governance.check_server_command(
+        f"{binary} /opt/source /home/saturnin/destination"
+    )
+
+    assert decision.allowed
+
+
+def test_forbidden_roots_override_writable_roots(
+    governance: Governance, config: Config
+) -> None:
+    config.server_scope["filesystem"]["writable_roots"] = ["/"]
+
+    decision = governance.check_server_command("rm -rf /etc")
+
+    assert not decision.allowed
+    assert "forbidden root '/etc'" in decision.reasons[0]
+
+
+def test_forbidden_roots_remain_readable(governance: Governance) -> None:
+    decision = governance.check_server_command("cat /etc/passwd")
+
+    assert decision.allowed
+
+
+@pytest.mark.parametrize(
     "command",
     [
         "true && apt remove python3",
