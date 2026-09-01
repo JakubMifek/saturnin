@@ -46,6 +46,20 @@ def test_dispatch_all_and_dry_run(home: Path, capsys: pytest.CaptureFixture[str]
     assert not json.loads(run(capsys, "--json", "task", "list", "--state", "intake")[1])
 
 
+@pytest.mark.parametrize(
+    ("squad", "error"),
+    [("ghost", "unknown squad members"), ("ceo", "CEO never executes")],
+)
+def test_dry_run_dispatch_rejects_an_invalid_squad(
+    home: Path, capsys: pytest.CaptureFixture[str], squad: str, error: str
+) -> None:
+    task = json.loads(run(capsys, "--json", "task", "add", "Preview dispatch")[1])
+
+    assert main(["dispatch", task["id"], "--dry-run", "--squad", squad]) == 1
+    assert error in capsys.readouterr().err
+    assert Board().get(task["id"]).state == "intake"
+
+
 def test_branch_and_command_checks(home: Path, capsys: pytest.CaptureFixture[str]) -> None:
     assert run(capsys, "check", "branch", "feature/x")[0] == 0
     assert run(capsys, "check", "branch", "main")[0] == 2

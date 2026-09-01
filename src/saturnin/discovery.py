@@ -88,14 +88,17 @@ class IssueDiscovery:
         return sources
 
     def marker(self, issue: InboundIssue) -> str:
-        prefix = self.policy.get("source_label_prefix", "source")
-        return f"{prefix}:{issue.ref}"
+        prefix = str(self.policy.get("source_label_prefix", "source")).casefold()
+        return f"{prefix}:{issue.ref.casefold()}"
 
     # -- ingest --------------------------------------------------------
     def known_markers(self) -> set[str]:
-        prefix = str(self.policy.get("source_label_prefix", "source")) + ":"
+        prefix = str(self.policy.get("source_label_prefix", "source")).casefold() + ":"
         return {
-            label for task in self.board for label in task.labels if label.startswith(prefix)
+            label.casefold()
+            for task in self.board
+            for label in task.labels
+            if label.casefold().startswith(prefix)
         }
 
     def ingest(self, issues: Iterable[InboundIssue]) -> list[Task]:

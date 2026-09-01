@@ -582,6 +582,8 @@ def _run_discover(args: argparse.Namespace, config: Config, board: Board, as_jso
 
 def _run_dispatch(args: argparse.Namespace, config: Config, board: Board, as_json: bool) -> int:
     router = Router(config)
+    if args.dry_run and args.squad:
+        router.validate_dispatch_squad(args.squad)
     if args.all:
         targets = board.list(state="intake")
     elif args.task_id:

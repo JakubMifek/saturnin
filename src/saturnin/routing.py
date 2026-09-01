@@ -126,6 +126,10 @@ class Router:
                 f"{source} puts the CEO in a squad; the CEO never executes"
             )
 
+    def validate_dispatch_squad(self, squad: Sequence[str]) -> None:
+        """Validate an ad-hoc squad before dispatching or previewing it."""
+        self._validate_squad(squad, "dispatch override")
+
     # -- dispatch ------------------------------------------------------
     def dispatch(
         self,
@@ -144,7 +148,7 @@ class Router:
         # even if the policy ever renames that role.
         effective_actor = actor if actor is not None else self.ceo_role
         if squad is not None:
-            self._validate_squad(squad, "dispatch override")
+            self.validate_dispatch_squad(squad)
         with board.edit(task.id) as current:
             if current.state not in ("intake", "blocked"):
                 raise BoardError(

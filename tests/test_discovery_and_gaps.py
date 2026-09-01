@@ -33,7 +33,7 @@ def test_inbound_issue_becomes_a_routed_task(config: Config, board: Board) -> No
     assert len(created) == 1
     task = created[0]
     assert task.repo == "JakubMifek/widget-api"
-    assert "source:JakubMifek/widget-api#7" in task.labels
+    assert "source:jakubmifek/widget-api#7" in task.labels
     assert "alert" in task.labels
     assert task.priority == "P0"
     assert "issues/7" in task.body
@@ -46,11 +46,20 @@ def test_discovery_never_adopts_the_same_issue_twice(config: Config, board: Boar
     assert len(list(board)) == 2
 
 
+def test_discovery_normalizes_source_markers(config: Config, board: Board) -> None:
+    discovery = _discovery(config, board, [_issue(7)])
+    discovery.run()
+    case_variant = _issue(7)
+    case_variant.repo = "jakubmifek/WIDGET-API"
+
+    assert discovery.ingest([case_variant]) == []
+
+
 def test_priority_falls_back_to_the_default(config: Config, board: Board) -> None:
     discovery = _discovery(config, board, [_issue(9, labels=["question"])])
     task = discovery.run()[0]
     assert task.priority == "P2"
-    assert task.labels == ["source:JakubMifek/widget-api#9"]
+    assert task.labels == ["source:jakubmifek/widget-api#9"]
 
 
 def test_discovery_respects_the_enabled_switch(config: Config, board: Board) -> None:
