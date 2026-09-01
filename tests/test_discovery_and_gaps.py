@@ -62,6 +62,15 @@ def test_priority_falls_back_to_the_default(config: Config, board: Board) -> Non
     assert task.labels == ["source:jakubmifek/widget-api#9"]
 
 
+def test_carried_labels_and_priority_match_regardless_of_case(config: Config, board: Board) -> None:
+    discovery = _discovery(config, board, [_issue(11, labels=["Alert", "INCIDENT"])])
+    task = discovery.run()[0]
+    assert task.priority == "P0"
+    assert "alert" in task.labels or "Alert" in task.labels
+    assert any(label.casefold() == "alert" for label in task.labels)
+    assert any(label.casefold() == "incident" for label in task.labels)
+
+
 def test_discovery_respects_the_enabled_switch(config: Config, board: Board) -> None:
     policy = config.policy("repos")
     policy["discovery"]["enabled"] = False

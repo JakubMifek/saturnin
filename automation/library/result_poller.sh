@@ -23,6 +23,7 @@ if (( ${#probes[@]} == 0 )); then
   exit 0
 fi
 
+exit_code=0
 for probe in "${probes[@]}"; do
   task_id="$(basename "$probe" .sh)"
   status=0
@@ -35,15 +36,32 @@ for probe in "${probes[@]}"; do
         mv "$probe" "$probe.done"
       else
         log "$task_id: failed to move task to review; leaving probe for retry"
+        exit_code=1
       fi
       ;;
     2)
       log "$task_id: still pending"
       ;;
     *)
-      log "$task_id: poller failed (exit $status): ${output:0:200}"
-      saturnin task move "$task_id" blocked --actor result-poller \
-        --note "poller failed (exit $status): ${output:0:200}" || true
+      note="poller failed (exit $status): ${output:0:200}"
+      log "$task_id: $note"
+      if ! saturnin task move "$task_id" blocked --actor result-poller --note "$note"; then
+        log "$task_id: failed to move task to blocked - board is out of sync"
+        exit_code=1
+        continue
+      fi
+      if ! saturnin escalate "Poller failed for task $task_id" \
+        --context "$note" \
+        --item "Check the poller probe at var/pollers/${task_id}.sh" \
+        --item "Confirm whether the awaited signal still applies" \
+        --urgency high \
+        --task "$task_id" \
+        --unblock "State whether to retry the poller or resolve the task manually" \
+        --push; then
+        log "$task_id: failed to submit escalation issue - blocked task has no escalation attached"
+        exit_code=1
+      fi
       ;;
   esac
 done
+exit "$exit_code"

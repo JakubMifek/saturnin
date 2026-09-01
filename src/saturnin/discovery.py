@@ -136,15 +136,17 @@ class IssueDiscovery:
 
 def _carried_labels(issue: InboundIssue, policy: dict[str, Any]) -> list[str]:
     """Labels worth copying onto the task, so routing can see them."""
-    carry = {str(label) for label in policy.get("carry_labels", [])}
-    return [label for label in issue.labels if label in carry]
+    carry = {str(label).casefold() for label in policy.get("carry_labels", [])}
+    return [label for label in issue.labels if label.casefold() in carry]
 
 
 def _priority(issue: InboundIssue, policy: dict[str, Any]) -> str:
     mapping: dict[str, str] = policy.get("priority_by_label", {}) or {}
+    mapping_casefold = {str(label).casefold(): str(value) for label, value in mapping.items()}
     for label in issue.labels:
-        if label in mapping:
-            return str(mapping[label])
+        folded = label.casefold()
+        if folded in mapping_casefold:
+            return mapping_casefold[folded]
     return str(policy.get("default_priority", "P2"))
 
 
