@@ -58,7 +58,9 @@ class Router:
         if not parts:
             return False
         pattern = (
-            r"(?<!\w)" + r"\s+".join(re.escape(part) for part in parts) + r"(?!\w)"
+            r"(?<![\w-])"
+            + r"\s+".join(re.escape(part) for part in parts)
+            + r"(?![\w-])"
         )
         return bool(re.search(pattern, text))
 

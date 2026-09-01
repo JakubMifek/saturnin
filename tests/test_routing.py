@@ -23,6 +23,8 @@ def test_keyword_routing_uses_word_boundaries(config: Config, board: Board) -> N
     router = Router(config)
     task = board.create("Download the release artifact")
     assert router.resolve(task).role == "chief-of-staff"
+    compound = board.create("Plan a down-time maintenance window")
+    assert router.resolve(compound).role == "chief-of-staff"
     incident = board.create("Production is down")
     assert router.resolve(incident).role == "code-worker"
 
