@@ -203,7 +203,7 @@ class Board:
         task.log("intake", actor=source)
         return self.save(task)
 
-    def transition(self, task: Task, state: str, *, actor: str = "ceo", note: str = "") -> Task:
+    def transition(self, task: Task, state: str, *, actor: str | None = None, note: str = "") -> Task:
         """Transition ``task`` by id under the exclusive lock.
 
         Delegates to :meth:`transition_id` rather than saving the in-memory
@@ -212,10 +212,10 @@ class Board:
         """
         return self.transition_id(task.id, state, actor=actor, note=note)
 
-    def transition_id(self, task_id: str, state: str, *, actor: str = "ceo", note: str = "") -> Task:
+    def transition_id(self, task_id: str, state: str, *, actor: str | None = None, note: str = "") -> Task:
         """Read-modify-write a state transition under the task's exclusive lock."""
         with self.edit(task_id) as task:
-            self._apply_transition(task, state, actor=actor, note=note)
+            self._apply_transition(task, state, actor=actor or self.config.ceo_role, note=note)
         return task
 
     @staticmethod

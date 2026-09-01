@@ -119,6 +119,11 @@ class Config:
     def server_scope(self) -> dict[str, Any]:
         return self.policy("server_scope")
 
+    @property
+    def ceo_role(self) -> str:
+        """The configured CEO role name (``delegation.ceo_role``), never a bare literal."""
+        return self.governance.get("delegation", {}).get("ceo_role", "ceo")
+
     def ensure_dirs(self) -> None:
         for path in (
             self.tasks_dir,

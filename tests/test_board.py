@@ -37,6 +37,23 @@ def test_transitions_are_validated(board: Board) -> None:
         board.transition(task, "in_progress")
 
 
+def test_transition_default_actor_uses_configured_ceo_role(board: Board) -> None:
+    """transition()/transition_id() must stamp the configured ceo_role, not a hardcoded literal."""
+    delegation = board.config.governance.setdefault("delegation", {})
+    had_role = "ceo_role" in delegation
+    original_role = delegation.get("ceo_role")
+    delegation["ceo_role"] = "chief"
+    try:
+        task = board.create("Implement widget")
+        updated = board.transition(task, "routed")
+        assert updated.history[-1]["actor"] == "chief"
+    finally:
+        if had_role:
+            delegation["ceo_role"] = original_role
+        else:
+            delegation.pop("ceo_role", None)
+
+
 def test_transition_id_is_read_modify_write_under_lock(board: Board) -> None:
     task = board.create("Implement widget")
     updated = board.transition_id(task.id, "routed", actor="router", note="dispatched")

@@ -79,7 +79,7 @@ def build_parser() -> argparse.ArgumentParser:
     move = task.add_parser("move", help="change task state")
     move.add_argument("task_id")
     move.add_argument("state")
-    move.add_argument("--actor", default="ceo")
+    move.add_argument("--actor", default=None, help="default: the configured CEO role")
     move.add_argument("--note", default="")
 
     tree = task.add_parser("tree", help="show the work hierarchy")
