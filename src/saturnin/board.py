@@ -204,8 +204,13 @@ class Board:
         return self.save(task)
 
     def transition(self, task: Task, state: str, *, actor: str = "ceo", note: str = "") -> Task:
-        self._apply_transition(task, state, actor=actor, note=note)
-        return self.save(task)
+        """Transition ``task`` by id under the exclusive lock.
+
+        Delegates to :meth:`transition_id` rather than saving the in-memory
+        ``task`` directly, so a caller holding a stale ``Task`` instance can't
+        clobber concurrent updates made by another squad.
+        """
+        return self.transition_id(task.id, state, actor=actor, note=note)
 
     def transition_id(self, task_id: str, state: str, *, actor: str = "ceo", note: str = "") -> Task:
         """Read-modify-write a state transition under the task's exclusive lock."""
