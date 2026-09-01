@@ -19,6 +19,14 @@ def test_keyword_routing(config: Config, board: Board) -> None:
     assert router.resolve(docs).role == "scribe"
 
 
+def test_keyword_routing_uses_word_boundaries(config: Config, board: Board) -> None:
+    router = Router(config)
+    task = board.create("Download the release artifact")
+    assert router.resolve(task).role == "chief-of-staff"
+    incident = board.create("Production is down")
+    assert router.resolve(incident).role == "code-worker"
+
+
 def test_kind_routing(config: Config, board: Board) -> None:
     task = board.create("Review PR 12", kind="pr-review")
     route = Router(config).resolve(task)

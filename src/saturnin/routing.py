@@ -7,6 +7,7 @@ in the system.
 
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass
 from typing import Any, Sequence
 
@@ -51,6 +52,16 @@ class Router:
     def _haystack(task: Task) -> str:
         return " ".join([task.title, task.body, " ".join(task.labels)]).lower()
 
+    @staticmethod
+    def _has_keyword(text: str, keyword: object) -> bool:
+        parts = str(keyword).lower().split()
+        if not parts:
+            return False
+        pattern = (
+            r"(?<!\w)" + r"\s+".join(re.escape(part) for part in parts) + r"(?!\w)"
+        )
+        return bool(re.search(pattern, text))
+
     def _matches(self, when: dict[str, Any], task: Task) -> bool:
         if not when:
             return False
@@ -61,7 +72,7 @@ class Router:
         if "any_label" in when and not labels & {str(v).lower() for v in when["any_label"]}:
             return False
         if "any_keyword" in when and not any(
-            str(word).lower() in text for word in when["any_keyword"]
+            self._has_keyword(text, word) for word in when["any_keyword"]
         ):
             return False
         return True
