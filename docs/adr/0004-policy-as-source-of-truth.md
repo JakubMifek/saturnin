@@ -11,7 +11,7 @@ From review:
 > duplicities in general across many files. Is that wise? How do we prevent
 > drift?
 
-It is not wise, and it was true: the seven rules appeared in
+It is not wise, and it was true: the governance rules appeared in
 `policies/governance.yaml`, `docs/operating-model.md`,
 `.github/copilot-instructions.md` and the README; the role catalog appeared in
 `policies/routing.yaml`, `agents/README.md`, `docs/delegation-policy.md` and in

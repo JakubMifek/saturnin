@@ -23,7 +23,7 @@ intake --dispatch--> routed --> in_progress --> review --> done
 - `blocked` always has an escalation issue attached.
 - Anything interruptible carries a checkpoint before it pauses.
 
-## 3. Governance (the seven rules)
+## 3. Governance
 
 <!-- generated:rules -->
 | # | Rule | Enforced by |

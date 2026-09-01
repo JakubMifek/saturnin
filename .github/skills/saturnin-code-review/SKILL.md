@@ -32,7 +32,7 @@ anything else:
    (`src/saturnin/board.py`), is a race condition, not a style nit - it must be
    flagged as blocking.
 
-5. **The seven governance rules are load-bearing.** Watch specifically for:
+5. **The governance rules are load-bearing.** Watch specifically for:
    pushes or merge instructions targeting `main`/`master`/`release` directly;
    automation that runs outside a feature-branch worktree; a PR merged without
    an independent review recorded via `saturnin review record` /
