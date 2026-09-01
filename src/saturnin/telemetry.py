@@ -9,13 +9,6 @@ from typing import Any, Iterable
 from .board import Board, TERMINAL_STATES, Task, parse_ts
 
 
-def _first_ts(task: Task, event: str) -> datetime | None:
-    for entry in task.history:
-        if entry.get("event") == event:
-            return parse_ts(entry["ts"])
-    return None
-
-
 def dispatch_latency_seconds(task: Task) -> float | None:
     """How long the task waited before the CEO handed it to somebody."""
     if not task.routed_at:

@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import pytest
 
-from saturnin.board import Board
+from saturnin.board import Board, BoardError
 from saturnin.config import Config
 from saturnin.routing import Router, RoutingError
 
@@ -90,7 +90,7 @@ def test_dispatch_twice_is_refused(config: Config, board: Board) -> None:
     task = board.create("Implement the widget")
     router = Router(config)
     router.dispatch(board, task)
-    with pytest.raises(Exception):
+    with pytest.raises(BoardError):
         router.dispatch(board, board.get(task.id))
 
 
