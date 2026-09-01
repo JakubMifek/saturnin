@@ -13,6 +13,7 @@ from typing import Any, Iterator
 
 from .board import Board, BoardError, utcnow
 from .config import Config, default_config
+from .locking import file_lock
 
 REQUIRED_FIELDS = ("task_id", "role", "summary", "next_steps")
 
@@ -83,8 +84,9 @@ class CheckpointStore:
             if not getattr(checkpoint, name):
                 raise CheckpointError(f"checkpoint field {name!r} must not be empty")
         path = self.path_for(checkpoint.task_id)
-        with path.open("a", encoding="utf-8") as handle:
-            handle.write(json.dumps(checkpoint.to_dict()) + "\n")
+        with file_lock(path):
+            with path.open("a", encoding="utf-8") as handle:
+                handle.write(json.dumps(checkpoint.to_dict()) + "\n")
         try:
             with self.board.edit(checkpoint.task_id) as task:
                 task.checkpoint = checkpoint.created_at
@@ -102,13 +104,14 @@ class CheckpointStore:
         path = self.path_for(task_id)
         if not path.is_file():
             return []
-        lines = [
-            (line_number, line, line.endswith("\n"))
-            for line_number, line in enumerate(
-                path.read_text(encoding="utf-8").splitlines(keepends=True), start=1
-            )
-            if line.strip()
-        ]
+        with file_lock(path, exclusive=False):
+            lines = [
+                (line_number, line, line.endswith("\n"))
+                for line_number, line in enumerate(
+                    path.read_text(encoding="utf-8").splitlines(keepends=True), start=1
+                )
+                if line.strip()
+            ]
         checkpoints: list[Checkpoint] = []
         for index, (line_number, line, terminated) in enumerate(lines):
             try:

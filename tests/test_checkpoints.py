@@ -1,5 +1,9 @@
 from __future__ import annotations
 
+from contextlib import contextmanager
+from pathlib import Path
+from typing import Iterator
+
 import pytest
 
 from saturnin.board import Board
@@ -92,6 +96,30 @@ def test_save_uses_locked_board_edit(
     stored = board.get(task.id)
     assert stored.body == "updated by another squad"
     assert stored.history[-1]["event"] == "checkpoint"
+
+
+def test_checkpoint_store_locks_jsonl_access(
+    config: Config, board: Board, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    task = board.create("Parallel checkpoints")
+    calls: list[tuple[str, bool]] = []
+
+    @contextmanager
+    def fake_file_lock(path: Path, *, exclusive: bool = True) -> Iterator[None]:
+        calls.append((path.name, exclusive))
+        yield
+
+    monkeypatch.setattr("saturnin.checkpoints.file_lock", fake_file_lock)
+    store = CheckpointStore(config, board)
+    store.save(
+        Checkpoint(task_id=task.id, role="scribe", summary="saved", next_steps=["resume"])
+    )
+
+    assert (f"{task.id}.jsonl", True) in calls
+
+    calls.clear()
+    assert store.history(task.id)
+    assert calls == [(f"{task.id}.jsonl", False)]
 
 
 def test_incomplete_checkpoint_rejected(config: Config, board: Board) -> None:
