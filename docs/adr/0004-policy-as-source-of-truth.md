@@ -39,7 +39,7 @@ repetition is **generated**, not typed:
 - `saturnin docs render --check` exits 2 when a block is stale; `saturnin doctor`
   and CI both run it, so a policy change that does not update the docs fails the
   build.
-- Generators available: `rules`, `rules-list`, `roles`, `routing`
+- Generators available: `rules`, `rules-list`, `roles`, `routing`, `backlog`
   (`src/saturnin/docsync.py`).
 
 For facts that cannot be generated - an agent's prose contract - the *structured*

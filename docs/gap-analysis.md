@@ -32,7 +32,7 @@ keep running while nobody is looking (ADR-0003).
 | No per-agent tool boundary | `policies/mcp.yaml` + per-agent `mcp:` allow-list, validated by `doctor` | done |
 | Nothing watched hosted applications | monitors declared per project, `run_monitors.sh`, failures become P0 tasks | done |
 | No record of *why* decisions were made | `docs/adr/` | done |
-| Nothing prevented malformed policies being committed | `.pre-commit-config.yaml` (yaml/json checks, ruff, secret detection) | done |
+| Nothing prevented malformed policies being committed | `.pre-commit-config.yaml` (YAML/JSON checks, merge-conflict checks, whitespace fixes and secret detection) | done |
 | No security model written down | `SECURITY.md` | done |
 | Coverage was unmeasured | 80% branch-coverage floor in the test worker contract and CI | done |
 

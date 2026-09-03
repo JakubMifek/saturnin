@@ -76,7 +76,11 @@ def audit(config: Config | None = None) -> list[str]:
             "agent contracts with no role in policies/routing.yaml: " + ", ".join(orphans)
         )
 
-    skills = {path.stem for path in (config.root / "skills").glob("*.md")}
+    skills = {
+        path.stem
+        for path in (config.root / "skills").glob("*.md")
+        if path.name != "README.md"
+    }
     mcp_policy = config.policy("mcp")
     servers = set(mcp_policy.get("servers", {}))
     denied: dict[str, list[str]] = mcp_policy.get("rules", {}).get("deny_for_roles", {})
@@ -86,6 +90,9 @@ def audit(config: Config | None = None) -> list[str]:
 
     for role, contract in contracts.items():
         catalog = roles.get(role)
+        for skill in contract.skills:
+            if skill not in skills:
+                problems.append(f"{contract.path.name}: unknown skill {skill!r}")
         if catalog is None:
             continue
         if contract.unit != catalog.get("unit"):
@@ -95,9 +102,6 @@ def audit(config: Config | None = None) -> list[str]:
             )
         if contract.executes != bool(catalog.get("executes", True)):
             problems.append(f"{contract.path.name}: 'executes' disagrees with the role catalog")
-        for skill in contract.skills:
-            if skill not in skills:
-                problems.append(f"{contract.path.name}: unknown skill {skill!r}")
         for server in contract.mcp:
             if server not in servers:
                 problems.append(f"{contract.path.name}: unknown MCP server {server!r}")

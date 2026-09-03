@@ -28,6 +28,22 @@ def test_unknown_mcp_server_is_rejected(config: Config) -> None:
     assert any("telepathy" in problem for problem in audit(config))
 
 
+def test_unknown_skill_in_orphan_contract_is_rejected(config: Config) -> None:
+    path = config.root / "agents" / "researcher.md"
+    path.write_text(
+        path.read_text()
+        .replace("role: researcher", "role: unrecognized-worker")
+        .replace("skills: [board-ops]", "skills: [telepathy]")
+    )
+    assert any("unknown skill 'telepathy'" in problem for problem in audit(config))
+
+
+def test_skills_readme_is_not_a_valid_skill(config: Config) -> None:
+    path = config.root / "agents" / "researcher.md"
+    path.write_text(path.read_text().replace("skills: [board-ops]", "skills: [README]"))
+    assert any("unknown skill 'README'" in problem for problem in audit(config))
+
+
 def test_ceo_gets_no_mcp_servers(config: Config) -> None:
     path = config.root / "agents" / "ceo.md"
     path.write_text(path.read_text().replace("mcp: []", "mcp: [github]"))

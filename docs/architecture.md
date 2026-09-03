@@ -75,8 +75,9 @@ inspected with `cat` when everything else is on fire.
 
 The primary runtime is the local Debian server, running as the unprivileged
 `saturnin` user with systemd **user** timers (`systemd/`). GitHub Actions is an
-integration helper only: it runs the test suite and the review gate on PRs; it
-never owns state and never schedules the orchestrator.
+integration helper only: it runs policy, documentation, shell-syntax and test
+checks, plus the feature-branch gate on PRs; it never owns state and never
+schedules the orchestrator.
 
 ## Extension points
 
