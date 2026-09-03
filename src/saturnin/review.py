@@ -33,6 +33,7 @@ class ReviewRecord:
     reviewer: str
     verdict: str
     zero_context: bool = True
+    head_sha: str = ""
     notes: str = ""
     created_at: str = field(default_factory=utcnow)
 
@@ -68,13 +69,14 @@ class ReviewLedger:
         reviewer: str,
         verdict: str,
         zero_context: bool = True,
+        head_sha: str = "",
         notes: str = "",
     ) -> ReviewRecord:
         if kind not in KINDS:
             raise ReviewError(f"unknown review kind: {kind}")
         if verdict not in VERDICTS:
             raise ReviewError(f"unknown verdict: {verdict}")
-        if reviewer == author:
+        if reviewer.strip().lower() == author.strip().lower():
             raise ReviewError("a review must be written by somebody other than the author")
         roles = self.config.routing.get("roles", {})
         reviewer_name = reviewer.strip().lower()
@@ -89,6 +91,7 @@ class ReviewLedger:
             reviewer=reviewer_name,
             verdict=verdict,
             zero_context=zero_context,
+            head_sha=head_sha,
             notes=notes,
         )
         path = self.dir / f"{kind}-{slugify(subject)}.jsonl"
@@ -128,3 +131,24 @@ class ReviewLedger:
                 raise ReviewError(
                     f"corrupt review ledger {path} at line {line_number}: {exc}"
                 ) from exc
+
+
+_KIND_TO_REVIEWER_ROLE: dict[str, str] = {
+    "pr": "pr-reviewer",
+    "issue": "issue-reviewer",
+}
+
+
+def _allowed_reviewer_roles(kind: str, config: Config) -> set[str]:
+    """Return the set of roles allowed to review the given kind.
+
+    Falls back to the hard-coded mapping when policy does not specify one.
+    """
+    review_policy = config.governance.get("review", {}).get(kind, {})
+    explicit = review_policy.get("allowed_reviewer_roles")
+    if explicit:
+        return {str(r).strip().lower() for r in explicit}
+    default_role = _KIND_TO_REVIEWER_ROLE.get(kind)
+    if default_role:
+        return {default_role}
+    return set()

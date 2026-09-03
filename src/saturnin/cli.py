@@ -172,11 +172,13 @@ def build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="reviewer had prior context (fails the zero-context gate)",
     )
+    record.add_argument("--head-sha", default="", help="reviewed commit SHA for PR reviews")
     gate = review.add_parser("gate", help="check whether merge/submission is allowed")
     gate.add_argument("subject")
     gate.add_argument("--kind", choices=["pr", "issue"], required=True)
     gate.add_argument("--repo", required=True)
     gate.add_argument("--author", required=True)
+    gate.add_argument("--head-sha", default="", help="current PR head SHA to match reviews against")
 
     # governance -------------------------------------------------------
     gov = sub.add_parser("check", help="governance checks").add_subparsers(
@@ -199,6 +201,7 @@ def build_parser() -> argparse.ArgumentParser:
     esc.add_argument("--unblock", action="append", default=[], dest="unblock")
     esc.add_argument("--urgency", default="normal")
     esc.add_argument("--task")
+    esc.add_argument("--actor", default="chief-of-staff", help="role performing the escalation")
     esc.add_argument("--push", action="store_true", help="submit to the configured board repo")
 
     # automation -------------------------------------------------------
@@ -414,12 +417,13 @@ def _run(args: argparse.Namespace, config: Config) -> int:  # noqa: C901 - flat 
             else None
         )
         if url and args.task:
+            escalation_actor = getattr(args, "actor", "chief-of-staff")
             try:
-                board.transition_id(args.task, "blocked", actor="ceo", note=f"escalated: {url}")
+                board.transition_id(args.task, "blocked", actor=escalation_actor, note=f"escalated: {url}")
             except BoardError:
                 try:
                     with board.edit(args.task) as etask:
-                        etask.log("escalation", actor="ceo", note=f"escalated: {url}")
+                        etask.log("escalation", actor=escalation_actor, note=f"escalated: {url}")
                 except BoardError:
                     print(f"warning: escalation submitted but task {args.task} not updated", file=sys.stderr)
         _emit({"body": body, "url": url}, as_json, url or body)
@@ -705,6 +709,7 @@ def _run_review(args: argparse.Namespace, config: Config, as_json: bool) -> int:
             reviewer=args.reviewer,
             verdict=args.verdict,
             zero_context=not args.with_context,
+            head_sha=getattr(args, "head_sha", ""),
             notes=args.notes,
         )
         _emit(
@@ -716,7 +721,10 @@ def _run_review(args: argparse.Namespace, config: Config, as_json: bool) -> int:
     governance = Governance(config)
     records = ledger.for_subject(args.subject, args.kind)
     decision = (
-        governance.merge_allowed(repo=args.repo, author=args.author, records=records)
+        governance.merge_allowed(
+            repo=args.repo, author=args.author, records=records,
+            head_sha=getattr(args, "head_sha", ""),
+        )
         if args.kind == "pr"
         else governance.issue_submission_allowed(
             repo=args.repo, author=args.author, records=records

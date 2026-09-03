@@ -109,10 +109,18 @@ class Governance:
         author: str,
         settings: dict[str, Any],
         subject: str,
+        *,
+        kind: str = "",
     ) -> Decision:
+        from .review import _allowed_reviewer_roles
         reasons: list[str] = []
-        records = [r for r in records if r.author == author]
+        author_lower = author.strip().lower()
+        records = [r for r in records if r.author.strip().lower() == author_lower]
+        # Only count approvals from designated reviewer roles for this kind.
+        allowed = _allowed_reviewer_roles(kind, self.config) if kind else set()
         approvals = [r for r in records if r.verdict == "approved"]
+        if allowed:
+            approvals = [r for r in approvals if r.reviewer.strip().lower() in allowed]
         blocking = [r for r in records if r.verdict in ("changes_requested", "rejected")]
         if blocking:
             return Decision.deny(
@@ -120,7 +128,7 @@ class Governance:
                 + ", ".join(f"{r.reviewer}={r.verdict}" for r in blocking)
             )
         if settings.get("independent", True) and not settings.get("author_may_review", False):
-            self_reviews = [r for r in approvals if r.reviewer == author]
+            self_reviews = [r for r in approvals if r.reviewer.strip().lower() == author_lower]
             if self_reviews:
                 return Decision.deny(f"{subject}: author {author!r} may not review their own work")
         if settings.get("zero_context", False):
@@ -136,13 +144,21 @@ class Governance:
         return Decision(True, reasons)
 
     def merge_allowed(
-        self, *, repo: str, author: str, records: Iterable[ReviewRecord]
+        self, *, repo: str, author: str, records: Iterable[ReviewRecord], head_sha: str = ""
     ) -> Decision:
         """Rule 3 + 4: merge only after an independent zero-context review."""
         records = [r for r in records if r.kind == "pr"]
+        # When a head SHA is provided, only reviews that match it are valid.
+        if head_sha:
+            records = [r for r in records if r.head_sha == head_sha]
+            if not records:
+                return Decision.deny(
+                    f"no review records match the current head SHA ({head_sha[:12]}); "
+                    "new commits may have been pushed after the last review"
+                )
         settings = self.review.get("pr", {})
         if settings.get("required", True):
-            decision = self._review_gate(records, author, settings, "pr review")
+            decision = self._review_gate(records, author, settings, "pr review", kind="pr")
             if not decision.allowed:
                 return decision
             reasons = list(decision.reasons)
@@ -168,6 +184,12 @@ class Governance:
             if isinstance(repo_entry, dict) and repo_entry.get("slug")
         }
         managed.add(self.autonomy.get("self_repo"))
+        # Discovery sources are also managed project repositories.
+        discovery = self.config.policy("repos").get("discovery", {})
+        for source in discovery.get("sources", []) or []:
+            slug = source.get("slug") if isinstance(source, dict) else source
+            if slug:
+                managed.add(str(slug))
         if repo not in managed:
             return Decision.deny(f"{repo}: issue creation is only allowed in managed repositories")
         if repo == self.autonomy.get("self_repo"):
@@ -178,7 +200,7 @@ class Governance:
         if not settings.get("required_for_external_repos", True):  # pragma: no cover
             return Decision.ok(f"{repo}: issue review not required")
         settings.setdefault("min_approvals", 1)
-        return self._review_gate(records, author, settings, "issue review")
+        return self._review_gate(records, author, settings, "issue review", kind="issue")
 
     def push_allowed(self, *, repo: str, branch: str) -> Decision:
         branch_check = self.check_branch(branch)
@@ -428,11 +450,18 @@ def _check_filesystem_scope(
     forbidden_roots = _policy_roots(filesystem.get("forbidden_roots", []))
     targets = _writable_targets(binary, arguments)
     if not targets:
-        # No explicit write targets detected.  For binaries whose write
-        # behaviour cannot be statically determined (interpreters, arbitrary
-        # executables) the only safe stance is an allowlist check.
+        # No explicit write targets detected.  Interpreters and shells can
+        # perform arbitrary filesystem writes that argument inspection cannot
+        # detect, so they must be denied unless an explicit allowlist permits
+        # them.  For non-interpreter binaries the allowlist is also checked.
         allowlist = set(filesystem.get("executable_allowlist", []))
-        if allowlist and binary not in allowlist:
+        if binary in _SHELL_BINARIES or binary in {"python", "python3", "ruby", "perl", "node"}:
+            if binary not in allowlist:
+                return Decision.deny(
+                    f"{binary!r} is an interpreter whose filesystem writes cannot be "
+                    "statically determined; add it to executable_allowlist to permit it"
+                )
+        elif allowlist and binary not in allowlist:
             return Decision.deny(
                 f"{binary!r} is not in the executable allowlist; "
                 "arbitrary executables cannot be sandboxed by argument inspection alone"

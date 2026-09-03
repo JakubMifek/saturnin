@@ -15,6 +15,8 @@ repos:
 
   # System of record for work. Every board task is mirrored here as an issue,
   # so nothing is lost if the local var/ and board/ directories disappear.
+  # Mirroring to this repo bypasses the issue-review gate (rule 5) by design:
+  # it is an automated durability mechanism, not a human filing an issue.
   board:
     slug: JakubMifek/saturnin-ops
     visibility: private

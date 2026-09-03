@@ -83,6 +83,7 @@ def test_syncable_revisits_existing_open_mirrors(config: Config, board: Board) -
     assert {task.id for task in IssueMirror(config, board).syncable()} == {
         existing.id,
         fresh.id,
+        closed.id,
     }
 
 

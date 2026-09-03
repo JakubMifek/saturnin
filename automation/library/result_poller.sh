@@ -31,6 +31,8 @@ for probe in "${probes[@]}"; do
   case "$status" in
     0)
       log "$task_id: signal received - handing back to the board"
+      # Clear any escalation deduplication marker from a previous failure episode.
+      rm -f "${POLLERS_DIR}/${task_id}.escalated"
       # The task may be in blocked (previous probe error) or in_progress.
       # Transition through in_progress first so blocked->review is never attempted.
       current_state="$(saturnin task show "$task_id" --json 2>/dev/null \
@@ -57,21 +59,33 @@ for probe in "${probes[@]}"; do
     *)
       note="poller failed (exit $status): ${output:0:200}"
       log "$task_id: $note"
+      # Deduplicate: only escalate once per failure episode.  The marker file
+      # is removed on recovery (exit 0 branch) so a *new* failure after
+      # recovery will escalate again.
+      escalation_marker="${POLLERS_DIR}/${task_id}.escalated"
+      if [[ -f "$escalation_marker" ]]; then
+        log "$task_id: already escalated for this failure episode - skipping"
+      else
+        # Submit escalation BEFORE moving to blocked so the task is never
+        # left blocked without an attached escalation issue.
+        if ! saturnin escalate "Poller failed for task $task_id" \
+          --context "$note" \
+          --item "Check the poller probe at var/pollers/${task_id}.sh" \
+          --item "Confirm whether the awaited signal still applies" \
+          --urgency high \
+          --task "$task_id" \
+          --unblock "State whether to retry the poller or resolve the task manually" \
+          --push; then
+          log "$task_id: failed to submit escalation issue - not blocking task"
+          exit_code=1
+          continue
+        fi
+        touch "$escalation_marker"
+      fi
       if ! saturnin task move "$task_id" blocked --actor result-poller --note "$note"; then
         log "$task_id: failed to move task to blocked - board is out of sync"
         exit_code=1
         continue
-      fi
-      if ! saturnin escalate "Poller failed for task $task_id" \
-        --context "$note" \
-        --item "Check the poller probe at var/pollers/${task_id}.sh" \
-        --item "Confirm whether the awaited signal still applies" \
-        --urgency high \
-        --task "$task_id" \
-        --unblock "State whether to retry the poller or resolve the task manually" \
-        --push; then
-        log "$task_id: failed to submit escalation issue - blocked task has no escalation attached"
-        exit_code=1
       fi
       ;;
   esac

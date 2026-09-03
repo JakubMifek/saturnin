@@ -78,6 +78,10 @@ escalation:
   channel: github_issue
   mention: "@jakubmifek"
   label: "saturnin:escalation"
+  # Escalation issues bypass the issue-review gate (rule 5) by design:
+  # blocking an escalation on a reviewer defeats the purpose of the safety
+  # valve.  The escalation itself is the review trigger for a human.
+  bypass_issue_review: true
   required_sections:
     - checklist
     - urgency

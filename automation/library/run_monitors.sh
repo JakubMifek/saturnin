@@ -67,6 +67,8 @@ print(monitor["name"], monitor["url"], monitor.get("expect_status", 200),
         "$started" "$app" "$name" "$code" >> "$monitor_ok_results"
       printf '{"ts":"%s","app":"%s","monitor":"%s","status":"%s","ok":true}\n' \
         "$started" "$app" "$name" "$code" >> "$results"
+      # Clear escalation deduplication marker on recovery.
+      rm -f "${RESULTS_DIR}/${app}_${name}.escalated"
       log "$app/$name ok ($code)"
       continue
     fi
@@ -81,13 +83,19 @@ print(monitor["name"], monitor["url"], monitor.get("expect_status", 200),
       "$started" "$app" "$name" "$code" >> "$monitor_results"
     recent_failures="$(tail -n 2 "$monitor_results" | grep -c '"ok":false' || true)"
     if (( recent_failures >= 2 )); then
-      saturnin escalate "Monitor $app/$name failing repeatedly" \
-        --context "Expected HTTP $expect from $url, got $code twice in a row." \
-        --item "Confirm the service is meant to be up" \
-        --item "Check deploy history and infrastructure" \
-        --urgency high \
-        --unblock "State whether to roll back, patch or accept the outage" \
-        --push
+      # Only escalate once per consecutive-failure streak.  The marker is
+      # removed when the monitor recovers (ok=true path above).
+      escalation_marker="${RESULTS_DIR}/${app}_${name}.escalated"
+      if [[ ! -f "$escalation_marker" ]]; then
+        saturnin escalate "Monitor $app/$name failing repeatedly" \
+          --context "Expected HTTP $expect from $url, got $code twice in a row." \
+          --item "Confirm the service is meant to be up" \
+          --item "Check deploy history and infrastructure" \
+          --urgency high \
+          --unblock "State whether to roll back, patch or accept the outage" \
+          --push
+        touch "$escalation_marker"
+      fi
     else
       saturnin task add "Monitor $app/$name failed: HTTP $code from $url" \
         --body "Expected $expect, observed $code at $started. Monitor declared in $manifest." \

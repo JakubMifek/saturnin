@@ -9,11 +9,7 @@
       "type": "stdio",
       "command": "uvx",
       "args": ["mcp-server-fetch"]
-    },
-    "filesystem": {
-      "type": "stdio",
-      "command": "npx",
-      "args": ["-y", "@modelcontextprotocol/server-filesystem", "var/worktrees"]
     }
-  }
+  },
+  "_note": "Role-scoped MCP configuration is enforced at the launcher level; this file lists servers available to the runtime, not a blanket grant to every agent. See policies/mcp.yaml for per-role declarations."
 }

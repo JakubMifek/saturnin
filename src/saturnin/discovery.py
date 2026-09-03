@@ -168,6 +168,8 @@ def _gh_fetch(repo: str, labels: list[str]) -> list[InboundIssue]:
     # are ANDed, but the policy intent is OR (any configured label is adoptable).
     seen: dict[int, InboundIssue] = {}
     for label in labels:
+        # Use a high limit to ensure all adoptable issues are seen, not just
+        # the first 100.  gh handles internal pagination automatically.
         args = [
             "issue",
             "list",
@@ -178,7 +180,7 @@ def _gh_fetch(repo: str, labels: list[str]) -> list[InboundIssue]:
             "--json",
             "number,title,body,url,labels",
             "--limit",
-            "100",
+            "10000",
             "--label",
             label,
         ]

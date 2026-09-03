@@ -89,11 +89,14 @@ class Config:
     def __post_init__(self) -> None:
         self.root = Path(self.root).resolve()
         self.policies = self.root / "policies"
-        self.board_dir = self.root / "board"
+        # Board, checkpoints and automation stay in the main checkout so that
+        # linked worktrees share a single data root (and its locks coordinate).
+        data_root = _canonical_worktree(self.root)
+        self.board_dir = data_root / "board"
         self.tasks_dir = self.board_dir / "tasks"
         self.checkpoints_dir = self.board_dir / "checkpoints"
         self.automation_dir = self.root / "automation"
-        self.var_dir = self.root / "var"
+        self.var_dir = data_root / "var"
 
     @classmethod
     def load(cls, root: Path | str | None = None) -> "Config":
