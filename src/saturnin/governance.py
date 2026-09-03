@@ -428,6 +428,15 @@ def _check_filesystem_scope(
     forbidden_roots = _policy_roots(filesystem.get("forbidden_roots", []))
     targets = _writable_targets(binary, arguments)
     if not targets:
+        # No explicit write targets detected.  For binaries whose write
+        # behaviour cannot be statically determined (interpreters, arbitrary
+        # executables) the only safe stance is an allowlist check.
+        allowlist = set(filesystem.get("executable_allowlist", []))
+        if allowlist and binary not in allowlist:
+            return Decision.deny(
+                f"{binary!r} is not in the executable allowlist; "
+                "arbitrary executables cannot be sandboxed by argument inspection alone"
+            )
         return Decision.ok("command has no explicit filesystem write target")
 
     writable_roots = _policy_roots(filesystem.get("writable_roots", []))

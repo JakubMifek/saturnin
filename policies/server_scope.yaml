@@ -33,3 +33,36 @@ filesystem:
     - /usr
     - /var/lib
     - /root
+  # Executables that are allowed even though their write targets cannot be
+  # statically determined. Commands not in this list and not handled by the
+  # built-in binary recogniser will be denied (see governance.py for details).
+  executable_allowlist:
+    - saturnin
+    - python3
+    - git
+    - gh
+    - curl
+    - jq
+    - grep
+    - find
+    - cat
+    - head
+    - tail
+    - ls
+    - date
+    - echo
+    - printf
+    - true
+    - false
+    - test
+    - wc
+    - sort
+    - uniq
+    - tr
+    - cut
+    - basename
+    - dirname
+    - mkdir
+    - sleep
+    - systemctl
+    - apt

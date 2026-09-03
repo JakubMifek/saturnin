@@ -129,7 +129,19 @@ class IssueMirror:
         ]
 
     def syncable(self) -> list[Task]:
-        return [task for task in self.board.list(open_only=True) if self.mirrors(task)]
+        """Return tasks that need syncing, including terminal tasks for a final update."""
+        result: list[Task] = []
+        for task in self.board:
+            if not self.mirrors(task):
+                continue
+            if task.state in ("done", "cancelled"):
+                # Terminal tasks need one final sync to close the GitHub issue,
+                # but only if they already have a mirror.
+                if task.issue:
+                    result.append(task)
+            else:
+                result.append(task)
+        return result
 
     def sync(self, task: Task, *, push: bool = False, actor: str = "chief-of-staff") -> IssuePayload:
         payload = self.render(task)
@@ -148,6 +160,7 @@ class IssueMirror:
 
     def _push(self, task: Task, payload: IssuePayload) -> str:
         ensure_labels(payload.repo, payload.labels)
+        terminal = task.state in ("done", "cancelled")
         if task.issue:
             current = self._issue_labels(task.issue)
             stale = sorted(
@@ -163,7 +176,15 @@ class IssueMirror:
                 *_label_args(stale, option="--remove-label"),
             ]
             run_gh(args)
+            if terminal:
+                run_gh(["issue", "close", task.issue])
             return task.issue
+        # Before creating, search for an existing issue with our marker to avoid
+        # duplicates if a previous creation succeeded but the local save failed.
+        marker = f"saturnin:task:{task.id}"
+        existing = self._find_issue_by_marker(payload.repo, marker)
+        if existing:
+            return existing
         out = run_gh(
             [
                 "issue",
@@ -181,6 +202,20 @@ class IssueMirror:
         if not url:
             raise MirrorError("gh issue create returned no URL")
         return url
+
+    def _find_issue_by_marker(self, repo: str, marker: str) -> str | None:
+        """Search for an existing issue containing the deterministic marker comment."""
+        try:
+            out = run_gh([
+                "issue", "list", "--repo", repo, "--search", marker,
+                "--json", "url", "--limit", "1",
+            ])
+            data = json.loads(out or "[]")
+            if data:
+                return str(data[0]["url"])
+        except (MirrorError, json.JSONDecodeError, KeyError):
+            pass
+        return None
 
     def _issue_labels(self, issue: str) -> set[str]:
         output = run_gh(["issue", "view", issue, "--json", "labels"])

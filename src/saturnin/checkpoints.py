@@ -22,6 +22,20 @@ class CheckpointError(RuntimeError):
     pass
 
 
+def _validate_resume_after(value: str | None) -> None:
+    """Ensure *resume_after*, when given, is a parseable ISO-8601 timestamp."""
+    if value is None:
+        return
+    from datetime import datetime
+
+    try:
+        datetime.fromisoformat(value)
+    except (ValueError, TypeError) as exc:
+        raise CheckpointError(
+            f"resume_after must be a valid ISO-8601 timestamp, got {value!r}: {exc}"
+        ) from exc
+
+
 @dataclass
 class Checkpoint:
     task_id: str
@@ -83,6 +97,7 @@ class CheckpointStore:
         for name in REQUIRED_FIELDS:
             if not getattr(checkpoint, name):
                 raise CheckpointError(f"checkpoint field {name!r} must not be empty")
+        _validate_resume_after(checkpoint.resume_after)
         path = self.path_for(checkpoint.task_id)
         with file_lock(path):
             with path.open("a", encoding="utf-8") as handle:

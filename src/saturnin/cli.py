@@ -413,6 +413,15 @@ def _run(args: argparse.Namespace, config: Config) -> int:  # noqa: C901 - flat 
             if args.push
             else None
         )
+        if url and args.task:
+            try:
+                board.transition_id(args.task, "blocked", actor="ceo", note=f"escalated: {url}")
+            except BoardError:
+                try:
+                    with board.edit(args.task) as etask:
+                        etask.log("escalation", actor="ceo", note=f"escalated: {url}")
+                except BoardError:
+                    print(f"warning: escalation submitted but task {args.task} not updated", file=sys.stderr)
         _emit({"body": body, "url": url}, as_json, url or body)
         return 0
     if args.command == "docs":

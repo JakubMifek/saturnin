@@ -294,6 +294,11 @@ class WorktreeManager:
         with log_file.open("a", encoding="utf-8") as handle:
             for line in lines:
                 handle.write(line + "\n")
+            for skip in plan.skipped:
+                handle.write(
+                    f"{stamp} {'APPLY' if plan.applied else 'DRYRUN'}"
+                    f" SKIP {skip.kind} {skip.target} :: {skip.reason}\n"
+                )
             for error in plan.errors:
                 handle.write(f"{stamp} ERROR {error}\n")
         return log_file

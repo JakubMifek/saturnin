@@ -164,35 +164,40 @@ def _body(issue: InboundIssue) -> str:
 def _gh_fetch(repo: str, labels: list[str]) -> list[InboundIssue]:
     if shutil.which("gh") is None:
         raise DiscoveryError("gh CLI not found; discovery needs it to read managed repositories")
-    args = [
-        "issue",
-        "list",
-        "--repo",
-        repo,
-        "--state",
-        "open",
-        "--json",
-        "number,title,body,url,labels",
-        "--limit",
-        "100",
-    ]
+    # Query each label separately and deduplicate, because gh --label filters
+    # are ANDed, but the policy intent is OR (any configured label is adoptable).
+    seen: dict[int, InboundIssue] = {}
     for label in labels:
-        args += ["--label", label]
-    result = subprocess.run(["gh", *args], capture_output=True, text=True, check=False)
-    if result.returncode != 0:
-        raise DiscoveryError(f"gh issue list failed for {repo}: {result.stderr.strip()}")
-    try:
-        raw = json.loads(result.stdout or "[]")
-    except json.JSONDecodeError as exc:  # pragma: no cover - gh contract change
-        raise DiscoveryError(f"gh returned invalid JSON for {repo}: {exc}") from exc
-    return [
-        InboundIssue(
-            repo=repo,
-            number=int(item["number"]),
-            title=str(item["title"]),
-            url=str(item.get("url", "")),
-            body=str(item.get("body") or ""),
-            labels=[str(label.get("name", "")) for label in item.get("labels", [])],
-        )
-        for item in raw
-    ]
+        args = [
+            "issue",
+            "list",
+            "--repo",
+            repo,
+            "--state",
+            "open",
+            "--json",
+            "number,title,body,url,labels",
+            "--limit",
+            "100",
+            "--label",
+            label,
+        ]
+        result = subprocess.run(["gh", *args], capture_output=True, text=True, check=False)
+        if result.returncode != 0:
+            raise DiscoveryError(f"gh issue list failed for {repo}: {result.stderr.strip()}")
+        try:
+            raw = json.loads(result.stdout or "[]")
+        except json.JSONDecodeError as exc:  # pragma: no cover - gh contract change
+            raise DiscoveryError(f"gh returned invalid JSON for {repo}: {exc}") from exc
+        for item in raw:
+            num = int(item["number"])
+            if num not in seen:
+                seen[num] = InboundIssue(
+                    repo=repo,
+                    number=num,
+                    title=str(item["title"]),
+                    url=str(item.get("url", "")),
+                    body=str(item.get("body") or ""),
+                    labels=[str(lbl.get("name", "")) for lbl in item.get("labels", [])],
+                )
+    return list(seen.values())

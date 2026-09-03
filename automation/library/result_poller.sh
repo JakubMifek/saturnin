@@ -31,6 +31,18 @@ for probe in "${probes[@]}"; do
   case "$status" in
     0)
       log "$task_id: signal received - handing back to the board"
+      # The task may be in blocked (previous probe error) or in_progress.
+      # Transition through in_progress first so blocked->review is never attempted.
+      current_state="$(saturnin task get "$task_id" --json 2>/dev/null \
+        | python3 -c 'import json,sys; print(json.load(sys.stdin).get("state",""))' 2>/dev/null || true)"
+      if [[ "$current_state" == "blocked" ]]; then
+        if ! saturnin task move "$task_id" in_progress --actor result-poller \
+          --note "poller recovered - retrying"; then
+          log "$task_id: failed to move task from blocked to in_progress; leaving probe for retry"
+          exit_code=1
+          continue
+        fi
+      fi
       if saturnin task move "$task_id" review --actor result-poller \
         --note "poller reported completion: ${output:0:200}"; then
         mv "$probe" "$probe.done"

@@ -58,8 +58,13 @@ print(monitor["name"], monitor["url"], monitor.get("expect_status", 200),
       monitor.get("timeout_seconds", 10))' "$manifest" "$i")
 
     started="$(date -Is)"
-    code="$(curl -sS -o /dev/null -w '%{http_code}' --max-time "$timeout" "$url" || echo 000)"
+    if ! code="$(curl -sS -o /dev/null -w '%{http_code}' --max-time "$timeout" "$url" 2>/dev/null)"; then
+      code=000
+    fi
     if [[ "$code" == "$expect" ]]; then
+      monitor_ok_results="${RESULTS_DIR}/${app}_${name}.jsonl"
+      printf '{"ts":"%s","app":"%s","monitor":"%s","status":"%s","ok":true}\n' \
+        "$started" "$app" "$name" "$code" >> "$monitor_ok_results"
       printf '{"ts":"%s","app":"%s","monitor":"%s","status":"%s","ok":true}\n' \
         "$started" "$app" "$name" "$code" >> "$results"
       log "$app/$name ok ($code)"
@@ -70,8 +75,11 @@ print(monitor["name"], monitor["url"], monitor.get("expect_status", 200),
       "$started" "$app" "$name" "$code" >> "$results"
     log "$app/$name FAILED (got $code, expected $expect)"
 
-    # Two consecutive failures mean the humans need to know.
-    recent_failures="$(tail -n 2 "$results" | grep -c '"ok":false' || true)"
+    # Two consecutive failures for THIS monitor mean the humans need to know.
+    monitor_results="${RESULTS_DIR}/${app}_${name}.jsonl"
+    printf '{"ts":"%s","app":"%s","monitor":"%s","status":"%s","ok":false}\n' \
+      "$started" "$app" "$name" "$code" >> "$monitor_results"
+    recent_failures="$(tail -n 2 "$monitor_results" | grep -c '"ok":false' || true)"
     if (( recent_failures >= 2 )); then
       saturnin escalate "Monitor $app/$name failing repeatedly" \
         --context "Expected HTTP $expect from $url, got $code twice in a row." \
