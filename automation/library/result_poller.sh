@@ -82,10 +82,13 @@ for probe in "${probes[@]}"; do
         fi
         touch "$escalation_marker"
       fi
-      if ! saturnin task move "$task_id" blocked --actor result-poller --note "$note"; then
-        log "$task_id: failed to move task to blocked - board is out of sync"
-        exit_code=1
-        continue
+      current_state="$(saturnin task show "$task_id" --json 2>/dev/null | "$PYTHON" -c 'import json,sys; print(json.load(sys.stdin).get("state",""))' 2>/dev/null || true)"
+      if [[ "$current_state" != "blocked" ]]; then
+        if ! saturnin task move "$task_id" blocked --actor result-poller --note "$note"; then
+          log "$task_id: failed to move task to blocked - board is out of sync"
+          exit_code=1
+          continue
+        fi
       fi
       ;;
   esac

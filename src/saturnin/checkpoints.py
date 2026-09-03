@@ -100,6 +100,12 @@ class CheckpointStore:
         _validate_resume_after(checkpoint.resume_after)
         path = self.path_for(checkpoint.task_id)
         with file_lock(path):
+            # Repair any unterminated JSON fragment left by an interrupted write.
+            if path.exists():
+                raw = path.read_text(encoding="utf-8")
+                if raw and not raw.endswith("\n"):
+                    with path.open("a", encoding="utf-8") as handle:
+                        handle.write("\n")
             with path.open("a", encoding="utf-8") as handle:
                 handle.write(json.dumps(checkpoint.to_dict()) + "\n")
         try:

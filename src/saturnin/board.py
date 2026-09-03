@@ -39,7 +39,7 @@ PRIORITIES = ("P0", "P1", "P2", "P3")
 TRANSITIONS: dict[str, tuple[str, ...]] = {
     "intake": ("routed", "cancelled"),
     "routed": ("in_progress", "blocked", "cancelled"),
-    "in_progress": ("review", "blocked", "done", "cancelled"),
+    "in_progress": ("review", "blocked", "cancelled"),
     "review": ("in_progress", "blocked", "done", "cancelled"),
     "blocked": ("routed", "in_progress", "cancelled"),
     "done": (),

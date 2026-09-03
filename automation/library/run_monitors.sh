@@ -51,11 +51,11 @@ data = yaml.safe_load(open(sys.argv[1])) or {}
 print(len(data.get("monitors") or []))' "$manifest")"
 
   for (( i = 0; i < count; i++ )); do
-    read -r name url expect timeout < <("$PYTHON" -c '
+    IFS=$'\t' read -r name url expect timeout < <("$PYTHON" -c '
 import sys, yaml
 monitor = (yaml.safe_load(open(sys.argv[1])) or {})["monitors"][int(sys.argv[2])]
 print(monitor["name"], monitor["url"], monitor.get("expect_status", 200),
-      monitor.get("timeout_seconds", 10))' "$manifest" "$i")
+      monitor.get("timeout_seconds", 10), sep="\t")' "$manifest" "$i")
 
     started="$(date -Is)"
     if ! code="$(curl -sS -o /dev/null -w '%{http_code}' --max-time "$timeout" "$url" 2>/dev/null)"; then

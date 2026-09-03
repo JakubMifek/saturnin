@@ -144,18 +144,21 @@ class Governance:
         return Decision(True, reasons)
 
     def merge_allowed(
-        self, *, repo: str, author: str, records: Iterable[ReviewRecord], head_sha: str = ""
+        self, *, repo: str, author: str, records: Iterable[ReviewRecord], head_sha: str
     ) -> Decision:
         """Rule 3 + 4: merge only after an independent zero-context review."""
         records = [r for r in records if r.kind == "pr"]
-        # When a head SHA is provided, only reviews that match it are valid.
-        if head_sha:
-            records = [r for r in records if r.head_sha == head_sha]
-            if not records:
-                return Decision.deny(
-                    f"no review records match the current head SHA ({head_sha[:12]}); "
-                    "new commits may have been pushed after the last review"
-                )
+        if not head_sha:
+            return Decision.deny(
+                "head_sha is required: approvals must be verified against the current commit"
+            )
+        # Only reviews that match the current head SHA are valid.
+        records = [r for r in records if r.head_sha == head_sha]
+        if not records:
+            return Decision.deny(
+                f"no review records match the current head SHA ({head_sha[:12]}); "
+                "new commits may have been pushed after the last review"
+            )
         settings = self.review.get("pr", {})
         if settings.get("required", True):
             decision = self._review_gate(records, author, settings, "pr review", kind="pr")
@@ -461,6 +464,14 @@ def _check_filesystem_scope(
                     f"{binary!r} is an interpreter whose filesystem writes cannot be "
                     "statically determined; add it to executable_allowlist to permit it"
                 )
+            # Even when allow-listed, interpreters are restricted to validated
+            # Saturnin module invocations (``python3 -m saturnin ...``).
+            if binary in {"python", "python3"}:
+                if not (len(arguments) >= 2 and arguments[0] == "-m" and arguments[1] == "saturnin"):
+                    return Decision.deny(
+                        f"{binary!r} is only allowed for Saturnin module invocations "
+                        "(python3 -m saturnin ...)"
+                    )
         elif allowlist and binary not in allowlist:
             return Decision.deny(
                 f"{binary!r} is not in the executable allowlist; "

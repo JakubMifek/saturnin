@@ -19,6 +19,7 @@ def test_metrics_reflect_the_board(config: Config, board: Board) -> None:
     done = board.create("Implement a widget")
     router.dispatch(board, done)
     board.transition(done, "in_progress")
+    board.transition(done, "review")
     board.transition(done, "done")
     board.create("Waiting in intake")
 

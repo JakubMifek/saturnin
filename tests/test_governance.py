@@ -8,6 +8,7 @@ from saturnin.review import ReviewLedger, ReviewError
 
 SELF_REPO = "JakubMifek/saturnin"
 OTHER_REPO = "JakubMifek/some-project"
+TEST_HEAD_SHA = "abc1234567890"
 
 
 @pytest.fixture()
@@ -41,7 +42,8 @@ def test_merge_requires_independent_zero_context_review(
     ledger = ReviewLedger(config)
     subject = "JakubMifek/saturnin#7"
     assert not governance.merge_allowed(
-        repo=SELF_REPO, author="code-worker", records=ledger.for_subject(subject, "pr")
+        repo=SELF_REPO, author="code-worker", records=ledger.for_subject(subject, "pr"),
+        head_sha=TEST_HEAD_SHA,
     ).allowed
 
     ledger.record(
@@ -50,9 +52,11 @@ def test_merge_requires_independent_zero_context_review(
         author="code-worker",
         reviewer="pr-reviewer",
         verdict="changes_requested",
+        head_sha=TEST_HEAD_SHA,
     )
     assert not governance.merge_allowed(
-        repo=SELF_REPO, author="code-worker", records=ledger.for_subject(subject, "pr")
+        repo=SELF_REPO, author="code-worker", records=ledger.for_subject(subject, "pr"),
+        head_sha=TEST_HEAD_SHA,
     ).allowed
 
     ledger.record(
@@ -61,9 +65,11 @@ def test_merge_requires_independent_zero_context_review(
         author="code-worker",
         reviewer="pr-reviewer",
         verdict="approved",
+        head_sha=TEST_HEAD_SHA,
     )
     assert governance.merge_allowed(
-        repo=SELF_REPO, author="code-worker", records=ledger.for_subject(subject, "pr")
+        repo=SELF_REPO, author="code-worker", records=ledger.for_subject(subject, "pr"),
+        head_sha=TEST_HEAD_SHA,
     ).allowed
 
 
@@ -79,9 +85,11 @@ def test_reviewer_with_context_does_not_satisfy_gate(
         reviewer="test-worker",
         verdict="approved",
         zero_context=False,
+        head_sha=TEST_HEAD_SHA,
     )
     decision = governance.merge_allowed(
-        repo=SELF_REPO, author="code-worker", records=ledger.for_subject(subject, "pr")
+        repo=SELF_REPO, author="code-worker", records=ledger.for_subject(subject, "pr"),
+        head_sha=TEST_HEAD_SHA,
     )
     assert not decision.allowed
     assert "zero-context" in decision.reasons[0]
@@ -143,9 +151,11 @@ def test_merge_in_managed_repo_is_never_autonomous(
         author="code-worker",
         reviewer="pr-reviewer",
         verdict="approved",
+        head_sha=TEST_HEAD_SHA,
     )
     decision = governance.merge_allowed(
-        repo=OTHER_REPO, author="code-worker", records=ledger.for_subject(subject, "pr")
+        repo=OTHER_REPO, author="code-worker", records=ledger.for_subject(subject, "pr"),
+        head_sha=TEST_HEAD_SHA,
     )
     assert not decision.allowed
 

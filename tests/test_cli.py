@@ -110,6 +110,8 @@ def test_review_gate_flow(home: Path, capsys: pytest.CaptureFixture[str]) -> Non
         "pr-reviewer",
         "--verdict",
         "approved",
+        "--head-sha",
+        "abc123",
     )
     code, out = run(
         capsys,
@@ -122,6 +124,8 @@ def test_review_gate_flow(home: Path, capsys: pytest.CaptureFixture[str]) -> Non
         "JakubMifek/saturnin",
         "--author",
         "code-worker",
+        "--head-sha",
+        "abc123",
     )
     assert code == 0
     assert "ALLOWED" in out
