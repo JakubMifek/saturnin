@@ -3,7 +3,7 @@ role: researcher
 unit: platform
 executes: true
 skills: [board-ops]
-mcp: [github, fetch]
+mcp: [fetch]
 ---
 
 # Researcher

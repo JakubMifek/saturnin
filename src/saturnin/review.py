@@ -6,6 +6,7 @@ can be evaluated by any process, including a cron job or a CI helper.
 
 from __future__ import annotations
 
+import hashlib
 import json
 import re
 from dataclasses import asdict, dataclass, field
@@ -48,7 +49,8 @@ def slugify(subject: str) -> str:
     slug = re.sub(r"[^a-zA-Z0-9._-]+", "-", subject).strip("-")
     if not slug:
         raise ReviewError(f"subject {subject!r} cannot be turned into a file name")
-    return slug.lower()
+    digest = hashlib.sha256(subject.encode("utf-8")).hexdigest()[:8]
+    return f"{slug.lower()}-{digest}"
 
 
 class ReviewLedger:
@@ -74,11 +76,17 @@ class ReviewLedger:
             raise ReviewError(f"unknown verdict: {verdict}")
         if reviewer == author:
             raise ReviewError("a review must be written by somebody other than the author")
+        roles = self.config.routing.get("roles", {})
+        reviewer_name = reviewer.strip().lower()
+        if reviewer_name not in roles:
+            raise ReviewError(f"unknown reviewer role {reviewer!r}; expected one of {sorted(roles)}")
+        if zero_context and not bool(roles[reviewer_name].get("zero_context", False)):
+            raise ReviewError(f"reviewer {reviewer!r} is not configured as zero-context")
         entry = ReviewRecord(
             subject=subject,
             kind=kind,
             author=author,
-            reviewer=reviewer,
+            reviewer=reviewer_name,
             verdict=verdict,
             zero_context=zero_context,
             notes=notes,
@@ -90,11 +98,11 @@ class ReviewLedger:
         return entry
 
     def for_subject(self, subject: str, kind: str) -> list[ReviewRecord]:
-        path = self.dir / f"{kind}-{slugify(subject)}.jsonl"
-        if not path.is_file():
-            return []
-        records = list(self._records(path))
-        # Only the latest verdict per reviewer counts.
+        records: list[ReviewRecord] = []
+        for path in sorted(self.dir.glob(f"{kind}-*.jsonl")):
+            records.extend(
+                record for record in self._records(path) if record.subject == subject and record.kind == kind
+            )
         latest: dict[str, ReviewRecord] = {}
         for record in records:
             latest[record.reviewer] = record

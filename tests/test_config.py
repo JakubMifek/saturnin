@@ -10,7 +10,7 @@ def _git(cwd: Path, *args: str) -> None:
     subprocess.run(["git", *args], cwd=cwd, check=True, capture_output=True, text=True)
 
 
-def test_find_root_resolves_linked_worktree_to_main_checkout(
+def test_find_root_keeps_the_worktree_as_the_source_root(
     tmp_path: Path, monkeypatch
 ) -> None:
     main = tmp_path / "main"
@@ -26,8 +26,8 @@ def test_find_root_resolves_linked_worktree_to_main_checkout(
     _git(main, "worktree", "add", "-b", "feature/linked", str(linked))
     monkeypatch.delenv("SATURNIN_HOME", raising=False)
 
-    assert find_root(linked) == main
-    assert find_root(linked / "policies") == main
+    assert find_root(linked) == linked
+    assert find_root(linked / "policies") == linked
 
 
 def test_find_root_preserves_saturnin_home_precedence(

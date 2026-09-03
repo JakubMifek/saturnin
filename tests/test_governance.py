@@ -99,6 +99,19 @@ def test_self_review_is_impossible(config: Config) -> None:
         )
 
 
+def test_review_subjects_are_exact_and_roles_are_valid(config: Config) -> None:
+    ledger = ReviewLedger(config)
+    first = "owner/repo#1"
+    second = "owner-repo-1"
+    ledger.record(subject=first, kind="pr", author="code-worker", reviewer="pr-reviewer", verdict="approved")
+    ledger.record(subject=second, kind="pr", author="code-worker", reviewer="pr-reviewer", verdict="approved")
+    assert {record.subject for record in ledger.for_subject(first, "pr")} == {first}
+    assert {record.subject for record in ledger.for_subject(second, "pr")} == {second}
+
+    with pytest.raises(ReviewError, match="unknown reviewer role"):
+        ledger.record(subject="x#2", kind="pr", author="code-worker", reviewer="ghost", verdict="approved")
+
+
 def test_corrupt_review_ledger_reports_file_and_line(config: Config) -> None:
     ledger = ReviewLedger(config)
     subject = "JakubMifek/saturnin#corrupt"

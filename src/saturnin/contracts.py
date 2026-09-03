@@ -84,6 +84,11 @@ def audit(config: Config | None = None) -> list[str]:
     mcp_policy = config.policy("mcp")
     servers = set(mcp_policy.get("servers", {}))
     denied: dict[str, list[str]] = mcp_policy.get("rules", {}).get("deny_for_roles", {})
+    write_caps: dict[str, set[str]] = {
+        server: set(server_def.get("write_roles", []))
+        for server, server_def in mcp_policy.get("servers", {}).items()
+        if isinstance(server_def, dict)
+    }
     strict_non_executing = bool(
         mcp_policy.get("rules", {}).get("non_executing_roles_get_none", False)
     )
@@ -108,6 +113,11 @@ def audit(config: Config | None = None) -> list[str]:
             if server in denied.get(role, []):
                 problems.append(
                     f"{contract.path.name}: MCP server {server!r} is denied for this role"
+                )
+            if server in write_caps and role not in write_caps[server] and write_caps[server]:
+                problems.append(
+                    f"{contract.path.name}: role {role!r} is not allowed write access to "
+                    f"MCP server {server!r}"
                 )
         if strict_non_executing and not contract.executes and contract.mcp:
             problems.append(

@@ -111,6 +111,7 @@ class Governance:
         subject: str,
     ) -> Decision:
         reasons: list[str] = []
+        records = [r for r in records if r.author == author]
         approvals = [r for r in records if r.verdict == "approved"]
         blocking = [r for r in records if r.verdict in ("changes_requested", "rejected")]
         if blocking:
@@ -161,6 +162,14 @@ class Governance:
     ) -> Decision:
         """Rule 5: issues for managed repos need an independent issue review."""
         records = [r for r in records if r.kind == "issue"]
+        managed = {
+            repo_entry.get("slug")
+            for repo_entry in self.config.policy("repos").get("repos", {}).values()
+            if isinstance(repo_entry, dict) and repo_entry.get("slug")
+        }
+        managed.add(self.autonomy.get("self_repo"))
+        if repo not in managed:
+            return Decision.deny(f"{repo}: issue creation is only allowed in managed repositories")
         if repo == self.autonomy.get("self_repo"):
             return Decision.ok(f"{repo}: own repository, issue may be filed directly")
         if not self.autonomy.get("external_repos_allow_issue_creation", True):

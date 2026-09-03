@@ -104,6 +104,12 @@ def test_dispatch_twice_is_refused(config: Config, board: Board) -> None:
         router.dispatch(board, board.get(task.id))
 
 
+def test_dispatch_rejects_container_kinds(config: Config, board: Board) -> None:
+    task = board.create("Platform roadmap", kind="epic")
+    with pytest.raises(BoardError, match="container"):
+        Router(config).dispatch(board, task)
+
+
 def test_routing_to_ceo_is_rejected(config: Config, board: Board) -> None:
     router = Router(config)
     router.rules = [{"id": "bad", "when": {"kind": "task"}, "route": {"role": "ceo"}}]

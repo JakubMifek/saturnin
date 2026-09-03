@@ -19,8 +19,10 @@ ENV_ROOT = "SATURNIN_HOME"
 def find_root(start: Path | None = None) -> Path:
     """Return the Saturnin home directory.
 
-    ``SATURNIN_HOME`` wins, otherwise we walk up from ``start`` looking for a
-    ``policies/governance.yaml`` marker, otherwise the current directory.
+    ``SATURNIN_HOME`` wins. Otherwise we keep the current source checkout so
+    worktree-local policy, agent and documentation changes are validated in place;
+    the board itself stays shared via its own data root rather than by redirecting
+    every repository read back to the main checkout.
     """
     env = os.environ.get(ENV_ROOT)
     if env:
@@ -28,7 +30,7 @@ def find_root(start: Path | None = None) -> Path:
     current = (start or Path.cwd()).resolve()
     for candidate in [current, *current.parents]:
         if (candidate / "policies" / "governance.yaml").is_file():
-            return _canonical_worktree(candidate)
+            return candidate.resolve()
     return current
 
 

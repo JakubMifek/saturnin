@@ -4,7 +4,7 @@ unit: assurance
 executes: true
 zero_context: true
 skills: [review-ledger]
-mcp: [github]
+mcp: []
 ---
 
 # Independent Issue Reviewer (zero context)

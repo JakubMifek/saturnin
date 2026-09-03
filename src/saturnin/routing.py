@@ -11,7 +11,7 @@ import re
 from dataclasses import dataclass
 from typing import Any, Sequence
 
-from .board import PRIORITIES, Board, BoardError, Task
+from .board import CONTAINER_KINDS, PRIORITIES, Board, BoardError, Task
 from .config import Config, default_config
 
 
@@ -150,6 +150,10 @@ class Router:
         if squad is not None:
             self.validate_dispatch_squad(squad)
         with board.edit(task.id) as current:
+            if current.kind in CONTAINER_KINDS:
+                raise BoardError(
+                    f"task {current.id} is a {current.kind} container and cannot be dispatched"
+                )
             if current.state not in ("intake", "blocked"):
                 raise BoardError(
                     f"task {current.id} is not dispatchable from state {current.state}"
