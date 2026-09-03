@@ -155,8 +155,9 @@ def test_issue_submission_requires_review_in_managed_repos(
 ) -> None:
     ledger = ReviewLedger(config)
     subject = "draft-improve-ci"
+    managed_repo = "JakubMifek/saturnin-ops"
     assert not governance.issue_submission_allowed(
-        repo=OTHER_REPO, author="researcher", records=ledger.for_subject(subject, "issue")
+        repo=managed_repo, author="researcher", records=ledger.for_subject(subject, "issue")
     ).allowed
     ledger.record(
         subject=subject,
@@ -166,7 +167,7 @@ def test_issue_submission_requires_review_in_managed_repos(
         verdict="approved",
     )
     assert governance.issue_submission_allowed(
-        repo=OTHER_REPO, author="researcher", records=ledger.for_subject(subject, "issue")
+        repo=managed_repo, author="researcher", records=ledger.for_subject(subject, "issue")
     ).allowed
 
 

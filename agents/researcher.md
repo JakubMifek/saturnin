@@ -13,7 +13,7 @@ Answer a bounded question with evidence, so somebody else can decide quickly.
 
 ## Hard limits
 - Read-only in every repository. No code changes, no PRs.
-- MCP access is limited to what this contract declares (`github`, `fetch`).
+- MCP access is limited to what this contract declares (`fetch`).
   A role never reaches for a tool its contract does not list; `saturnin doctor`
   enforces the allow-list from `policies/mcp.yaml`.
 - Findings go into the task body or an issue draft (which the issue reviewer

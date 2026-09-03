@@ -202,6 +202,7 @@ class IssueMirror:
         )
         return any(label.startswith(f"{prefix}:{key}/") for key in keys)
 
+
 def _label_args(labels: list[str], *, option: str = "--label") -> list[str]:
     out: list[str] = []
     for label in labels:

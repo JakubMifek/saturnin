@@ -13,7 +13,8 @@ servers:
     command: npx
     args: ["-y", "@modelcontextprotocol/server-github"]
     # Roles allowed to mutate state through this server; everyone else is read-only.
-    write_roles: [chief-of-staff, code-worker, ops-worker]
+    write_roles:
+      [chief-of-staff, code-worker, ops-worker, architect, automation-smith, improver, scribe, test-worker]
   fetch:
     description: Read-only web fetch for research.
     transport: stdio
@@ -25,7 +26,7 @@ servers:
     transport: stdio
     command: npx
     args: ["-y", "@modelcontextprotocol/server-filesystem", "var/worktrees"]
-    write_roles: [code-worker, test-worker, architect, scribe, automation-smith]
+    write_roles: [code-worker, test-worker, architect, scribe, automation-smith, janitor]
 
 rules:
   # The zero-context reviewers get the diff and the requirement, nothing that

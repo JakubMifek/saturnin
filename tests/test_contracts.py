@@ -24,7 +24,7 @@ def test_drift_is_detected(config: Config) -> None:
 
 def test_unknown_mcp_server_is_rejected(config: Config) -> None:
     path = config.root / "agents" / "researcher.md"
-    path.write_text(path.read_text().replace("[github, fetch]", "[github, telepathy]"))
+    path.write_text(path.read_text().replace("mcp: [fetch]", "mcp: [telepathy]"))
     assert any("telepathy" in problem for problem in audit(config))
 
 
