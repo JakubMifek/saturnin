@@ -227,6 +227,22 @@ def test_in_scope_server_commands(governance: Governance, command: str) -> None:
 
 
 @pytest.mark.parametrize(
+    "command",
+    [
+        "SATURNIN_HOME=/tmp python3 -m saturnin task add x",
+        "env SATURNIN_HOME=/tmp python3 -m saturnin task add x",
+    ],
+)
+def test_shell_assignments_cannot_change_policy_home(
+    governance: Governance, command: str
+) -> None:
+    decision = governance.check_server_command(command)
+
+    assert not decision.allowed
+    assert "assignments are not allowed" in decision.reasons[0]
+
+
+@pytest.mark.parametrize(
     ("command", "reason"),
     [
         ("rm -rf /etc", "forbidden root"),

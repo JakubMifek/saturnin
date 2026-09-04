@@ -50,6 +50,10 @@ _ALL_OPERANDS_WRITABLE = {
 _DESTINATION_WRITABLE = {"cp", "install", "ln", "mv", "rsync"}
 
 
+class _AssignmentError(ValueError):
+    pass
+
+
 @dataclass
 class Decision:
     allowed: bool
@@ -252,6 +256,8 @@ class Governance:
             return Decision.deny(f"unparsable command: {exc}")
         if not parts:
             return Decision.deny("empty command")
+        if _ASSIGNMENT.fullmatch(parts[0]):
+            return Decision.deny("shell variable assignments are not allowed")
         user = scope.get("user", {})
         if not user.get("allow_root", False) and os.geteuid() == 0:
             return Decision.deny("server commands may not run as root")
@@ -281,10 +287,10 @@ class Governance:
         if depth >= _MAX_COMMAND_DEPTH:
             return Decision.deny("command wrappers are nested too deeply")
         parts = list(parts)
-        while parts and _ASSIGNMENT.fullmatch(parts[0]):
-            parts.pop(0)
         if not parts:
             return Decision.deny("wrapper contains no command")
+        if _ASSIGNMENT.fullmatch(parts[0]):
+            return Decision.deny("shell variable assignments are not allowed")
         binary = parts[0].rsplit("/", 1)[-1]
         if binary in _SHELL_RESERVED or binary in _DYNAMIC_COMMANDS:
             return Decision.deny(f"shell keyword {binary!r} is not allowed")
@@ -303,6 +309,8 @@ class Governance:
         if binary in _WRAPPERS:
             try:
                 wrapped = _wrapped_command(binary, parts[1:])
+            except _AssignmentError as exc:
+                return Decision.deny(str(exc))
             except ValueError as exc:
                 return Decision.deny(f"malformed {binary} wrapper: {exc}")
             if not wrapped:
@@ -639,8 +647,7 @@ def _after_options(
             index += 1
             break
         if assignments and _ASSIGNMENT.fullmatch(token):
-            index += 1
-            continue
+            raise _AssignmentError("environment variable assignments are not allowed")
         if token == "-" and token in flag_options:
             index += 1
             continue
