@@ -257,7 +257,7 @@ class Governance:
         if not parts:
             return Decision.deny("empty command")
         if _ASSIGNMENT.fullmatch(parts[0]):
-            return Decision.deny("shell variable assignments are not allowed")
+            return Decision.deny("environment variable assignments are not allowed")
         user = scope.get("user", {})
         if not user.get("allow_root", False) and os.geteuid() == 0:
             return Decision.deny("server commands may not run as root")
