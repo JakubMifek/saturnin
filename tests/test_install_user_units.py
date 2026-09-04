@@ -37,8 +37,8 @@ def test_install_user_units_escapes_checkout_path(tmp_path: Path) -> None:
     installed_dir = config_home / "systemd" / "user"
     escaped_home_env = str(saturnin_home).replace("&", r"\x26").replace(
         "|", r"\x7c"
-    ).replace("\\", r"\x5c")
-    escaped_home = escaped_home_env.replace("%", "%%")
+    ).replace("\\", r"\x5c").replace("%", "%%")
+    escaped_home = escaped_home_env
     for template in (saturnin_home / "systemd").glob("saturnin-*"):
         installed = installed_dir / template.name
         expected = (

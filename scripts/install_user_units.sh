@@ -20,7 +20,8 @@ def escape_path():
     return escaped.replace("%", "%%")
 
 def escape_env_value():
-    return value.replace("&", r"\x26").replace("|", r"\x7c").replace("\\", r"\x5c")
+    escaped = value.replace("&", r"\x26").replace("|", r"\x7c").replace("\\", r"\x5c")
+    return escaped.replace("%", "%%")
 
 print(escape_path())
 print(escape_env_value())
