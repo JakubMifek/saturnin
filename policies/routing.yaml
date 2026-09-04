@@ -92,15 +92,15 @@ rules:
   - id: escalation
     when: {any_label: [escalation, blocked, human-needed]}
     route: {role: chief-of-staff, priority: P0, escalate: true, result_contract: escalation}
-  - id: incident
-    when: {any_keyword: [outage, incident, broken, failing, down, hotfix]}
-    route: {role: code-worker, priority: P0, result_contract: pr-gate, squad: [code-worker, test-worker, pr-reviewer]}
   - id: review-pr
     when: {kind: pr-review}
     route: {role: pr-reviewer, priority: P1, result_contract: pr-gate}
   - id: review-issue
     when: {kind: issue-review}
     route: {role: issue-reviewer, priority: P1}
+  - id: incident
+    when: {any_keyword: [outage, incident, broken, failing, down, hotfix]}
+    route: {role: code-worker, priority: P0, result_contract: pr-gate, squad: [code-worker, test-worker, pr-reviewer]}
   - id: architecture
     when: {any_keyword: [architecture, design review, structural, duplication, extract library, technical debt, tech debt]}
     route: {role: architect, priority: P2, squad: [architect, code-worker]}

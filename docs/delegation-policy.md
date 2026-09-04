@@ -57,9 +57,9 @@ Rules of assembly:
 | Rule | Matches | Goes to | Priority | Results via |
 | --- | --- | --- | --- | --- |
 | `escalation` | any_label: escalation, blocked, human-needed | `chief-of-staff` | P0 | escalation |
-| `incident` | any_keyword: outage, incident, broken, failing, down, hotfix | `code-worker` | P0 | pr-gate |
 | `review-pr` | kind: pr-review | `pr-reviewer` | P1 | pr-gate |
 | `review-issue` | kind: issue-review | `issue-reviewer` | P1 | board-callback |
+| `incident` | any_keyword: outage, incident, broken, failing, down, hotfix | `code-worker` | P0 | pr-gate |
 | `architecture` | any_keyword: architecture, design review, structural, duplication, extract library, technical debt, tech debt | `architect` | P2 | board-callback |
 | `cleanup` | any_keyword: worktree, stale branch, cleanup, prune, disk | `janitor` | P3 | board-callback |
 | `server` | any_keyword: debian, server, systemd, timer, cron, service, apt | `ops-worker` | P2 | board-callback |

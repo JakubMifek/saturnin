@@ -36,6 +36,17 @@ def test_kind_routing(config: Config, board: Board) -> None:
     assert route.priority == "P1"
 
 
+@pytest.mark.parametrize(
+    ("kind", "role"),
+    [("pr-review", "pr-reviewer"), ("issue-review", "issue-reviewer")],
+)
+def test_review_kind_routing_precedes_incident_keywords(
+    config: Config, board: Board, kind: str, role: str
+) -> None:
+    task = board.create("Review failing incident", kind=kind)
+    assert Router(config).resolve(task).role == role
+
+
 def test_escalation_label_is_p0_and_never_ceo(config: Config, board: Board) -> None:
     task = board.create("Need a decision", labels=["escalation"])
     route = Router(config).resolve(task)
