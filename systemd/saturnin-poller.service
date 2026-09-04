@@ -5,6 +5,6 @@ Documentation=file://@SATURNIN_HOME@/docs/operating-model.md
 [Service]
 Type=oneshot
 WorkingDirectory=@SATURNIN_HOME@
-Environment=SATURNIN_HOME="@SATURNIN_HOME@"
+Environment=SATURNIN_HOME="@SATURNIN_HOME_ENV@"
 ExecStart=@SATURNIN_HOME@/automation/library/result_poller.sh
 Nice=10

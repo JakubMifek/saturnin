@@ -5,7 +5,7 @@ Documentation=file://@SATURNIN_HOME@/docs/runbooks/ops-safety.md
 [Service]
 Type=oneshot
 WorkingDirectory=@SATURNIN_HOME@
-Environment=SATURNIN_HOME="@SATURNIN_HOME@"
+Environment=SATURNIN_HOME="@SATURNIN_HOME_ENV@"
 # Dry run by default. Set APPLY=1 once the plans look right.
 Environment=APPLY=0
 ExecStart=@SATURNIN_HOME@/automation/library/cleanup_worktrees.sh

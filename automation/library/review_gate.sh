@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
 # Usage: review_gate.sh <pr|issue> <subject> <repo> <author> [head-sha]
+# The head SHA is required for PRs; an extra SHA is ignored for issues.
 # Exits non-zero when the independent review requirement is not satisfied.
 set -Eeuo pipefail
 SCRIPT_NAME=review-gate

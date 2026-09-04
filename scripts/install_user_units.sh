@@ -20,14 +20,25 @@ print("".join(
     for byte in value
 ))
 ')"
+escaped_home_env="$(SATURNIN_HOME="$SATURNIN_HOME" python3 -c '
+import os
+value = os.environ["SATURNIN_HOME"].encode()
+safe = b"abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789._/-"
+print("".join(
+    chr(byte) if byte in safe else f"\\x{byte:02x}"
+    for byte in value
+))
+')"
 for unit in "$SATURNIN_HOME"/systemd/saturnin-*; do
   name="$(basename "$unit")"
-  SATURNIN_HOME_ESCAPED="$escaped_home" TEMPLATE="$unit" DEST="$UNIT_DIR/$name" python3 -c '
+  SATURNIN_HOME_ESCAPED="$escaped_home" SATURNIN_HOME_ENV_ESCAPED="$escaped_home_env" \
+    TEMPLATE="$unit" DEST="$UNIT_DIR/$name" python3 -c '
 from pathlib import Path
 import os
 template = Path(os.environ["TEMPLATE"]).read_text()
 Path(os.environ["DEST"]).write_text(
     template.replace("@SATURNIN_HOME@", os.environ["SATURNIN_HOME_ESCAPED"])
+    .replace("@SATURNIN_HOME_ENV@", os.environ["SATURNIN_HOME_ENV_ESCAPED"])
 )
 '
   if command -v systemd-analyze >/dev/null 2>&1; then
