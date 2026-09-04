@@ -15,16 +15,20 @@ mapfile -t escaped_values < <(SATURNIN_HOME="$SATURNIN_HOME" python3 -c '
 import os
 value = os.environ["SATURNIN_HOME"].encode()
 safe = b"abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789._/-"
-def escape(*, double_percent):
+def escape_path():
     return "".join(
-    chr(byte) if byte in safe else ("%%" if byte == ord("%") else f"\\x{byte:02x}")
-    for byte in value
-    ) if double_percent else "".join(
+        chr(byte) if byte in safe else ("%%" if byte == ord("%") else f"\\x{byte:02x}")
+        for byte in value
+    )
+
+def escape_env_value():
+    return "".join(
         chr(byte) if byte in safe else f"\\x{byte:02x}"
         for byte in value
     )
-print(escape(double_percent=True))
-print(escape(double_percent=False))
+
+print(escape_path())
+print(escape_env_value())
 ')"
 escaped_home="${escaped_values[0]}"
 escaped_home_env="${escaped_values[1]}"
@@ -41,7 +45,7 @@ Path(os.environ["DEST"]).write_text(
 )
 '
   if command -v systemd-analyze >/dev/null 2>&1; then
-    if ! systemd-analyze verify "$UNIT_DIR/$name"; then
+    if ! systemd-analyze --user verify "$UNIT_DIR/$name"; then
       echo "warning: systemd-analyze verify failed for $name" >&2
     fi
   fi
