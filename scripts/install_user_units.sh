@@ -11,24 +11,23 @@ if [[ "$(id -u)" -eq 0 ]]; then
 fi
 
 mkdir -p "$UNIT_DIR"
-escaped_home="$(SATURNIN_HOME="$SATURNIN_HOME" python3 -c '
+mapfile -t escaped_values < <(SATURNIN_HOME="$SATURNIN_HOME" python3 -c '
 import os
 value = os.environ["SATURNIN_HOME"].encode()
 safe = b"abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789._/-"
-print("".join(
+def escape(*, double_percent):
+    return "".join(
     chr(byte) if byte in safe else ("%%" if byte == ord("%") else f"\\x{byte:02x}")
     for byte in value
-))
+    ) if double_percent else "".join(
+        chr(byte) if byte in safe else f"\\x{byte:02x}"
+        for byte in value
+    )
+print(escape(double_percent=True))
+print(escape(double_percent=False))
 ')"
-escaped_home_env="$(SATURNIN_HOME="$SATURNIN_HOME" python3 -c '
-import os
-value = os.environ["SATURNIN_HOME"].encode()
-safe = b"abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789._/-"
-print("".join(
-    chr(byte) if byte in safe else f"\\x{byte:02x}"
-    for byte in value
-))
-')"
+escaped_home="${escaped_values[0]}"
+escaped_home_env="${escaped_values[1]}"
 for unit in "$SATURNIN_HOME"/systemd/saturnin-*; do
   name="$(basename "$unit")"
   SATURNIN_HOME_ESCAPED="$escaped_home" SATURNIN_HOME_ENV_ESCAPED="$escaped_home_env" \

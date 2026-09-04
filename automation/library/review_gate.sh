@@ -21,5 +21,7 @@ args=("$subject" --kind "$kind" --repo "$repo" --author "$author")
 if [[ "$kind" == "pr" ]]; then
   [[ -n "$head_sha" ]] || { echo "missing head SHA for PR review gate" >&2; exit 2; }
   args+=(--head-sha "$head_sha")
+elif [[ -n "$head_sha" ]]; then
+  echo "warning: ignoring head SHA for issue review gate" >&2
 fi
 saturnin review gate "${args[@]}"
