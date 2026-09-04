@@ -290,7 +290,7 @@ class Governance:
         if not parts:
             return Decision.deny("wrapper contains no command")
         if _ASSIGNMENT.fullmatch(parts[0]):
-            return Decision.deny("shell variable assignments are not allowed")
+            return Decision.deny("environment variable assignments are not allowed")
         binary = parts[0].rsplit("/", 1)[-1]
         if binary in _SHELL_RESERVED or binary in _DYNAMIC_COMMANDS:
             return Decision.deny(f"shell keyword {binary!r} is not allowed")
