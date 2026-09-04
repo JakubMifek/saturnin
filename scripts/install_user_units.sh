@@ -13,23 +13,18 @@ fi
 mkdir -p "$UNIT_DIR"
 mapfile -t escaped_values < <(SATURNIN_HOME="$SATURNIN_HOME" python3 -c '
 import os
-value = os.environ["SATURNIN_HOME"].encode()
-safe = b"abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789._/-"
+value = os.environ["SATURNIN_HOME"]
+
 def escape_path():
-    return "".join(
-        chr(byte) if byte in safe else ("%%" if byte == ord("%") else f"\\x{byte:02x}")
-        for byte in value
-    )
+    escaped = value.replace("&", r"\x26").replace("|", r"\x7c").replace("\\", r"\x5c")
+    return escaped.replace("%", "%%")
 
 def escape_env_value():
-    return "".join(
-        chr(byte) if byte in safe else f"\\x{byte:02x}"
-        for byte in value
-    )
+    return value.replace("&", r"\x26").replace("|", r"\x7c").replace("\\", r"\x5c")
 
 print(escape_path())
 print(escape_env_value())
-')"
+')
 escaped_home="${escaped_values[0]}"
 escaped_home_env="${escaped_values[1]}"
 for unit in "$SATURNIN_HOME"/systemd/saturnin-*; do

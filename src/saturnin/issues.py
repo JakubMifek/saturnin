@@ -149,6 +149,7 @@ class IssueMirror:
         return result
 
     def sync(self, task: Task, *, push: bool = False, actor: str = "chief-of-staff") -> IssuePayload:
+        task = self.board.get(task.id)
         payload = self.render(task)
         if not push:
             return payload
