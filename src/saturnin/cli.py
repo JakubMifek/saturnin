@@ -673,7 +673,7 @@ def _run_worktree(args: argparse.Namespace, config: Config, board: Board, as_jso
             + [f"  ! {e}" for e in plan.errors]
         ),
     )
-    return 0
+    return 1 if args.apply and plan.errors else 0
 
 
 def _run_checkpoint(args: argparse.Namespace, config: Config, board: Board, as_json: bool) -> int:

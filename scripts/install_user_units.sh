@@ -11,10 +11,30 @@ if [[ "$(id -u)" -eq 0 ]]; then
 fi
 
 mkdir -p "$UNIT_DIR"
-escaped_home="$(printf '%s\n' "$SATURNIN_HOME" | sed 's/[&|\\]/\\&/g')"
+escaped_home="$(SATURNIN_HOME="$SATURNIN_HOME" python3 -c '
+import os
+value = os.environ["SATURNIN_HOME"].encode()
+safe = b"abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789._/-"
+print("".join(
+    chr(byte) if byte in safe else ("%%" if byte == ord("%") else f"\\x{byte:02x}")
+    for byte in value
+))
+')"
 for unit in "$SATURNIN_HOME"/systemd/saturnin-*; do
   name="$(basename "$unit")"
-  sed "s|@SATURNIN_HOME@|$escaped_home|g" "$unit" > "$UNIT_DIR/$name"
+  SATURNIN_HOME_ESCAPED="$escaped_home" TEMPLATE="$unit" DEST="$UNIT_DIR/$name" python3 -c '
+from pathlib import Path
+import os
+template = Path(os.environ["TEMPLATE"]).read_text()
+Path(os.environ["DEST"]).write_text(
+    template.replace("@SATURNIN_HOME@", os.environ["SATURNIN_HOME_ESCAPED"])
+)
+'
+  if command -v systemd-analyze >/dev/null 2>&1; then
+    if ! systemd-analyze verify "$UNIT_DIR/$name"; then
+      echo "warning: systemd-analyze verify failed for $name" >&2
+    fi
+  fi
   echo "installed $UNIT_DIR/$name"
 done
 

@@ -206,6 +206,8 @@ class IssueMirror:
         url = out.strip().splitlines()[-1].strip() if out.strip() else ""
         if not url:
             raise MirrorError("gh issue create returned no URL")
+        if terminal:
+            run_gh(["issue", "close", url])
         return url
 
     def _find_issue_by_marker(self, repo: str, marker: str) -> str | None:

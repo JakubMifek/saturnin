@@ -35,9 +35,17 @@ def test_install_user_units_escapes_checkout_path(tmp_path: Path) -> None:
     )
 
     installed_dir = config_home / "systemd" / "user"
+    raw_home = str(saturnin_home).encode()
+    safe = b"abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789._/-"
+    escaped_home = "".join(
+        chr(byte)
+        if byte in safe
+        else ("%%" if byte == ord("%") else f"\\x{byte:02x}")
+        for byte in raw_home
+    )
     for template in (saturnin_home / "systemd").glob("saturnin-*"):
         installed = installed_dir / template.name
         expected = template.read_text(encoding="utf-8").replace(
-            "@SATURNIN_HOME@", str(saturnin_home)
+            "@SATURNIN_HOME@", escaped_home
         )
         assert installed.read_text(encoding="utf-8") == expected

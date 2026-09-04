@@ -131,6 +131,19 @@ def test_review_gate_flow(home: Path, capsys: pytest.CaptureFixture[str]) -> Non
     assert "ALLOWED" in out
 
 
+def test_cleanup_apply_reports_plan_errors(
+    home: Path, capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from saturnin.worktrees import CleanupPlan, WorktreeManager
+
+    monkeypatch.setattr(
+        WorktreeManager,
+        "plan_cleanup",
+        lambda self, now: CleanupPlan(errors=["could not remove stale worktree"]),
+    )
+    assert run(capsys, "worktree", "cleanup", "--apply")[0] == 1
+
+
 def test_checkpoint_roundtrip(home: Path, capsys: pytest.CaptureFixture[str]) -> None:
     task = json.loads(run(capsys, "--json", "task", "add", "Long job")[1])
     run(

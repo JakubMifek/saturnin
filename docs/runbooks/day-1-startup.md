@@ -47,9 +47,11 @@ saturnin checkpoint save <task-id> --role code-worker \
 
 ```bash
 saturnin review record JakubMifek/saturnin#12 --kind pr \
-  --author code-worker --reviewer pr-reviewer --verdict approved
+  --author code-worker --reviewer pr-reviewer --verdict approved \
+  --head-sha "$HEAD_SHA"
 saturnin review gate JakubMifek/saturnin#12 --kind pr \
-  --repo JakubMifek/saturnin --author code-worker   # exit 0 = may merge
+  --repo JakubMifek/saturnin --author code-worker --head-sha "$HEAD_SHA"
+# exit 0 = may merge
 ```
 
 For another repository: draft the issue, `--kind issue`, and let the

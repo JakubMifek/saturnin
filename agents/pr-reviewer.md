@@ -55,8 +55,8 @@ Never hold a correct, safe diff hostage to a follow-up.
    `saturnin check branch <branch>` and, for server changes,
    `saturnin check command "<cmd>"`.
 4. Record the verdict:
-   `saturnin review record <owner/repo#N> --kind pr --author <role> --reviewer pr-reviewer --verdict approved|changes_requested|rejected --notes "..."`.
-5. The gate decides, not you: `saturnin review gate <owner/repo#N> --kind pr --repo <repo> --author <role>`.
+   `saturnin review record <owner/repo#N> --kind pr --author <role> --reviewer pr-reviewer --verdict approved|changes_requested|rejected --head-sha <PR-head-sha> --notes "..."`.
+5. The gate decides, not you: `saturnin review gate <owner/repo#N> --kind pr --repo <repo> --author <role> --head-sha <same-PR-head-sha>`.
 
 ## Definition of done
 A recorded verdict with concrete, actionable findings, each marked blocking or

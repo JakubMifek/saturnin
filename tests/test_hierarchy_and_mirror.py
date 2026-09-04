@@ -191,6 +191,30 @@ def test_label_provisioning_failure_stops_issue_creation(
     assert board.get(task.id).issue is None
 
 
+def test_new_terminal_issue_is_closed(
+    config: Config, board: Board, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    task = board.create("Already complete", kind="task")
+    with board.edit(task.id) as stored:
+        stored.state = "done"
+    calls: list[list[str]] = []
+    monkeypatch.setattr("saturnin.issues.shutil.which", lambda _: "/usr/bin/gh")
+
+    def fake_run(args, **kwargs):
+        calls.append(args)
+        if args[1:3] == ["label", "list"]:
+            return subprocess.CompletedProcess(args, 0, "[]", "")
+        if args[1:3] == ["issue", "create"]:
+            return subprocess.CompletedProcess(
+                args, 0, "https://github.com/example/repo/issues/3\n", ""
+            )
+        return subprocess.CompletedProcess(args, 0, "", "")
+
+    monkeypatch.setattr("saturnin.issues.subprocess.run", fake_run)
+    IssueMirror(config, board).sync(task, push=True)
+    assert ["gh", "issue", "close", "https://github.com/example/repo/issues/3"] in calls
+
+
 def test_missing_gh_error_applies_to_all_integrations(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
