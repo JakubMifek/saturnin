@@ -27,7 +27,12 @@ exit_code=0
 for probe in "${probes[@]}"; do
   task_id="$(basename "$probe" .sh)"
   status=0
-  output="$(bash "$probe" 2>&1)" || status=$?
+  output="$(timeout 300 bash "$probe" 2>&1)" || status=$?
+  if [[ "$status" -eq 124 ]]; then
+    # timeout(1) returns 124 when the child is killed.
+    output="probe timed out after 300 seconds"
+    status=1
+  fi
   case "$status" in
     0)
       log "$task_id: signal received - handing back to the board"
