@@ -240,12 +240,16 @@ def test_curl_output_flags_are_parsed() -> None:
         "-D",
         "/home/saturnin/headers.txt",
         "-O",
+        "--silent",
         "https://example.test/download.tar.gz",
+        "--remote-name-all",
+        "https://example.test/second.tar.gz",
     ]) == [
         "/home/saturnin/response.txt",
         "/home/saturnin/other.txt",
         "/home/saturnin/headers.txt",
         "download.tar.gz",
+        "second.tar.gz",
     ]
 
 

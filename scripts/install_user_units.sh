@@ -15,16 +15,12 @@ mapfile -t escaped_values < <(SATURNIN_HOME="$SATURNIN_HOME" python3 -c '
 import os
 value = os.environ["SATURNIN_HOME"]
 
-def escape_path():
+def escape_for_unit():
     escaped = value.replace("&", r"\x26").replace("|", r"\x7c").replace("\\", r"\x5c")
     return escaped.replace("%", "%%")
 
-def escape_env_value():
-    escaped = value.replace("&", r"\x26").replace("|", r"\x7c").replace("\\", r"\x5c")
-    return escaped.replace("%", "%%")
-
-print(escape_path())
-print(escape_env_value())
+print(escape_for_unit())
+print(escape_for_unit())
 ')
 escaped_home="${escaped_values[0]}"
 escaped_home_env="${escaped_values[1]}"

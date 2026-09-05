@@ -544,6 +544,8 @@ def _writable_targets(binary: str, arguments: Sequence[str]) -> list[str]:
 def _curl_targets(arguments: Sequence[str]) -> list[str]:
     targets: list[str] = []
     index = 0
+    remote_name_all = False
+    remote_name_pending = False
     while index < len(arguments):
         argument = arguments[index]
         if argument in {"-o", "--output", "-D", "--dump-header"}:
@@ -566,13 +568,29 @@ def _curl_targets(arguments: Sequence[str]) -> list[str]:
                 targets.append(value)
             index += 1
             continue
-        if argument in {"-O", "--remote-name", "--remote-name-all"}:
+        if argument == "--remote-name-all":
+            remote_name_all = True
             index += 1
-            if index < len(arguments):
-                target = _curl_remote_name(arguments[index])
-                if target:
-                    targets.append(target)
+            continue
+        if argument in {"-O", "--remote-name"}:
+            remote_name_pending = True
+            index += 1
+            continue
+        if remote_name_pending:
+            if argument.startswith("-"):
                 index += 1
+                continue
+            target = _curl_remote_name(argument)
+            if target:
+                targets.append(target)
+            remote_name_pending = False
+            index += 1
+            continue
+        if remote_name_all and not argument.startswith("-"):
+            target = _curl_remote_name(argument)
+            if target:
+                targets.append(target)
+            index += 1
             continue
         index += 1
     return targets
