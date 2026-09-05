@@ -365,7 +365,12 @@ class Governance:
                 "--no-pager",
                 "--show-types",
             }
-            unknown = [flag for flag in flags if flag not in allowed_flags and not flag.startswith("--type=") and not flag.startswith("--state=") and not flag.startswith("--property=")]
+            allowed_flag_prefixes = ("--type=", "--state=", "--property=")
+            unknown = [
+                flag
+                for flag in flags
+                if flag not in allowed_flags and not any(flag.startswith(prefix) for prefix in allowed_flag_prefixes)
+            ]
             if unknown:
                 return Decision.deny(
                     f"systemctl option(s) not allowed: {', '.join(unknown)}"
@@ -554,18 +559,45 @@ def _writable_targets(binary: str, arguments: Sequence[str]) -> list[str]:
     return []
 
 
+def _curl_output_dir(arguments: Sequence[str]) -> str | None:
+    output_dir: str | None = None
+    for index in range(len(arguments) - 1, -1, -1):
+        argument = arguments[index]
+        if argument == "--output-dir" and index + 1 < len(arguments):
+            candidate = arguments[index + 1]
+            if candidate and candidate != "-":
+                output_dir = candidate
+            break
+        if argument.startswith("--output-dir="):
+            candidate = argument.split("=", 1)[1]
+            if candidate and candidate != "-":
+                output_dir = candidate
+            break
+    return output_dir
+
+
 def _curl_targets(arguments: Sequence[str]) -> list[str]:
     targets: list[str] = []
     index = 0
     remote_name_all = False
     remote_name_pending = False
+    output_dir = _curl_output_dir(arguments)
     while index < len(arguments):
         argument = arguments[index]
-        if argument in {"-o", "--output", "-D", "--dump-header", "--output-dir"}:
+        if argument in {"-o", "--output", "-D", "--dump-header"}:
             index += 1
             if index < len(arguments):
                 value = arguments[index]
                 if value != "-":
+                    targets.append(value)
+                index += 1
+            continue
+        if argument in {"--output-dir"}:
+            index += 1
+            if index < len(arguments):
+                value = arguments[index]
+                if value != "-":
+                    output_dir = value
                     targets.append(value)
                 index += 1
             continue
@@ -578,6 +610,7 @@ def _curl_targets(arguments: Sequence[str]) -> list[str]:
         if argument.startswith("--output-dir="):
             value = argument.split("=", 1)[1]
             if value and value != "-":
+                output_dir = value
                 targets.append(value)
             index += 1
             continue
@@ -601,14 +634,20 @@ def _curl_targets(arguments: Sequence[str]) -> list[str]:
                 continue
             target = _curl_remote_name(argument)
             if target:
-                targets.append(target)
+                if output_dir:
+                    targets.append(str(Path(output_dir) / target))
+                else:
+                    targets.append(target)
             remote_name_pending = False
             index += 1
             continue
         if remote_name_all and not argument.startswith("-"):
             target = _curl_remote_name(argument)
             if target:
-                targets.append(target)
+                if output_dir:
+                    targets.append(str(Path(output_dir) / target))
+                else:
+                    targets.append(target)
             index += 1
             continue
         index += 1

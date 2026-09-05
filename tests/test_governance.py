@@ -254,8 +254,20 @@ def test_curl_output_flags_are_parsed() -> None:
         "/home/saturnin/other.txt",
         "/home/saturnin/downloads",
         "/home/saturnin/headers.txt",
-        "download.tar.gz",
-        "second.tar.gz",
+        "/home/saturnin/downloads/download.tar.gz",
+        "/home/saturnin/downloads/second.tar.gz",
+    ]
+
+
+def test_curl_output_dir_applies_even_when_url_comes_first() -> None:
+    assert _curl_targets([
+        "-O",
+        "https://example.test/download.tar.gz",
+        "--output-dir",
+        "/home/saturnin/downloads",
+    ]) == [
+        "/home/saturnin/downloads/download.tar.gz",
+        "/home/saturnin/downloads",
     ]
 
 
