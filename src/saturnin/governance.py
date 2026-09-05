@@ -351,8 +351,21 @@ class Governance:
                 return Decision.deny("systemctl is not allowed")
             raw_args = parts[1:]
             flags = [p for p in raw_args if p.startswith("-")]
-            allowed_flags = {"--user", "--now"}
-            unknown = [flag for flag in flags if flag not in allowed_flags]
+            allowed_flags = {
+                "--user",
+                "--now",
+                "--all",
+                "--failed",
+                "--type",
+                "--state",
+                "--property",
+                "--quiet",
+                "--plain",
+                "--no-legend",
+                "--no-pager",
+                "--show-types",
+            }
+            unknown = [flag for flag in flags if flag not in allowed_flags and not flag.startswith("--type=") and not flag.startswith("--state=") and not flag.startswith("--property=")]
             if unknown:
                 return Decision.deny(
                     f"systemctl option(s) not allowed: {', '.join(unknown)}"
@@ -548,7 +561,7 @@ def _curl_targets(arguments: Sequence[str]) -> list[str]:
     remote_name_pending = False
     while index < len(arguments):
         argument = arguments[index]
-        if argument in {"-o", "--output", "-D", "--dump-header"}:
+        if argument in {"-o", "--output", "-D", "--dump-header", "--output-dir"}:
             index += 1
             if index < len(arguments):
                 value = arguments[index]
@@ -557,6 +570,12 @@ def _curl_targets(arguments: Sequence[str]) -> list[str]:
                 index += 1
             continue
         if argument.startswith("--output="):
+            value = argument.split("=", 1)[1]
+            if value and value != "-":
+                targets.append(value)
+            index += 1
+            continue
+        if argument.startswith("--output-dir="):
             value = argument.split("=", 1)[1]
             if value and value != "-":
                 targets.append(value)
