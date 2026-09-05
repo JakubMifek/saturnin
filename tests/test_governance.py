@@ -3,7 +3,7 @@ from __future__ import annotations
 import pytest
 
 from saturnin.config import Config
-from saturnin.governance import Governance
+from saturnin.governance import Governance, _curl_targets
 from saturnin.review import ReviewLedger, ReviewError
 
 SELF_REPO = "JakubMifek/saturnin"
@@ -219,11 +219,34 @@ def test_out_of_scope_server_commands(governance: Governance, command: str) -> N
     [
         "systemctl --user restart saturnin-janitor.timer",
         "systemctl --user status saturnin-improve.service",
+        "systemctl --user daemon-reload",
+        "systemctl --user enable --now saturnin-janitor.timer",
+        "curl -o /home/saturnin/response.txt https://example.test/ok",
+        "curl --output /home/saturnin/response.txt https://example.test/ok",
+        "curl -D /home/saturnin/headers.txt https://example.test/ok",
         "python3 -m saturnin doctor",
     ],
 )
 def test_in_scope_server_commands(governance: Governance, command: str) -> None:
     assert governance.check_server_command(command).allowed
+
+
+def test_curl_output_flags_are_parsed() -> None:
+    assert _curl_targets([
+        "-o",
+        "/home/saturnin/response.txt",
+        "--output",
+        "/home/saturnin/other.txt",
+        "-D",
+        "/home/saturnin/headers.txt",
+        "-O",
+        "https://example.test/download.tar.gz",
+    ]) == [
+        "/home/saturnin/response.txt",
+        "/home/saturnin/other.txt",
+        "/home/saturnin/headers.txt",
+        "download.tar.gz",
+    ]
 
 
 @pytest.mark.parametrize(
@@ -248,9 +271,11 @@ def test_shell_assignments_cannot_change_policy_home(
         ("rm -rf /etc", "forbidden root"),
         ("touch /usr/local/unsafe", "forbidden root"),
         ("mkdir /var/lib/saturnin", "forbidden root"),
+        ("curl -o /etc/headers.txt https://example.test/ok", "forbidden root"),
         ("rm -rf /home/saturnin-other", "outside writable roots"),
         ("rm -- -outside-writable-roots", "outside writable roots"),
         ("cp --target-directory /opt source", "outside writable roots"),
+        ("curl --output /opt/response.txt https://example.test/ok", "outside writable roots"),
         ("sed -i s/foo/bar/ /opt/status", "outside writable roots"),
     ],
 )

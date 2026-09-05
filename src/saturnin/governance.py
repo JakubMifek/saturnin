@@ -13,6 +13,7 @@ import shlex
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Iterable, Sequence
+from urllib.parse import urlsplit
 
 from .config import Config, default_config
 from .review import ReviewRecord
@@ -350,7 +351,8 @@ class Governance:
                 return Decision.deny("systemctl is not allowed")
             raw_args = parts[1:]
             flags = [p for p in raw_args if p.startswith("-")]
-            unknown = [flag for flag in flags if flag != "--user"]
+            allowed_flags = {"--user", "--now"}
+            unknown = [flag for flag in flags if flag not in allowed_flags]
             if unknown:
                 return Decision.deny(
                     f"systemctl option(s) not allowed: {', '.join(unknown)}"
@@ -370,7 +372,7 @@ class Governance:
                 return Decision.deny(
                     f"systemctl may only touch {prefix}* units, got: {', '.join(bad)}"
                 )
-            if not units and sub not in ("list-timers", "status"):
+            if not units and sub not in ("list-timers", "status", "daemon-reload"):
                 return Decision.deny("systemctl needs an explicit Saturnin unit name")
             return Decision.ok("systemctl limited to Saturnin-dedicated units")
         return Decision.ok(f"{binary}: no elevated capability required")
@@ -524,6 +526,8 @@ def _writable_targets(binary: str, arguments: Sequence[str]) -> list[str]:
         if target_directory is not None:
             return [target_directory]
         return positional[-1:]
+    if binary == "curl":
+        return _curl_targets(arguments)
     if binary == "dd":
         return [
             argument.split("=", 1)[1]
@@ -535,6 +539,50 @@ def _writable_targets(binary: str, arguments: Sequence[str]) -> list[str]:
     ):
         return _sed_targets(arguments)
     return []
+
+
+def _curl_targets(arguments: Sequence[str]) -> list[str]:
+    targets: list[str] = []
+    index = 0
+    while index < len(arguments):
+        argument = arguments[index]
+        if argument in {"-o", "--output", "-D", "--dump-header"}:
+            index += 1
+            if index < len(arguments):
+                value = arguments[index]
+                if value != "-":
+                    targets.append(value)
+                index += 1
+            continue
+        if argument.startswith("--output="):
+            value = argument.split("=", 1)[1]
+            if value and value != "-":
+                targets.append(value)
+            index += 1
+            continue
+        if argument.startswith("--dump-header="):
+            value = argument.split("=", 1)[1]
+            if value and value != "-":
+                targets.append(value)
+            index += 1
+            continue
+        if argument in {"-O", "--remote-name", "--remote-name-all"}:
+            index += 1
+            if index < len(arguments):
+                target = _curl_remote_name(arguments[index])
+                if target:
+                    targets.append(target)
+                index += 1
+            continue
+        index += 1
+    return targets
+
+
+def _curl_remote_name(url: str) -> str | None:
+    if not url or url.startswith("-"):
+        return None
+    name = urlsplit(url).path.rsplit("/", 1)[-1]
+    return name or None
 
 
 def _positional_arguments(arguments: Sequence[str]) -> list[str]:
