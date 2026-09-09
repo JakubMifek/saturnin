@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import pytest
+import yaml
 
 from saturnin.board import Board
 from saturnin.cli import check_managed_repo, main
@@ -88,7 +89,19 @@ def test_sources_accept_plain_slugs_and_mappings(config: Config, board: Board) -
     assert sources[1]["labels"] == ["ops"]
 
 
+def test_public_task_intake_is_a_discovery_source(config: Config, board: Board) -> None:
+    sources = IssueDiscovery(config, board).sources()
+    assert {
+        "slug": "JakubMifek/saturnin",
+        "labels": ["saturnin:task"],
+    } in sources
+
+
 def test_discover_command_reports_when_there_is_nothing(config: Config, capsys) -> None:
+    policy_path = config.policies / "repos.yaml"
+    policy = yaml.safe_load(policy_path.read_text(encoding="utf-8"))
+    policy["discovery"]["sources"] = []
+    policy_path.write_text(yaml.safe_dump(policy), encoding="utf-8")
     assert main(["--home", str(config.root), "discover", "--dry-run"]) == 0
     assert "nothing new to adopt" in capsys.readouterr().out
 
@@ -157,10 +170,43 @@ def test_project_agent_must_exist_and_not_shadow_a_global_role(
     _manifest(project, ".saturnin/agents/db-migrator.md")
     assert any("missing" in p for p in check_managed_repo(project, config))
 
+    (project / ".saturnin" / "agents" / "local-worker.md").write_text(
+        "---\nrole: code-worker\nskills: []\nmcp: []\n---\n"
+    )
+    _manifest(project, ".saturnin/agents/local-worker.md")
+    problems = check_managed_repo(project, config)
+    assert any("shadows" in p for p in problems)
+    assert any("must match its filename" in p for p in problems)
+
     (project / ".saturnin" / "agents" / "code-worker.md").write_text("# local\n")
     _manifest(project, ".saturnin/agents/code-worker.md")
-    assert any("shadows" in p for p in check_managed_repo(project, config))
+    assert any("missing YAML front matter" in p for p in check_managed_repo(project, config))
 
-    (project / ".saturnin" / "agents" / "db-migrator.md").write_text("# migrations\n")
+    (project / ".saturnin" / "agents" / "db-migrator.md").write_text(
+        "---\n"
+        "role: db-migrator\n"
+        "skills: [checkpointing]\n"
+        "mcp: [github]\n"
+        "---\n"
+        "# Migrations\n"
+    )
     _manifest(project, ".saturnin/agents/db-migrator.md")
     assert check_managed_repo(project, config) == []
+
+
+def test_project_agent_validates_skill_and_mcp_declarations(
+    project, config: Config
+) -> None:
+    agent = project / ".saturnin" / "agents" / "db-migrator.md"
+    agent.write_text(
+        "---\n"
+        "role: db-migrator\n"
+        "skills: [made-up-skill]\n"
+        "mcp: [made-up-server]\n"
+        "---\n"
+    )
+    _manifest(project, ".saturnin/agents/db-migrator.md")
+
+    problems = check_managed_repo(project, config)
+    assert any("unknown skill 'made-up-skill'" in p for p in problems)
+    assert any("unknown MCP server 'made-up-server'" in p for p in problems)

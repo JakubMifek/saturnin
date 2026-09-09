@@ -100,3 +100,22 @@ def test_monitor_escalations_are_pushed_and_not_silenced(config: Config) -> None
     escalation = script.split("saturnin escalate", 1)[1].split("else", 1)[0]
     assert "--push" in escalation
     assert "|| true" not in escalation
+
+
+def test_review_gate_rejects_pr_subject_for_another_repo(config: Config) -> None:
+    result = subprocess.run(
+        [
+            "bash",
+            str(config.root / "automation/library/review_gate.sh"),
+            "pr",
+            "other/repo#42",
+            "owner/repo",
+            "code-worker",
+        ],
+        capture_output=True,
+        text=True,
+        env={**os.environ, "SATURNIN_HOME": str(config.root)},
+    )
+
+    assert result.returncode == 2
+    assert "expected owner/repo#number" in result.stderr

@@ -5,7 +5,6 @@ name: ci
 
 on:
   push:
-    branches-ignore: [main]
   pull_request:
   workflow_dispatch:
 
@@ -40,7 +39,7 @@ jobs:
           python-version: "3.12"
       - name: Install
         run: python -m pip install -e ".[dev]"
-      - name: Branch must be a feature branch (rules 1 and 2)
+      - name: PR head must be a feature branch (rules 1 and 2)
         if: github.event_name == 'pull_request'
         env:
           HEAD_REF: ${{ github.head_ref }}

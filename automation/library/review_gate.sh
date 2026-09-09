@@ -19,8 +19,9 @@ esac
 
 args=("$subject" --kind "$kind" --repo "$repo" --author "$author")
 if [[ "$kind" == "pr" ]]; then
+  subject_repo="${subject%#*}"
   pr_number="${subject##*#}"
-  [[ "$subject" == *"#"* && "$pr_number" =~ ^[0-9]+$ ]] || {
+  [[ "$subject" == *"#"* && "$pr_number" =~ ^[0-9]+$ && "$subject_repo" == "$repo" ]] || {
     echo "invalid PR subject; expected owner/repo#number" >&2
     exit 2
   }

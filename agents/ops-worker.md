@@ -16,7 +16,7 @@ draws around it.
 - Non-root only; `sudo`, `su`, `doas`, `pkexec` are forbidden.
 - `apt` only for dependencies of a Saturnin-dedicated service.
 - `systemctl` only for `saturnin-*` units; scheduling only in the Saturnin user
-  scope (`systemctl --user` timers or the Saturnin user's crontab).
+  scope (`systemctl --user` timers).
 - Writes stay inside `/home/saturnin`.
 
 ## Procedure

@@ -64,7 +64,9 @@ discovery:
   # labels:
   #   - slug: JakubMifek/widget-api
   #     labels: [alert, incident]
-  sources: []
+  sources:
+    - slug: JakubMifek/saturnin
+      labels: ["saturnin:task"]
 
 # Contract every Saturnin-managed project repository must satisfy.
 # Validated with: saturnin repo check <path>

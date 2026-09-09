@@ -22,7 +22,7 @@ from .automation import AutomationLibrary
 from .board import CONTAINER_KINDS, Board, BoardError, Task
 from .checkpoints import Checkpoint, CheckpointStore
 from .config import Config
-from .contracts import audit as audit_contracts
+from .contracts import FRONT_MATTER, audit as audit_contracts
 from .discovery import DiscoveryError, IssueDiscovery
 from . import docsync
 from .governance import Governance
@@ -296,12 +296,16 @@ def check_managed_repo(path: Path, config: Config) -> list[str]:
             problems.append(f"squad names roles that are not in the catalog: {', '.join(unknown)}")
     else:
         problems.append("squad must be a list of role ids")
-    problems += _check_project_agents(path, manifest, contract, roles)
+    problems += _check_project_agents(path, manifest, contract, roles, config)
     return problems
 
 
 def _check_project_agents(
-    path: Path, manifest: dict[str, Any], contract: dict[str, Any], roles: dict[str, Any]
+    path: Path,
+    manifest: dict[str, Any],
+    contract: dict[str, Any],
+    roles: dict[str, Any],
+    config: Config,
 ) -> list[str]:
     """A project-specific role must live inside the project it belongs to.
 
@@ -313,6 +317,12 @@ def _check_project_agents(
     if not isinstance(entries, list):
         return ["agents must be a list of paths inside the repository"]
     agents_dir = str(contract.get("agents_dir", ".saturnin/agents"))
+    known_skills = {
+        skill.stem
+        for skill in (config.root / "skills").glob("*.md")
+        if skill.name != "README.md"
+    }
+    known_mcp = set(config.policy("mcp").get("servers", {}))
     problems: list[str] = []
     for entry in entries:
         rel = str(entry)
@@ -322,15 +332,48 @@ def _check_project_agents(
         if not rel.startswith(f"{agents_dir}/"):
             problems.append(f"project agents belong in {agents_dir}/: {rel}")
             continue
-        if not (path / rel).is_file():
+        agent_path = path / rel
+        if not agent_path.is_file():
             problems.append(f"agent contract declared but missing: {rel}")
             continue
-        role_id = Path(rel).stem
+        match = FRONT_MATTER.match(agent_path.read_text(encoding="utf-8"))
+        if not match:
+            problems.append(f"project agent {rel} is missing YAML front matter")
+            continue
+        try:
+            front_matter = yaml.safe_load(match.group(1)) or {}
+        except yaml.YAMLError as exc:
+            problems.append(f"project agent {rel} has invalid YAML front matter: {exc}")
+            continue
+        if not isinstance(front_matter, dict):
+            problems.append(f"project agent {rel} front matter must contain a mapping")
+            continue
+        role_id = front_matter.get("role")
+        if not isinstance(role_id, str) or not role_id:
+            problems.append(f"project agent {rel} must declare a role")
+            continue
+        if role_id != Path(rel).stem:
+            problems.append(
+                f"project agent {rel} declares role '{role_id}', which must match its filename"
+            )
         if role_id in roles:
             problems.append(
                 f"project agent {rel} shadows the global role '{role_id}'; "
                 "give the project role its own id"
             )
+        for field, known, description in (
+            ("skills", known_skills, "skill"),
+            ("mcp", known_mcp, "MCP server"),
+        ):
+            declarations = front_matter.get(field, [])
+            if not isinstance(declarations, list) or not all(
+                isinstance(value, str) for value in declarations
+            ):
+                problems.append(f"project agent {rel} {field} must be a list of ids")
+                continue
+            for value in declarations:
+                if value not in known:
+                    problems.append(f"project agent {rel}: unknown {description} {value!r}")
     return problems
 
 def _config(args: argparse.Namespace) -> Config:
