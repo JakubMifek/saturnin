@@ -226,12 +226,12 @@ def test_missing_gh_error_applies_to_all_integrations(
     assert "--push" not in str(error.value)
 
 
-def test_review_kinds_are_not_mirrored(config: Config, board: Board) -> None:
-    task = board.create("Review the diff", kind="pr-review")
+@pytest.mark.parametrize("kind", ["pr-review", "issue-review"])
+def test_review_kinds_are_mirrored(config: Config, board: Board, kind: str) -> None:
+    task = board.create("Review the diff", kind=kind)
     mirror = IssueMirror(config, board)
-    assert not mirror.mirrors(task)
-    with pytest.raises(MirrorError):
-        mirror.render(task)
+    assert mirror.mirrors(task)
+    assert f"saturnin:kind/{kind}" in mirror.render(task).labels
 
 
 def test_result_contract_gate(config: Config) -> None:

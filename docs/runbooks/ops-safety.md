@@ -7,7 +7,7 @@
 - `apt install|update|list|show` only, and only when `--service saturnin-*`
   identifies the dedicated service that needs the dependency.
 - `systemctl` only for `saturnin-*` units; scheduling only through user-scope
-  timers or the Saturnin user's crontab.
+  timers.
 - Writes stay under `/home/saturnin`.
 
 Check anything unusual first:

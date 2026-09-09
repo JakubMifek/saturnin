@@ -33,7 +33,7 @@ tracking:
   # Rule 8: a task without a mirrored issue is not durable.
   mirror_tasks_as_issues: true
   # Improvement findings and automation proposals are mirrored too.
-  mirror_kinds: [objective, epic, feature, task, automation, improvement]
+  mirror_kinds: [objective, epic, feature, task, pr-review, issue-review, automation, improvement]
   # Label scheme applied to the mirrored issue.
   kind_label: "kind"
   state_label: "state"

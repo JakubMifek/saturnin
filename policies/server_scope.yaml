@@ -19,9 +19,9 @@ services:
   systemctl_allowed: true
   unit_prefix: saturnin-
   allowed_subcommands: [start, stop, restart, status, enable, disable, list-timers, daemon-reload]
-  # Timers/cron entries live in the Saturnin user scope only.
+  # Timers live in the Saturnin user scope only.
   scheduling_scope: user
-  allowed_schedulers: [systemd-user-timer, user-crontab]
+  allowed_schedulers: [systemd-user-timer]
 
 filesystem:
   writable_roots:
