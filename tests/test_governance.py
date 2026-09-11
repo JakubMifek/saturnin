@@ -4,7 +4,7 @@ import pytest
 
 from saturnin.config import Config
 from saturnin.governance import Governance, _curl_targets
-from saturnin.review import ReviewLedger, ReviewError
+from saturnin.review import ReviewLedger, ReviewError, issue_content_digest
 
 SELF_REPO = "JakubMifek/saturnin"
 OTHER_REPO = "JakubMifek/some-project"
@@ -226,8 +226,12 @@ def test_issue_submission_requires_review_in_managed_repos(
     ledger = ReviewLedger(config)
     subject = "draft-improve-ci"
     managed_repo = "JakubMifek/saturnin-ops"
+    digest = issue_content_digest("Improve CI", "Add the missing gate.")
     assert not governance.issue_submission_allowed(
-        repo=managed_repo, author="researcher", records=ledger.for_subject(subject, "issue")
+        repo=managed_repo,
+        author="researcher",
+        records=ledger.for_subject(subject, "issue"),
+        issue_digest=digest,
     ).allowed
     ledger.record(
         subject=subject,
@@ -235,10 +239,49 @@ def test_issue_submission_requires_review_in_managed_repos(
         author="researcher",
         reviewer="issue-reviewer",
         verdict="approved",
+        issue_digest=digest,
     )
     assert governance.issue_submission_allowed(
-        repo=managed_repo, author="researcher", records=ledger.for_subject(subject, "issue")
+        repo=managed_repo,
+        author="researcher",
+        records=ledger.for_subject(subject, "issue"),
+        issue_digest=digest,
     ).allowed
+
+
+def test_issue_review_is_bound_to_the_reviewed_draft(
+    governance: Governance, config: Config
+) -> None:
+    ledger = ReviewLedger(config)
+    subject = "draft-changing"
+    managed_repo = "JakubMifek/saturnin-ops"
+    reviewed = issue_content_digest("Original", "Reviewed body")
+    changed = issue_content_digest("Original", "Changed body")
+    ledger.record(
+        subject=subject,
+        kind="issue",
+        author="researcher",
+        reviewer="issue-reviewer",
+        verdict="approved",
+        issue_digest=reviewed,
+    )
+
+    missing = governance.issue_submission_allowed(
+        repo=managed_repo,
+        author="researcher",
+        records=ledger.for_subject(subject, "issue"),
+    )
+    changed_decision = governance.issue_submission_allowed(
+        repo=managed_repo,
+        author="researcher",
+        records=ledger.for_subject(subject, "issue"),
+        issue_digest=changed,
+    )
+
+    assert not missing.allowed
+    assert "issue_digest is required" in missing.reasons[0]
+    assert not changed_decision.allowed
+    assert "current issue-content digest" in changed_decision.reasons[0]
 
 
 def test_issue_in_own_repo_needs_no_review(governance: Governance) -> None:

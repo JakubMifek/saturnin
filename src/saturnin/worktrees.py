@@ -199,6 +199,9 @@ class WorktreeManager:
             if worktree.locked:
                 plan.skipped.append(Action("remove_worktree", target, "worktree is locked"))
                 continue
+            if worktree.branch is None:
+                plan.skipped.append(Action("remove_worktree", target, "detached HEAD"))
+                continue
             if any(fnmatch(target, pattern) for pattern in wt_policy.get("keep_globs", [])):
                 plan.skipped.append(Action("remove_worktree", target, "matches keep_globs"))
                 continue
@@ -324,6 +327,8 @@ class WorktreeManager:
         worktree = matches[0]
         if worktree.locked:
             return "worktree is locked"
+        if worktree.branch is None:
+            return "detached HEAD"
         if worktree.branch in self.governance.protected_branches:
             return "protected branch"
         if worktree.branch and self.board.open_tasks_for_branch(worktree.branch):

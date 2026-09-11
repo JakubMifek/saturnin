@@ -129,25 +129,24 @@ class AutomationLibrary:
     ) -> list[Task]:
         """Create board tasks for repeated work that has no automation yet."""
         proposed: list[Task] = []
-        known = {label for task in board for label in task.labels}
         for candidate in self.detect_repeats(board, threshold=threshold):
             if candidate.existing:
                 continue
             marker = f"repeat:{candidate.signature}"
-            if marker in known:
-                continue
-            proposed.append(
-                board.create(
-                    f"Automate repeated work: {candidate.signature}",
-                    kind="automation",
-                    body=(
-                        f"Seen {candidate.count} times on the board "
-                        f"({', '.join(candidate.task_ids)}).\n"
-                        "Build a reusable script in automation/library and register it "
-                        "in automation/registry.yaml."
-                    ),
-                    labels=["automation", "self-improvement", marker],
-                    source="automation-detector",
-                )
+            task = board.create_if_labels_absent(
+                [marker],
+                f"Automate repeated work: {candidate.signature}",
+                kind="automation",
+                body=(
+                    f"Seen {candidate.count} times on the board "
+                    f"({', '.join(candidate.task_ids)}).\n"
+                    "Build a reusable script in automation/library and register it "
+                    "in automation/registry.yaml."
+                ),
+                labels=["automation", "self-improvement"],
+                source="automation-detector",
             )
+            if task is None:
+                continue
+            proposed.append(task)
         return proposed

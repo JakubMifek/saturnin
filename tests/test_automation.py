@@ -104,6 +104,36 @@ def test_monitor_escalations_are_pushed_and_not_silenced(config: Config) -> None
     assert "|| true" not in escalation
 
 
+def test_monitors_validate_manifest_name_and_url_before_curl(config: Config) -> None:
+    repo = config.root / "managed-app"
+    (repo / ".saturnin").mkdir(parents=True)
+    (repo / ".saturnin" / "repo.yaml").write_text(
+        "monitors:\n"
+        "  - name: ../escape\n"
+        "    url: https://example.test/health\n"
+        "  - name: option-url\n"
+        "    url: --config=/tmp/curlrc\n",
+        encoding="utf-8",
+    )
+    fake_bin = config.root / "fake-bin"
+    fake_bin.mkdir()
+    curl = fake_bin / "curl"
+    curl.write_text("#!/bin/sh\nexit 99\n", encoding="utf-8")
+    curl.chmod(0o755)
+
+    result = subprocess.run(
+        ["bash", str(config.root / "automation/library/run_monitors.sh"), str(repo)],
+        check=True,
+        capture_output=True,
+        text=True,
+        env={**os.environ, "PATH": f"{fake_bin}:{os.environ['PATH']}"},
+    )
+
+    assert "unsafe name" in result.stdout
+    assert "unsupported monitor URL" in result.stdout
+    assert not list((config.root / "var" / "monitors").glob("*escape*"))
+
+
 def test_review_gate_rejects_pr_subject_for_another_repo(config: Config) -> None:
     result = subprocess.run(
         [

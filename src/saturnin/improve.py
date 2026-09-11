@@ -193,22 +193,20 @@ class ImprovementLoop:
         self, findings: list[Finding], *, prefix: str = "Improve", label: str = "improve"
     ) -> list[Task]:
         labels = list(self.actions.get("labels", ["self-improvement"]))
-        known = {label for task in self.board for label in task.labels}
         created: list[Task] = []
         for finding in findings:
             marker = f"finding:{finding.id}"
-            if marker in known:
-                continue
-            created.append(
-                self.board.create(
-                    f"{prefix}: {finding.title or finding.detail}",
-                    kind="improvement",
-                    body=f"{finding.detail}\n\nRecommendation: {finding.recommendation}",
-                    labels=[*labels, label, marker],
-                    priority="P1" if finding.severity == "critical" else "P2",
-                    source="improvement-loop",
-                )
+            task = self.board.create_if_labels_absent(
+                [marker],
+                f"{prefix}: {finding.title or finding.detail}",
+                kind="improvement",
+                body=f"{finding.detail}\n\nRecommendation: {finding.recommendation}",
+                labels=[*labels, label],
+                priority="P1" if finding.severity == "critical" else "P2",
+                source="improvement-loop",
             )
+            if task is not None:
+                created.append(task)
         return created
 
     def write_report(self, report: ImprovementReport, *, now: datetime | None = None) -> Path:

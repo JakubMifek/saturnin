@@ -38,7 +38,7 @@ rules:
   non_executing_roles_get_none: true
 
 launcher:
-  enabled: true
+  enabled: false
   command: copilot
   args:
     - --autopilot

@@ -34,6 +34,7 @@ class ReviewRecord:
     verdict: str
     zero_context: bool = True
     head_sha: str = ""
+    issue_digest: str = ""
     notes: str = ""
     created_at: str = field(default_factory=utcnow)
 
@@ -54,6 +55,15 @@ def slugify(subject: str) -> str:
     return f"{slug.lower()}-{digest}"
 
 
+def issue_content_digest(title: str, body: str) -> str:
+    payload = json.dumps(
+        {"title": title.strip(), "body": body.strip()},
+        sort_keys=True,
+        separators=(",", ":"),
+    )
+    return hashlib.sha256(payload.encode("utf-8")).hexdigest()
+
+
 class ReviewLedger:
     def __init__(self, config: Config | None = None) -> None:
         self.config = config or default_config()
@@ -70,6 +80,7 @@ class ReviewLedger:
         verdict: str,
         zero_context: bool = True,
         head_sha: str = "",
+        issue_digest: str = "",
         notes: str = "",
     ) -> ReviewRecord:
         if kind not in KINDS:
@@ -78,6 +89,8 @@ class ReviewLedger:
             raise ReviewError(f"unknown verdict: {verdict}")
         if kind == "pr" and not head_sha.strip():
             raise ReviewError("PR reviews require the reviewed head SHA")
+        if kind == "issue" and not issue_digest.strip():
+            raise ReviewError("issue reviews require the reviewed issue-content digest")
         if reviewer.strip().lower() == author.strip().lower():
             raise ReviewError("a review must be written by somebody other than the author")
         roles = self.config.routing.get("roles", {})
@@ -94,6 +107,7 @@ class ReviewLedger:
             verdict=verdict,
             zero_context=zero_context,
             head_sha=head_sha.strip(),
+            issue_digest=issue_digest.strip(),
             notes=notes,
         )
         path = self.dir / f"{kind}-{slugify(subject)}.jsonl"

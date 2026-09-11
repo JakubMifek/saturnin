@@ -54,8 +54,6 @@ class AgentLauncher:
         if not self.enabled:
             return None
         task = self.board.get(task_id)
-        if task.state not in ("routed", "in_progress"):
-            raise LauncherError(f"task {task.id} cannot launch from state {task.state}")
         contract = self._contract(task)
         mcp_path = self._write_mcp_config(task, contract)
         prompt = self._prompt(task, contract)
@@ -76,35 +74,68 @@ class AgentLauncher:
                 ],
             )
         ]
-        workdir = Path(task.worktree) if task.worktree else self.config.root
-        if not workdir.is_dir():
-            raise LauncherError(f"task worktree does not exist: {workdir}")
         log_path = self.dir / f"{task.id}.log"
-        with log_path.open("ab") as output:
-            process = subprocess.Popen(
-                [executable, *args],
-                cwd=workdir,
-                stdin=subprocess.DEVNULL,
-                stdout=output,
-                stderr=subprocess.STDOUT,
-                start_new_session=True,
-            )
+        launch_error: LauncherError | None = None
+        process: subprocess.Popen[bytes] | None = None
+        workdir: Path | None = None
         with self.board.edit(task.id) as stored:
+            previous_state = stored.state
+            if stored.state == "in_progress" and resumed_checkpoint:
+                if stored.checkpoint_resumed_at == resumed_checkpoint:
+                    raise LauncherError(
+                        f"checkpoint {resumed_checkpoint} already resumed for task {stored.id}"
+                    )
+            elif stored.state != "routed":
+                raise LauncherError(f"task {stored.id} cannot launch from state {stored.state}")
             if stored.state == "routed":
                 Board._apply_transition(
                     stored,
                     "in_progress",
                     actor=stored.role or "launcher",
-                    note=f"agent pid={process.pid}",
+                    note="agent launch claimed",
                 )
-            stored.log(
-                "agent:launched",
-                actor="launcher",
-                role=contract.role,
-                pid=process.pid,
-            )
             if resumed_checkpoint:
                 stored.checkpoint_resumed_at = resumed_checkpoint
+            stored.log(
+                "agent:claim",
+                actor="launcher",
+                previous_state=previous_state,
+                resumed_checkpoint=resumed_checkpoint,
+            )
+            claimed = Task.from_dict(stored.to_dict())
+            try:
+                workdir = self._validated_workdir(claimed)
+                with log_path.open("ab") as output:
+                    process = subprocess.Popen(
+                        [executable, *args],
+                        cwd=workdir,
+                        stdin=subprocess.DEVNULL,
+                        stdout=output,
+                        stderr=subprocess.STDOUT,
+                        start_new_session=True,
+                    )
+            except (LauncherError, OSError) as exc:
+                if previous_state in ("routed", "in_progress"):
+                    stored.state = previous_state
+                stored.log("agent:launch_failed", actor="launcher", reason=str(exc))
+                launch_error = LauncherError(f"agent launcher failed for task {task.id}: {exc}")
+            else:
+                stored.log(
+                    "agent:launched",
+                    actor="launcher",
+                    role=contract.role,
+                    pid=process.pid,
+                )
+                stored.log(
+                    "state:in_progress",
+                    actor=stored.role or "launcher",
+                    note=f"agent pid={process.pid}",
+                )
+                task = Task.from_dict(stored.to_dict())
+        if launch_error is not None:
+            raise launch_error
+        if process is None or workdir is None:  # pragma: no cover - guarded by launch_error
+            raise LauncherError(f"agent launcher failed for task {task.id}")
         metadata = {
             "task_id": task.id,
             "role": contract.role,
@@ -124,6 +155,29 @@ class AgentLauncher:
             log=str(log_path),
             mcp_config=str(mcp_path),
         )
+
+    def _validated_workdir(self, task: Task) -> Path:
+        if not task.branch:
+            raise LauncherError(f"task {task.id} has no attached branch")
+        if not task.worktree:
+            raise LauncherError(f"task {task.id} has no attached worktree")
+        workdir = Path(task.worktree)
+        if workdir.resolve() == self.config.root.resolve():
+            raise LauncherError(f"task {task.id} cannot launch in the main checkout")
+        if not workdir.is_dir():
+            raise LauncherError(f"task worktree does not exist: {workdir}")
+        current = subprocess.run(  # noqa: S603 - fixed executable, arguments are not shell-parsed
+            ["git", "branch", "--show-current"],
+            cwd=str(workdir),
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        if current.returncode != 0 or current.stdout.strip() != task.branch:
+            raise LauncherError(
+                f"task worktree {workdir} is not checked out on branch {task.branch}"
+            )
+        return workdir
 
     def _contract(self, task: Task) -> AgentContract:
         if not task.role:

@@ -72,6 +72,24 @@ def test_fresh_worktree_is_kept(manager: WorktreeManager) -> None:
     assert str(worktree.path) not in {a.target for a in plan.actions}
 
 
+def test_detached_worktree_is_skipped_during_plan_and_apply(
+    manager: WorktreeManager, git_repo: Path
+) -> None:
+    detached = git_repo / "var" / "worktrees" / "detached"
+    git(["worktree", "add", "--detach", str(detached), "HEAD"], git_repo)
+    later = datetime.now(timezone.utc) + timedelta(days=90)
+
+    plan = manager.plan_cleanup(now=later)
+    assert str(detached) not in {a.target for a in plan.actions}
+    assert any(a.target == str(detached) and a.reason == "detached HEAD" for a in plan.skipped)
+
+    plan.actions.append(worktrees.Action("remove_worktree", str(detached), "stale"))
+    manager.apply(plan)
+
+    assert detached.exists()
+    assert any(a.target == str(detached) and a.reason == "detached HEAD" for a in plan.skipped)
+
+
 def test_unmerged_worktree_uses_hard_stale_threshold(manager: WorktreeManager) -> None:
     worktree = manager.create("feature/local-commit")
     (worktree.path / "local.txt").write_text("unmerged\n", encoding="utf-8")

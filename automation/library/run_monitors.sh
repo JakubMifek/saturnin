@@ -56,9 +56,17 @@ import sys, yaml
 monitor = (yaml.safe_load(open(sys.argv[1])) or {})["monitors"][int(sys.argv[2])]
 print(monitor["name"], monitor["url"], monitor.get("expect_status", 200),
       monitor.get("timeout_seconds", 10), sep="\t")' "$manifest" "$i")
+    if [[ ! "$name" =~ ^[A-Za-z0-9_.-]+$ ]]; then
+      log "$app monitor has unsafe name: $name"
+      continue
+    fi
+    if [[ ! "$url" =~ ^https?:// ]]; then
+      log "$app/$name has unsupported monitor URL: $url"
+      continue
+    fi
 
     started="$(date -Is)"
-    if ! code="$(curl -sS -o /dev/null -w '%{http_code}' --max-time "$timeout" "$url" 2>/dev/null)"; then
+    if ! code="$(curl -sS -o /dev/null -w '%{http_code}' --max-time "$timeout" -- "$url" 2>/dev/null)"; then
       code=000
     fi
     if [[ "$code" == "$expect" ]]; then

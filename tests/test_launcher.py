@@ -6,21 +6,55 @@ from types import SimpleNamespace
 
 from saturnin.board import Board
 from saturnin.config import Config
-from saturnin.launcher import AgentLauncher
+from saturnin.launcher import AgentLauncher, LauncherError
 from saturnin.routing import Router
+from saturnin.worktrees import WorktreeManager
+
+
+class FakeProcess:
+    def __init__(self, command, *, stdout: str = "", returncode: int = 0, pid: int = 4242):
+        self.args = command
+        self._stdout = stdout
+        self._stderr = ""
+        self.returncode = returncode
+        self.pid = pid
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *args):
+        return False
+
+    def communicate(self, input=None, timeout=None):  # noqa: A002 - subprocess API
+        return self._stdout, self._stderr
+
+    def poll(self):
+        return self.returncode
+
+    def wait(self, timeout=None):
+        return self.returncode
+
+    def kill(self):
+        self.returncode = -9
 
 
 def test_launcher_starts_routed_role_with_filtered_mcp(
-    config: Config, board: Board, monkeypatch
+    config: Config, board: Board, git_repo: Path, monkeypatch
 ) -> None:
     config.policy("mcp")["launcher"]["enabled"] = True
     task = board.create("Implement a small fix")
     Router(config).dispatch(board, task)
+    worktree = WorktreeManager(config, repo=git_repo, board=board).create("feature/launch")
+    with board.edit(task.id) as stored:
+        stored.branch = "feature/launch"
+        stored.worktree = str(worktree.path)
     calls: list[tuple[list[str], dict]] = []
 
     monkeypatch.setattr("saturnin.launcher.shutil.which", lambda _: "/usr/bin/copilot")
 
     def fake_popen(command, **kwargs):
+        if command == ["git", "branch", "--show-current"]:
+            return FakeProcess(command, stdout="feature/launch\n")
         calls.append((command, kwargs))
         return SimpleNamespace(pid=4242)
 
@@ -38,6 +72,56 @@ def test_launcher_starts_routed_role_with_filtered_mcp(
     assert "--no-ask-user" in command
     assert "Implement a small fix" in command[-1]
     assert "role: code-worker" in command[-1]
+    assert calls[0][1]["cwd"] == worktree.path
+
+
+def test_launcher_refuses_to_run_without_attached_worktree(
+    config: Config, board: Board, monkeypatch
+) -> None:
+    config.policy("mcp")["launcher"]["enabled"] = True
+    task = board.create("Implement a small fix")
+    Router(config).dispatch(board, task)
+    monkeypatch.setattr("saturnin.launcher.shutil.which", lambda _: "/usr/bin/copilot")
+
+    try:
+        AgentLauncher(config, board).launch(task.id)
+    except LauncherError as exc:
+        assert "attached branch" in str(exc)
+    else:  # pragma: no cover - assertion guard
+        raise AssertionError("launcher accepted a task without a worktree")
+    assert board.get(task.id).state == "routed"
+
+
+def test_launcher_rolls_back_claim_when_spawn_fails(
+    config: Config, board: Board, git_repo: Path, monkeypatch
+) -> None:
+    config.policy("mcp")["launcher"]["enabled"] = True
+    task = board.create("Implement a small fix")
+    Router(config).dispatch(board, task)
+    worktree = WorktreeManager(config, repo=git_repo, board=board).create("feature/fail-launch")
+    with board.edit(task.id) as stored:
+        stored.branch = "feature/fail-launch"
+        stored.worktree = str(worktree.path)
+    monkeypatch.setattr("saturnin.launcher.shutil.which", lambda _: "/usr/bin/copilot")
+    monkeypatch.setattr(
+        "saturnin.launcher.subprocess.Popen",
+        lambda command, **kwargs: (
+            FakeProcess(command, stdout="feature/fail-launch\n")
+            if command == ["git", "branch", "--show-current"]
+            else (_ for _ in ()).throw(OSError("boom"))
+        ),
+    )
+
+    try:
+        AgentLauncher(config, board).launch(task.id)
+    except LauncherError as exc:
+        assert "boom" in str(exc)
+    else:  # pragma: no cover - assertion guard
+        raise AssertionError("launcher did not report spawn failure")
+
+    stored = board.get(task.id)
+    assert stored.state == "routed"
+    assert stored.history[-1]["event"] == "agent:launch_failed"
 
 
 def test_root_mcp_config_has_no_blanket_grants() -> None:

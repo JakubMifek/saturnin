@@ -182,12 +182,22 @@ def build_parser() -> argparse.ArgumentParser:
         help="reviewer had prior context (fails the zero-context gate)",
     )
     record.add_argument("--head-sha", default="", help="reviewed commit SHA for PR reviews")
+    record.add_argument(
+        "--issue-digest",
+        default="",
+        help="reviewed title/body digest for issue reviews",
+    )
     gate = review.add_parser("gate", help="check whether merge/submission is allowed")
     gate.add_argument("subject")
     gate.add_argument("--kind", choices=["pr", "issue"], required=True)
     gate.add_argument("--repo", required=True)
     gate.add_argument("--author", required=True)
     gate.add_argument("--head-sha", default="", help="current PR head SHA to match reviews against")
+    gate.add_argument(
+        "--issue-digest",
+        default="",
+        help="current issue title/body digest to match reviews against",
+    )
 
     # governance -------------------------------------------------------
     gov = sub.add_parser("check", help="governance checks").add_subparsers(
@@ -475,16 +485,22 @@ def _run(args: argparse.Namespace, config: Config) -> int:  # noqa: C901 - flat 
         )
         if url and args.task:
             escalation_actor = getattr(args, "actor", "chief-of-staff")
+            task_update_error = None
             try:
                 board.transition_id(args.task, "blocked", actor=escalation_actor, note=f"escalated: {url}")
-            except BoardError:
-                try:
-                    with board.edit(args.task) as etask:
-                        etask.log("escalation", actor=escalation_actor, note=f"escalated: {url}")
-                except BoardError:
-                    print(f"warning: escalation submitted but task {args.task} not updated", file=sys.stderr)
-        _emit({"body": body, "url": url}, as_json, url or body)
-        return 0
+            except BoardError as exc:
+                task_update_error = f"escalation submitted but task {args.task} not blocked: {exc}"
+        else:
+            task_update_error = None
+        payload = {"body": body, "url": url}
+        if task_update_error:
+            payload["task_update_error"] = task_update_error
+        _emit(
+            payload,
+            as_json,
+            ((url or body) + (f"\n{task_update_error}" if task_update_error else "")),
+        )
+        return 2 if task_update_error else 0
     if args.command == "docs":
         stale = docsync.render(config, write=not args.check)
         names = [str(p.relative_to(config.root)) for p in stale]
@@ -807,6 +823,7 @@ def _run_review(args: argparse.Namespace, config: Config, as_json: bool) -> int:
             verdict=args.verdict,
             zero_context=not args.with_context,
             head_sha=getattr(args, "head_sha", ""),
+            issue_digest=getattr(args, "issue_digest", ""),
             notes=args.notes,
         )
         _emit(
@@ -824,7 +841,8 @@ def _run_review(args: argparse.Namespace, config: Config, as_json: bool) -> int:
         )
         if args.kind == "pr"
         else governance.issue_submission_allowed(
-            repo=args.repo, author=args.author, records=records
+            repo=args.repo, author=args.author, records=records,
+            issue_digest=getattr(args, "issue_digest", ""),
         )
     )
     _emit(

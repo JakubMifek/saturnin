@@ -182,7 +182,12 @@ class Governance:
         )
 
     def issue_submission_allowed(
-        self, *, repo: str, author: str, records: Iterable[ReviewRecord]
+        self,
+        *,
+        repo: str,
+        author: str,
+        records: Iterable[ReviewRecord],
+        issue_digest: str = "",
     ) -> Decision:
         """Rule 5: issues for managed repos need an independent issue review."""
         records = [r for r in records if r.kind == "issue"]
@@ -207,6 +212,16 @@ class Governance:
         settings = dict(self.review.get("issue", {}))
         if not settings.get("required_for_external_repos", True):  # pragma: no cover
             return Decision.ok(f"{repo}: issue review not required")
+        if not issue_digest.strip():
+            return Decision.deny(
+                "issue_digest is required: approvals must be verified against the current draft"
+            )
+        records = [r for r in records if r.issue_digest == issue_digest.strip()]
+        if not records:
+            return Decision.deny(
+                "no issue review records match the current issue-content digest; "
+                "the draft may have changed after review"
+            )
         settings.setdefault("min_approvals", 1)
         return self._review_gate(records, author, settings, "issue review", kind="issue")
 

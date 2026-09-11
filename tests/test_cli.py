@@ -145,6 +145,67 @@ def test_review_gate_flow(home: Path, capsys: pytest.CaptureFixture[str]) -> Non
     assert "ALLOWED" in out
 
 
+def test_issue_review_gate_requires_matching_digest(
+    home: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    subject = "draft-for-managed-repo"
+    digest = "reviewed-digest"
+    run(
+        capsys,
+        "review",
+        "record",
+        subject,
+        "--kind",
+        "issue",
+        "--author",
+        "researcher",
+        "--reviewer",
+        "issue-reviewer",
+        "--verdict",
+        "approved",
+        "--issue-digest",
+        digest,
+    )
+
+    code, out = run(
+        capsys,
+        "review",
+        "gate",
+        subject,
+        "--kind",
+        "issue",
+        "--repo",
+        "JakubMifek/saturnin-ops",
+        "--author",
+        "researcher",
+        "--issue-digest",
+        digest,
+    )
+
+    assert code == 0
+    assert "ALLOWED" in out
+
+
+def test_escalation_returns_nonzero_when_submitted_task_cannot_be_blocked(
+    home: Path, capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    done = Board().create("already done")
+    Board().transition(done, "routed")
+    Board().transition(done, "in_progress")
+    Board().transition(done, "review")
+    Board().transition(done, "done")
+    monkeypatch.setattr(
+        "saturnin.escalation.submit",
+        lambda **kwargs: "https://github.com/JakubMifek/saturnin-ops/issues/9",
+    )
+
+    code, out = run(capsys, "escalate", "Need help", "--push", "--task", done.id)
+
+    assert code == 2
+    assert out.splitlines()[0].endswith("/issues/9")
+    assert "not blocked" in out
+
+
 def test_cleanup_apply_reports_plan_errors(
     home: Path, capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch
 ) -> None:
