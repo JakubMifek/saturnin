@@ -168,28 +168,14 @@ class IssueMirror:
         ensure_labels(payload.repo, payload.labels)
         terminal = task.state in ("done", "cancelled")
         if task.issue:
-            current = self._issue_labels(task.issue)
-            stale = sorted(
-                label
-                for label in current
-                if self._is_metadata_label(label) and label not in payload.labels
-            )
-            args = [
-                "issue", "edit", task.issue,
-                "--body", payload.body,
-                "--title", payload.title,
-                *_label_args(payload.labels, option="--add-label"),
-                *_label_args(stale, option="--remove-label"),
-            ]
-            run_gh(args)
-            if terminal:
-                run_gh(["issue", "close", task.issue])
+            self._update_issue(task.issue, payload, terminal=terminal)
             return task.issue
         # Before creating, search for an existing issue with our marker to avoid
         # duplicates if a previous creation succeeded but the local save failed.
         marker = f"saturnin:task:{task.id}"
         existing = self._find_issue_by_marker(payload.repo, marker)
         if existing:
+            self._update_issue(existing, payload, terminal=terminal)
             return existing
         out = run_gh(
             [
@@ -211,17 +197,35 @@ class IssueMirror:
             run_gh(["issue", "close", url])
         return url
 
+    def _update_issue(self, issue: str, payload: IssuePayload, *, terminal: bool) -> None:
+        current = self._issue_labels(issue)
+        stale = sorted(
+            label
+            for label in current
+            if self._is_metadata_label(label) and label not in payload.labels
+        )
+        args = [
+            "issue", "edit", issue,
+            "--body", payload.body,
+            "--title", payload.title,
+            *_label_args(payload.labels, option="--add-label"),
+            *_label_args(stale, option="--remove-label"),
+        ]
+        run_gh(args)
+        if terminal:
+            run_gh(["issue", "close", issue])
+
     def _find_issue_by_marker(self, repo: str, marker: str) -> str | None:
         """Search for an existing issue containing the deterministic marker comment."""
         try:
             out = run_gh([
                 "issue", "list", "--repo", repo, "--search", marker,
-                "--json", "url", "--limit", "1",
+                "--state", "all", "--json", "url", "--limit", "1",
             ])
             data = json.loads(out or "[]")
             if data:
                 return str(data[0]["url"])
-        except (MirrorError, json.JSONDecodeError, KeyError):
+        except (json.JSONDecodeError, KeyError, TypeError):
             pass
         return None
 

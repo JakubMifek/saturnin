@@ -215,6 +215,60 @@ def test_new_terminal_issue_is_closed(
     assert ["gh", "issue", "close", "https://github.com/example/repo/issues/3"] in calls
 
 
+def test_recovered_terminal_issue_is_updated_and_closed(
+    config: Config, board: Board, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    task = board.create("Recovered", kind="task")
+    with board.edit(task.id) as stored:
+        stored.state = "done"
+    calls: list[list[str]] = []
+    recovered = "https://github.com/example/repo/issues/4"
+    monkeypatch.setattr("saturnin.issues.shutil.which", lambda _: "/usr/bin/gh")
+
+    def fake_run(args, **kwargs):
+        calls.append(args)
+        if args[1:3] == ["label", "list"]:
+            return subprocess.CompletedProcess(args, 0, "[]", "")
+        if args[1:3] == ["issue", "list"]:
+            return subprocess.CompletedProcess(args, 0, json.dumps([{"url": recovered}]), "")
+        if args[1:3] == ["issue", "view"]:
+            return subprocess.CompletedProcess(args, 0, json.dumps({"labels": []}), "")
+        return subprocess.CompletedProcess(args, 0, "", "")
+
+    monkeypatch.setattr("saturnin.issues.subprocess.run", fake_run)
+
+    IssueMirror(config, board).sync(task, push=True)
+
+    search = next(call for call in calls if call[1:3] == ["issue", "list"])
+    assert "--state" in search
+    assert search[search.index("--state") + 1] == "all"
+    assert next(call for call in calls if call[1:3] == ["issue", "edit"])[3] == recovered
+    assert ["gh", "issue", "close", recovered] in calls
+    assert not any(call[1:3] == ["issue", "create"] for call in calls)
+
+
+def test_marker_lookup_failure_stops_issue_creation(
+    config: Config, board: Board, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    task = board.create("Fresh")
+    calls: list[list[str]] = []
+    monkeypatch.setattr("saturnin.issues.shutil.which", lambda _: "/usr/bin/gh")
+
+    def fake_run(args, **kwargs):
+        calls.append(args)
+        if args[1:3] == ["label", "list"]:
+            return subprocess.CompletedProcess(args, 0, "[]", "")
+        if args[1:3] == ["issue", "list"]:
+            return subprocess.CompletedProcess(args, 1, "", "search unavailable")
+        return subprocess.CompletedProcess(args, 0, "", "")
+
+    monkeypatch.setattr("saturnin.issues.subprocess.run", fake_run)
+
+    with pytest.raises(MirrorError, match="search unavailable"):
+        IssueMirror(config, board).sync(task, push=True)
+    assert not any(call[1:3] == ["issue", "create"] for call in calls)
+
+
 def test_missing_gh_error_applies_to_all_integrations(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

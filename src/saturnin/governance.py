@@ -500,6 +500,9 @@ def _check_filesystem_scope(
                         f"{binary!r} is only allowed for Saturnin module invocations "
                         "(python3 -m saturnin ...)"
                     )
+                targets = _saturnin_targets(arguments[2:])
+                if targets:
+                    return _check_filesystem_targets(targets, filesystem)
         elif allowlist and binary not in allowlist:
             return Decision.deny(
                 f"{binary!r} is not in the executable allowlist; "
@@ -507,6 +510,11 @@ def _check_filesystem_scope(
             )
         return Decision.ok("command has no explicit filesystem write target")
 
+    return _check_filesystem_targets(targets, filesystem)
+
+
+def _check_filesystem_targets(targets: Sequence[str], filesystem: dict[str, Any]) -> Decision:
+    forbidden_roots = _policy_roots(filesystem.get("forbidden_roots", []))
     writable_roots = _policy_roots(filesystem.get("writable_roots", []))
     for raw_path in targets:
         path = _resolve_command_path(raw_path)
@@ -556,6 +564,55 @@ def _writable_targets(binary: str, arguments: Sequence[str]) -> list[str]:
         argument == "-i" or argument.startswith("--in-place") for argument in arguments
     ):
         return _sed_targets(arguments)
+    if binary == "saturnin":
+        return _saturnin_targets(arguments)
+    if binary == "git":
+        return _git_targets(arguments)
+    return []
+
+
+def _saturnin_targets(arguments: Sequence[str]) -> list[str]:
+    targets: list[str] = []
+    index = 0
+    while index < len(arguments):
+        argument = arguments[index]
+        if argument == "--home":
+            if index + 1 < len(arguments):
+                targets.append(arguments[index + 1])
+            index += 2
+            continue
+        if argument.startswith("--home="):
+            targets.append(argument.split("=", 1)[1])
+        index += 1
+    return targets
+
+
+def _git_targets(arguments: Sequence[str]) -> list[str]:
+    index = 0
+    working_directories: list[str] = []
+    while index < len(arguments):
+        argument = arguments[index]
+        if argument == "-C":
+            if index + 1 < len(arguments):
+                working_directories.append(arguments[index + 1])
+            index += 2
+            continue
+        if argument.startswith("-C") and len(argument) > 2:
+            working_directories.append(argument[2:])
+            index += 1
+            continue
+        if argument in {"-c", "--git-dir", "--work-tree"}:
+            index += 2
+            continue
+        if argument.startswith(("-c", "--git-dir=", "--work-tree=")):
+            index += 1
+            continue
+        if argument == "clone":
+            operands = _positional_arguments(arguments[index + 1 :])
+            if len(operands) >= 2:
+                return [operands[-1]]
+            return working_directories or ["."]
+        index += 1
     return []
 
 

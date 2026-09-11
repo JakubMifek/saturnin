@@ -7,16 +7,18 @@ cleanup planner.
 
 from __future__ import annotations
 
+from contextlib import contextmanager
 import subprocess
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
 from fnmatch import fnmatch
 from pathlib import Path
-from typing import Any, Iterable, Sequence
+from typing import Any, Iterable, Iterator, Sequence
 
 from .board import Board
 from .config import Config, default_config
 from .governance import Governance
+from .locking import file_lock
 
 
 class GitError(RuntimeError):
@@ -85,6 +87,19 @@ class WorktreeManager:
         self.governance = Governance(self.config)
         self.board = board or Board(self.config)
         self.policy = self.config.cleanup
+        self._lifecycle_depth = 0
+
+    @contextmanager
+    def lifecycle_lock(self) -> Iterator[None]:
+        if self._lifecycle_depth:
+            yield
+            return
+        with file_lock(self.config.var_dir / "worktree-lifecycle"):
+            self._lifecycle_depth += 1
+            try:
+                yield
+            finally:
+                self._lifecycle_depth -= 1
 
     # -- inspection ----------------------------------------------------
     def list(self) -> list[Worktree]:
@@ -141,6 +156,12 @@ class WorktreeManager:
 
     # -- creation ------------------------------------------------------
     def create(self, branch: str, *, base: str | None = None, path: Path | None = None) -> Worktree:
+        with self.lifecycle_lock():
+            return self._create_unlocked(branch, base=base, path=path)
+
+    def _create_unlocked(
+        self, branch: str, *, base: str | None = None, path: Path | None = None
+    ) -> Worktree:
         decision = self.governance.check_branch(branch)
         if not decision.allowed:
             raise GitError("; ".join(decision.reasons))
@@ -265,14 +286,22 @@ class WorktreeManager:
         return (now - max(stamps)).total_seconds() / 86400.0
 
     def apply(self, plan: CleanupPlan) -> CleanupPlan:
-        for action in plan.actions:
-            try:
-                if action.kind == "remove_worktree":
-                    self.remove(Path(action.target))
-                elif action.kind == "delete_branch":
-                    git(["branch", "-d", action.target], self.repo)
-            except GitError as exc:
-                plan.errors.append(f"{action.kind} {action.target}: {exc}")
+        applied: list[Action] = []
+        with self.lifecycle_lock():
+            for action in plan.actions:
+                try:
+                    skip_reason = self._execution_skip_reason(action)
+                    if skip_reason is not None:
+                        plan.skipped.append(Action(action.kind, action.target, skip_reason))
+                        continue
+                    if action.kind == "remove_worktree":
+                        self.remove(Path(action.target))
+                    elif action.kind == "delete_branch":
+                        git(["branch", "-d", action.target], self.repo)
+                    applied.append(action)
+                except GitError as exc:
+                    plan.errors.append(f"{action.kind} {action.target}: {exc}")
+        plan.actions = applied
         try:
             git(["worktree", "prune"], self.repo)
         except GitError as exc:  # pragma: no cover - defensive
@@ -280,6 +309,40 @@ class WorktreeManager:
         plan.applied = True
         self.log_plan(plan)
         return plan
+
+    def _execution_skip_reason(self, action: Action) -> str | None:
+        if action.kind == "remove_worktree":
+            return self._remove_worktree_skip_reason(Path(action.target))
+        if action.kind == "delete_branch":
+            return self._delete_branch_skip_reason(action.target)
+        return None
+
+    def _remove_worktree_skip_reason(self, path: Path) -> str | None:
+        matches = [worktree for worktree in self.list() if worktree.path == path]
+        if not matches:
+            return "worktree no longer exists"
+        worktree = matches[0]
+        if worktree.locked:
+            return "worktree is locked"
+        if worktree.branch in self.governance.protected_branches:
+            return "protected branch"
+        if worktree.branch and self.board.open_tasks_for_branch(worktree.branch):
+            return "has an open board task"
+        if self.policy.get("safety", {}).get("require_clean_worktree", True) and not self.is_clean(path):
+            return "uncommitted changes present"
+        return None
+
+    def _delete_branch_skip_reason(self, branch: str) -> str | None:
+        if branch in self.governance.protected_branches:
+            return "protected branch"
+        if branch in {worktree.branch for worktree in self.list()}:
+            return "checked out in a worktree"
+        if self.policy.get("branch", {}).get("protect_with_open_tasks", True):
+            if self.board.open_tasks_for_branch(branch):
+                return "has an open board task"
+        if branch not in self.merged_branches():
+            return "not merged into default branch"
+        return None
 
     def log_plan(self, plan: CleanupPlan) -> Path:
         log_file = Path(self.policy.get("safety", {}).get("log_file", "var/logs/janitor.log"))

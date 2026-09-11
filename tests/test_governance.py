@@ -300,6 +300,10 @@ def test_shell_assignments_cannot_change_policy_home(
         ("cp --target-directory /opt source", "outside writable roots"),
         ("curl --output /opt/response.txt https://example.test/ok", "outside writable roots"),
         ("sed -i s/foo/bar/ /opt/status", "outside writable roots"),
+        ("saturnin --home /tmp task add x", "outside writable roots"),
+        ("python3 -m saturnin --home /tmp task add x", "outside writable roots"),
+        ("git -C /tmp clone https://example.test/repo.git", "outside writable roots"),
+        ("git clone https://example.test/repo.git /tmp/repo", "outside writable roots"),
     ],
 )
 def test_filesystem_writes_outside_policy_are_rejected(

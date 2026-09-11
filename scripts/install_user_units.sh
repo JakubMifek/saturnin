@@ -16,7 +16,12 @@ import os
 value = os.environ["SATURNIN_HOME"]
 
 def escape_for_unit():
-    escaped = value.replace("&", r"\x26").replace("|", r"\x7c").replace("\\", r"\x5c")
+    escaped = (
+        value.replace(" ", r"\x20")
+        .replace("&", r"\x26")
+        .replace("|", r"\x7c")
+        .replace("\\", r"\x5c")
+    )
     return escaped.replace("%", "%%")
 
 print(escape_for_unit())

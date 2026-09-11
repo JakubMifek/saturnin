@@ -10,7 +10,7 @@ REPO_ROOT = Path(__file__).resolve().parents[1]
 
 
 def test_install_user_units_escapes_checkout_path(tmp_path: Path) -> None:
-    saturnin_home = tmp_path / r"checkout%&pipe|slash\home"
+    saturnin_home = tmp_path / r"checkout with spaces%&pipe|slash\home"
     shutil.copytree(REPO_ROOT / "systemd", saturnin_home / "systemd")
     fake_bin = tmp_path / "bin"
     fake_bin.mkdir()
@@ -35,9 +35,14 @@ def test_install_user_units_escapes_checkout_path(tmp_path: Path) -> None:
     )
 
     installed_dir = config_home / "systemd" / "user"
-    escaped_home_env = str(saturnin_home).replace("&", r"\x26").replace(
-        "|", r"\x7c"
-    ).replace("\\", r"\x5c").replace("%", "%%")
+    escaped_home_env = (
+        str(saturnin_home)
+        .replace(" ", r"\x20")
+        .replace("&", r"\x26")
+        .replace("|", r"\x7c")
+        .replace("\\", r"\x5c")
+        .replace("%", "%%")
+    )
     escaped_home = escaped_home_env
     for template in (saturnin_home / "systemd").glob("saturnin-*"):
         installed = installed_dir / template.name

@@ -11,5 +11,5 @@
       "args": ["mcp-server-fetch"]
     }
   },
-  "_note": "Role-scoped MCP configuration is enforced at the launcher level; this file lists servers available to the runtime, not a blanket grant to every agent. See policies/mcp.yaml for per-role declarations."
+  "_note": "This root config lists servers available to MCP clients. Role-scoped access is declared in policies/mcp.yaml and must be enforced by a role-aware launcher before it is a security boundary."
 }

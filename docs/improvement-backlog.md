@@ -6,8 +6,6 @@ ones here). Ordered by expected effect on throughput per unit of risk.
 
 ## Ready
 
-- [ ] **GitHub intake bridge** - poll issues labelled `saturnin:task` in managed
-      repos and create board tasks automatically (today: manual `task add`).
 - [ ] **Agent launcher** - a `saturnin run <task-id>` that starts the agent named
       by the route with exactly its contracts, instead of a human copy-paste.
 - [ ] **Review request automation** - open the PR, request the zero-context

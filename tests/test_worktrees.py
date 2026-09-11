@@ -121,6 +121,28 @@ def test_stale_worktree_is_planned_and_applied(
     assert "APPLY remove_worktree" in log
 
 
+def test_apply_rechecks_open_task_before_removing_worktree(
+    manager: WorktreeManager, board: Board
+) -> None:
+    worktree = manager.create("feature/recheck")
+    later = datetime.now(timezone.utc) + timedelta(days=30)
+    plan = manager.plan_cleanup(now=later)
+    assert str(worktree.path) in {a.target for a in plan.actions}
+
+    task = board.create("newly attached")
+    with board.edit(task.id) as stored:
+        stored.branch = "feature/recheck"
+
+    manager.apply(plan)
+
+    assert worktree.path.exists()
+    assert str(worktree.path) not in {a.target for a in plan.actions}
+    assert any(
+        action.target == str(worktree.path) and action.reason == "has an open board task"
+        for action in plan.skipped
+    )
+
+
 def test_merged_branch_is_deleted_and_protected_ones_are_not(
     manager: WorktreeManager, git_repo: Path
 ) -> None:

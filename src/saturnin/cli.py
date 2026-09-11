@@ -592,17 +592,19 @@ def _run_task(args: argparse.Namespace, config: Config, board: Board, as_json: b
             if not decision.allowed:
                 print("; ".join(decision.reasons), file=sys.stderr)
                 return 2
-        with board.edit(args.task_id) as task:
-            if args.branch:
-                task.branch = args.branch
-            if args.worktree:
-                task.worktree = args.worktree
-            task.log(
-                "attach",
-                actor=args.actor or task.role or "cli",
-                branch=task.branch,
-                worktree=task.worktree,
-            )
+        manager = WorktreeManager(config, board=board)
+        with manager.lifecycle_lock():
+            with board.edit(args.task_id) as task:
+                if args.branch:
+                    task.branch = args.branch
+                if args.worktree:
+                    task.worktree = args.worktree
+                task.log(
+                    "attach",
+                    actor=args.actor or task.role or "cli",
+                    branch=task.branch,
+                    worktree=task.worktree,
+                )
         _emit(task.to_dict(), as_json, _task_line(task))
         return 0
     task = board.transition_id(args.task_id, args.state, actor=args.actor, note=args.note)
@@ -674,17 +676,18 @@ def _run_dispatch(args: argparse.Namespace, config: Config, board: Board, as_jso
 def _run_worktree(args: argparse.Namespace, config: Config, board: Board, as_json: bool) -> int:
     manager = WorktreeManager(config, board=board)
     if args.worktree_command == "create":
-        worktree = manager.create(args.branch, base=args.base)
-        if args.task:
-            with board.edit(args.task) as task:
-                task.branch = args.branch
-                task.worktree = str(worktree.path)
-                task.log(
-                    "worktree",
-                    actor=args.actor or task.role or "cli",
-                    branch=args.branch,
-                    worktree=str(worktree.path),
-                )
+        with manager.lifecycle_lock():
+            worktree = manager.create(args.branch, base=args.base)
+            if args.task:
+                with board.edit(args.task) as task:
+                    task.branch = args.branch
+                    task.worktree = str(worktree.path)
+                    task.log(
+                        "worktree",
+                        actor=args.actor or task.role or "cli",
+                        branch=args.branch,
+                        worktree=str(worktree.path),
+                    )
         _emit(
             {"branch": worktree.branch, "path": str(worktree.path)},
             as_json,

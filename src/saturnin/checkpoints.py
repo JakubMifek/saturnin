@@ -104,8 +104,9 @@ class CheckpointStore:
             if path.exists():
                 raw = path.read_text(encoding="utf-8")
                 if raw and not raw.endswith("\n"):
-                    with path.open("a", encoding="utf-8") as handle:
-                        handle.write("\n")
+                    last_complete = raw.rfind("\n")
+                    repaired = raw[: last_complete + 1] if last_complete >= 0 else ""
+                    path.write_text(repaired, encoding="utf-8")
             with path.open("a", encoding="utf-8") as handle:
                 handle.write(json.dumps(checkpoint.to_dict()) + "\n")
         try:
