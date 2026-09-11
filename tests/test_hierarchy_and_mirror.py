@@ -135,6 +135,30 @@ def test_existing_mirror_updates_content_and_reconciles_metadata_labels(
     assert stored.history[-1]["event"] == "issue:synced"
 
 
+def test_concurrent_change_is_left_pending_after_mirror_push(
+    config: Config, board: Board, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    task = board.create("Concurrent mirror")
+    with board.edit(task.id) as stored:
+        stored.issue = "https://github.com/JakubMifek/saturnin-ops/issues/1"
+    monkeypatch.setattr("saturnin.issues.ensure_labels", lambda *args: None)
+
+    def concurrent_push(current, payload):
+        with board.edit(current.id) as stored:
+            stored.state = "done"
+            stored.log("state:done", actor="code-worker")
+        return current.issue
+
+    mirror = IssueMirror(config, board)
+    monkeypatch.setattr(mirror, "_push", concurrent_push)
+    mirror.sync(board.get(task.id), push=True)
+
+    stored = board.get(task.id)
+    assert stored.state == "done"
+    assert stored.issue_synced_at is None
+    assert stored.id in {candidate.id for candidate in mirror.syncable()}
+
+
 def test_labels_are_provisioned_before_create(
     config: Config, board: Board, monkeypatch: pytest.MonkeyPatch
 ) -> None:

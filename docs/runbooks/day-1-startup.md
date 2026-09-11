@@ -30,8 +30,8 @@ saturnin task add "Fix the failing deploy pipeline" \
 saturnin task list --open
 ```
 
-The task is routed the moment it is created. Start the agent named by the route
-(`agents/<role>.md`) with the task body and its skill contracts.
+The task is routed and its agent is started without waiting. `saturnin run <task-id>`
+can restart that role with the same contract-aware, role-scoped MCP configuration.
 
 ## 4. Do the work in a worktree
 
@@ -46,6 +46,7 @@ saturnin checkpoint save <task-id> --role code-worker \
 ## 5. Review before merge
 
 ```bash
+HEAD_SHA="$(git rev-parse HEAD)"
 saturnin review record JakubMifek/saturnin#12 --kind pr \
   --author code-worker --reviewer pr-reviewer --verdict approved \
   --head-sha "$HEAD_SHA"

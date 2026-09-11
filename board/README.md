@@ -1,7 +1,8 @@
 # The work board
 
-Everything Saturnin owns is a task here. The board is the single source of truth
-for state; chat transcripts are not.
+Everything Saturnin owns is represented as a task here. The local board is the
+fast work queue and cache; mirrored GitHub Issues are the durable system of
+record. Chat transcripts are neither.
 
 ```
 board/tasks/T-YYYYMMDD-xxxxxx.json   one task, full history, gitignored runtime state

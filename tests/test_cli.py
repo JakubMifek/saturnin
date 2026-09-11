@@ -46,6 +46,20 @@ def test_dispatch_all_and_dry_run(home: Path, capsys: pytest.CaptureFixture[str]
     assert not json.loads(run(capsys, "--json", "task", "list", "--state", "intake")[1])
 
 
+def test_dispatch_launches_the_selected_agent(
+    home: Path, capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    task = json.loads(run(capsys, "--json", "task", "add", "Implement launcher check")[1])
+    launched: list[str] = []
+    monkeypatch.setattr(
+        "saturnin.cli.AgentLauncher.launch",
+        lambda self, task_id, **kwargs: launched.append(task_id),
+    )
+
+    assert run(capsys, "dispatch", task["id"])[0] == 0
+    assert launched == [task["id"]]
+
+
 @pytest.mark.parametrize(
     ("squad", "error"),
     [("ghost", "unknown squad members"), ("ceo", "CEO never executes")],

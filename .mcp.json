@@ -1,15 +1,4 @@
 {
-  "mcpServers": {
-    "github": {
-      "type": "stdio",
-      "command": "npx",
-      "args": ["-y", "@modelcontextprotocol/server-github"]
-    },
-    "fetch": {
-      "type": "stdio",
-      "command": "uvx",
-      "args": ["mcp-server-fetch"]
-    }
-  },
-  "_note": "This root config lists servers available to MCP clients. Role-scoped access is declared in policies/mcp.yaml and must be enforced by a role-aware launcher before it is a security boundary."
+  "mcpServers": {},
+  "_note": "Repository-wide MCP grants are intentionally empty. `saturnin run` generates a role-filtered config from policies/mcp.yaml for each launched task."
 }

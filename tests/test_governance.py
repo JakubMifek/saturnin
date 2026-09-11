@@ -111,13 +111,45 @@ def test_review_subjects_are_exact_and_roles_are_valid(config: Config) -> None:
     ledger = ReviewLedger(config)
     first = "owner/repo#1"
     second = "owner-repo-1"
-    ledger.record(subject=first, kind="pr", author="code-worker", reviewer="pr-reviewer", verdict="approved")
-    ledger.record(subject=second, kind="pr", author="code-worker", reviewer="pr-reviewer", verdict="approved")
+    ledger.record(
+        subject=first,
+        kind="pr",
+        author="code-worker",
+        reviewer="pr-reviewer",
+        verdict="approved",
+        head_sha=TEST_HEAD_SHA,
+    )
+    ledger.record(
+        subject=second,
+        kind="pr",
+        author="code-worker",
+        reviewer="pr-reviewer",
+        verdict="approved",
+        head_sha=TEST_HEAD_SHA,
+    )
     assert {record.subject for record in ledger.for_subject(first, "pr")} == {first}
     assert {record.subject for record in ledger.for_subject(second, "pr")} == {second}
 
     with pytest.raises(ReviewError, match="unknown reviewer role"):
-        ledger.record(subject="x#2", kind="pr", author="code-worker", reviewer="ghost", verdict="approved")
+        ledger.record(
+            subject="x#2",
+            kind="pr",
+            author="code-worker",
+            reviewer="ghost",
+            verdict="approved",
+            head_sha=TEST_HEAD_SHA,
+        )
+
+
+def test_pr_review_requires_head_sha(config: Config) -> None:
+    with pytest.raises(ReviewError, match="head SHA"):
+        ReviewLedger(config).record(
+            subject="owner/repo#2",
+            kind="pr",
+            author="code-worker",
+            reviewer="pr-reviewer",
+            verdict="approved",
+        )
 
 
 def test_corrupt_review_ledger_reports_file_and_line(config: Config) -> None:
@@ -129,6 +161,7 @@ def test_corrupt_review_ledger_reports_file_and_line(config: Config) -> None:
         author="code-worker",
         reviewer="pr-reviewer",
         verdict="approved",
+        head_sha=TEST_HEAD_SHA,
     )
     path = next(ledger.dir.glob("*.jsonl"))
     with path.open("a", encoding="utf-8") as handle:
@@ -138,6 +171,33 @@ def test_corrupt_review_ledger_reports_file_and_line(config: Config) -> None:
         ledger.for_subject(subject, "pr")
     with pytest.raises(ReviewError, match=rf"{path} at line 2"):
         list(ledger)
+
+
+def test_review_ledger_recovers_from_unterminated_tail(config: Config) -> None:
+    ledger = ReviewLedger(config)
+    subject = "JakubMifek/saturnin#interrupted"
+    ledger.record(
+        subject=subject,
+        kind="pr",
+        author="code-worker",
+        reviewer="pr-reviewer",
+        verdict="approved",
+        head_sha=TEST_HEAD_SHA,
+    )
+    path = next(ledger.dir.glob("*.jsonl"))
+    with path.open("a", encoding="utf-8") as handle:
+        handle.write('{"subject":')
+
+    assert len(ledger.for_subject(subject, "pr")) == 1
+    ledger.record(
+        subject=subject,
+        kind="pr",
+        author="code-worker",
+        reviewer="pr-reviewer",
+        verdict="changes_requested",
+        head_sha=TEST_HEAD_SHA,
+    )
+    assert ledger.for_subject(subject, "pr")[0].verdict == "changes_requested"
 
 
 def test_merge_in_managed_repo_is_never_autonomous(

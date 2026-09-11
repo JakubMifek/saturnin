@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import json
 from dataclasses import asdict, dataclass, field
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Iterator
 
@@ -26,8 +27,6 @@ def _validate_resume_after(value: str | None) -> None:
     """Ensure *resume_after*, when given, is a parseable ISO-8601 timestamp."""
     if value is None:
         return
-    from datetime import datetime
-
     try:
         datetime.fromisoformat(value)
     except (ValueError, TypeError) as exc:
@@ -161,3 +160,28 @@ class CheckpointStore:
         if checkpoint is None:
             raise CheckpointError(f"no checkpoint stored for {task_id}")
         return checkpoint.render()
+
+    def due(self, *, now: datetime | None = None) -> list[Checkpoint]:
+        """Return latest delayed checkpoints whose task has not resumed yet."""
+        current = now or datetime.now(timezone.utc)
+        if current.tzinfo is None:
+            current = current.replace(tzinfo=timezone.utc)
+        due: list[Checkpoint] = []
+        for checkpoint in self:
+            if not checkpoint.resume_after:
+                continue
+            resume_at = datetime.fromisoformat(checkpoint.resume_after)
+            if resume_at.tzinfo is None:
+                resume_at = resume_at.replace(tzinfo=timezone.utc)
+            if resume_at > current:
+                continue
+            try:
+                task = self.board.get(checkpoint.task_id)
+            except BoardError:
+                continue
+            if task.state in ("done", "cancelled", "review"):
+                continue
+            if task.checkpoint_resumed_at == checkpoint.created_at:
+                continue
+            due.append(checkpoint)
+        return due

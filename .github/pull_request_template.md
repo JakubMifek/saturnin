@@ -14,6 +14,6 @@
 
 - [ ] Branch is a feature branch (`saturnin check branch <branch>` exits 0)
 - [ ] Independent zero-context reviewer requested (never the author)
-- [ ] Review verdict recorded: `saturnin review record <repo#N> --kind pr ...`
-- [ ] Merge gate passes: `saturnin review gate <repo#N> --kind pr --repo ... --author ...`
+- [ ] Review verdict recorded: `saturnin review record <repo#N> --kind pr ... --head-sha <PR-head-sha>`
+- [ ] Merge gate passes: `saturnin review gate <repo#N> --kind pr --repo ... --author ... --head-sha <same-PR-head-sha>`
 - [ ] Board task moved to `review`

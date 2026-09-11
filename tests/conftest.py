@@ -7,6 +7,7 @@ import subprocess
 from pathlib import Path
 
 import pytest
+import yaml
 
 from saturnin.board import Board
 from saturnin.config import Config
@@ -20,6 +21,10 @@ def home(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
     (root / "policies").mkdir(parents=True)
     for policy in (REPO_ROOT / "policies").glob("*.yaml"):
         shutil.copy(policy, root / "policies" / policy.name)
+    mcp_path = root / "policies" / "mcp.yaml"
+    mcp_policy = yaml.safe_load(mcp_path.read_text(encoding="utf-8"))
+    mcp_policy["launcher"]["enabled"] = False
+    mcp_path.write_text(yaml.safe_dump(mcp_policy), encoding="utf-8")
     shutil.copytree(REPO_ROOT / "automation", root / "automation")
     shutil.copytree(REPO_ROOT / "scripts", root / "scripts")
     shutil.copytree(REPO_ROOT / "agents", root / "agents")

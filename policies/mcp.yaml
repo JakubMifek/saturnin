@@ -25,7 +25,7 @@ servers:
     description: Scoped filesystem access inside var/worktrees only.
     transport: stdio
     command: npx
-    args: ["-y", "@modelcontextprotocol/server-filesystem", "var/worktrees"]
+    args: ["-y", "@modelcontextprotocol/server-filesystem", "{worktrees}"]
     write_roles: [code-worker, test-worker, architect, scribe, automation-smith, janitor]
 
 rules:
@@ -36,3 +36,14 @@ rules:
     issue-reviewer: [fetch]
   # A role that does not execute may not hold any MCP server at all.
   non_executing_roles_get_none: true
+
+launcher:
+  enabled: true
+  command: copilot
+  args:
+    - --autopilot
+    - --no-ask-user
+    - --additional-mcp-config
+    - "{mcp_config}"
+    - -p
+    - "{prompt}"

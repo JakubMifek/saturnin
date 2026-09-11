@@ -6,8 +6,6 @@ ones here). Ordered by expected effect on throughput per unit of risk.
 
 ## Ready
 
-- [ ] **Agent launcher** - a `saturnin run <task-id>` that starts the agent named
-      by the route with exactly its contracts, instead of a human copy-paste.
 - [ ] **Review request automation** - open the PR, request the zero-context
       reviewer and record the verdict from the GitHub review event.
 - [ ] **Board index** - a `board/index.json` summary so `task list` stays fast

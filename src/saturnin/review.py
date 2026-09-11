@@ -76,6 +76,8 @@ class ReviewLedger:
             raise ReviewError(f"unknown review kind: {kind}")
         if verdict not in VERDICTS:
             raise ReviewError(f"unknown verdict: {verdict}")
+        if kind == "pr" and not head_sha.strip():
+            raise ReviewError("PR reviews require the reviewed head SHA")
         if reviewer.strip().lower() == author.strip().lower():
             raise ReviewError("a review must be written by somebody other than the author")
         roles = self.config.routing.get("roles", {})
@@ -91,11 +93,19 @@ class ReviewLedger:
             reviewer=reviewer_name,
             verdict=verdict,
             zero_context=zero_context,
-            head_sha=head_sha,
+            head_sha=head_sha.strip(),
             notes=notes,
         )
         path = self.dir / f"{kind}-{slugify(subject)}.jsonl"
         with file_lock(path):
+            if path.exists():
+                raw = path.read_text(encoding="utf-8")
+                if raw and not raw.endswith("\n"):
+                    last_complete = raw.rfind("\n")
+                    path.write_text(
+                        raw[: last_complete + 1] if last_complete >= 0 else "",
+                        encoding="utf-8",
+                    )
             with path.open("a", encoding="utf-8") as handle:
                 handle.write(json.dumps(entry.to_dict()) + "\n")
         return entry
@@ -119,7 +129,12 @@ class ReviewLedger:
     def _records(path: Path) -> Iterator[ReviewRecord]:
         with file_lock(path, exclusive=False):
             text = path.read_text(encoding="utf-8")
-        for line_number, line in enumerate(text.splitlines(), start=1):
+        lines = [
+            (line_number, line, line.endswith("\n"))
+            for line_number, line in enumerate(text.splitlines(keepends=True), start=1)
+            if line.strip()
+        ]
+        for index, (line_number, line, terminated) in enumerate(lines):
             if not line.strip():
                 continue
             try:
@@ -128,6 +143,8 @@ class ReviewLedger:
                     raise TypeError("record must be a JSON object")
                 yield ReviewRecord.from_dict(data)
             except (json.JSONDecodeError, TypeError) as exc:
+                if index == len(lines) - 1 and not terminated:
+                    break
                 raise ReviewError(
                     f"corrupt review ledger {path} at line {line_number}: {exc}"
                 ) from exc

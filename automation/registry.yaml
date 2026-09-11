@@ -45,6 +45,12 @@ automations:
     owner_role: chief-of-staff
     triggers: [poll, wait, watch, result, long running]
 
+  - id: checkpoint-resume
+    description: Launch fresh agents for delayed checkpoints whose resume time is due.
+    path: automation/library/resume_checkpoints.sh
+    owner_role: chief-of-staff
+    triggers: [checkpoint, resume, delayed, schedule, handoff]
+
   - id: run-monitors
     description: Run synthetic monitors of managed applications and file incidents.
     path: automation/library/run_monitors.sh

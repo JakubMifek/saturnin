@@ -151,13 +151,15 @@ class IssueMirror:
     def sync(self, task: Task, *, push: bool = False, actor: str = "chief-of-staff") -> IssuePayload:
         task = self.board.get(task.id)
         payload = self.render(task)
+        rendered_updated_at = task.updated_at
         if not push:
             return payload
         url = self._push(task, payload)
         with self.board.edit(task.id) as stored:
             stored.issue = url
-            stored.issue_synced_at = _utcnow()
-            stored.log("issue:synced", actor=actor, note=url)
+            if stored.updated_at == rendered_updated_at:
+                stored.log("issue:synced", actor=actor, note=url)
+                stored.issue_synced_at = stored.updated_at
         task.issue = url
         return payload
 

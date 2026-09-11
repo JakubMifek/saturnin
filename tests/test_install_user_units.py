@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import os
+import re
 import shutil
 import subprocess
 from pathlib import Path
@@ -35,20 +36,25 @@ def test_install_user_units_escapes_checkout_path(tmp_path: Path) -> None:
     )
 
     installed_dir = config_home / "systemd" / "user"
-    escaped_home_env = (
-        str(saturnin_home)
-        .replace(" ", r"\x20")
-        .replace("&", r"\x26")
-        .replace("|", r"\x7c")
-        .replace("\\", r"\x5c")
-        .replace("%", "%%")
-    )
-    escaped_home = escaped_home_env
-    for template in (saturnin_home / "systemd").glob("saturnin-*"):
-        installed = installed_dir / template.name
-        expected = (
-            template.read_text(encoding="utf-8")
-            .replace("@SATURNIN_HOME@", escaped_home)
-            .replace("@SATURNIN_HOME_ENV@", escaped_home_env)
+    def decode(value: str) -> str:
+        value = value.replace("%%", "%")
+        return re.sub(
+            r"\\x([0-9a-fA-F]{2})",
+            lambda match: chr(int(match.group(1), 16)),
+            value,
         )
-        assert installed.read_text(encoding="utf-8") == expected
+
+    for installed in installed_dir.glob("saturnin-*.service"):
+        text = installed.read_text(encoding="utf-8")
+        working_directory = next(
+            line.removeprefix("WorkingDirectory=")
+            for line in text.splitlines()
+            if line.startswith("WorkingDirectory=")
+        )
+        environment = next(
+            line.removeprefix('Environment=SATURNIN_HOME="').removesuffix('"')
+            for line in text.splitlines()
+            if line.startswith("Environment=SATURNIN_HOME=")
+        )
+        assert decode(working_directory) == str(saturnin_home)
+        assert decode(environment) == str(saturnin_home)

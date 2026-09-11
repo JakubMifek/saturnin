@@ -69,6 +69,7 @@ print(monitor["name"], monitor["url"], monitor.get("expect_status", 200),
         "$started" "$app" "$name" "$code" >> "$results"
       # Clear escalation deduplication marker on recovery.
       rm -f "${RESULTS_DIR}/${app}_${name}.escalated"
+      rm -f "${RESULTS_DIR}/${app}_${name}.task"
       log "$app/$name ok ($code)"
       continue
     fi
@@ -87,19 +88,26 @@ print(monitor["name"], monitor["url"], monitor.get("expect_status", 200),
       # removed when the monitor recovers (ok=true path above).
       escalation_marker="${RESULTS_DIR}/${app}_${name}.escalated"
       if [[ ! -f "$escalation_marker" ]]; then
+        incident_task="$(<"${RESULTS_DIR}/${app}_${name}.task")"
         saturnin escalate "Monitor $app/$name failing repeatedly" \
           --context "Expected HTTP $expect from $url, got $code twice in a row." \
           --item "Confirm the service is meant to be up" \
           --item "Check deploy history and infrastructure" \
           --urgency high \
           --unblock "State whether to roll back, patch or accept the outage" \
+          --task "$incident_task" \
           --push
         touch "$escalation_marker"
       fi
     else
-      saturnin task add "Monitor $app/$name failed: HTTP $code from $url" \
+      incident="$(
+        saturnin --json task add "Monitor $app/$name failed: HTTP $code from $url" \
         --body "Expected $expect, observed $code at $started. Monitor declared in $manifest." \
         --label incident --label monitor --priority P0 --dispatch
+      )"
+      printf '%s' "$incident" | "$PYTHON" -c \
+        'import json, sys; print(json.load(sys.stdin)["id"])' \
+        > "${RESULTS_DIR}/${app}_${name}.task"
     fi
   done
 done

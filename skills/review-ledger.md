@@ -4,8 +4,10 @@
 Make the independent-review requirement mechanical instead of aspirational.
 
 ## Commands
-- `saturnin review record <subject> --kind pr|issue --author <role> --reviewer <role> --verdict approved|changes_requested|rejected [--notes ...] [--with-context]`
-- `saturnin review gate <subject> --kind pr|issue --repo <owner/repo> --author <role>`
+- PR: capture the current head SHA, then pass the same value to
+  `saturnin review record <subject> --kind pr ... --head-sha <sha>` and
+  `saturnin review gate <subject> --kind pr ... --head-sha <sha>`.
+- Issue: use `saturnin review record|gate <subject> --kind issue ...`.
 
 ## Guarantees
 - Author and reviewer can never be the same role.

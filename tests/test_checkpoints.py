@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from contextlib import contextmanager
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Iterator
 
@@ -146,3 +147,35 @@ def test_incomplete_checkpoint_rejected(config: Config, board: Board) -> None:
 def test_resume_without_checkpoint(config: Config, board: Board) -> None:
     with pytest.raises(CheckpointError):
         CheckpointStore(config, board).resume("T-does-not-exist")
+
+
+def test_due_returns_only_elapsed_unresumed_checkpoints(config: Config, board: Board) -> None:
+    due_task = board.create("Resume now")
+    future_task = board.create("Resume later")
+    store = CheckpointStore(config, board)
+    due = store.save(
+        Checkpoint(
+            task_id=due_task.id,
+            role="code-worker",
+            summary="paused",
+            next_steps=["continue"],
+            resume_after="2026-09-11T19:00:00+00:00",
+        )
+    )
+    store.save(
+        Checkpoint(
+            task_id=future_task.id,
+            role="code-worker",
+            summary="waiting",
+            next_steps=["continue"],
+            resume_after="2026-09-12T19:00:00+00:00",
+        )
+    )
+
+    assert [item.task_id for item in store.due(
+        now=datetime(2026, 9, 11, 20, tzinfo=timezone.utc)
+    )] == [due_task.id]
+
+    with board.edit(due_task.id) as task:
+        task.checkpoint_resumed_at = due.created_at
+    assert store.due(now=datetime(2026, 9, 11, 20, tzinfo=timezone.utc)) == []

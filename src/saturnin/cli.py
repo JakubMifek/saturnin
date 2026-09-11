@@ -28,6 +28,7 @@ from . import docsync
 from .governance import Governance
 from .improve import ImprovementLoop
 from .issues import IssueMirror, MirrorError
+from .launcher import AgentLauncher
 from .review import ReviewLedger
 from .routing import Router, RoutingError
 from .worktrees import GitError, WorktreeManager
@@ -66,6 +67,7 @@ def build_parser() -> argparse.ArgumentParser:
     add.add_argument("--priority", default="P2")
     add.add_argument("--parent", help="objective/epic/feature this work belongs to")
     add.add_argument("--dispatch", action="store_true", help="route it immediately")
+    add.add_argument("--no-launch", action="store_true", help="route without starting the worker")
 
     listing = task.add_parser("list", help="list tasks")
     listing.add_argument("--state")
@@ -103,6 +105,7 @@ def build_parser() -> argparse.ArgumentParser:
     dispatch.add_argument("task_id", nargs="?")
     dispatch.add_argument("--all", action="store_true", help="dispatch everything in intake")
     dispatch.add_argument("--dry-run", action="store_true", help="show the route only")
+    dispatch.add_argument("--no-launch", action="store_true", help="route without starting workers")
     dispatch.add_argument(
         "--squad",
         action="append",
@@ -118,6 +121,10 @@ def build_parser() -> argparse.ArgumentParser:
     discover.add_argument(
         "--no-dispatch", action="store_true", help="adopt without routing immediately"
     )
+    discover.add_argument("--no-launch", action="store_true", help="route without starting workers")
+
+    run_agent = sub.add_parser("run", help="start the routed agent without waiting")
+    run_agent.add_argument("task_id")
 
     # board ------------------------------------------------------------
     board_cmd = sub.add_parser("board", help="board overview").add_subparsers(
@@ -155,6 +162,8 @@ def build_parser() -> argparse.ArgumentParser:
     save.add_argument("--resume-after")
     resume = checkpoint.add_parser("resume", help="print the handoff note")
     resume.add_argument("task_id")
+    sweep = checkpoint.add_parser("sweep", help="launch agents for due delayed checkpoints")
+    sweep.add_argument("--dry-run", action="store_true")
 
     # review -----------------------------------------------------------
     review = sub.add_parser("review", help="independent review pipelines").add_subparsers(
@@ -400,6 +409,11 @@ def _run(args: argparse.Namespace, config: Config) -> int:  # noqa: C901 - flat 
         return _run_task(args, config, board, as_json)
     if args.command == "dispatch":
         return _run_dispatch(args, config, board, as_json)
+    if args.command == "run":
+        launched = AgentLauncher(config, board).launch(args.task_id)
+        payload = launched.to_dict() if launched else {"task_id": args.task_id, "disabled": True}
+        _emit(payload, as_json, json.dumps(payload, indent=2))
+        return 0
     if args.command == "board":
         if args.board_command == "metrics":
             metrics = telemetry.collect(board)
@@ -540,6 +554,8 @@ def _run_task(args: argparse.Namespace, config: Config, board: Board, as_json: b
         )
         if args.dispatch:
             Router(config).dispatch(board, task)
+            if not args.no_launch:
+                AgentLauncher(config, board).launch(task.id)
             task = board.get(task.id)
         _emit(task.to_dict(), as_json, _task_line(task))
         return 0
@@ -626,9 +642,12 @@ def _run_discover(args: argparse.Namespace, config: Config, board: Board, as_jso
         return 0
     adopted = discovery.ingest(issues)
     router = Router(config)
+    launcher = AgentLauncher(config, board)
     for task in adopted:
         if not args.no_dispatch:
             router.dispatch(board, task, actor="discovery")
+            if not args.no_launch:
+                launcher.launch(task.id)
     _emit(
         [task.to_dict() for task in adopted],
         as_json,
@@ -650,6 +669,7 @@ def _run_dispatch(args: argparse.Namespace, config: Config, board: Board, as_jso
         print("saturnin: give a task id or --all", file=sys.stderr)
         return 1
     results = []
+    launcher = AgentLauncher(config, board)
     for task in targets:
         route = (
             router.resolve(task)
@@ -660,6 +680,10 @@ def _run_dispatch(args: argparse.Namespace, config: Config, board: Board, as_jso
                         "priority": route.priority, "escalate": route.escalate,
                         "squad": list(args.squad or route.squad),
                         "result_contract": route.result_contract})
+        if not args.dry_run and not args.no_launch:
+            launched = launcher.launch(task.id)
+            if launched:
+                results[-1]["launch"] = launched.to_dict()
     _emit(
         results,
         as_json,
@@ -739,6 +763,33 @@ def _run_checkpoint(args: argparse.Namespace, config: Config, board: Board, as_j
             )
         )
         _emit(checkpoint.to_dict(), as_json, checkpoint.render())
+        return 0
+    if args.checkpoint_command == "sweep":
+        due = store.due()
+        if args.dry_run:
+            payload = [checkpoint.to_dict() for checkpoint in due]
+        else:
+            router = Router(config)
+            launcher = AgentLauncher(config, board)
+            payload = []
+            for checkpoint in due:
+                task = board.get(checkpoint.task_id)
+                if task.state in ("intake", "blocked"):
+                    router.dispatch(board, task, actor="checkpoint-sweeper")
+                launched = launcher.launch(
+                    checkpoint.task_id,
+                    resumed_checkpoint=checkpoint.created_at,
+                )
+                payload.append(
+                    launched.to_dict()
+                    if launched
+                    else {"task_id": checkpoint.task_id, "disabled": True}
+                )
+        _emit(
+            payload,
+            as_json,
+            "\n".join(item["task_id"] for item in payload) or "(no checkpoints due)",
+        )
         return 0
     note = store.resume(args.task_id)
     _emit({"note": note}, as_json, note)

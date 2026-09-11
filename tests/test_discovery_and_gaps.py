@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from concurrent.futures import ThreadPoolExecutor
+
 import pytest
 import yaml
 
@@ -45,6 +47,19 @@ def test_discovery_never_adopts_the_same_issue_twice(config: Config, board: Boar
     assert len(discovery.run()) == 2
     assert discovery.run() == []
     assert len(list(board)) == 2
+
+
+def test_concurrent_discovery_atomically_deduplicates(config: Config, board: Board) -> None:
+    issue = _issue(77)
+
+    def ingest(_: int):
+        return _discovery(config, board, [issue]).ingest([issue])
+
+    with ThreadPoolExecutor(max_workers=8) as pool:
+        results = list(pool.map(ingest, range(16)))
+
+    assert sum(len(result) for result in results) == 1
+    assert len(list(board)) == 1
 
 
 def test_discovery_normalizes_source_markers(config: Config, board: Board) -> None:

@@ -99,6 +99,8 @@ def test_monitor_escalations_are_pushed_and_not_silenced(config: Config) -> None
     )
     escalation = script.split("saturnin escalate", 1)[1].split("else", 1)[0]
     assert "--push" in escalation
+    assert '--task "$incident_task"' in escalation
+    assert '.task"' in script
     assert "|| true" not in escalation
 
 

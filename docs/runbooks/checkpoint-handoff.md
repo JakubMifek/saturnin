@@ -27,8 +27,8 @@ saturnin checkpoint resume <task-id>
 ```
 
 Prints the handoff note: state, next steps as a checklist, blockers, artifacts
-and the earliest resume time. Start the fresh agent with **that note plus the
-task body** - not with the old session's transcript.
+and the earliest resume time. `saturnin run` gives the fresh agent **that note
+plus the task body** - not the old session's transcript.
 
 ## Rules of thumb
 
@@ -42,9 +42,9 @@ task body** - not with the old session's transcript.
 
 ## Delayed resume
 
-`--resume-after` records the earliest sensible restart. The chief of staff
-sweeps open tasks, resumes those whose time has come, and chases anything with a
-week-old checkpoint and no progress.
+`--resume-after` records the earliest sensible restart. The
+`saturnin-resume.timer` runs `saturnin checkpoint sweep`, which launches due
+tasks once and leaves future checkpoints alone.
 
 Checkpoints are append-only: `saturnin checkpoint resume` shows the latest,
 `board/checkpoints/<task-id>.jsonl` keeps the whole story.

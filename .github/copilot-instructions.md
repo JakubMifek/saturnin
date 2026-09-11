@@ -62,11 +62,9 @@ only its echo (`saturnin docs render`):
 9. The CEO never waits for a worker; every dispatch names a result contract.
 <!-- /generated:rules-list -->
 
-Practical notes: branches are `feature|fix|chore|docs|automation|experiment/<slug>`
-in their own worktree; escalations need a checklist, an urgency and unblock
-criteria; on the server `apt` is only for dependencies of a Saturnin-dedicated
-service, `systemctl` only for `saturnin-*` units, timers only in the Saturnin
-user scope - check anything unusual with `saturnin check command "<cmd>"`.
+Operational details come from the policies above. Use `saturnin check branch`
+and `saturnin check command` before acting rather than copying policy values
+into instructions that can drift.
 
 ## Before you build anything
 

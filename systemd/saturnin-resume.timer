@@ -1,0 +1,10 @@
+[Unit]
+Description=Resume due Saturnin checkpoints every minute
+
+[Timer]
+OnCalendar=*:0/1
+Persistent=true
+Unit=saturnin-resume.service
+
+[Install]
+WantedBy=timers.target

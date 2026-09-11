@@ -103,23 +103,20 @@ class IssueDiscovery:
 
     def ingest(self, issues: Iterable[InboundIssue]) -> list[Task]:
         """Create a board task for every issue not already on the board."""
-        known = self.known_markers()
         created: list[Task] = []
         for issue in issues:
             marker = self.marker(issue)
-            if marker in known:
-                continue
-            known.add(marker)
-            created.append(
-                self.board.create(
-                    issue.title,
-                    body=_body(issue),
-                    repo=issue.repo,
-                    labels=sorted({marker, *_carried_labels(issue, self.policy)}),
-                    priority=_priority(issue, self.policy),
-                    source=f"discovery:{issue.repo}",
-                )
+            task = self.board.create_if_labels_absent(
+                [marker],
+                issue.title,
+                body=_body(issue),
+                repo=issue.repo,
+                labels=_carried_labels(issue, self.policy),
+                priority=_priority(issue, self.policy),
+                source=f"discovery:{issue.repo}",
             )
+            if task is not None:
+                created.append(task)
         return created
 
     def poll(self) -> list[InboundIssue]:

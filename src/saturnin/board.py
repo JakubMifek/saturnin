@@ -48,7 +48,7 @@ TRANSITIONS: dict[str, tuple[str, ...]] = {
 
 
 def utcnow() -> str:
-    return datetime.now(timezone.utc).isoformat(timespec="seconds")
+    return datetime.now(timezone.utc).isoformat(timespec="microseconds")
 
 
 def parse_ts(value: str) -> datetime:
@@ -78,6 +78,7 @@ class Task:
     branch: str | None = None
     worktree: str | None = None
     checkpoint: str | None = None
+    checkpoint_resumed_at: str | None = None
     # Work hierarchy: objective > epic > feature > task.
     parent: str | None = None
     # Rule 8: the mirrored GitHub issue is the durable copy of this task.
@@ -182,6 +183,46 @@ class Board:
         parent: str | None = None,
         source: str = "cli",
     ) -> Task:
+        return self._create(
+            title,
+            kind=kind,
+            body=body,
+            labels=labels,
+            repo=repo,
+            priority=priority,
+            parent=parent,
+            source=source,
+        )
+
+    def create_if_labels_absent(
+        self,
+        required_labels: Iterable[str],
+        title: str,
+        **kwargs: Any,
+    ) -> Task | None:
+        """Atomically create a task unless one already carries every marker."""
+        markers = {label.casefold() for label in required_labels}
+        with file_lock(self.config.tasks_dir / ".board"):
+            if any(
+                markers <= {label.casefold() for label in task.labels}
+                for task in self
+            ):
+                return None
+            labels = {*kwargs.pop("labels", ()), *required_labels}
+            return self._create(title, labels=labels, **kwargs)
+
+    def _create(
+        self,
+        title: str,
+        *,
+        kind: str = "task",
+        body: str = "",
+        labels: Iterable[str] = (),
+        repo: str | None = None,
+        priority: str = "P2",
+        parent: str | None = None,
+        source: str = "cli",
+    ) -> Task:
         if not title.strip():
             raise BoardError("task title must not be empty")
         if priority not in PRIORITIES:
@@ -190,8 +231,11 @@ class Board:
             raise BoardError(f"unknown kind: {kind} (expected one of {', '.join(KINDS)})")
         if parent is not None:
             self.check_parent(parent, kind)
+        task_id = new_task_id()
+        while self.path_for(task_id).exists():
+            task_id = new_task_id()
         task = Task(
-            id=new_task_id(),
+            id=task_id,
             title=title.strip(),
             kind=kind,
             body=body,

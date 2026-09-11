@@ -17,10 +17,10 @@ value = os.environ["SATURNIN_HOME"]
 
 def escape_for_unit():
     escaped = (
-        value.replace(" ", r"\x20")
+        value.replace("\\", r"\x5c")
+        .replace(" ", r"\x20")
         .replace("&", r"\x26")
         .replace("|", r"\x7c")
-        .replace("\\", r"\x5c")
     )
     return escaped.replace("%", "%%")
 
@@ -52,7 +52,8 @@ done
 systemctl --user daemon-reload
 systemctl --user enable --now \
   saturnin-janitor.timer saturnin-improve.timer \
-  saturnin-poller.timer saturnin-mirror.timer saturnin-discovery.timer
+  saturnin-poller.timer saturnin-mirror.timer saturnin-discovery.timer \
+  saturnin-resume.timer
 systemctl --user list-timers 'saturnin-*' || true
 
 cat <<'MSG'
