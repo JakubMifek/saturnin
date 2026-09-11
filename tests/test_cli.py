@@ -2,13 +2,16 @@ from __future__ import annotations
 
 import json
 import subprocess
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
 
 from saturnin.board import Board
+from saturnin.checkpoints import Checkpoint, CheckpointStore
 from saturnin.cli import main
+from saturnin.routing import Router
 from saturnin.worktrees import WorktreeManager
 
 
@@ -184,6 +187,32 @@ def test_issue_review_gate_requires_matching_digest(
 
     assert code == 0
     assert "ALLOWED" in out
+
+
+def test_checkpoint_sweep_does_not_mutate_when_launcher_is_disabled(
+    config: Config, board: Board, capsys: pytest.CaptureFixture[str]
+) -> None:
+    task = board.create("Resume after dependency")
+    Router(config).dispatch(board, task)
+    board.transition(task, "blocked")
+    CheckpointStore(config, board).save(
+        Checkpoint(
+            task_id=task.id,
+            role="code-worker",
+            summary="Waiting for dependency.",
+            next_steps=["Continue implementation."],
+            resume_after=(datetime.now(timezone.utc) - timedelta(minutes=1)).isoformat(),
+        )
+    )
+    before = board.get(task.id)
+
+    code, out = run(capsys, "--json", "checkpoint", "sweep")
+
+    after = board.get(task.id)
+    assert code == 0
+    assert json.loads(out) == [{"task_id": task.id, "disabled": True}]
+    assert after.state == "blocked"
+    assert after.history == before.history
 
 
 def test_escalation_returns_nonzero_when_submitted_task_cannot_be_blocked(

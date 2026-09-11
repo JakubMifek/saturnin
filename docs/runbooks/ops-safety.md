@@ -2,21 +2,17 @@
 
 ## Scope on the Debian host (rule 7)
 
-- Non-root only. `sudo`, `su`, `doas`, `pkexec` are refused by
-  `saturnin check command`, and that refusal is final.
-- `apt install|update|list|show` only, and only when `--service saturnin-*`
-  identifies the dedicated service that needs the dependency.
-- `systemctl` only for `saturnin-*` units; scheduling only through user-scope
-  timers.
-- Writes stay under `/home/saturnin`.
-
-Check anything unusual first:
+The canonical privilege, command, service, scheduling and filesystem limits are
+in [`policies/server_scope.yaml`](../../policies/server_scope.yaml). Do not copy
+those values into a runbook: validate every exact planned command against the
+current policy first.
 
 ```bash
-saturnin check command "systemctl --user restart saturnin-janitor.timer"   # 0
-saturnin check command "apt install ripgrep" --service saturnin-api.service # 0
-saturnin check command "sudo apt install nginx"                            # 2
+saturnin check command "<exact command>"
+saturnin check command "<exact package command>" --service "<dedicated service>"
 ```
+
+Exit code 0 allows the command and exit code 2 denies it. A denial is final.
 
 ## Scheduled workers
 

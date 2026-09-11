@@ -1,17 +1,17 @@
 #!/usr/bin/env bash
-# Usage: review_gate.sh <pr|issue> <subject> <repo> <author> [legacy-sha]
+# Usage: review_gate.sh <pr|issue> <subject> <repo> <author> [issue-digest]
 # PR gates resolve the head SHA and import GitHub review state available to CI.
-# Issue gates ignore any supplied SHA.
+# Issue gates require the digest of the exact reviewed title and body.
 # Exits non-zero when the independent review requirement is not satisfied.
 set -Eeuo pipefail
 SCRIPT_NAME=review-gate
 source "$(dirname "${BASH_SOURCE[0]}")/_common.sh"
 
-kind="${1:?usage: review_gate.sh <pr|issue> <subject> <repo> <author> [legacy-sha]}"
+kind="${1:?usage: review_gate.sh <pr|issue> <subject> <repo> <author> [issue-digest]}"
 subject="${2:?missing subject}"
 repo="${3:?missing repo}"
 author="${4:?missing author}"
-head_sha="${5:-}"
+review_target="${5:-}"
 
 case "$kind" in
   pr|issue) ;;
@@ -26,6 +26,17 @@ if [[ "$kind" == "pr" ]]; then
     echo "invalid PR subject; expected owner/repo#number" >&2
     exit 2
   }
+  reviewer_login="$(
+    python3 -c '
+import sys, yaml
+policy = yaml.safe_load(open(sys.argv[1], encoding="utf-8")) or {}
+print(policy.get("review", {}).get("pr", {}).get("github_reviewer_login", ""))' \
+      "${SATURNIN_HOME}/policies/governance.yaml"
+  )"
+  [[ -n "$reviewer_login" ]] || {
+    echo "review.pr.github_reviewer_login is not configured" >&2
+    exit 2
+  }
   github_headers=(-H "Accept: application/vnd.github+json")
   [[ -z "${GITHUB_TOKEN:-${GH_TOKEN:-}}" ]] || \
     github_headers+=(-H "Authorization: token ${GITHUB_TOKEN:-${GH_TOKEN:-}}")
@@ -35,20 +46,20 @@ if [[ "$kind" == "pr" ]]; then
   [[ -n "$head_sha" ]] || { echo "GitHub PR response contained no head SHA" >&2; exit 2; }
   args+=(--head-sha "$head_sha")
   pr_author="$(python3 -c 'import json, sys; print(json.load(sys.stdin)["user"]["login"])' <<<"$pr_json")"
-  github_verdict="$(
-    python3 - "$repo" "$pr_number" "$head_sha" "$pr_author" <<'PY'
+  IFS=$'\t' read -r github_verdict github_reviewer < <(
+    python3 - "$repo" "$pr_number" "$head_sha" "$pr_author" "$reviewer_login" <<'PY'
 import json
 import os
 import sys
 import urllib.request
 
-repo, pr_number, head_sha, pr_author = sys.argv[1:]
+repo, pr_number, head_sha, pr_author, reviewer_login = sys.argv[1:]
 headers = {"Accept": "application/vnd.github+json", "User-Agent": "saturnin-review-gate"}
 token = os.environ.get("GITHUB_TOKEN") or os.environ.get("GH_TOKEN")
 if token:
     headers["Authorization"] = f"token {token}"
 
-latest = {}
+latest = None
 for page in range(1, 11):
     request = urllib.request.Request(
         f"https://api.github.com/repos/{repo}/pulls/{pr_number}/reviews?per_page=100&page={page}",
@@ -62,25 +73,33 @@ for page in range(1, 11):
         if review.get("commit_id") != head_sha:
             continue
         user = (review.get("user") or {}).get("login", "")
-        if not user or user.casefold() == pr_author.casefold():
+        if (
+            not user
+            or user.casefold() == pr_author.casefold()
+            or user.casefold() != reviewer_login.casefold()
+        ):
             continue
-        latest[user.casefold()] = str(review.get("state", "")).lower()
+        latest = str(review.get("state", "")).lower()
 
-states = set(latest.values())
-if "changes_requested" in states or "rejected" in states:
-    print("changes_requested")
-elif "approved" in states:
-    print("approved")
+if latest in {"changes_requested", "rejected"}:
+    print(f"changes_requested\t{reviewer_login}")
+elif latest == "approved":
+    print(f"approved\t{reviewer_login}")
 else:
-    print("none")
+    print("none\t")
 PY
-  )"
+  )
   if [[ "$github_verdict" != "none" ]]; then
     saturnin review record "$subject" --kind pr --author "$author" \
       --reviewer pr-reviewer --verdict "$github_verdict" --head-sha "$head_sha" \
-      --notes "Imported from GitHub pull request reviews for CI." >/dev/null
+      --notes "Imported from GitHub reviewer ${github_reviewer} for CI." >/dev/null
   fi
-elif [[ -n "$head_sha" ]]; then
-  echo "warning: ignoring head SHA for issue review gate" >&2
+else
+  [[ -n "$review_target" ]] || {
+    echo "missing reviewed issue-content digest" >&2
+    exit 2
+  }
+  issue_digest="$review_target"
+  args+=(--issue-digest "$issue_digest")
 fi
 saturnin review gate "${args[@]}"

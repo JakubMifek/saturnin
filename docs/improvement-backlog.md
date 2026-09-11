@@ -17,12 +17,8 @@ ones here). Ordered by expected effect on throughput per unit of risk.
 
 - [ ] **Better repeat detection** - the current signature is a bag of title
       words; cluster on body similarity as well.
-- [ ] **Cost/latency telemetry per role** - decide topology changes on money and
-      minutes, not only on counts.
 - [ ] **Squad-level parallelism** - run several code workers on one epic with a
       shared integration branch.
-- [ ] **JSON Schema for `policies/*.yaml`** - `doctor` checks semantics, not
-      structure; a mistyped key is only caught when some code happens to read it.
 - [ ] **Evaluation harness** - replay recorded dispatches so a routing or policy
       change can be judged before it ships, instead of by watching the metric
       drift afterwards (see [gap-analysis.md](gap-analysis.md)).

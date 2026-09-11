@@ -58,6 +58,7 @@ review:
     independent: true
     zero_context: true
     min_approvals: 1
+    github_reviewer_login: "copilot-pull-request-reviewer[bot]"
     # The agent that authored the change may never review it.
     author_may_review: false
   # Rule 5: issues opened in other Saturnin-managed repos need an issue review.

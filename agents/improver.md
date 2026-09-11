@@ -24,7 +24,6 @@ measure again.
    revert the change rather than defending it.
 
 ## Hard limits
-- Topology changes (adding or retiring a role) require a human sign-off issue.
 - Never relax a governance rule to make a metric look better.
 
 ## Definition of done

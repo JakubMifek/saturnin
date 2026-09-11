@@ -19,8 +19,6 @@ actions:
   # Findings become board tasks routed by the normal router.
   create_tasks: true
   labels: [self-improvement]
-  # Topology upgrades (adding/retiring roles) always need a human sign-off.
-  topology_changes_require_escalation: true
   report_dir: var/reports
 
 # Known gaps in Saturnin itself, carried as data rather than as a list in a

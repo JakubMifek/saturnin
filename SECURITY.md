@@ -11,11 +11,11 @@ Debian server. It is not multi-tenant and has no authentication of its own: the
 security boundary is the operating-system user account plus the credentials
 `gh` holds. Anyone who can run `saturnin` can do anything Saturnin can do.
 
-## Guarantees enforced by code
+## Safety controls implemented in code
 
-| Guarantee | Where |
+| Control | Where |
 | --- | --- |
-| Never commits, pushes or merges on `main`/`master`/`release` | `Governance.check_branch`, `Governance.push_allowed` |
+| Reports protected branch targets as denied when Saturnin's branch or push checks are invoked; direct Git commands remain outside Saturnin's control | `saturnin check branch`, `Governance.push_allowed` |
 | No merge without an independent, zero-context review by someone other than the author | `Governance.merge_allowed`, `ReviewLedger` |
 | No issue filed in a managed repository without an independent issue review | `Governance.issue_submission_allowed` |
 | Never runs as root; `apt` only for Saturnin-dedicated service dependencies; `systemctl` only for `saturnin-*` units; timers only in the user scope | `Governance.check_server_command`, `policies/server_scope.yaml` |

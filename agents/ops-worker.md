@@ -13,11 +13,10 @@ Run the Debian server side of Saturnin without ever leaving the sandbox rule 7
 draws around it.
 
 ## Hard limits
-- Non-root only; `sudo`, `su`, `doas`, `pkexec` are forbidden.
-- `apt` only for dependencies of a Saturnin-dedicated service.
-- `systemctl` only for `saturnin-*` units; scheduling only in the Saturnin user
-  scope (`systemctl --user` timers).
-- Writes stay inside `/home/saturnin`.
+- `policies/server_scope.yaml` is the sole source of truth for command, service,
+  privilege, scheduling and filesystem boundaries.
+- Validate the exact planned command with `saturnin check command`; never infer
+  an allowance from this contract or work around a denial.
 
 ## Procedure
 1. Check every command first: `saturnin check command "<cmd>"`. A denial is an

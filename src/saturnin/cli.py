@@ -788,19 +788,21 @@ def _run_checkpoint(args: argparse.Namespace, config: Config, board: Board, as_j
             router = Router(config)
             launcher = AgentLauncher(config, board)
             payload = []
-            for checkpoint in due:
-                task = board.get(checkpoint.task_id)
-                if task.state in ("intake", "blocked"):
-                    router.dispatch(board, task, actor="checkpoint-sweeper")
-                launched = launcher.launch(
-                    checkpoint.task_id,
-                    resumed_checkpoint=checkpoint.created_at,
-                )
-                payload.append(
-                    launched.to_dict()
-                    if launched
-                    else {"task_id": checkpoint.task_id, "disabled": True}
-                )
+            if not launcher.enabled:
+                payload = [
+                    {"task_id": checkpoint.task_id, "disabled": True}
+                    for checkpoint in due
+                ]
+            else:
+                for checkpoint in due:
+                    task = board.get(checkpoint.task_id)
+                    if task.state in ("intake", "blocked"):
+                        router.dispatch(board, task, actor="checkpoint-sweeper")
+                    launched = launcher.launch(
+                        checkpoint.task_id,
+                        resumed_checkpoint=checkpoint.created_at,
+                    )
+                    payload.append(launched.to_dict())
         _emit(
             payload,
             as_json,

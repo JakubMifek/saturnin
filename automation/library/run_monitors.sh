@@ -42,7 +42,11 @@ for repo_path in "$@"; do
     continue
   fi
   app="$(basename "${repo_path%/}")"
-  results="${RESULTS_DIR}/${app}.jsonl"
+  repo_key="$("$PYTHON" -c '
+import hashlib, pathlib, sys
+path = str(pathlib.Path(sys.argv[1]).resolve())
+print(f"{pathlib.Path(path).name}-{hashlib.sha256(path.encode()).hexdigest()[:12]}")' "$repo_path")"
+  results="${RESULTS_DIR}/${repo_key}.jsonl"
 
   # monitors: [{name, url, expect_status, timeout_seconds}]
   count="$("$PYTHON" -c '
@@ -70,23 +74,23 @@ print(monitor["name"], monitor["url"], monitor.get("expect_status", 200),
       code=000
     fi
     if [[ "$code" == "$expect" ]]; then
-      monitor_ok_results="${RESULTS_DIR}/${app}_${name}.jsonl"
+      monitor_ok_results="${RESULTS_DIR}/${repo_key}_${name}.jsonl"
       printf '{"ts":"%s","app":"%s","monitor":"%s","status":"%s","ok":true}\n' \
         "$started" "$app" "$name" "$code" >> "$monitor_ok_results"
       printf '{"ts":"%s","app":"%s","monitor":"%s","status":"%s","ok":true}\n' \
         "$started" "$app" "$name" "$code" >> "$results"
-      task_marker="${RESULTS_DIR}/${app}_${name}.task"
+      task_marker="${RESULTS_DIR}/${repo_key}_${name}.task"
       if [[ -f "$task_marker" ]]; then
         incident_task="$(<"$task_marker")"
         if saturnin task move "$incident_task" cancelled --actor monitors \
           --note "$app/$name recovered with HTTP $code before intervention" >/dev/null; then
           rm -f "$task_marker"
-          rm -f "${RESULTS_DIR}/${app}_${name}.escalated"
+          rm -f "${RESULTS_DIR}/${repo_key}_${name}.escalated"
         else
           log "$app/$name recovered, but task $incident_task could not be closed; keeping marker"
         fi
       else
-        rm -f "${RESULTS_DIR}/${app}_${name}.escalated"
+        rm -f "${RESULTS_DIR}/${repo_key}_${name}.escalated"
       fi
       log "$app/$name ok ($code)"
       continue
@@ -97,16 +101,16 @@ print(monitor["name"], monitor["url"], monitor.get("expect_status", 200),
     log "$app/$name FAILED (got $code, expected $expect)"
 
     # Two consecutive failures for THIS monitor mean the humans need to know.
-    monitor_results="${RESULTS_DIR}/${app}_${name}.jsonl"
+    monitor_results="${RESULTS_DIR}/${repo_key}_${name}.jsonl"
     printf '{"ts":"%s","app":"%s","monitor":"%s","status":"%s","ok":false}\n' \
       "$started" "$app" "$name" "$code" >> "$monitor_results"
     recent_failures="$(tail -n 2 "$monitor_results" | grep -c '"ok":false' || true)"
     if (( recent_failures >= 2 )); then
       # Only escalate once per consecutive-failure streak.  The marker is
       # removed when the monitor recovers (ok=true path above).
-      escalation_marker="${RESULTS_DIR}/${app}_${name}.escalated"
+      escalation_marker="${RESULTS_DIR}/${repo_key}_${name}.escalated"
       if [[ ! -f "$escalation_marker" ]]; then
-        incident_task="$(<"${RESULTS_DIR}/${app}_${name}.task")"
+        incident_task="$(<"${RESULTS_DIR}/${repo_key}_${name}.task")"
         saturnin escalate "Monitor $app/$name failing repeatedly" \
           --context "Expected HTTP $expect from $url, got $code twice in a row." \
           --item "Confirm the service is meant to be up" \
@@ -125,7 +129,7 @@ print(monitor["name"], monitor["url"], monitor.get("expect_status", 200),
       )"
       printf '%s' "$incident" | "$PYTHON" -c \
         'import json, sys; print(json.load(sys.stdin)["id"])' \
-        > "${RESULTS_DIR}/${app}_${name}.task"
+        > "${RESULTS_DIR}/${repo_key}_${name}.task"
     fi
   done
 done

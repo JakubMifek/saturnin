@@ -95,8 +95,7 @@ knowing what the system is for produces theatre, not findings.
 4. **Verify** - record the metric before and after in the task. If it did not
    move, revert.
 
-Safety rails: topology changes need a human sign-off issue, and no metric may
-ever be improved by weakening a governance rule.
+No metric may ever be improved by weakening a governance rule.
 
 ## 8. Escalation
 

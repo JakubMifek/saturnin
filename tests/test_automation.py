@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import os
 import subprocess
 import sys
@@ -116,9 +117,10 @@ def test_monitor_recovery_closes_recorded_incident_task(config: Config, board: B
     )
     task = board.create("Monitor managed-app/health failed")
     (config.var_dir / "monitors").mkdir(parents=True)
-    marker = config.var_dir / "monitors" / "managed-app_health.task"
+    repo_key = f"managed-app-{hashlib.sha256(str(repo.resolve()).encode()).hexdigest()[:12]}"
+    marker = config.var_dir / "monitors" / f"{repo_key}_health.task"
     marker.write_text(task.id, encoding="utf-8")
-    escalated = config.var_dir / "monitors" / "managed-app_health.escalated"
+    escalated = config.var_dir / "monitors" / f"{repo_key}_health.escalated"
     escalated.write_text("", encoding="utf-8")
     fake_bin = config.root / "fake-bin"
     fake_bin.mkdir()
@@ -131,7 +133,10 @@ def test_monitor_recovery_closes_recorded_incident_task(config: Config, board: B
         check=True,
         capture_output=True,
         text=True,
-        env={**os.environ, "PATH": f"{fake_bin}:{os.environ['PATH']}"},
+        env={
+            **os.environ,
+            "PATH": f"{fake_bin}:{os.path.dirname(sys.executable)}:{os.environ['PATH']}",
+        },
     )
 
     assert board.get(task.id).state == "cancelled"
@@ -169,6 +174,40 @@ def test_monitors_validate_manifest_name_and_url_before_curl(config: Config) -> 
     assert not list((config.root / "var" / "monitors").glob("*escape*"))
 
 
+def test_monitor_state_is_namespaced_by_repository_path(config: Config) -> None:
+    repos = [config.root / parent / "managed-app" for parent in ("one", "two")]
+    for repo in repos:
+        (repo / ".saturnin").mkdir(parents=True)
+        (repo / ".saturnin" / "repo.yaml").write_text(
+            "monitors:\n"
+            "  - name: health\n"
+            "    url: https://example.test/health\n",
+            encoding="utf-8",
+        )
+    fake_bin = config.root / "fake-bin"
+    fake_bin.mkdir()
+    curl = fake_bin / "curl"
+    curl.write_text("#!/bin/sh\nprintf 200\n", encoding="utf-8")
+    curl.chmod(0o755)
+
+    subprocess.run(
+        [
+            "bash",
+            str(config.root / "automation/library/run_monitors.sh"),
+            *(str(repo) for repo in repos),
+        ],
+        check=True,
+        capture_output=True,
+        text=True,
+        env={**os.environ, "PATH": f"{fake_bin}:{os.environ['PATH']}"},
+    )
+
+    result_files = list((config.var_dir / "monitors").glob("managed-app-*.jsonl"))
+    repository_logs = [path for path in result_files if not path.stem.endswith("_health")]
+    assert len(repository_logs) == 2
+    assert repository_logs[0].name != repository_logs[1].name
+
+
 def test_review_gate_rejects_pr_subject_for_another_repo(config: Config) -> None:
     result = subprocess.run(
         [
@@ -186,3 +225,44 @@ def test_review_gate_rejects_pr_subject_for_another_repo(config: Config) -> None
 
     assert result.returncode == 2
     assert "expected owner/repo#number" in result.stderr
+
+
+def test_review_gate_passes_issue_digest_to_gate(config: Config) -> None:
+    fake_bin = config.root / "fake-bin"
+    fake_bin.mkdir()
+    args_log = config.root / "saturnin-args"
+    saturnin = fake_bin / "saturnin"
+    saturnin.write_text(
+        f"#!/bin/sh\nprintf '%s\\n' \"$@\" > {args_log}\n",
+        encoding="utf-8",
+    )
+    saturnin.chmod(0o755)
+
+    subprocess.run(
+        [
+            "bash",
+            str(config.root / "automation/library/review_gate.sh"),
+            "issue",
+            "draft-42",
+            "owner/repo",
+            "researcher",
+            "reviewed-digest",
+        ],
+        check=True,
+        capture_output=True,
+        text=True,
+        env={**os.environ, "PATH": f"{fake_bin}:{os.environ['PATH']}"},
+    )
+
+    args = args_log.read_text(encoding="utf-8").splitlines()
+    assert args[:2] == ["review", "gate"]
+    assert args[-2:] == ["--issue-digest", "reviewed-digest"]
+
+
+def test_review_gate_imports_only_the_designated_reviewer(config: Config) -> None:
+    script = (config.root / "automation/library/review_gate.sh").read_text(
+        encoding="utf-8"
+    )
+
+    assert "user.casefold() != reviewer_login.casefold()" in script
+    assert "Imported from GitHub reviewer ${github_reviewer}" in script

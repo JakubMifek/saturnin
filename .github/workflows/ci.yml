@@ -6,6 +6,8 @@ name: ci
 on:
   push:
   pull_request:
+  pull_request_review:
+    types: [submitted, dismissed]
   workflow_dispatch:
 
 permissions:
@@ -41,12 +43,12 @@ jobs:
       - name: Install
         run: python -m pip install -e ".[dev]"
       - name: PR head must be a feature branch (rules 1 and 2)
-        if: github.event_name == 'pull_request'
+        if: github.event_name == 'pull_request' || github.event_name == 'pull_request_review'
         env:
-          HEAD_REF: ${{ github.head_ref }}
+          HEAD_REF: ${{ github.event.pull_request.head.ref }}
         run: saturnin check branch "$HEAD_REF"
       - name: Independent review gate (rule 3)
-        if: github.event_name == 'pull_request'
+        if: github.event_name == 'pull_request' || github.event_name == 'pull_request_review'
         env:
           GITHUB_TOKEN: ${{ github.token }}
         run: automation/library/review_gate.sh pr "JakubMifek/saturnin#${{ github.event.pull_request.number }}" "JakubMifek/saturnin" code-worker
