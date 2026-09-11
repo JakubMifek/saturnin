@@ -96,12 +96,16 @@ def test_discovery_respects_the_enabled_switch(config: Config, board: Board) -> 
 
 def test_sources_accept_plain_slugs_and_mappings(config: Config, board: Board) -> None:
     policy = config.policy("repos")
-    policy["discovery"]["sources"] = ["a/one", {"slug": "a/two", "labels": ["ops"]}]
+    policy["discovery"]["sources"] = [
+        "a/one",
+        {"slug": "a/two", "labels": ["ops"], "require_labels": ["trusted"]},
+    ]
     discovery = IssueDiscovery(config, board)
     sources = discovery.sources()
     assert [s["slug"] for s in sources] == ["a/one", "a/two"]
     assert sources[0]["labels"] == discovery.labels
     assert sources[1]["labels"] == ["ops"]
+    assert sources[1]["require_labels"] == ["trusted"]
 
 
 def test_public_task_intake_is_a_discovery_source(config: Config, board: Board) -> None:
@@ -109,7 +113,26 @@ def test_public_task_intake_is_a_discovery_source(config: Config, board: Board) 
     assert {
         "slug": "JakubMifek/saturnin",
         "labels": ["saturnin:task"],
+        "require_labels": ["saturnin:trusted"],
     } in sources
+
+
+def test_discovery_requires_maintainer_trust_labels(config: Config, board: Board) -> None:
+    policy = config.policy("repos")
+    policy["discovery"]["sources"] = [
+        {
+            "slug": "JakubMifek/widget-api",
+            "labels": ["saturnin:task"],
+            "require_labels": ["trusted"],
+        }
+    ]
+    issues = [
+        _issue(1, labels=["saturnin:task"]),
+        _issue(2, labels=["saturnin:task", "trusted"]),
+    ]
+    discovery = IssueDiscovery(config, board, fetcher=lambda repo, labels: list(issues))
+
+    assert [issue.number for issue in discovery.poll()] == [2]
 
 
 def test_discover_command_reports_when_there_is_nothing(config: Config, capsys) -> None:

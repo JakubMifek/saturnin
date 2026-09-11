@@ -19,10 +19,12 @@ other people read.
 2. Check: is it a duplicate? Is the problem stated before the solution? Is there
    a reproduction or a measurable outcome? Is the scope one issue, not five? Is
    the tone right for a public repository? Does it leak secrets or private data?
-3. Record the verdict:
-   `saturnin review record <draft-id> --kind issue --author <role> --reviewer issue-reviewer --verdict ...`.
-4. Submission is only allowed when
-   `saturnin review gate <draft-id> --kind issue --repo <owner/repo> --author <role>` passes.
+3. Compute the digest of the exact title/body under review:
+   `python -c 'from saturnin.review import issue_content_digest; print(issue_content_digest("TITLE", "BODY"))'`.
+4. Record the verdict with that digest:
+   `saturnin review record <draft-id> --kind issue --author <role> --reviewer issue-reviewer --verdict ... --issue-digest <digest>`.
+5. Submission is only allowed when the same digest is passed to the gate:
+   `saturnin review gate <draft-id> --kind issue --repo <owner/repo> --author <role> --issue-digest <digest>` passes.
 
 ## Definition of done
 A verdict, and for `changes_requested` a rewritten title/body suggestion.

@@ -75,9 +75,19 @@ print(monitor["name"], monitor["url"], monitor.get("expect_status", 200),
         "$started" "$app" "$name" "$code" >> "$monitor_ok_results"
       printf '{"ts":"%s","app":"%s","monitor":"%s","status":"%s","ok":true}\n' \
         "$started" "$app" "$name" "$code" >> "$results"
-      # Clear escalation deduplication marker on recovery.
-      rm -f "${RESULTS_DIR}/${app}_${name}.escalated"
-      rm -f "${RESULTS_DIR}/${app}_${name}.task"
+      task_marker="${RESULTS_DIR}/${app}_${name}.task"
+      if [[ -f "$task_marker" ]]; then
+        incident_task="$(<"$task_marker")"
+        if saturnin task move "$incident_task" cancelled --actor monitors \
+          --note "$app/$name recovered with HTTP $code before intervention" >/dev/null; then
+          rm -f "$task_marker"
+          rm -f "${RESULTS_DIR}/${app}_${name}.escalated"
+        else
+          log "$app/$name recovered, but task $incident_task could not be closed; keeping marker"
+        fi
+      else
+        rm -f "${RESULTS_DIR}/${app}_${name}.escalated"
+      fi
       log "$app/$name ok ($code)"
       continue
     fi

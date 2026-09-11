@@ -30,8 +30,10 @@ saturnin task add "Fix the failing deploy pipeline" \
 saturnin task list --open
 ```
 
-The task is routed and its agent is started without waiting. `saturnin run <task-id>`
-can restart that role with the same contract-aware, role-scoped MCP configuration.
+The default installation is non-launching: the task is routed, and `saturnin run
+<task-id>` reports `{"disabled": true}` until `policies/mcp.yaml` is configured
+for this host. Enable launching only after the worker has an attached feature
+branch/worktree and the `copilot`, `npx` and `uvx` prerequisites are installed.
 
 ## 4. Do the work in a worktree
 
@@ -73,9 +75,9 @@ systemctl --user list-timers 'saturnin-*'
 - `saturnin-mirror.timer` - every fifteen minutes, mirrors open tasks as GitHub
   issues so the board survives this machine (rule 8).
 - `saturnin-discovery.timer` - every ten minutes, adopts labelled issues raised
-  in managed repositories (alerts, CI, humans) as board tasks. It does nothing
-  until `discovery.sources` in `policies/repos.yaml` names a repository; see
-  [observability](../observability.md).
+  in managed repositories (alerts, CI, humans) as board tasks. The scaffold
+  watches `JakubMifek/saturnin` for `saturnin:task` issues only after a
+  maintainer adds the `saturnin:trusted` label; see [observability](../observability.md).
 
 Without a login session, keep the timers alive across logouts:
 `loginctl enable-linger $USER`.
@@ -84,7 +86,7 @@ Without a login session, keep the timers alive across logouts:
 
 | When | Command | Who |
 | --- | --- | --- |
-| On every request | `saturnin task add ... --dispatch` | CEO |
+| On every request | `saturnin task add ... --dispatch --no-launch` | CEO |
 | Hourly (timer) | `automation/library/improvement_cycle.sh` | improver |
 | Daily (timer) | `automation/library/cleanup_worktrees.sh` | janitor |
 | Every 5 min (timer) | `automation/library/result_poller.sh` | chief-of-staff |

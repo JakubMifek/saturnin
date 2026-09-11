@@ -104,6 +104,41 @@ def test_monitor_escalations_are_pushed_and_not_silenced(config: Config) -> None
     assert "|| true" not in escalation
 
 
+def test_monitor_recovery_closes_recorded_incident_task(config: Config, board: Board) -> None:
+    repo = config.root / "managed-app"
+    (repo / ".saturnin").mkdir(parents=True)
+    (repo / ".saturnin" / "repo.yaml").write_text(
+        "monitors:\n"
+        "  - name: health\n"
+        "    url: https://example.test/health\n"
+        "    expect_status: 200\n",
+        encoding="utf-8",
+    )
+    task = board.create("Monitor managed-app/health failed")
+    (config.var_dir / "monitors").mkdir(parents=True)
+    marker = config.var_dir / "monitors" / "managed-app_health.task"
+    marker.write_text(task.id, encoding="utf-8")
+    escalated = config.var_dir / "monitors" / "managed-app_health.escalated"
+    escalated.write_text("", encoding="utf-8")
+    fake_bin = config.root / "fake-bin"
+    fake_bin.mkdir()
+    curl = fake_bin / "curl"
+    curl.write_text("#!/bin/sh\nprintf 200\n", encoding="utf-8")
+    curl.chmod(0o755)
+
+    subprocess.run(
+        ["bash", str(config.root / "automation/library/run_monitors.sh"), str(repo)],
+        check=True,
+        capture_output=True,
+        text=True,
+        env={**os.environ, "PATH": f"{fake_bin}:{os.environ['PATH']}"},
+    )
+
+    assert board.get(task.id).state == "cancelled"
+    assert not marker.exists()
+    assert not escalated.exists()
+
+
 def test_monitors_validate_manifest_name_and_url_before_curl(config: Config) -> None:
     repo = config.root / "managed-app"
     (repo / ".saturnin").mkdir(parents=True)

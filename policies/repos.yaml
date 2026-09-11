@@ -61,12 +61,14 @@ discovery:
   # Written onto the task so the same issue is never adopted twice.
   source_label_prefix: "source"
   # Repositories to watch. Each entry is a slug, or a mapping with per-repo
-  # labels:
+  # labels and maintainer-applied trust labels:
   #   - slug: JakubMifek/widget-api
   #     labels: [alert, incident]
+  #     require_labels: [saturnin:trusted]
   sources:
     - slug: JakubMifek/saturnin
       labels: ["saturnin:task"]
+      require_labels: ["saturnin:trusted"]
 
 # Contract every Saturnin-managed project repository must satisfy.
 # Validated with: saturnin repo check <path>

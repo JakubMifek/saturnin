@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 # Usage: review_gate.sh <pr|issue> <subject> <repo> <author> [legacy-sha]
-# PR gates always resolve the head SHA from GitHub; issue gates ignore any supplied SHA.
+# PR gates resolve the head SHA and import GitHub review state available to CI.
+# Issue gates ignore any supplied SHA.
 # Exits non-zero when the independent review requirement is not satisfied.
 set -Eeuo pipefail
 SCRIPT_NAME=review-gate
@@ -33,6 +34,52 @@ if [[ "$kind" == "pr" ]]; then
   head_sha="$(python3 -c 'import json, sys; print(json.load(sys.stdin)["head"]["sha"])' <<<"$pr_json")"
   [[ -n "$head_sha" ]] || { echo "GitHub PR response contained no head SHA" >&2; exit 2; }
   args+=(--head-sha "$head_sha")
+  pr_author="$(python3 -c 'import json, sys; print(json.load(sys.stdin)["user"]["login"])' <<<"$pr_json")"
+  github_verdict="$(
+    python3 - "$repo" "$pr_number" "$head_sha" "$pr_author" <<'PY'
+import json
+import os
+import sys
+import urllib.request
+
+repo, pr_number, head_sha, pr_author = sys.argv[1:]
+headers = {"Accept": "application/vnd.github+json", "User-Agent": "saturnin-review-gate"}
+token = os.environ.get("GITHUB_TOKEN") or os.environ.get("GH_TOKEN")
+if token:
+    headers["Authorization"] = f"token {token}"
+
+latest = {}
+for page in range(1, 11):
+    request = urllib.request.Request(
+        f"https://api.github.com/repos/{repo}/pulls/{pr_number}/reviews?per_page=100&page={page}",
+        headers=headers,
+    )
+    with urllib.request.urlopen(request, timeout=30) as response:
+        reviews = json.load(response)
+    if not reviews:
+        break
+    for review in reviews:
+        if review.get("commit_id") != head_sha:
+            continue
+        user = (review.get("user") or {}).get("login", "")
+        if not user or user.casefold() == pr_author.casefold():
+            continue
+        latest[user.casefold()] = str(review.get("state", "")).lower()
+
+states = set(latest.values())
+if "changes_requested" in states or "rejected" in states:
+    print("changes_requested")
+elif "approved" in states:
+    print("approved")
+else:
+    print("none")
+PY
+  )"
+  if [[ "$github_verdict" != "none" ]]; then
+    saturnin review record "$subject" --kind pr --author "$author" \
+      --reviewer pr-reviewer --verdict "$github_verdict" --head-sha "$head_sha" \
+      --notes "Imported from GitHub pull request reviews for CI." >/dev/null
+  fi
 elif [[ -n "$head_sha" ]]; then
   echo "warning: ignoring head SHA for issue review gate" >&2
 fi

@@ -65,3 +65,4 @@ def test_public_task_template_matches_discovery_policy() -> None:
     )
 
     assert template["labels"] == source["labels"]
+    assert not set(source.get("require_labels", [])) <= set(template["labels"])

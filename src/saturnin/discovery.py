@@ -84,7 +84,13 @@ class IssueDiscovery:
             slug = entry.get("slug")
             if not slug:
                 continue
-            sources.append({"slug": str(slug), "labels": entry.get("labels") or self.labels})
+            sources.append(
+                {
+                    "slug": str(slug),
+                    "labels": entry.get("labels") or self.labels,
+                    "require_labels": entry.get("require_labels") or [],
+                }
+            )
         return sources
 
     def marker(self, issue: InboundIssue) -> str:
@@ -124,7 +130,12 @@ class IssueDiscovery:
             return []
         found: list[InboundIssue] = []
         for source in self.sources():
-            found += self._fetch(source["slug"], list(source["labels"]))
+            issues = self._fetch(source["slug"], list(source["labels"]))
+            found += [
+                issue
+                for issue in issues
+                if _has_required_labels(issue, source.get("require_labels", []))
+            ]
         return found
 
     def run(self) -> list[Task]:
@@ -145,6 +156,14 @@ def _priority(issue: InboundIssue, policy: dict[str, Any]) -> str:
         if folded in mapping_casefold:
             return mapping_casefold[folded]
     return str(policy.get("default_priority", "P2"))
+
+
+def _has_required_labels(issue: InboundIssue, required: Iterable[str]) -> bool:
+    required_labels = {str(label).casefold() for label in required}
+    if not required_labels:
+        return True
+    issue_labels = {label.casefold() for label in issue.labels}
+    return required_labels <= issue_labels
 
 
 def _body(issue: InboundIssue) -> str:
