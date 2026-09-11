@@ -604,31 +604,50 @@ def _saturnin_targets(arguments: Sequence[str]) -> list[str]:
 
 def _git_targets(arguments: Sequence[str]) -> list[str]:
     index = 0
-    working_directories: list[str] = []
+    targets: list[str] = []
+    subcommand_index: int | None = None
     while index < len(arguments):
         argument = arguments[index]
         if argument == "-C":
             if index + 1 < len(arguments):
-                working_directories.append(arguments[index + 1])
+                targets.append(arguments[index + 1])
             index += 2
             continue
         if argument.startswith("-C") and len(argument) > 2:
-            working_directories.append(argument[2:])
+            targets.append(argument[2:])
             index += 1
             continue
-        if argument in {"-c", "--git-dir", "--work-tree"}:
+        if argument in {"--git-dir", "--work-tree"}:
+            if index + 1 < len(arguments):
+                targets.append(arguments[index + 1])
             index += 2
             continue
-        if argument.startswith(("-c", "--git-dir=", "--work-tree=")):
+        if argument.startswith(("--git-dir=", "--work-tree=")):
+            targets.append(argument.split("=", 1)[1])
             index += 1
             continue
-        if argument == "clone":
-            operands = _positional_arguments(arguments[index + 1 :])
-            if len(operands) >= 2:
-                return [operands[-1]]
-            return working_directories or ["."]
+        if argument == "-c":
+            index += 2
+            continue
+        if argument.startswith("-c"):
+            index += 1
+            continue
+        if not argument.startswith("-"):
+            subcommand_index = index
+            break
         index += 1
-    return []
+    targets.append(".")
+    if subcommand_index is None:
+        return targets
+    subcommand = arguments[subcommand_index]
+    operands = _positional_arguments(arguments[subcommand_index + 1 :])
+    if subcommand == "clone" and len(operands) >= 2:
+        targets.append(operands[-1])
+    elif subcommand == "init" and operands:
+        targets.append(operands[-1])
+    elif subcommand == "worktree" and operands[:1] == ["add"] and len(operands) >= 2:
+        targets.append(operands[1])
+    return targets
 
 
 def _curl_output_dir(arguments: Sequence[str]) -> str | None:

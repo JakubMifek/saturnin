@@ -134,17 +134,11 @@ class IssueMirror:
         for task in self.board:
             if not self.mirrors(task):
                 continue
-            if task.state in ("done", "cancelled"):
-                # Terminal tasks that were never mirrored still need a one-time
-                # sync to satisfy rule 8; terminal tasks that already have a
-                # mirror need one final update to close the issue.
-                if task.issue:
-                    if not getattr(task, "issue_synced_at", None) or task.issue_synced_at < getattr(task, "updated_at", ""):
-                        result.append(task)
-                else:
-                    # Never mirrored - sync exactly once to make it durable.
-                    result.append(task)
-            else:
+            if not task.issue:
+                result.append(task)
+                continue
+            synced_at = getattr(task, "issue_synced_at", None)
+            if not synced_at or synced_at < getattr(task, "updated_at", ""):
                 result.append(task)
         return result
 

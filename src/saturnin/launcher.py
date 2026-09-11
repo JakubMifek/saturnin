@@ -11,7 +11,7 @@ from typing import Any
 
 from .board import Board, Task, utcnow
 from .checkpoints import CheckpointStore
-from .config import Config, default_config
+from .config import Config, default_config, load_yaml
 from .contracts import AgentContract, load_contracts
 
 
@@ -80,6 +80,7 @@ class AgentLauncher:
         workdir: Path | None = None
         with self.board.edit(task.id) as stored:
             previous_state = stored.state
+            previous_checkpoint_resumed_at = stored.checkpoint_resumed_at
             if stored.state == "in_progress" and resumed_checkpoint:
                 if stored.checkpoint_resumed_at == resumed_checkpoint:
                     raise LauncherError(
@@ -117,6 +118,7 @@ class AgentLauncher:
             except (LauncherError, OSError) as exc:
                 if previous_state in ("routed", "in_progress"):
                     stored.state = previous_state
+                stored.checkpoint_resumed_at = previous_checkpoint_resumed_at
                 stored.log("agent:launch_failed", actor="launcher", reason=str(exc))
                 launch_error = LauncherError(f"agent launcher failed for task {task.id}: {exc}")
             else:
@@ -191,7 +193,28 @@ class AgentLauncher:
     def _write_mcp_config(self, task: Task, contract: AgentContract) -> Path:
         definitions = self.config.policy("mcp").get("servers", {})
         servers: dict[str, dict[str, Any]] = {}
-        for name in contract.mcp:
+        allowed = list(contract.mcp)
+        if task.worktree:
+            manifest_path = Path(task.worktree) / ".saturnin" / "repo.yaml"
+            if manifest_path.is_file():
+                try:
+                    manifest = load_yaml(manifest_path)
+                except (OSError, ValueError) as exc:
+                    raise LauncherError(f"invalid managed repository manifest: {exc}") from exc
+                project_mcp = manifest.get("mcp")
+                if project_mcp is not None:
+                    if not isinstance(project_mcp, list) or not all(
+                        isinstance(name, str) for name in project_mcp
+                    ):
+                        raise LauncherError("managed repository mcp must be a list of server ids")
+                    unknown = sorted(set(project_mcp) - set(definitions))
+                    if unknown:
+                        raise LauncherError(
+                            f"managed repository names unknown MCP server(s): {', '.join(unknown)}"
+                        )
+                    project_allowlist = set(project_mcp)
+                    allowed = [name for name in allowed if name in project_allowlist]
+        for name in allowed:
             definition = definitions.get(name)
             if not isinstance(definition, dict):
                 raise LauncherError(f"unknown MCP server {name!r} for role {contract.role}")

@@ -3,7 +3,7 @@ from __future__ import annotations
 import pytest
 
 from saturnin.config import Config
-from saturnin.governance import Governance, _curl_targets
+from saturnin.governance import Governance, _curl_targets, _git_targets
 from saturnin.review import ReviewLedger, ReviewError, issue_content_digest
 
 SELF_REPO = "JakubMifek/saturnin"
@@ -406,6 +406,11 @@ def test_shell_assignments_cannot_change_policy_home(
         ("saturnin --home /tmp task add x", "outside writable roots"),
         ("python3 -m saturnin --home /tmp task add x", "outside writable roots"),
         ("git -C /tmp clone https://example.test/repo.git", "outside writable roots"),
+        ("git -C /tmp init", "outside writable roots"),
+        ("git --git-dir=/tmp/repo.git status", "outside writable roots"),
+        ("git --work-tree /tmp/repo checkout -- file", "outside writable roots"),
+        ("git init /tmp/repo", "outside writable roots"),
+        ("git worktree add /tmp/worktree feature/test", "outside writable roots"),
         ("git clone https://example.test/repo.git /tmp/repo", "outside writable roots"),
     ],
 )
@@ -416,6 +421,22 @@ def test_filesystem_writes_outside_policy_are_rejected(
 
     assert not decision.allowed
     assert reason in decision.reasons[0]
+
+
+@pytest.mark.parametrize(
+    ("arguments", "target"),
+    [
+        (["-C", "/tmp", "init"], "/tmp"),
+        (["--git-dir=/tmp/repo.git", "status"], "/tmp/repo.git"),
+        (["--work-tree", "/tmp/repo", "checkout", "--", "file"], "/tmp/repo"),
+        (["init", "/tmp/repo"], "/tmp/repo"),
+        (["worktree", "add", "/tmp/worktree", "feature/test"], "/tmp/worktree"),
+    ],
+)
+def test_git_control_paths_and_mutation_destinations_are_write_targets(
+    arguments: list[str], target: str
+) -> None:
+    assert target in _git_targets(arguments)
 
 
 @pytest.mark.parametrize(

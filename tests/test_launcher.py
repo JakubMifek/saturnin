@@ -75,6 +75,38 @@ def test_launcher_starts_routed_role_with_filtered_mcp(
     assert calls[0][1]["cwd"] == worktree.path
 
 
+def test_launcher_intersects_role_mcp_with_project_allowlist(
+    config: Config, board: Board, git_repo: Path, monkeypatch
+) -> None:
+    config.policy("mcp")["launcher"]["enabled"] = True
+    task = board.create("Implement a restricted fix")
+    Router(config).dispatch(board, task)
+    worktree = WorktreeManager(config, repo=git_repo, board=board).create(
+        "feature/restricted-launch"
+    )
+    manifest = worktree.path / ".saturnin" / "repo.yaml"
+    manifest.parent.mkdir(parents=True, exist_ok=True)
+    manifest.write_text("mcp: []\n", encoding="utf-8")
+    with board.edit(task.id) as stored:
+        stored.branch = "feature/restricted-launch"
+        stored.worktree = str(worktree.path)
+
+    monkeypatch.setattr("saturnin.launcher.shutil.which", lambda _: "/usr/bin/copilot")
+    monkeypatch.setattr(
+        "saturnin.launcher.subprocess.Popen",
+        lambda command, **kwargs: (
+            FakeProcess(command, stdout="feature/restricted-launch\n")
+            if command == ["git", "branch", "--show-current"]
+            else SimpleNamespace(pid=4242)
+        ),
+    )
+
+    AgentLauncher(config, board).launch(task.id)
+
+    mcp = json.loads((config.var_dir / "launches" / f"{task.id}.mcp.json").read_text())
+    assert mcp["mcpServers"] == {}
+
+
 def test_launcher_refuses_to_run_without_attached_worktree(
     config: Config, board: Board, monkeypatch
 ) -> None:
@@ -84,12 +116,14 @@ def test_launcher_refuses_to_run_without_attached_worktree(
     monkeypatch.setattr("saturnin.launcher.shutil.which", lambda _: "/usr/bin/copilot")
 
     try:
-        AgentLauncher(config, board).launch(task.id)
+        AgentLauncher(config, board).launch(task.id, resumed_checkpoint="checkpoint-1")
     except LauncherError as exc:
         assert "attached branch" in str(exc)
     else:  # pragma: no cover - assertion guard
         raise AssertionError("launcher accepted a task without a worktree")
-    assert board.get(task.id).state == "routed"
+    stored = board.get(task.id)
+    assert stored.state == "routed"
+    assert stored.checkpoint_resumed_at is None
 
 
 def test_launcher_rolls_back_claim_when_spawn_fails(
@@ -113,7 +147,7 @@ def test_launcher_rolls_back_claim_when_spawn_fails(
     )
 
     try:
-        AgentLauncher(config, board).launch(task.id)
+        AgentLauncher(config, board).launch(task.id, resumed_checkpoint="checkpoint-1")
     except LauncherError as exc:
         assert "boom" in str(exc)
     else:  # pragma: no cover - assertion guard
@@ -121,6 +155,7 @@ def test_launcher_rolls_back_claim_when_spawn_fails(
 
     stored = board.get(task.id)
     assert stored.state == "routed"
+    assert stored.checkpoint_resumed_at is None
     assert stored.history[-1]["event"] == "agent:launch_failed"
 
 

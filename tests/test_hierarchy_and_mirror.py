@@ -74,10 +74,15 @@ def test_unmirrored_lists_open_tasks_without_an_issue(config: Config, board: Boa
 
 def test_syncable_revisits_existing_open_mirrors(config: Config, board: Board) -> None:
     existing = board.create("Existing")
+    current = board.create("Current")
     fresh = board.create("Fresh")
     closed = board.create("Closed")
     with board.edit(existing.id) as stored:
         stored.issue = "https://github.com/JakubMifek/saturnin-ops/issues/1"
+    with board.edit(current.id) as stored:
+        stored.issue = "https://github.com/JakubMifek/saturnin-ops/issues/2"
+        stored.log("issue:synced", actor="chief-of-staff", note=stored.issue)
+        stored.issue_synced_at = stored.updated_at
     board.transition(closed, "cancelled")
 
     assert {task.id for task in IssueMirror(config, board).syncable()} == {
