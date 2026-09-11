@@ -55,6 +55,10 @@ class _AssignmentError(ValueError):
     pass
 
 
+class _WriteScopeError(ValueError):
+    pass
+
+
 @dataclass
 class Decision:
     allowed: bool
@@ -494,7 +498,10 @@ def _check_filesystem_scope(
     binary: str, arguments: Sequence[str], filesystem: dict[str, Any]
 ) -> Decision:
     forbidden_roots = _policy_roots(filesystem.get("forbidden_roots", []))
-    targets = _writable_targets(binary, arguments)
+    try:
+        targets = _writable_targets(binary, arguments)
+    except _WriteScopeError as exc:
+        return Decision.deny(str(exc))
     if not targets:
         # No explicit write targets detected.  Interpreters and shells can
         # perform arbitrary filesystem writes that argument inspection cannot
@@ -640,14 +647,80 @@ def _git_targets(arguments: Sequence[str]) -> list[str]:
     if subcommand_index is None:
         return targets
     subcommand = arguments[subcommand_index]
-    operands = _positional_arguments(arguments[subcommand_index + 1 :])
+    subcommand_arguments = arguments[subcommand_index + 1 :]
+    operands = _positional_arguments(subcommand_arguments)
     if subcommand == "clone" and len(operands) >= 2:
         targets.append(operands[-1])
     elif subcommand == "init" and operands:
         targets.append(operands[-1])
-    elif subcommand == "worktree" and operands[:1] == ["add"] and len(operands) >= 2:
-        targets.append(operands[1])
+    elif subcommand == "worktree" and subcommand_arguments[:1] == ["add"]:
+        targets.append(_git_worktree_add_target(subcommand_arguments[1:]))
     return targets
+
+
+def _git_worktree_add_target(arguments: Sequence[str]) -> str:
+    flags = {
+        "-d",
+        "--detach",
+        "-f",
+        "--force",
+        "--checkout",
+        "--no-checkout",
+        "--guess-remote",
+        "--no-guess-remote",
+        "--lock",
+        "-q",
+        "--quiet",
+        "--relative-paths",
+        "--no-relative-paths",
+        "--track",
+        "--no-track",
+    }
+    value_options = {"-b", "-B", "--orphan", "--reason"}
+    positionals: list[str] = []
+    options = True
+    index = 0
+    while index < len(arguments):
+        argument = arguments[index]
+        if options and argument == "--":
+            options = False
+            index += 1
+            continue
+        if options and argument in flags:
+            index += 1
+            continue
+        if options and argument in value_options:
+            if index + 1 >= len(arguments):
+                raise _WriteScopeError(
+                    f"git worktree add option {argument!r} requires a value"
+                )
+            index += 2
+            continue
+        if options and (
+            (argument.startswith("-b") and len(argument) > 2)
+            or (argument.startswith("-B") and len(argument) > 2)
+            or argument.startswith("--orphan=")
+            or argument.startswith("--reason=")
+        ):
+            if argument.endswith("="):
+                raise _WriteScopeError(
+                    f"git worktree add option {argument.split('=', 1)[0]!r} requires a value"
+                )
+            index += 1
+            continue
+        if options and argument.startswith("-"):
+            raise _WriteScopeError(
+                f"unsupported git worktree add option {argument!r}; write scope is unknown"
+            )
+        positionals.append(argument)
+        index += 1
+    if not positionals:
+        raise _WriteScopeError("git worktree add requires an explicit destination")
+    if len(positionals) > 2:
+        raise _WriteScopeError(
+            "unsupported git worktree add form; expected destination and optional commit-ish"
+        )
+    return positionals[0]
 
 
 def _curl_output_dir(arguments: Sequence[str]) -> str | None:

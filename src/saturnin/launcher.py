@@ -9,6 +9,8 @@ from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Any
 
+from yaml import YAMLError
+
 from .board import Board, Task, utcnow
 from .checkpoints import CheckpointStore
 from .config import Config, default_config, load_yaml
@@ -199,7 +201,7 @@ class AgentLauncher:
             if manifest_path.is_file():
                 try:
                     manifest = load_yaml(manifest_path)
-                except (OSError, ValueError) as exc:
+                except (OSError, ValueError, YAMLError) as exc:
                     raise LauncherError(f"invalid managed repository manifest: {exc}") from exc
                 project_mcp = manifest.get("mcp")
                 if project_mcp is not None:

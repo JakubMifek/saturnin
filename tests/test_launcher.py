@@ -1,10 +1,14 @@
 from __future__ import annotations
 
 import json
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from types import SimpleNamespace
 
+import pytest
+
 from saturnin.board import Board
+from saturnin.checkpoints import Checkpoint, CheckpointStore
 from saturnin.config import Config
 from saturnin.launcher import AgentLauncher, LauncherError
 from saturnin.routing import Router
@@ -105,6 +109,58 @@ def test_launcher_intersects_role_mcp_with_project_allowlist(
 
     mcp = json.loads((config.var_dir / "launches" / f"{task.id}.mcp.json").read_text())
     assert mcp["mcpServers"] == {}
+
+
+def test_malformed_project_yaml_leaves_checkpoint_available_for_retry(
+    config: Config, board: Board, git_repo: Path, monkeypatch
+) -> None:
+    config.policy("mcp")["launcher"]["enabled"] = True
+    task = board.create("Resume a restricted fix")
+    Router(config).dispatch(board, task)
+    worktree = WorktreeManager(config, repo=git_repo, board=board).create(
+        "feature/retry-launch"
+    )
+    manifest = worktree.path / ".saturnin" / "repo.yaml"
+    manifest.parent.mkdir(parents=True, exist_ok=True)
+    manifest.write_text("mcp: [\n", encoding="utf-8")
+    with board.edit(task.id) as stored:
+        stored.branch = "feature/retry-launch"
+        stored.worktree = str(worktree.path)
+    checkpoint = CheckpointStore(config, board).save(
+        Checkpoint(
+            task_id=task.id,
+            role="code-worker",
+            summary="Retry after launcher validation.",
+            next_steps=["Resume implementation."],
+            resume_after=(datetime.now(timezone.utc) - timedelta(minutes=1)).isoformat(),
+        )
+    )
+    monkeypatch.setattr("saturnin.launcher.shutil.which", lambda _: "/usr/bin/copilot")
+
+    with pytest.raises(LauncherError, match="invalid managed repository manifest"):
+        AgentLauncher(config, board).launch(
+            task.id, resumed_checkpoint=checkpoint.created_at
+        )
+
+    stored = board.get(task.id)
+    assert stored.state == "routed"
+    assert stored.checkpoint_resumed_at is None
+    assert [item.task_id for item in CheckpointStore(config, board).due()] == [task.id]
+
+    manifest.write_text("mcp: []\n", encoding="utf-8")
+    monkeypatch.setattr(
+        "saturnin.launcher.subprocess.Popen",
+        lambda command, **kwargs: (
+            FakeProcess(command, stdout="feature/retry-launch\n")
+            if command == ["git", "branch", "--show-current"]
+            else SimpleNamespace(pid=4242)
+        ),
+    )
+    AgentLauncher(config, board).launch(
+        task.id, resumed_checkpoint=checkpoint.created_at
+    )
+
+    assert CheckpointStore(config, board).due() == []
 
 
 def test_launcher_refuses_to_run_without_attached_worktree(

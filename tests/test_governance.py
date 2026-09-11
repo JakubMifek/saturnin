@@ -411,6 +411,7 @@ def test_shell_assignments_cannot_change_policy_home(
         ("git --work-tree /tmp/repo checkout -- file", "outside writable roots"),
         ("git init /tmp/repo", "outside writable roots"),
         ("git worktree add /tmp/worktree feature/test", "outside writable roots"),
+        ("git worktree add -b feature/test /tmp/worktree", "outside writable roots"),
         ("git clone https://example.test/repo.git /tmp/repo", "outside writable roots"),
     ],
 )
@@ -431,12 +432,40 @@ def test_filesystem_writes_outside_policy_are_rejected(
         (["--work-tree", "/tmp/repo", "checkout", "--", "file"], "/tmp/repo"),
         (["init", "/tmp/repo"], "/tmp/repo"),
         (["worktree", "add", "/tmp/worktree", "feature/test"], "/tmp/worktree"),
+        (
+            ["worktree", "add", "-b", "feature/test", "--lock", "/tmp/worktree"],
+            "/tmp/worktree",
+        ),
+        (
+            ["worktree", "add", "--reason=review-fix", "/tmp/worktree", "HEAD"],
+            "/tmp/worktree",
+        ),
     ],
 )
 def test_git_control_paths_and_mutation_destinations_are_write_targets(
     arguments: list[str], target: str
 ) -> None:
     assert target in _git_targets(arguments)
+
+
+@pytest.mark.parametrize(
+    ("command", "reason"),
+    [
+        (
+            "git worktree add --porcelain /home/saturnin/worktrees/test",
+            "unsupported git worktree add option",
+        ),
+        ("git worktree add -b", "requires a value"),
+        ("git worktree add --lock", "requires an explicit destination"),
+    ],
+)
+def test_unsupported_git_worktree_add_forms_fail_closed(
+    governance: Governance, command: str, reason: str
+) -> None:
+    decision = governance.check_server_command(command)
+
+    assert not decision.allowed
+    assert reason in decision.reasons[0]
 
 
 @pytest.mark.parametrize(
