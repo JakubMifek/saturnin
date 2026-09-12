@@ -9,7 +9,7 @@ from __future__ import annotations
 
 import re
 from dataclasses import dataclass
-from typing import Any, Sequence
+from typing import Any, Mapping, Sequence
 
 from .board import CONTAINER_KINDS, PRIORITIES, Board, BoardError, Task
 from .config import Config, default_config
@@ -79,28 +79,52 @@ class Router:
             return False
         return True
 
-    def resolve(self, task: Task) -> Route:
+    def resolve(
+        self,
+        task: Task,
+        *,
+        additional_roles: Mapping[str, dict[str, Any]] | None = None,
+        lead_role: str | None = None,
+    ) -> Route:
         """Pick a route for ``task`` without mutating it."""
         for rule in self.rules:
             if self._matches(rule.get("when", {}), task):
-                return self._build(rule.get("route", {}), rule.get("id", "?"))
+                return self._build(
+                    rule.get("route", {}),
+                    rule.get("id", "?"),
+                    additional_roles=additional_roles,
+                    lead_role=lead_role,
+                )
         default = dict(self.policy.get("default_route", {}))
         if not default.get("role"):
             raise RoutingError("routing policy has no usable default_route")
-        return self._build(default, "default")
+        return self._build(
+            default,
+            "default",
+            additional_roles=additional_roles,
+            lead_role=lead_role,
+        )
 
-    def _build(self, route: dict[str, Any], rule_id: str) -> Route:
-        role = route.get("role")
-        if role not in self.roles:
+    def _build(
+        self,
+        route: dict[str, Any],
+        rule_id: str,
+        *,
+        additional_roles: Mapping[str, dict[str, Any]] | None = None,
+        lead_role: str | None = None,
+    ) -> Route:
+        roles = {**self.roles, **(additional_roles or {})}
+        role = lead_role or route.get("role")
+        if role not in roles:
             raise RoutingError(f"rule {rule_id!r} points at unknown role {role!r}")
         if role == self.ceo_role:
             raise RoutingError(
                 f"rule {rule_id!r} routes work to the CEO; the CEO never executes"
             )
-        if not self.roles[role].get("executes", True):
+        if not roles[role].get("executes", True):
             raise RoutingError(f"role {role!r} is not an executing role")
         squad = tuple(route.get("squad", (role,))) or (role,)
-        self._validate_squad(squad, f"rule {rule_id!r}")
+        self._validate_squad(squad, f"rule {rule_id!r}", additional_roles or {})
         contract = route.get("result_contract", self.default_result_contract)
         if self.result_contracts and contract not in self.result_contracts:
             raise RoutingError(
@@ -109,7 +133,7 @@ class Router:
             )
         return Route(
             role=role,
-            unit=self.roles[role].get("unit"),
+            unit=roles[role].get("unit"),
             priority=route.get("priority", "P2"),
             rule=rule_id,
             escalate=bool(route.get("escalate", False)),
@@ -118,7 +142,10 @@ class Router:
         )
 
     def _validate_squad(
-        self, squad: Sequence[str], source: str, additional_roles: Sequence[str] = ()
+        self,
+        squad: Sequence[str],
+        source: str,
+        additional_roles: Mapping[str, dict[str, Any]] | Sequence[str] = (),
     ) -> None:
         known = set(self.roles) | set(additional_roles)
         unknown = [member for member in squad if member not in known]
@@ -130,7 +157,9 @@ class Router:
             )
 
     def validate_dispatch_squad(
-        self, squad: Sequence[str], additional_roles: Sequence[str] = ()
+        self,
+        squad: Sequence[str],
+        additional_roles: Mapping[str, dict[str, Any]] | Sequence[str] = (),
     ) -> None:
         """Validate an ad-hoc squad before dispatching or previewing it."""
         self._validate_squad(squad, "dispatch override", additional_roles)
@@ -143,7 +172,8 @@ class Router:
         *,
         actor: str | None = None,
         squad: Sequence[str] | None = None,
-        additional_roles: Sequence[str] = (),
+        additional_roles: Mapping[str, dict[str, Any]] | None = None,
+        lead_role: str | None = None,
     ) -> Route:
         """Assign ``task`` to a role and move it to ``routed``.
 
@@ -154,7 +184,7 @@ class Router:
         # even if the policy ever renames that role.
         effective_actor = actor if actor is not None else self.ceo_role
         if squad is not None:
-            self.validate_dispatch_squad(squad, additional_roles)
+            self.validate_dispatch_squad(squad, additional_roles or {})
         with board.edit(task.id) as current:
             if current.kind in CONTAINER_KINDS:
                 raise BoardError(
@@ -164,7 +194,11 @@ class Router:
                 raise BoardError(
                     f"task {current.id} is not dispatchable from state {current.state}"
                 )
-            route = self.resolve(current)
+            route = self.resolve(
+                current,
+                additional_roles=additional_roles,
+                lead_role=lead_role,
+            )
             current.role = route.role
             current.unit = route.unit
             current.squad = list(squad or route.squad)

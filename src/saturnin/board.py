@@ -79,6 +79,8 @@ class Task:
     worktree: str | None = None
     checkpoint: str | None = None
     checkpoint_resumed_at: str | None = None
+    launch_deferred_at: str | None = None
+    launch_deferred_reason: str | None = None
     # Work hierarchy: objective > epic > feature > task.
     parent: str | None = None
     # Rule 8: the mirrored GitHub issue is the durable copy of this task.

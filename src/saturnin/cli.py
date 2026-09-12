@@ -28,7 +28,7 @@ from . import docsync
 from .governance import Governance
 from .improve import ImprovementLoop
 from .issues import IssueMirror, MirrorError
-from .launcher import AgentLauncher
+from .launcher import AgentLauncher, LaunchResult
 from .review import ReviewLedger
 from .routing import Router, RoutingError
 from .worktrees import GitError, WorktreeManager
@@ -308,23 +308,31 @@ def check_managed_repo(path: Path, config: Config) -> list[str]:
         if not manifest.get(key):
             problems.append(f".saturnin/repo.yaml is missing required key: {key}")
     roles = config.routing.get("roles", {})
-    local_roles = _project_agent_roles(path, manifest, contract)
+    local_roles = _project_agent_catalog(path, manifest, contract)
+    known_roles = set(roles) | set(local_roles)
     squad = manifest.get("squad") or []
     if isinstance(squad, list):
-        unknown = [role for role in squad if role not in roles and role not in local_roles]
+        unknown = [role for role in squad if role not in known_roles]
         if unknown:
             problems.append(f"squad names roles that are not in the catalog: {', '.join(unknown)}")
     else:
         problems.append("squad must be a list of role ids")
+    lead = manifest.get("lead")
+    if lead is not None and lead not in known_roles:
+        problems.append(f"lead names a role that is not in the catalog: {lead}")
+    elif lead is not None:
+        role = local_roles.get(lead) or roles.get(lead, {})
+        if lead == config.ceo_role or not role.get("executes", True):
+            problems.append(f"lead role does not execute work: {lead}")
     problems += _check_project_agents(path, manifest, contract, roles, config)
     return problems
 
 
-def _project_agent_roles(
+def _project_agent_catalog(
     path: Path, manifest: dict[str, Any], contract: dict[str, Any]
-) -> set[str]:
+) -> dict[str, dict[str, Any]]:
     agents_dir = str(contract.get("agents_dir", ".saturnin/agents"))
-    result: set[str] = set()
+    result: dict[str, dict[str, Any]] = {}
     entries = manifest.get("agents") or []
     if not isinstance(entries, list):
         return result
@@ -343,8 +351,110 @@ def _project_agent_roles(
         except yaml.YAMLError:
             continue
         if isinstance(data, dict) and isinstance(data.get("role"), str):
-            result.add(data["role"])
+            result[data["role"]] = data
     return result
+
+
+def _project_routing_context(
+    task: Task, config: Config
+) -> tuple[dict[str, dict[str, Any]], str | None, list[str] | None]:
+    if not task.worktree:
+        return {}, None, None
+    worktree = Path(task.worktree)
+    manifest_path = worktree / ".saturnin" / "repo.yaml"
+    if not manifest_path.is_file():
+        return {}, None, None
+    manifest = yaml.safe_load(manifest_path.read_text(encoding="utf-8")) or {}
+    if not isinstance(manifest, dict):
+        raise RoutingError("managed repository manifest must contain a mapping")
+    local_roles = _project_agent_catalog(
+        worktree,
+        manifest,
+        config.policy("repos").get("managed_repo_contract", {}),
+    )
+    lead = manifest.get("lead")
+    if lead is not None and not isinstance(lead, str):
+        raise RoutingError("managed repository lead must be a role id")
+    squad = manifest.get("squad")
+    if squad is not None and (
+        not isinstance(squad, list) or not all(isinstance(role, str) for role in squad)
+    ):
+        raise RoutingError("managed repository squad must be a list of role ids")
+    return local_roles, lead, squad
+
+
+def _prepare_project_route(config: Config, board: Board, task_id: str) -> Task:
+    task = board.get(task_id)
+    local_roles, lead, project_squad = _project_routing_context(task, config)
+    if not lead:
+        return task
+    router = Router(config)
+    route = router.resolve(task, additional_roles=local_roles, lead_role=lead)
+    squad = list(project_squad or route.squad)
+    if lead not in squad:
+        squad.insert(0, lead)
+    router.validate_dispatch_squad(squad, local_roles)
+    with board.edit(task_id) as stored:
+        if stored.state != "routed":
+            raise BoardError(
+                f"task {stored.id} cannot select project lead from state {stored.state}"
+            )
+        stored.role = route.role
+        stored.unit = route.unit
+        stored.squad = squad
+        stored.log(
+            "project-route",
+            actor="worktree-provisioner",
+            role=route.role,
+            squad=",".join(squad),
+        )
+    return board.get(task_id)
+
+
+def _defer_launch(board: Board, task_id: str, reason: str) -> None:
+    with board.edit(task_id) as task:
+        if task.launch_deferred_reason == reason:
+            return
+        task.launch_deferred_at = datetime.now(timezone.utc).isoformat(timespec="microseconds")
+        task.launch_deferred_reason = reason
+        task.log("agent:deferred", actor="worktree-provisioner", reason=reason)
+
+
+def _provision_and_launch(
+    config: Config, board: Board, task_id: str
+) -> LaunchResult | None:
+    launcher = AgentLauncher(config, board)
+    if not launcher.enabled:
+        return None
+    task = board.get(task_id)
+    if not task.worktree:
+        engine_repo = config.policy("repos").get("repos", {}).get("engine", {}).get("slug")
+        if task.repo and task.repo.casefold() != str(engine_repo).casefold():
+            _defer_launch(
+                board,
+                task.id,
+                f"attach a checkout for managed repository {task.repo}",
+            )
+            return None
+        branch = f"feature/{task.id.lower()}"
+        manager = WorktreeManager(config, board=board)
+        try:
+            with manager.lifecycle_lock():
+                worktree = manager.create(branch)
+                with board.edit(task.id) as stored:
+                    stored.branch = branch
+                    stored.worktree = str(worktree.path)
+                    stored.log(
+                        "worktree",
+                        actor="worktree-provisioner",
+                        branch=branch,
+                        worktree=str(worktree.path),
+                    )
+        except (GitError, OSError) as exc:
+            _defer_launch(board, task.id, f"worktree provisioning failed: {exc}")
+            return None
+    _prepare_project_route(config, board, task.id)
+    return launcher.launch(task.id)
 
 
 def _check_project_agents(
@@ -448,6 +558,7 @@ def _run(args: argparse.Namespace, config: Config) -> int:  # noqa: C901 - flat 
     if args.command == "dispatch":
         return _run_dispatch(args, config, board, as_json)
     if args.command == "run":
+        _prepare_project_route(config, board, args.task_id)
         launched = AgentLauncher(config, board).launch(args.task_id)
         payload = launched.to_dict() if launched else {"task_id": args.task_id, "disabled": True}
         _emit(payload, as_json, json.dumps(payload, indent=2))
@@ -605,6 +716,8 @@ def _run_task(args: argparse.Namespace, config: Config, board: Board, as_json: b
         )
         if args.dispatch:
             Router(config).dispatch(board, task)
+            if not args.no_launch:
+                _provision_and_launch(config, board, task.id)
             task = board.get(task.id)
         _emit(task.to_dict(), as_json, _task_line(task))
         return 0
@@ -694,6 +807,9 @@ def _run_discover(args: argparse.Namespace, config: Config, board: Board, as_jso
     for task in adopted:
         if not args.no_dispatch:
             router.dispatch(board, task, actor="discovery")
+            if not args.no_launch:
+                _provision_and_launch(config, board, task.id)
+            task.__dict__.update(board.get(task.id).__dict__)
     _emit(
         [task.to_dict() for task in adopted],
         as_json,
@@ -707,8 +823,13 @@ def _run_dispatch(args: argparse.Namespace, config: Config, board: Board, as_jso
     router = Router(config)
     if args.all:
         targets = [
-            task for task in board.list(state="intake")
-            if task.kind not in CONTAINER_KINDS
+            task
+            for task in board.list(open_only=True)
+            if (
+                task.state == "intake"
+                and task.kind not in CONTAINER_KINDS
+            )
+            or (task.state == "routed" and task.launch_deferred_at is not None)
         ]
     elif args.task_id:
         targets = [board.get(args.task_id)]
@@ -716,38 +837,47 @@ def _run_dispatch(args: argparse.Namespace, config: Config, board: Board, as_jso
         print("saturnin: give a task id or --all", file=sys.stderr)
         return 1
     results = []
-    launcher = AgentLauncher(config, board)
     for task in targets:
-        local_roles: set[str] = set()
-        if task.worktree:
-            manifest_path = Path(task.worktree) / ".saturnin" / "repo.yaml"
-            if manifest_path.is_file():
-                manifest = yaml.safe_load(manifest_path.read_text(encoding="utf-8")) or {}
-                local_roles = _project_agent_roles(
-                    Path(task.worktree),
-                    manifest,
-                    config.policy("repos").get("managed_repo_contract", {}),
-                )
-        if args.squad:
-            router.validate_dispatch_squad(args.squad, local_roles)
-        route = (
-            router.resolve(task)
-            if args.dry_run
-            else router.dispatch(
-                board,
+        local_roles, project_lead, project_squad = _project_routing_context(task, config)
+        squad = args.squad or project_squad
+        if squad:
+            router.validate_dispatch_squad(squad, local_roles)
+        if task.state == "routed":
+            route = router.resolve(
                 task,
-                squad=args.squad or None,
-                additional_roles=tuple(local_roles),
+                additional_roles=local_roles,
+                lead_role=project_lead,
             )
-        )
+            if not args.dry_run:
+                task = _prepare_project_route(config, board, task.id)
+        else:
+            route = (
+                router.resolve(
+                    task,
+                    additional_roles=local_roles,
+                    lead_role=project_lead,
+                )
+                if args.dry_run
+                else router.dispatch(
+                    board,
+                    task,
+                    squad=squad or None,
+                    additional_roles=local_roles,
+                    lead_role=project_lead,
+                )
+            )
         results.append({"task": task.id, "role": route.role, "rule": route.rule,
                         "priority": route.priority, "escalate": route.escalate,
-                        "squad": list(args.squad or route.squad),
+                        "squad": list(squad or route.squad),
                         "result_contract": route.result_contract})
         if not args.dry_run and not args.no_launch:
-            launched = launcher.launch(task.id)
+            launched = _provision_and_launch(config, board, task.id)
             if launched:
                 results[-1]["launch"] = launched.to_dict()
+            else:
+                deferred = board.get(task.id)
+                if deferred.launch_deferred_reason:
+                    results[-1]["launch_deferred"] = deferred.launch_deferred_reason
     _emit(
         results,
         as_json,

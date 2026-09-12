@@ -83,6 +83,7 @@ managed_repo_contract:
     - squad          # roles this project's work usually needs
     - conventions    # style, testing and review expectations
   optional_keys:
+    - lead           # project-local or global role that normally leads its work
     - agents         # project-specific agent contracts (paths)
     - mcp            # MCP servers this project's agents may use
     - monitors       # hosted endpoints to watch, with SLOs

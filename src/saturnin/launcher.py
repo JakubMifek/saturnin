@@ -124,6 +124,8 @@ class AgentLauncher:
                 stored.log("agent:launch_failed", actor="launcher", reason=str(exc))
                 launch_error = LauncherError(f"agent launcher failed for task {task.id}: {exc}")
             else:
+                stored.launch_deferred_at = None
+                stored.launch_deferred_reason = None
                 stored.log(
                     "agent:launched",
                     actor="launcher",

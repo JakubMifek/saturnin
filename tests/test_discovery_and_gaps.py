@@ -254,3 +254,30 @@ def test_project_agent_validates_skill_and_mcp_declarations(
     problems = check_managed_repo(project, config)
     assert any("unknown skill 'made-up-skill'" in p for p in problems)
     assert any("unknown MCP server 'made-up-server'" in p for p in problems)
+
+
+def test_project_local_lead_is_validated_and_persisted_on_dispatch(
+    project, config: Config, board: Board, capsys
+) -> None:
+    agent = project / ".saturnin" / "agents" / "db-migrator.md"
+    agent.write_text(
+        "---\nrole: db-migrator\nunit: engineering\nskills: []\nmcp: []\n---\n"
+    )
+    (project / ".saturnin" / "repo.yaml").write_text(
+        "project: Widget\ncontext: python\nconventions: pytest\n"
+        "lead: db-migrator\nsquad: [db-migrator, code-worker]\n"
+        "agents: [.saturnin/agents/db-migrator.md]\n"
+    )
+    task = board.create("Apply database migration")
+    with board.edit(task.id) as stored:
+        stored.worktree = str(project)
+        stored.branch = "feature/migration"
+
+    assert check_managed_repo(project, config) == []
+    assert main(["--home", str(config.root), "dispatch", task.id, "--no-launch"]) == 0
+    capsys.readouterr()
+
+    routed = board.get(task.id)
+    assert routed.role == "db-migrator"
+    assert routed.unit == "engineering"
+    assert routed.squad == ["db-migrator", "code-worker"]

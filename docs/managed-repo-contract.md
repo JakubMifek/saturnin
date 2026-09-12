@@ -44,7 +44,10 @@ context:
 
 # The roles this project's work usually needs. A starting point for squad
 # assembly, not a fixed team - see docs/delegation-policy.md.
-squad: [code-worker, test-worker, pr-reviewer]
+squad: [db-migrator, code-worker, test-worker, pr-reviewer]
+
+# Optional lead override. This may name a validated project-local agent.
+lead: db-migrator
 
 conventions:
   style: ruff, line length 100
@@ -77,6 +80,8 @@ monitors:
   what the system is for produces theatre, not findings.
 - **`squad`** is where ad-hoc squad assembly starts. The project knows whether
   its work usually needs an ops worker; the global default cannot.
+- **`lead`** selects the role that owns routed work for this project. It may name
+  a global role or one of the validated project-local contracts below.
 - **`conventions`** is what stops every PR review re-deciding house style.
 - **`agents`** lets a project ship a role that only makes sense there (a
   migration specialist, a protocol expert) without polluting the global catalog.

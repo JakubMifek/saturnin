@@ -58,6 +58,8 @@ def test_launcher_starts_routed_role_with_filtered_mcp(
     with board.edit(task.id) as stored:
         stored.branch = "feature/launch"
         stored.worktree = str(worktree.path)
+        stored.launch_deferred_at = "2026-09-12T10:00:00+00:00"
+        stored.launch_deferred_reason = "waiting for worktree"
     calls: list[tuple[list[str], dict]] = []
 
     monkeypatch.setattr("saturnin.launcher.shutil.which", lambda _: "/usr/bin/copilot")
@@ -74,7 +76,10 @@ def test_launcher_starts_routed_role_with_filtered_mcp(
 
     assert result is not None
     assert result.pid == 4242
-    assert board.get(task.id).state == "in_progress"
+    launched_task = board.get(task.id)
+    assert launched_task.state == "in_progress"
+    assert launched_task.launch_deferred_at is None
+    assert launched_task.launch_deferred_reason is None
     mcp = json.loads((config.var_dir / "launches" / f"{task.id}.mcp.json").read_text())
     assert set(mcp["mcpServers"]) == {"github", "filesystem"}
     assert mcp["mcpServers"]["filesystem"]["args"][-1] == str(config.var_dir / "worktrees")

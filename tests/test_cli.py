@@ -11,6 +11,7 @@ import pytest
 from saturnin.board import Board
 from saturnin.checkpoints import Checkpoint, CheckpointStore
 from saturnin.cli import main
+from saturnin.discovery import InboundIssue, IssueDiscovery
 from saturnin.launcher import AgentLauncher
 from saturnin.routing import Router
 from saturnin.worktrees import WorktreeManager
@@ -61,9 +62,84 @@ def test_dispatch_launches_the_selected_agent(
         "saturnin.cli.AgentLauncher.launch",
         lambda self, task_id, **kwargs: launched.append(task_id),
     )
+    monkeypatch.setattr(AgentLauncher, "enabled", property(lambda self: True))
+    worktree = home / "var" / "worktrees" / "feature"
+    worktree.mkdir(parents=True)
+    monkeypatch.setattr(
+        WorktreeManager,
+        "create",
+        lambda self, branch, base=None: SimpleNamespace(path=worktree, branch=branch),
+    )
 
     assert run(capsys, "dispatch", task["id"])[0] == 0
     assert launched == [task["id"]]
+
+
+def test_task_add_provisions_worktree_before_launch(
+    home: Path, capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    worktree = home / "var" / "worktrees" / "auto"
+    worktree.mkdir(parents=True)
+    launched: list[dict] = []
+    monkeypatch.setattr(AgentLauncher, "enabled", property(lambda self: True))
+    monkeypatch.setattr(
+        WorktreeManager,
+        "create",
+        lambda self, branch, base=None: SimpleNamespace(path=worktree, branch=branch),
+    )
+
+    def launch(self, task_id, **kwargs):
+        launched.append(self.board.get(task_id).to_dict())
+        return None
+
+    monkeypatch.setattr(AgentLauncher, "launch", launch)
+
+    code, out = run(
+        capsys, "--json", "task", "add", "Provision before launch", "--dispatch"
+    )
+
+    task = json.loads(out)
+    assert code == 0
+    assert task["worktree"] == str(worktree)
+    assert task["branch"].startswith("feature/")
+    assert launched[0]["worktree"] == str(worktree)
+
+
+def test_discovery_defers_external_launch_until_worktree_is_attached(
+    home: Path, capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    issue = InboundIssue(
+        repo="JakubMifek/widget-api",
+        number=7,
+        title="Fix widget failure",
+        url="https://github.com/JakubMifek/widget-api/issues/7",
+        labels=["incident"],
+    )
+    launched: list[str] = []
+    monkeypatch.setattr(IssueDiscovery, "poll", lambda self: [issue])
+    monkeypatch.setattr(AgentLauncher, "enabled", property(lambda self: True))
+    monkeypatch.setattr(
+        AgentLauncher,
+        "launch",
+        lambda self, task_id, **kwargs: launched.append(task_id),
+    )
+
+    assert run(capsys, "discover")[0] == 0
+    task = next(iter(Board()))
+    assert task.state == "routed"
+    assert task.launch_deferred_reason == (
+        "attach a checkout for managed repository JakubMifek/widget-api"
+    )
+    assert launched == []
+
+    worktree = home / "widget-api"
+    worktree.mkdir()
+    with Board().edit(task.id) as stored:
+        stored.branch = "feature/widget"
+        stored.worktree = str(worktree)
+
+    assert run(capsys, "dispatch", "--all")[0] == 0
+    assert launched == [task.id]
 
 
 @pytest.mark.parametrize(
