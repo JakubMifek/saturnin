@@ -616,6 +616,8 @@ def _writable_targets(binary: str, arguments: Sequence[str]) -> list[str]:
         return _saturnin_targets(arguments)
     if binary == "git":
         return _git_targets(arguments)
+    if binary == "find":
+        return _find_targets(arguments)
     return []
 
 
@@ -747,6 +749,48 @@ def _git_worktree_add_target(arguments: Sequence[str]) -> str:
             "unsupported git worktree add form; expected destination and optional commit-ish"
         )
     return positionals[0]
+
+
+def _find_targets(arguments: Sequence[str]) -> list[str]:
+    roots: list[str] = []
+    targets: list[str] = []
+    index = 0
+    while index < len(arguments):
+        argument = arguments[index]
+        if argument in {"-H", "-L", "-P"} or re.fullmatch(r"-O\d+", argument):
+            index += 1
+            continue
+        if argument == "-D":
+            if index + 1 >= len(arguments):
+                raise _WriteScopeError("find option '-D' requires a value")
+            index += 2
+            continue
+        if argument.startswith("-D") and len(argument) > 2:
+            index += 1
+            continue
+        if argument == "-files0-from" or argument.startswith("-files0-from="):
+            raise _WriteScopeError("unsupported find option '-files0-from'; write scope is unknown")
+        if argument in {"!", "(", ")"} or argument.startswith("-"):
+            break
+        roots.append(argument)
+        index += 1
+    if not roots:
+        roots = ["."]
+    while index < len(arguments):
+        argument = arguments[index]
+        if argument == "-delete":
+            targets.extend(roots)
+        elif argument in {"-exec", "-execdir", "-ok", "-okdir"}:
+            raise _WriteScopeError(
+                f"unsupported find action {argument!r}; write scope is unknown"
+            )
+        elif argument in {"-fprint", "-fprint0", "-fprintf", "-fls"}:
+            if index + 1 >= len(arguments):
+                raise _WriteScopeError(f"find action {argument!r} requires a value")
+            targets.append(arguments[index + 1])
+            index += 1
+        index += 1
+    return targets
 
 
 def _curl_output_dir(arguments: Sequence[str]) -> str | None:

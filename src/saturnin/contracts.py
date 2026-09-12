@@ -43,6 +43,29 @@ class AgentContract:
         return list(self.front_matter.get("mcp", []))
 
 
+def mcp_authorization_problem(
+    role: str,
+    server: str,
+    mcp_policy: dict[str, Any],
+    *,
+    executes: bool = True,
+) -> str | None:
+    servers = mcp_policy.get("servers", {})
+    if server not in servers:
+        return f"unknown MCP server {server!r}"
+    rules = mcp_policy.get("rules", {})
+    if rules.get("non_executing_roles_get_none", False) and not executes:
+        return "non-executing roles get no MCP servers (the CEO delegates, it does not act)"
+    denied: dict[str, list[str]] = rules.get("deny_for_roles", {})
+    if server in denied.get(role, []):
+        return f"MCP server {server!r} is denied for this role"
+    definition = servers.get(server, {})
+    write_roles = set(definition.get("write_roles", [])) if isinstance(definition, dict) else set()
+    if write_roles and role not in write_roles:
+        return f"role {role!r} is not allowed write access to MCP server {server!r}"
+    return None
+
+
 def load_contracts(config: Config | None = None) -> list[AgentContract]:
     config = config or default_config()
     contracts: list[AgentContract] = []
@@ -92,16 +115,6 @@ def audit(config: Config | None = None) -> list[str]:
         if path.name != "README.md"
     }
     mcp_policy = config.policy("mcp")
-    servers = set(mcp_policy.get("servers", {}))
-    denied: dict[str, list[str]] = mcp_policy.get("rules", {}).get("deny_for_roles", {})
-    write_caps: dict[str, set[str]] = {
-        server: set(server_def.get("write_roles", []))
-        for server, server_def in mcp_policy.get("servers", {}).items()
-        if isinstance(server_def, dict)
-    }
-    strict_non_executing = bool(
-        mcp_policy.get("rules", {}).get("non_executing_roles_get_none", False)
-    )
 
     for role, contract in contracts.items():
         catalog = roles.get(role)
@@ -118,20 +131,9 @@ def audit(config: Config | None = None) -> list[str]:
         if contract.executes != bool(catalog.get("executes", True)):
             problems.append(f"{contract.path.name}: 'executes' disagrees with the role catalog")
         for server in contract.mcp:
-            if server not in servers:
-                problems.append(f"{contract.path.name}: unknown MCP server {server!r}")
-            if server in denied.get(role, []):
-                problems.append(
-                    f"{contract.path.name}: MCP server {server!r} is denied for this role"
-                )
-            if server in write_caps and role not in write_caps[server] and write_caps[server]:
-                problems.append(
-                    f"{contract.path.name}: role {role!r} is not allowed write access to "
-                    f"MCP server {server!r}"
-                )
-        if strict_non_executing and not contract.executes and contract.mcp:
-            problems.append(
-                f"{contract.path.name}: non-executing roles get no MCP servers "
-                "(the CEO delegates, it does not act)"
+            problem = mcp_authorization_problem(
+                role, server, mcp_policy, executes=contract.executes
             )
+            if problem:
+                problems.append(f"{contract.path.name}: {problem}")
     return problems

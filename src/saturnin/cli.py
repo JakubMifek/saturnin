@@ -22,7 +22,7 @@ from .automation import AutomationLibrary
 from .board import CONTAINER_KINDS, Board, BoardError, Task
 from .checkpoints import Checkpoint, CheckpointStore
 from .config import Config
-from .contracts import FRONT_MATTER, audit as audit_contracts
+from .contracts import FRONT_MATTER, audit as audit_contracts, mcp_authorization_problem
 from .discovery import DiscoveryError, IssueDiscovery
 from . import docsync
 from .governance import Governance
@@ -500,7 +500,8 @@ def _check_project_agents(
         for skill in (config.root / "skills").glob("*.md")
         if skill.name != "README.md"
     }
-    known_mcp = set(config.policy("mcp").get("servers", {}))
+    mcp_policy = config.policy("mcp")
+    known_mcp = set(mcp_policy.get("servers", {}))
     problems: list[str] = []
     for entry in entries:
         rel = str(entry)
@@ -552,6 +553,15 @@ def _check_project_agents(
             for value in declarations:
                 if value not in known:
                     problems.append(f"project agent {rel}: unknown {description} {value!r}")
+                elif field == "mcp":
+                    authorization_problem = mcp_authorization_problem(
+                        role_id,
+                        value,
+                        mcp_policy,
+                        executes=bool(front_matter.get("executes", True)),
+                    )
+                    if authorization_problem:
+                        problems.append(f"project agent {rel}: {authorization_problem}")
     return problems
 
 def _config(args: argparse.Namespace) -> Config:

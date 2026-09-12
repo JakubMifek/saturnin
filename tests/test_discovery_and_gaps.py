@@ -229,6 +229,12 @@ def test_project_agent_must_exist_and_not_shadow_a_global_role(
         "# Migrations\n"
     )
     _manifest(project, ".saturnin/agents/db-migrator.md")
+    assert any("write access" in p for p in check_managed_repo(project, config))
+    (project / ".saturnin" / "agents" / "db-migrator.md").write_text(
+        (project / ".saturnin" / "agents" / "db-migrator.md")
+        .read_text()
+        .replace("mcp: [github]", "mcp: []")
+    )
     manifest = project / ".saturnin" / "repo.yaml"
     manifest.write_text(
         manifest.read_text().replace(

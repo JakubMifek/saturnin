@@ -14,7 +14,7 @@ from yaml import YAMLError
 from .board import Board, Task, utcnow
 from .checkpoints import CheckpointStore
 from .config import Config, default_config, load_yaml
-from .contracts import FRONT_MATTER, AgentContract, load_contracts
+from .contracts import FRONT_MATTER, AgentContract, load_contracts, mcp_authorization_problem
 
 
 class LauncherError(RuntimeError):
@@ -91,12 +91,7 @@ class AgentLauncher:
             elif stored.state != "routed":
                 raise LauncherError(f"task {stored.id} cannot launch from state {stored.state}")
             if stored.state == "routed":
-                Board._apply_transition(
-                    stored,
-                    "in_progress",
-                    actor=stored.role or "launcher",
-                    note="agent launch claimed",
-                )
+                stored.state = "in_progress"
             if resumed_checkpoint:
                 stored.checkpoint_resumed_at = resumed_checkpoint
             stored.log(
@@ -260,6 +255,17 @@ class AgentLauncher:
             definition = definitions.get(name)
             if not isinstance(definition, dict):
                 raise LauncherError(f"unknown MCP server {name!r} for role {contract.role}")
+            authorization_problem = mcp_authorization_problem(
+                contract.role,
+                name,
+                self.config.policy("mcp"),
+                executes=contract.executes,
+            )
+            if authorization_problem:
+                raise LauncherError(
+                    f"MCP server {name!r} is not authorized for role "
+                    f"{contract.role!r}: {authorization_problem}"
+                )
             servers[name] = {
                 "type": definition.get("transport", "stdio"),
                 "command": definition["command"],

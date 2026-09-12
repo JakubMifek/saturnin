@@ -78,6 +78,10 @@ def test_launcher_starts_routed_role_with_filtered_mcp(
     assert result.pid == 4242
     launched_task = board.get(task.id)
     assert launched_task.state == "in_progress"
+    assert (
+        [entry["event"] for entry in launched_task.history].count("state:in_progress")
+        == 1
+    )
     assert launched_task.launch_deferred_at is None
     assert launched_task.launch_deferred_reason is None
     mcp = json.loads((config.var_dir / "launches" / f"{task.id}.mcp.json").read_text())
@@ -254,6 +258,37 @@ def test_launcher_rolls_back_claim_when_spawn_fails(
     assert stored.state == "routed"
     assert stored.checkpoint_resumed_at is None
     assert stored.history[-1]["event"] == "agent:launch_failed"
+    assert not any(entry["event"] == "state:in_progress" for entry in stored.history)
+
+
+def test_launcher_rejects_unauthorized_project_mcp(
+    config: Config, board: Board, git_repo: Path, monkeypatch
+) -> None:
+    config.policy("mcp")["launcher"]["enabled"] = True
+    task = board.create("Run a project migration")
+    worktree = WorktreeManager(config, repo=git_repo, board=board).create(
+        "feature/local-mcp"
+    )
+    agent = worktree.path / ".saturnin" / "agents" / "db-migrator.md"
+    agent.parent.mkdir(parents=True, exist_ok=True)
+    agent.write_text(
+        "---\nrole: db-migrator\nskills: [checkpointing]\nmcp: [github]\n---\n"
+        "# Database migrator\n",
+        encoding="utf-8",
+    )
+    (worktree.path / ".saturnin" / "repo.yaml").write_text(
+        "agents: [.saturnin/agents/db-migrator.md]\nmcp: [github]\n",
+        encoding="utf-8",
+    )
+    with board.edit(task.id) as stored:
+        stored.state = "routed"
+        stored.role = "db-migrator"
+        stored.branch = "feature/local-mcp"
+        stored.worktree = str(worktree.path)
+    monkeypatch.setattr("saturnin.launcher.shutil.which", lambda _: "/usr/bin/copilot")
+
+    with pytest.raises(LauncherError, match="not authorized"):
+        AgentLauncher(config, board).launch(task.id)
 
 
 def test_root_mcp_config_has_no_blanket_grants() -> None:

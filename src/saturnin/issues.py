@@ -140,9 +140,20 @@ class IssueMirror:
                 result.append(task)
                 continue
             synced_at = getattr(task, "issue_synced_at", None)
-            if not synced_at or synced_at < getattr(task, "updated_at", ""):
+            if not synced_at or synced_at < self._rendered_updated_at(task):
                 result.append(task)
         return result
+
+    def _rendered_updated_at(self, task: Task) -> str:
+        child_timestamps: list[str] = []
+        for path in sorted(self.config.tasks_dir.glob("*.json")):
+            if path == self.board.path_for(task.id):
+                continue
+            with file_lock(path, exclusive=False):
+                child = Task.from_dict(json.loads(path.read_text(encoding="utf-8")))
+            if child.parent == task.id:
+                child_timestamps.append(child.updated_at)
+        return max([task.updated_at, *child_timestamps])
 
     def sync(self, task: Task, *, push: bool = False, actor: str = "chief-of-staff") -> IssuePayload:
         if not push:
@@ -151,11 +162,11 @@ class IssueMirror:
         with file_lock(sync_lock):
             task = self.board.get(task.id)
             payload = self.render(task)
-            rendered_updated_at = task.updated_at
+            rendered_updated_at = self._rendered_updated_at(task)
             url = self._push(task, payload)
             with self.board.edit(task.id) as stored:
                 stored.issue = url
-                if stored.updated_at == rendered_updated_at:
+                if self._rendered_updated_at(stored) == rendered_updated_at:
                     stored.log("issue:synced", actor=actor, note=url)
                     stored.issue_synced_at = stored.updated_at
             task.issue = url

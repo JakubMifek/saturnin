@@ -92,6 +92,18 @@ def test_syncable_revisits_existing_open_mirrors(config: Config, board: Board) -
     }
 
 
+def test_syncable_revisits_parent_when_child_changes(config: Config, board: Board) -> None:
+    parent = board.create("Parent", kind="epic")
+    child = board.create("Child", parent=parent.id)
+    with board.edit(parent.id) as stored:
+        stored.issue = "https://github.com/JakubMifek/saturnin-ops/issues/1"
+        stored.log("issue:synced", actor="chief-of-staff", note=stored.issue)
+        stored.issue_synced_at = stored.updated_at
+    board.transition(child, "routed")
+
+    assert parent.id in {task.id for task in IssueMirror(config, board).syncable()}
+
+
 def test_existing_mirror_updates_content_and_reconciles_metadata_labels(
     config: Config, board: Board, monkeypatch: pytest.MonkeyPatch
 ) -> None:

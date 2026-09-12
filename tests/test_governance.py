@@ -475,6 +475,8 @@ def test_shell_assignments_cannot_change_policy_home(
         ("git worktree add /tmp/worktree feature/test", "outside writable roots"),
         ("git worktree add -b feature/test /tmp/worktree", "outside writable roots"),
         ("git clone https://example.test/repo.git /tmp/repo", "outside writable roots"),
+        ("find /tmp/job -delete", "outside writable roots"),
+        ("find /home/saturnin -fprint /opt/results", "outside writable roots"),
     ],
 )
 def test_filesystem_writes_outside_policy_are_rejected(
@@ -484,6 +486,20 @@ def test_filesystem_writes_outside_policy_are_rejected(
 
     assert not decision.allowed
     assert reason in decision.reasons[0]
+
+
+@pytest.mark.parametrize(
+    "command",
+    [
+        "find /tmp/job -exec rm ITEM +",
+        "find /home/saturnin -execdir ./cleanup ITEM +",
+    ],
+)
+def test_find_exec_actions_fail_closed(governance: Governance, command: str) -> None:
+    decision = governance.check_server_command(command)
+
+    assert not decision.allowed
+    assert "unsupported find action" in decision.reasons[0]
 
 
 @pytest.mark.parametrize(
