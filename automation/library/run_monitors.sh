@@ -42,6 +42,29 @@ for repo_path in "$@"; do
     continue
   fi
   app="$(basename "${repo_path%/}")"
+  repo_slug="$("$PYTHON" -c '
+import pathlib, sys, yaml
+repo_path = pathlib.Path(sys.argv[1]).resolve()
+policy = yaml.safe_load(open(sys.argv[2])) or {}
+for source in (policy.get("discovery") or {}).get("sources") or []:
+    if not isinstance(source, dict):
+        continue
+    checkout = source.get("checkout")
+    slug = source.get("slug")
+    if not checkout or not slug:
+        continue
+    path = pathlib.Path(str(checkout)).expanduser()
+    if not path.is_absolute():
+        path = pathlib.Path(sys.argv[3]) / path
+    if path.resolve() == repo_path:
+        print(slug)
+        break
+else:
+    engine = (policy.get("repos") or {}).get("engine") or {}
+    slug = engine.get("slug")
+    if slug and pathlib.Path(sys.argv[3]).resolve() == repo_path:
+        print(slug)
+' "$repo_path" "${SATURNIN_HOME}/policies/repos.yaml" "$SATURNIN_HOME")"
   repo_key="$("$PYTHON" -c '
 import hashlib, pathlib, sys
 path = str(pathlib.Path(sys.argv[1]).resolve())
@@ -122,10 +145,14 @@ print(monitor["name"], monitor["url"], monitor.get("expect_status", 200),
         touch "$escalation_marker"
       fi
     else
+      task_add_args=(--label incident --label monitor --priority P0 --dispatch)
+      if [[ -n "$repo_slug" ]]; then
+        task_add_args=(--repo "$repo_slug" "${task_add_args[@]}")
+      fi
       incident="$(
         saturnin --json task add "Monitor $app/$name failed: HTTP $code from $url" \
         --body "Expected $expect, observed $code at $started. Monitor declared in $manifest." \
-        --label incident --label monitor --priority P0 --dispatch
+        "${task_add_args[@]}"
       )"
       printf '%s' "$incident" | "$PYTHON" -c \
         'import json, sys; print(json.load(sys.stdin)["id"])' \
