@@ -57,25 +57,10 @@ class AgentLauncher:
             return None
         task = self.board.get(task_id)
         contract = self._contract(task)
-        mcp_path = self._write_mcp_config(task, contract)
-        prompt = self._prompt(task, contract)
         executable = str(self.policy.get("command", "copilot"))
         if shutil.which(executable) is None:
             raise LauncherError(f"agent launcher executable not found: {executable}")
-        args = [
-            str(value).format(mcp_config=str(mcp_path), prompt=prompt, task_id=task.id)
-            for value in self.policy.get(
-                "args",
-                [
-                    "--autopilot",
-                    "--no-ask-user",
-                    "--additional-mcp-config",
-                    "{mcp_config}",
-                    "-p",
-                    "{prompt}",
-                ],
-            )
-        ]
+        mcp_path: Path | None = None
         log_path = self.dir / f"{task.id}.log"
         launch_error: LauncherError | None = None
         process: subprocess.Popen[bytes] | None = None
@@ -103,6 +88,22 @@ class AgentLauncher:
             claimed = Task.from_dict(stored.to_dict())
             try:
                 workdir = self._validated_workdir(claimed)
+                mcp_path = self._write_mcp_config(claimed, contract, worktree_scope=workdir)
+                prompt = self._prompt(claimed, contract)
+                args = [
+                    str(value).format(mcp_config=str(mcp_path), prompt=prompt, task_id=claimed.id)
+                    for value in self.policy.get(
+                        "args",
+                        [
+                            "--autopilot",
+                            "--no-ask-user",
+                            "--additional-mcp-config",
+                            "{mcp_config}",
+                            "-p",
+                            "{prompt}",
+                        ],
+                    )
+                ]
                 with log_path.open("ab") as output:
                     process = subprocess.Popen(
                         [executable, *args],
@@ -135,7 +136,7 @@ class AgentLauncher:
                 task = Task.from_dict(stored.to_dict())
         if launch_error is not None:
             raise launch_error
-        if process is None or workdir is None:  # pragma: no cover - guarded by launch_error
+        if process is None or workdir is None or mcp_path is None:  # pragma: no cover
             raise LauncherError(f"agent launcher failed for task {task.id}")
         metadata = {
             "task_id": task.id,
@@ -227,7 +228,13 @@ class AgentLauncher:
             contracts[role] = AgentContract(role=role, path=path, front_matter=data)
         return contracts
 
-    def _write_mcp_config(self, task: Task, contract: AgentContract) -> Path:
+    def _write_mcp_config(
+        self,
+        task: Task,
+        contract: AgentContract,
+        *,
+        worktree_scope: Path | None = None,
+    ) -> Path:
         definitions = self.config.policy("mcp").get("servers", {})
         servers: dict[str, dict[str, Any]] = {}
         allowed = list(contract.mcp)
@@ -270,7 +277,10 @@ class AgentLauncher:
                 "type": definition.get("transport", "stdio"),
                 "command": definition["command"],
                 "args": [
-                    str(value).format(worktrees=str(self.config.var_dir / "worktrees"))
+                    str(value).format(
+                        worktrees=str(worktree_scope or (self.config.var_dir / "worktrees")),
+                        worktree=str(worktree_scope or (self.config.var_dir / "worktrees")),
+                    )
                     for value in definition.get("args", [])
                 ],
             }

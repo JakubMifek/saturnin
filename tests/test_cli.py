@@ -584,3 +584,23 @@ def test_worktree_task_attachment_uses_locked_edit(
     assert stored.branch == "feature/atomic-worktree"
     assert stored.worktree == str(worktree_path)
     assert stored.history[-1]["actor"] == "code-worker"
+
+
+def test_worktree_create_rejects_already_attached_task(
+    capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    task = Board().create("Already attached")
+    with Board().edit(task.id) as stored:
+        stored.branch = "feature/existing"
+        stored.worktree = "/tmp/existing-worktree"
+
+    calls: list[str] = []
+
+    def fake_create(*args, **kwargs):
+        calls.append("called")
+        return SimpleNamespace(branch="feature/new", path=Path("/tmp/new-worktree"))
+
+    monkeypatch.setattr(WorktreeManager, "create", fake_create)
+
+    assert main(["worktree", "create", "feature/new", "--task", task.id]) == 1
+    assert calls == []

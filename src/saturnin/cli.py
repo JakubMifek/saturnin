@@ -930,14 +930,23 @@ def _run_worktree(args: argparse.Namespace, config: Config, board: Board, as_jso
     manager = WorktreeManager(config, board=board)
     if args.worktree_command == "create":
         with manager.lifecycle_lock():
+            attachment_error = "already has an attached branch/worktree"
+            actor = args.actor or "cli"
+            if args.task:
+                with board.edit(args.task) as task:
+                    if task.branch or task.worktree:
+                        raise BoardError(f"task {task.id} {attachment_error}")
+                    actor = args.actor or task.role or "cli"
             worktree = manager.create(args.branch, base=args.base)
             if args.task:
                 with board.edit(args.task) as task:
+                    if task.branch or task.worktree:
+                        raise BoardError(f"task {task.id} {attachment_error}")
                     task.branch = args.branch
                     task.worktree = str(worktree.path)
                     task.log(
                         "worktree",
-                        actor=args.actor or task.role or "cli",
+                        actor=actor,
                         branch=args.branch,
                         worktree=str(worktree.path),
                     )

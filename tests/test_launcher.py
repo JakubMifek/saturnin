@@ -86,7 +86,7 @@ def test_launcher_starts_routed_role_with_filtered_mcp(
     assert launched_task.launch_deferred_reason is None
     mcp = json.loads((config.var_dir / "launches" / f"{task.id}.mcp.json").read_text())
     assert set(mcp["mcpServers"]) == {"github", "filesystem"}
-    assert mcp["mcpServers"]["filesystem"]["args"][-1] == str(config.var_dir / "worktrees")
+    assert mcp["mcpServers"]["filesystem"]["args"][-1] == str(worktree.path)
     command = calls[0][0]
     assert "--no-ask-user" in command
     assert "Implement a small fix" in command[-1]

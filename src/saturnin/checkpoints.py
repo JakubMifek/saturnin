@@ -108,13 +108,13 @@ class CheckpointStore:
                     path.write_text(repaired, encoding="utf-8")
             with path.open("a", encoding="utf-8") as handle:
                 handle.write(json.dumps(checkpoint.to_dict()) + "\n")
-        try:
-            with self.board.edit(checkpoint.task_id) as task:
-                task.checkpoint = checkpoint.created_at
-                task.log("checkpoint", actor=checkpoint.role, summary=checkpoint.summary[:120])
-        except BoardError:
-            # Checkpoints may outlive their task file.
-            return checkpoint
+            try:
+                with self.board.edit(checkpoint.task_id) as task:
+                    task.checkpoint = checkpoint.created_at
+                    task.log("checkpoint", actor=checkpoint.role, summary=checkpoint.summary[:120])
+            except BoardError:
+                # Checkpoints may outlive their task file.
+                return checkpoint
         return checkpoint
 
     def latest(self, task_id: str) -> Checkpoint | None:
