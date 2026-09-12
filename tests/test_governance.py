@@ -73,6 +73,35 @@ def test_merge_requires_independent_zero_context_review(
     ).allowed
 
 
+def test_dismissed_review_blocks_merge(governance: Governance, config: Config) -> None:
+    ledger = ReviewLedger(config)
+    subject = "JakubMifek/saturnin#dismissed"
+    ledger.record(
+        subject=subject,
+        kind="pr",
+        author="code-worker",
+        reviewer="pr-reviewer",
+        verdict="approved",
+        head_sha=TEST_HEAD_SHA,
+    )
+    ledger.record(
+        subject=subject,
+        kind="pr",
+        author="code-worker",
+        reviewer="pr-reviewer",
+        verdict="dismissed",
+        head_sha=TEST_HEAD_SHA,
+    )
+    decision = governance.merge_allowed(
+        repo=SELF_REPO,
+        author="code-worker",
+        records=ledger.for_subject(subject, "pr"),
+        head_sha=TEST_HEAD_SHA,
+    )
+    assert not decision.allowed
+    assert "dismissed" in decision.reasons[0]
+
+
 def test_reviewer_with_context_does_not_satisfy_gate(
     governance: Governance, config: Config
 ) -> None:

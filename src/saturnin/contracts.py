@@ -61,7 +61,17 @@ def audit(config: Config | None = None) -> list[str]:
     """Return every disagreement between contracts, routing and MCP policy."""
     config = config or default_config()
     problems: list[str] = []
-    contracts = {c.role: c for c in load_contracts(config)}
+    loaded_contracts = load_contracts(config)
+    role_to_paths: dict[str, list[Path]] = {}
+    for contract in loaded_contracts:
+        role_to_paths.setdefault(contract.role, []).append(contract.path)
+    for role, paths in sorted(role_to_paths.items()):
+        if len(paths) > 1:
+            problems.append(
+                "duplicate agent contracts declare role "
+                f"{role!r}: {', '.join(path.name for path in paths)}"
+            )
+    contracts = {c.role: c for c in loaded_contracts}
     roles: dict[str, dict[str, Any]] = config.routing.get("roles", {})
 
     missing_contract = sorted(set(roles) - set(contracts))

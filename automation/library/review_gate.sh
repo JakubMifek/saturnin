@@ -83,6 +83,8 @@ for page in range(1, 11):
 
 if latest in {"changes_requested", "rejected"}:
     print(f"changes_requested\t{reviewer_login}")
+elif latest == "dismissed":
+    print(f"dismissed\t{reviewer_login}")
 elif latest == "approved":
     print(f"approved\t{reviewer_login}")
 else:

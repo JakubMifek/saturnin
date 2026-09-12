@@ -49,6 +49,12 @@ def test_launcher_starts_routed_role_with_filtered_mcp(
     task = board.create("Implement a small fix")
     Router(config).dispatch(board, task)
     worktree = WorktreeManager(config, repo=git_repo, board=board).create("feature/launch")
+    manifest = worktree.path / ".saturnin" / "repo.yaml"
+    manifest.parent.mkdir(parents=True, exist_ok=True)
+    manifest.write_text(
+        "stack: python\nentry_points:\n  - saturnin\nrun:\n  test: python -m pytest\n",
+        encoding="utf-8",
+    )
     with board.edit(task.id) as stored:
         stored.branch = "feature/launch"
         stored.worktree = str(worktree.path)
@@ -76,6 +82,8 @@ def test_launcher_starts_routed_role_with_filtered_mcp(
     assert "--no-ask-user" in command
     assert "Implement a small fix" in command[-1]
     assert "role: code-worker" in command[-1]
+    assert "Managed repository manifest (.saturnin/repo.yaml):" in command[-1]
+    assert "stack: python" in command[-1]
     assert calls[0][1]["cwd"] == worktree.path
 
 

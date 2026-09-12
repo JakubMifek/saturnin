@@ -54,3 +54,12 @@ def test_write_capable_mcp_servers_are_role_scoped(config: Config) -> None:
     path = config.root / "agents" / "researcher.md"
     path.write_text(path.read_text().replace("mcp: [fetch]", "mcp: [github, fetch]"))
     assert any("write access" in problem for problem in audit(config))
+
+
+def test_duplicate_role_contracts_are_rejected(config: Config) -> None:
+    duplicate = config.root / "agents" / "duplicate-code-worker.md"
+    duplicate.write_text(
+        "---\nrole: code-worker\nunit: engineering\nexecutes: true\nskills: []\nmcp: []\n---\n",
+        encoding="utf-8",
+    )
+    assert any("duplicate agent contracts declare role 'code-worker'" in problem for problem in audit(config))

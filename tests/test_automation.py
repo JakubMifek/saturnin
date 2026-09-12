@@ -265,4 +265,6 @@ def test_review_gate_imports_only_the_designated_reviewer(config: Config) -> Non
     )
 
     assert "user.casefold() != reviewer_login.casefold()" in script
+    assert 'elif latest == "dismissed":' in script
+    assert 'print(f"dismissed\\t{reviewer_login}")' in script
     assert "Imported from GitHub reviewer ${github_reviewer}" in script

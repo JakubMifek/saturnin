@@ -17,7 +17,7 @@ from .board import utcnow
 from .config import Config, default_config
 from .locking import file_lock
 
-VERDICTS = ("approved", "changes_requested", "rejected")
+VERDICTS = ("approved", "changes_requested", "rejected", "dismissed")
 KINDS = ("pr", "issue")
 
 

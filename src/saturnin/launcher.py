@@ -238,6 +238,13 @@ class AgentLauncher:
             json.dumps(task.to_dict(), indent=2),
             contract.path.read_text(encoding="utf-8"),
         ]
+        if task.worktree:
+            manifest_path = Path(task.worktree) / ".saturnin" / "repo.yaml"
+            if manifest_path.is_file():
+                sections.append(
+                    "Managed repository manifest (.saturnin/repo.yaml):\n"
+                    + manifest_path.read_text(encoding="utf-8")
+                )
         for skill in contract.skills:
             path = self.config.root / "skills" / f"{skill}.md"
             sections.append(path.read_text(encoding="utf-8"))

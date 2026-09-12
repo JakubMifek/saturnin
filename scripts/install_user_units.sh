@@ -16,13 +16,14 @@ import os
 value = os.environ["SATURNIN_HOME"]
 
 def escape_for_unit():
-    escaped = (
-        value.replace("\\", r"\x5c")
-        .replace(" ", r"\x20")
-        .replace("&", r"\x26")
-        .replace("|", r"\x7c")
-    )
-    return escaped.replace("%", "%%")
+    safe = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789/._-"
+    escaped = []
+    for byte in value.encode("utf-8"):
+        if byte in safe:
+            escaped.append(chr(byte))
+        else:
+            escaped.append(f"\\x{byte:02x}")
+    return "".join(escaped).replace("%", "%%")
 
 print(escape_for_unit())
 print(escape_for_unit())

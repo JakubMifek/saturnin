@@ -130,7 +130,9 @@ class Governance:
         approvals = [r for r in records if r.verdict == "approved"]
         if allowed:
             approvals = [r for r in approvals if r.reviewer.strip().lower() in allowed]
-        blocking = [r for r in records if r.verdict in ("changes_requested", "rejected")]
+        blocking = [
+            r for r in records if r.verdict in ("changes_requested", "rejected", "dismissed")
+        ]
         if blocking:
             return Decision.deny(
                 f"{subject}: {len(blocking)} blocking review(s) outstanding: "

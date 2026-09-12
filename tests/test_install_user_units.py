@@ -11,7 +11,7 @@ REPO_ROOT = Path(__file__).resolve().parents[1]
 
 
 def test_install_user_units_escapes_checkout_path(tmp_path: Path) -> None:
-    saturnin_home = tmp_path / r"checkout with spaces%&pipe|slash\home"
+    saturnin_home = tmp_path / "checkout with spaces%&pipe|slash\\home\"quote\tline\nbreak"
     shutil.copytree(REPO_ROOT / "systemd", saturnin_home / "systemd")
     fake_bin = tmp_path / "bin"
     fake_bin.mkdir()
