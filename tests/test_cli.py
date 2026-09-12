@@ -11,6 +11,7 @@ import pytest
 from saturnin.board import Board
 from saturnin.checkpoints import Checkpoint, CheckpointStore
 from saturnin.cli import main
+from saturnin.launcher import AgentLauncher
 from saturnin.routing import Router
 from saturnin.worktrees import WorktreeManager
 
@@ -41,12 +42,14 @@ def test_task_intake_and_dispatch(home: Path, capsys: pytest.CaptureFixture[str]
 
 def test_dispatch_all_and_dry_run(home: Path, capsys: pytest.CaptureFixture[str]) -> None:
     run(capsys, "task", "add", "Write the runbook documentation")
+    run(capsys, "task", "add", "Roadmap", "--kind", "objective")
     code, out = run(capsys, "--json", "dispatch", "--all", "--dry-run")
     assert json.loads(out)[0]["role"] == "scribe"
-    assert json.loads(run(capsys, "--json", "task", "list", "--state", "intake")[1])
+    assert len(json.loads(run(capsys, "--json", "task", "list", "--state", "intake")[1])) == 2
 
     run(capsys, "dispatch", "--all")
-    assert not json.loads(run(capsys, "--json", "task", "list", "--state", "intake")[1])
+    intake = json.loads(run(capsys, "--json", "task", "list", "--state", "intake")[1])
+    assert [task["kind"] for task in intake] == ["objective"]
 
 
 def test_dispatch_launches_the_selected_agent(
@@ -215,7 +218,38 @@ def test_checkpoint_sweep_does_not_mutate_when_launcher_is_disabled(
     assert after.history == before.history
 
 
-def test_escalation_returns_nonzero_when_submitted_task_cannot_be_blocked(
+def test_checkpoint_sweep_continues_after_launch_failure(
+    config: Config, board: Board, capsys: pytest.CaptureFixture[str],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    first = board.create("Malformed checkpoint task")
+    second = board.create("Healthy checkpoint task")
+    Router(config).dispatch(board, first)
+    Router(config).dispatch(board, second)
+    checkpoints = [
+        Checkpoint(task_id=first.id, role="code-worker", summary="first"),
+        Checkpoint(task_id=second.id, role="code-worker", summary="second"),
+    ]
+    monkeypatch.setattr(CheckpointStore, "due", lambda self: checkpoints)
+    monkeypatch.setattr(AgentLauncher, "enabled", property(lambda self: True))
+
+    def launch(self, task_id, **kwargs):
+        if task_id == first.id:
+            raise RuntimeError("invalid checkpoint")
+        return SimpleNamespace(to_dict=lambda: {"task_id": task_id, "pid": 42})
+
+    monkeypatch.setattr("saturnin.cli.AgentLauncher.launch", launch)
+
+    code, out = run(capsys, "--json", "checkpoint", "sweep")
+
+    assert code == 0
+    assert json.loads(out) == [
+        {"task_id": first.id, "error": "invalid checkpoint"},
+        {"task_id": second.id, "pid": 42},
+    ]
+
+
+def test_escalation_validates_task_before_submission(
     home: Path, capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch
 ) -> None:
     done = Board().create("already done")
@@ -223,16 +257,14 @@ def test_escalation_returns_nonzero_when_submitted_task_cannot_be_blocked(
     Board().transition(done, "in_progress")
     Board().transition(done, "review")
     Board().transition(done, "done")
-    monkeypatch.setattr(
-        "saturnin.escalation.submit",
-        lambda **kwargs: "https://github.com/JakubMifek/saturnin-ops/issues/9",
-    )
+    submitted: list[str] = []
+    monkeypatch.setattr("saturnin.escalation.submit", lambda **kwargs: submitted.append("called"))
 
     code, out = run(capsys, "escalate", "Need help", "--push", "--task", done.id)
 
-    assert code == 2
-    assert out.splitlines()[0].endswith("/issues/9")
-    assert "not blocked" in out
+    assert code == 1
+    assert out == ""
+    assert submitted == []
 
 
 def test_cleanup_apply_reports_plan_errors(

@@ -308,15 +308,43 @@ def check_managed_repo(path: Path, config: Config) -> list[str]:
         if not manifest.get(key):
             problems.append(f".saturnin/repo.yaml is missing required key: {key}")
     roles = config.routing.get("roles", {})
+    local_roles = _project_agent_roles(path, manifest, contract)
     squad = manifest.get("squad") or []
     if isinstance(squad, list):
-        unknown = [role for role in squad if role not in roles]
+        unknown = [role for role in squad if role not in roles and role not in local_roles]
         if unknown:
             problems.append(f"squad names roles that are not in the catalog: {', '.join(unknown)}")
     else:
         problems.append("squad must be a list of role ids")
     problems += _check_project_agents(path, manifest, contract, roles, config)
     return problems
+
+
+def _project_agent_roles(
+    path: Path, manifest: dict[str, Any], contract: dict[str, Any]
+) -> set[str]:
+    agents_dir = str(contract.get("agents_dir", ".saturnin/agents"))
+    result: set[str] = set()
+    entries = manifest.get("agents") or []
+    if not isinstance(entries, list):
+        return result
+    for entry in entries:
+        rel = Path(str(entry))
+        if rel.is_absolute() or ".." in rel.parts or not str(rel).startswith(f"{agents_dir}/"):
+            continue
+        agent_path = path / rel
+        if not agent_path.is_file():
+            continue
+        match = FRONT_MATTER.match(agent_path.read_text(encoding="utf-8"))
+        if not match:
+            continue
+        try:
+            data = yaml.safe_load(match.group(1)) or {}
+        except yaml.YAMLError:
+            continue
+        if isinstance(data, dict) and isinstance(data.get("role"), str):
+            result.add(data["role"])
+    return result
 
 
 def _check_project_agents(
@@ -465,6 +493,13 @@ def _run(args: argparse.Namespace, config: Config) -> int:  # noqa: C901 - flat 
         )
         return 0 if decision.allowed else 2
     if args.command == "escalate":
+        if args.push and args.task:
+            task = board.get(args.task)
+            if task.state not in ("routed", "in_progress", "review"):
+                raise BoardError(
+                    f"task {args.task} cannot be blocked from state {task.state}; "
+                    "escalation was not submitted"
+                )
         body = escalation_mod.render(
             title=args.title,
             context=args.context,
@@ -570,8 +605,6 @@ def _run_task(args: argparse.Namespace, config: Config, board: Board, as_json: b
         )
         if args.dispatch:
             Router(config).dispatch(board, task)
-            if not args.no_launch:
-                AgentLauncher(config, board).launch(task.id)
             task = board.get(task.id)
         _emit(task.to_dict(), as_json, _task_line(task))
         return 0
@@ -658,12 +691,9 @@ def _run_discover(args: argparse.Namespace, config: Config, board: Board, as_jso
         return 0
     adopted = discovery.ingest(issues)
     router = Router(config)
-    launcher = AgentLauncher(config, board)
     for task in adopted:
         if not args.no_dispatch:
             router.dispatch(board, task, actor="discovery")
-            if not args.no_launch:
-                launcher.launch(task.id)
     _emit(
         [task.to_dict() for task in adopted],
         as_json,
@@ -675,10 +705,11 @@ def _run_discover(args: argparse.Namespace, config: Config, board: Board, as_jso
 
 def _run_dispatch(args: argparse.Namespace, config: Config, board: Board, as_json: bool) -> int:
     router = Router(config)
-    if args.dry_run and args.squad:
-        router.validate_dispatch_squad(args.squad)
     if args.all:
-        targets = board.list(state="intake")
+        targets = [
+            task for task in board.list(state="intake")
+            if task.kind not in CONTAINER_KINDS
+        ]
     elif args.task_id:
         targets = [board.get(args.task_id)]
     else:
@@ -687,10 +718,27 @@ def _run_dispatch(args: argparse.Namespace, config: Config, board: Board, as_jso
     results = []
     launcher = AgentLauncher(config, board)
     for task in targets:
+        local_roles: set[str] = set()
+        if task.worktree:
+            manifest_path = Path(task.worktree) / ".saturnin" / "repo.yaml"
+            if manifest_path.is_file():
+                manifest = yaml.safe_load(manifest_path.read_text(encoding="utf-8")) or {}
+                local_roles = _project_agent_roles(
+                    Path(task.worktree),
+                    manifest,
+                    config.policy("repos").get("managed_repo_contract", {}),
+                )
+        if args.squad:
+            router.validate_dispatch_squad(args.squad, local_roles)
         route = (
             router.resolve(task)
             if args.dry_run
-            else router.dispatch(board, task, squad=args.squad or None)
+            else router.dispatch(
+                board,
+                task,
+                squad=args.squad or None,
+                additional_roles=tuple(local_roles),
+            )
         )
         results.append({"task": task.id, "role": route.role, "rule": route.rule,
                         "priority": route.priority, "escalate": route.escalate,
@@ -795,14 +843,19 @@ def _run_checkpoint(args: argparse.Namespace, config: Config, board: Board, as_j
                 ]
             else:
                 for checkpoint in due:
-                    task = board.get(checkpoint.task_id)
-                    if task.state in ("intake", "blocked"):
-                        router.dispatch(board, task, actor="checkpoint-sweeper")
-                    launched = launcher.launch(
-                        checkpoint.task_id,
-                        resumed_checkpoint=checkpoint.created_at,
-                    )
-                    payload.append(launched.to_dict())
+                    try:
+                        task = board.get(checkpoint.task_id)
+                        if task.state in ("intake", "blocked"):
+                            router.dispatch(board, task, actor="checkpoint-sweeper")
+                        launched = launcher.launch(
+                            checkpoint.task_id,
+                            resumed_checkpoint=checkpoint.created_at,
+                        )
+                        payload.append(launched.to_dict())
+                    except RuntimeError as exc:
+                        payload.append(
+                            {"task_id": checkpoint.task_id, "error": str(exc)}
+                        )
         _emit(
             payload,
             as_json,

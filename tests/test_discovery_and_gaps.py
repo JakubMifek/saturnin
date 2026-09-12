@@ -229,6 +229,12 @@ def test_project_agent_must_exist_and_not_shadow_a_global_role(
         "# Migrations\n"
     )
     _manifest(project, ".saturnin/agents/db-migrator.md")
+    manifest = project / ".saturnin" / "repo.yaml"
+    manifest.write_text(
+        manifest.read_text().replace(
+            "squad: [code-worker]", "squad: [code-worker, db-migrator]"
+        )
+    )
     assert check_managed_repo(project, config) == []
 
 

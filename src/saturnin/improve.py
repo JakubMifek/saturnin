@@ -180,7 +180,9 @@ class ImprovementLoop:
         if create_tasks is None:
             create_tasks = bool(self.actions.get("create_tasks", True))
         if create_tasks:
-            report.proposed_tasks = [task.id for task in self._file_tasks(report.findings)]
+            report.proposed_tasks = [
+                task.id for task in self._file_tasks(report.findings, recurring=True)
+            ]
             report.proposed_tasks += [
                 task.id for task in self._file_tasks(report.backlog, prefix="Gap", label="gap")
             ]
@@ -190,7 +192,12 @@ class ImprovementLoop:
         return report
 
     def _file_tasks(
-        self, findings: list[Finding], *, prefix: str = "Improve", label: str = "improve"
+        self,
+        findings: list[Finding],
+        *,
+        prefix: str = "Improve",
+        label: str = "improve",
+        recurring: bool = False,
     ) -> list[Task]:
         labels = list(self.actions.get("labels", ["self-improvement"]))
         created: list[Task] = []
@@ -199,6 +206,7 @@ class ImprovementLoop:
             task = self.board.create_if_labels_absent(
                 [marker],
                 f"{prefix}: {finding.title or finding.detail}",
+                open_only=recurring,
                 kind="improvement",
                 body=f"{finding.detail}\n\nRecommendation: {finding.recommendation}",
                 labels=[*labels, label],

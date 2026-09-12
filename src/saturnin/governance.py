@@ -414,6 +414,30 @@ class Governance:
             if not units and sub not in ("list-timers", "status", "daemon-reload"):
                 return Decision.deny("systemctl needs an explicit Saturnin unit name")
             return Decision.ok("systemctl limited to Saturnin-dedicated units")
+        if binary == "journalctl":
+            if not services.get("journalctl_allowed", False):
+                return Decision.deny("journalctl is not allowed")
+            args = parts[1:]
+            if "--user" not in args:
+                return Decision.deny("journalctl must use --user scope")
+            units: list[str] = []
+            for index, value in enumerate(args):
+                if value in ("-u", "--unit") and index + 1 < len(args):
+                    units.append(args[index + 1])
+                elif value.startswith("--unit="):
+                    units.append(value.split("=", 1)[1])
+            prefix = services.get("unit_prefix", "saturnin-")
+            if not units or any(not unit.startswith(prefix) for unit in units):
+                return Decision.deny(f"journalctl requires a {prefix}* unit")
+            allowed = {"--user", "-u", "--unit", "-n", "--lines", "--no-pager"}
+            for index, value in enumerate(args):
+                if value.startswith("-") and value not in allowed and not value.startswith(
+                    ("--unit=", "--lines=")
+                ):
+                    return Decision.deny(f"journalctl option not allowed: {value}")
+                if value in ("-n", "--lines") and index + 1 == len(args):
+                    return Decision.deny(f"journalctl option {value} requires a value")
+            return Decision.ok("journalctl limited to Saturnin user units")
         return Decision.ok(f"{binary}: no elevated capability required")
 
     # -- delegation ----------------------------------------------------

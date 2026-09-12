@@ -26,6 +26,47 @@ actions:
 # deduplicated by its `finding:<id>` marker, so an open hole has an owner and a
 # state. Close a gap by deleting its entry here once the task is done.
 backlog:
+  - id: review-request-automation
+    title: automate zero-context review requests
+    severity: warn
+    detail: >-
+      Opening a pull request and requesting the designated zero-context reviewer
+      still requires a manual step.
+    recommendation: >-
+      Add a policy-aware automation that requests the reviewer and records the
+      resulting GitHub review event.
+  - id: board-index
+    title: index the board for large installations
+    severity: info
+    detail: >-
+      Listing tasks scans every task file, which will become slow after several
+      thousand tasks.
+    recommendation: >-
+      Maintain a locked board/index.json summary for list and filter operations.
+  - id: per-role-wip-limits
+    title: enforce per-role WIP limits
+    severity: warn
+    detail: >-
+      Role overload is measured after dispatch rather than prevented while
+      assigning new work.
+    recommendation: >-
+      Refuse dispatch above the configured role limit and leave work visibly queued.
+  - id: repeat-detection
+    title: improve repeated-work detection
+    severity: info
+    detail: >-
+      Repeat detection uses only normalized title words and misses semantically
+      similar work described differently.
+    recommendation: >-
+      Include task-body similarity when clustering repeated work.
+  - id: squad-parallelism
+    title: support squad-level parallelism
+    severity: info
+    detail: >-
+      Multiple code workers cannot yet coordinate one epic through a shared
+      integration branch.
+    recommendation: >-
+      Add a governed integration workflow for parallel workers on one epic.
   - id: cost-accounting
     title: measure cost per role, task and repository
     severity: warn

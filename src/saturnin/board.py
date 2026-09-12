@@ -198,6 +198,8 @@ class Board:
         self,
         required_labels: Iterable[str],
         title: str,
+        *,
+        open_only: bool = False,
         **kwargs: Any,
     ) -> Task | None:
         """Atomically create a task unless one already carries every marker."""
@@ -206,6 +208,7 @@ class Board:
             if any(
                 markers <= {label.casefold() for label in task.labels}
                 for task in self
+                if not open_only or task.state not in TERMINAL_STATES
             ):
                 return None
             labels = {*kwargs.pop("labels", ()), *required_labels}

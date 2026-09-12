@@ -340,6 +340,9 @@ def test_push_rules(governance: Governance) -> None:
         "env sudo systemctl --user restart saturnin-janitor.timer",
         "env /usr/local/bin/pkexec systemctl --user restart saturnin-janitor.timer",
         "systemctl --user --system restart saturnin-janitor.timer",
+        "journalctl -u saturnin-janitor.service -n 100",
+        "journalctl --user -u nginx.service -n 100",
+        "journalctl --user --system -u saturnin-janitor.service",
     ],
 )
 def test_out_of_scope_server_commands(governance: Governance, command: str) -> None:
@@ -355,6 +358,7 @@ def test_out_of_scope_server_commands(governance: Governance, command: str) -> N
         "systemctl --user enable --now saturnin-janitor.timer",
         "systemctl --user list-timers --all",
         "systemctl --user status --failed saturnin-improve.service",
+        "journalctl --user -u saturnin-janitor.service -n 100",
         "curl -o /home/saturnin/response.txt https://example.test/ok",
         "curl --output /home/saturnin/response.txt https://example.test/ok",
         "curl --output-dir /home/saturnin https://example.test/ok",

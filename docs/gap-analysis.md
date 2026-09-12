@@ -47,6 +47,11 @@ deleting its entry from the policy, not editing this table.
 <!-- generated:backlog -->
 | Gap | Severity | Fix |
 | --- | --- | --- |
+| `review-request-automation` - automate zero-context review requests | warn | Add a policy-aware automation that requests the reviewer and records the resulting GitHub review event. |
+| `board-index` - index the board for large installations | info | Maintain a locked board/index.json summary for list and filter operations. |
+| `per-role-wip-limits` - enforce per-role WIP limits | warn | Refuse dispatch above the configured role limit and leave work visibly queued. |
+| `repeat-detection` - improve repeated-work detection | info | Include task-body similarity when clustering repeated work. |
+| `squad-parallelism` - support squad-level parallelism | info | Add a governed integration workflow for parallel workers on one epic. |
 | `cost-accounting` - measure cost per role, task and repository | warn | Record model, token counts and elapsed time per dispatch in var/telemetry, surface cost per role in `saturnin board metrics`, and add a spend threshold to policies/improvement.yaml so the loop can flag an expensive role the same way it flags a slow one. |
 | `quality-regression-blindspot` - detect quality regressions, not only slow ones | warn | Track review outcomes per role - changes requested, follow-up findings, reverted merges - and treat a rising rejection rate as a finding. |
 | `policy-rollback` - make a bad policy change reversible | warn | Version policy changes, keep the previous revision in var/, and add `saturnin policy rollback` plus a dry run that replays the last N dispatches through the proposed routing table. |

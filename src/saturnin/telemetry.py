@@ -6,7 +6,7 @@ import statistics
 from datetime import datetime, timezone
 from typing import Any, Iterable
 
-from .board import Board, TERMINAL_STATES, Task, parse_ts
+from .board import CONTAINER_KINDS, Board, TERMINAL_STATES, Task, parse_ts
 
 
 def dispatch_latency_seconds(task: Task) -> float | None:
@@ -48,7 +48,9 @@ def collect(board: Board, *, now: datetime | None = None) -> dict[str, Any]:
         "by_state": by_state,
         "wip_by_role": by_role,
         "by_priority": by_priority,
-        "undispatched": sum(1 for t in open_tasks if t.state == "intake"),
+        "undispatched": sum(
+            1 for t in open_tasks if t.state == "intake" and t.kind not in CONTAINER_KINDS
+        ),
         "blocked": sum(1 for t in open_tasks if t.state == "blocked"),
         "median_dispatch_latency_s": _median(dispatch_latency_seconds(t) for t in tasks),
         "median_cycle_time_s": _median(cycle_time_seconds(t) for t in tasks),

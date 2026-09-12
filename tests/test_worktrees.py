@@ -116,8 +116,8 @@ def test_unmerged_worktree_uses_hard_stale_threshold(manager: WorktreeManager) -
 def test_open_task_protects_worktree(manager: WorktreeManager, board: Board) -> None:
     worktree = manager.create("feature/guarded")
     task = board.create("guarded work")
-    task.branch = "feature/guarded"
-    board.save(task)
+    with board.edit(task.id) as stored:
+        stored.branch = "feature/guarded"
     plan = manager.plan_cleanup(now=datetime.now(timezone.utc) + timedelta(days=90))
     assert str(worktree.path) not in {a.target for a in plan.actions}
     assert "has an open board task" in {a.reason for a in plan.skipped}

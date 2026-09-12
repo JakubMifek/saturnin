@@ -44,7 +44,8 @@ Path(os.environ["DEST"]).write_text(
 '
   if command -v systemd-analyze >/dev/null 2>&1; then
     if ! systemd-analyze --user verify "$UNIT_DIR/$name"; then
-      echo "warning: systemd-analyze verify failed for $name" >&2
+      echo "systemd-analyze verify failed for $name; refusing to enable invalid units" >&2
+      exit 1
     fi
   fi
   echo "installed $UNIT_DIR/$name"

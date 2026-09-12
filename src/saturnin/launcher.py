@@ -14,7 +14,7 @@ from yaml import YAMLError
 from .board import Board, Task, utcnow
 from .checkpoints import CheckpointStore
 from .config import Config, default_config, load_yaml
-from .contracts import AgentContract, load_contracts
+from .contracts import FRONT_MATTER, AgentContract, load_contracts
 
 
 class LauncherError(RuntimeError):
@@ -187,10 +187,48 @@ class AgentLauncher:
         if not task.role:
             raise LauncherError(f"task {task.id} has no routed role")
         contracts = {contract.role: contract for contract in load_contracts(self.config)}
+        if task.worktree:
+            contracts.update(self._project_contracts(Path(task.worktree)))
         try:
             return contracts[task.role]
         except KeyError as exc:
             raise LauncherError(f"no agent contract for routed role {task.role!r}") from exc
+
+    def _project_contracts(self, worktree: Path) -> dict[str, AgentContract]:
+        manifest_path = worktree / ".saturnin" / "repo.yaml"
+        if not manifest_path.is_file():
+            return {}
+        try:
+            manifest = load_yaml(manifest_path)
+        except (OSError, ValueError, YAMLError) as exc:
+            raise LauncherError(f"invalid managed repository manifest: {exc}") from exc
+        contracts: dict[str, AgentContract] = {}
+        entries = manifest.get("agents") or []
+        if not isinstance(entries, list):
+            raise LauncherError("managed repository agents must be a list")
+        global_roles = {contract.role for contract in load_contracts(self.config)}
+        for entry in entries:
+            relative = Path(str(entry))
+            if (
+                relative.is_absolute()
+                or ".." in relative.parts
+                or not str(relative).startswith(".saturnin/agents/")
+            ):
+                raise LauncherError(f"invalid project agent path: {entry}")
+            path = worktree / relative
+            if not path.is_file():
+                raise LauncherError(f"project agent contract does not exist: {entry}")
+            match = FRONT_MATTER.match(path.read_text(encoding="utf-8"))
+            if not match:
+                raise LauncherError(f"project agent contract lacks front matter: {entry}")
+            data = load_yaml_front_matter(match.group(1), path)
+            role = str(data.get("role", ""))
+            if not role or role != relative.stem:
+                raise LauncherError(f"project agent role must match its filename: {entry}")
+            if role in global_roles:
+                raise LauncherError(f"project agent shadows global role {role!r}")
+            contracts[role] = AgentContract(role=role, path=path, front_matter=data)
+        return contracts
 
     def _write_mcp_config(self, task: Task, contract: AgentContract) -> Path:
         definitions = self.config.policy("mcp").get("servers", {})
@@ -252,3 +290,15 @@ class AgentLauncher:
         if checkpoint is not None:
             sections.append(checkpoint.render())
         return "\n\n---\n\n".join(sections)
+
+
+def load_yaml_front_matter(value: str, path: Path) -> dict[str, Any]:
+    import yaml
+
+    try:
+        data = yaml.safe_load(value) or {}
+    except YAMLError as exc:
+        raise LauncherError(f"invalid project agent contract {path}: {exc}") from exc
+    if not isinstance(data, dict):
+        raise LauncherError(f"project agent contract {path} must contain a mapping")
+    return data

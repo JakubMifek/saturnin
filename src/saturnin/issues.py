@@ -10,6 +10,7 @@ never has to hold a token itself.
 
 from __future__ import annotations
 
+import hashlib
 import json
 import shutil
 import subprocess
@@ -18,6 +19,7 @@ from typing import Any, Iterable
 
 from .board import Board, Task
 from .config import Config, default_config
+from .locking import file_lock
 
 
 class MirrorError(RuntimeError):
@@ -82,7 +84,7 @@ class IssueMirror:
         if task.role:
             pairs.append((self.tracking.get("role_label", "role"), task.role))
         labels = [f"{prefix}:{key}/{value}" for key, value in pairs]
-        return sorted({*labels, *task.labels})
+        return sorted({_github_label(label) for label in {*labels, *task.labels}})
 
     def render(self, task: Task) -> IssuePayload:
         if not self.mirrors(task):
@@ -143,19 +145,21 @@ class IssueMirror:
         return result
 
     def sync(self, task: Task, *, push: bool = False, actor: str = "chief-of-staff") -> IssuePayload:
-        task = self.board.get(task.id)
-        payload = self.render(task)
-        rendered_updated_at = task.updated_at
         if not push:
+            return self.render(self.board.get(task.id))
+        sync_lock = self.config.var_dir / "locks" / f"mirror-{task.id}"
+        with file_lock(sync_lock):
+            task = self.board.get(task.id)
+            payload = self.render(task)
+            rendered_updated_at = task.updated_at
+            url = self._push(task, payload)
+            with self.board.edit(task.id) as stored:
+                stored.issue = url
+                if stored.updated_at == rendered_updated_at:
+                    stored.log("issue:synced", actor=actor, note=url)
+                    stored.issue_synced_at = stored.updated_at
+            task.issue = url
             return payload
-        url = self._push(task, payload)
-        with self.board.edit(task.id) as stored:
-            stored.issue = url
-            if stored.updated_at == rendered_updated_at:
-                stored.log("issue:synced", actor=actor, note=url)
-                stored.issue_synced_at = stored.updated_at
-        task.issue = url
-        return payload
 
     def sync_all(self, tasks: Iterable[Task], *, push: bool = False) -> list[IssuePayload]:
         return [self.sync(task, push=push) for task in tasks if self.mirrors(task)]
@@ -251,6 +255,14 @@ def _label_args(labels: list[str], *, option: str = "--label") -> list[str]:
     for label in labels:
         out += [option, label]
     return out
+
+
+def _github_label(label: str) -> str:
+    """Keep board-internal markers deterministic without exceeding GitHub's limit."""
+    if len(label) <= 50:
+        return label
+    digest = hashlib.sha256(label.encode("utf-8")).hexdigest()[:32]
+    return f"saturnin:label/{digest}"
 
 
 def ensure_labels(repo: str, labels: Iterable[str]) -> None:

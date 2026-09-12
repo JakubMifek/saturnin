@@ -17,6 +17,7 @@ packages:
 services:
   # systemctl is limited to units owned by Saturnin.
   systemctl_allowed: true
+  journalctl_allowed: true
   unit_prefix: saturnin-
   allowed_subcommands: [start, stop, restart, status, enable, disable, list-timers, daemon-reload]
   # Timers live in the Saturnin user scope only.
@@ -65,4 +66,5 @@ filesystem:
     - mkdir
     - sleep
     - systemctl
+    - journalctl
     - apt

@@ -117,8 +117,11 @@ class Router:
             result_contract=contract,
         )
 
-    def _validate_squad(self, squad: Sequence[str], source: str) -> None:
-        unknown = [member for member in squad if member not in self.roles]
+    def _validate_squad(
+        self, squad: Sequence[str], source: str, additional_roles: Sequence[str] = ()
+    ) -> None:
+        known = set(self.roles) | set(additional_roles)
+        unknown = [member for member in squad if member not in known]
         if unknown:
             raise RoutingError(f"{source} suggests unknown squad members: {unknown}")
         if self.ceo_role in squad:
@@ -126,9 +129,11 @@ class Router:
                 f"{source} puts the CEO in a squad; the CEO never executes"
             )
 
-    def validate_dispatch_squad(self, squad: Sequence[str]) -> None:
+    def validate_dispatch_squad(
+        self, squad: Sequence[str], additional_roles: Sequence[str] = ()
+    ) -> None:
         """Validate an ad-hoc squad before dispatching or previewing it."""
-        self._validate_squad(squad, "dispatch override")
+        self._validate_squad(squad, "dispatch override", additional_roles)
 
     # -- dispatch ------------------------------------------------------
     def dispatch(
@@ -138,6 +143,7 @@ class Router:
         *,
         actor: str | None = None,
         squad: Sequence[str] | None = None,
+        additional_roles: Sequence[str] = (),
     ) -> Route:
         """Assign ``task`` to a role and move it to ``routed``.
 
@@ -148,7 +154,7 @@ class Router:
         # even if the policy ever renames that role.
         effective_actor = actor if actor is not None else self.ceo_role
         if squad is not None:
-            self.validate_dispatch_squad(squad)
+            self.validate_dispatch_squad(squad, additional_roles)
         with board.edit(task.id) as current:
             if current.kind in CONTAINER_KINDS:
                 raise BoardError(

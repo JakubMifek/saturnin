@@ -14,14 +14,3 @@ body:
       label: Detail
       description: What is wrong or wanted, and how you will know it is done.
     validations: {required: true}
-  - type: dropdown
-    id: priority
-    attributes:
-      label: Priority
-      options: ["P0 - drop everything", "P1 - today", "P2 - normal", "P3 - when idle"]
-      default: 2
-  - type: input
-    id: repo
-    attributes:
-      label: Repository it concerns
-      placeholder: JakubMifek/some-project

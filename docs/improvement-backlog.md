@@ -1,29 +1,24 @@
 # Improvement backlog
 
-Seeded by hand, then maintained by the improvement loop
-(`saturnin improve` files a task per finding; the improver promotes recurring
-ones here). Ordered by expected effect on throughput per unit of risk.
+The policy-backed list below is filed and tracked by `saturnin improve`.
 
-## Ready
-
-- [ ] **Review request automation** - open the PR, request the zero-context
-      reviewer and record the verdict from the GitHub review event.
-- [ ] **Board index** - a `board/index.json` summary so `task list` stays fast
-      past a few thousand tasks.
-- [ ] **Per-role WIP limits** - refuse dispatch above the limit and queue instead,
-      making overload visible at dispatch time rather than in a weekly metric.
-
-## Investigating
-
-- [ ] **Better repeat detection** - the current signature is a bag of title
-      words; cluster on body similarity as well.
-- [ ] **Squad-level parallelism** - run several code workers on one epic with a
-      shared integration branch.
-- [ ] **Evaluation harness** - replay recorded dispatches so a routing or policy
-      change can be judged before it ships, instead of by watching the metric
-      drift afterwards (see [gap-analysis.md](gap-analysis.md)).
-- [ ] **Worktree post-create hook** - install the package and dev tooling in a
-      new worktree automatically, rather than leaving it to the worker.
+<!-- generated:backlog -->
+| Gap | Severity | Fix |
+| --- | --- | --- |
+| `review-request-automation` - automate zero-context review requests | warn | Add a policy-aware automation that requests the reviewer and records the resulting GitHub review event. |
+| `board-index` - index the board for large installations | info | Maintain a locked board/index.json summary for list and filter operations. |
+| `per-role-wip-limits` - enforce per-role WIP limits | warn | Refuse dispatch above the configured role limit and leave work visibly queued. |
+| `repeat-detection` - improve repeated-work detection | info | Include task-body similarity when clustering repeated work. |
+| `squad-parallelism` - support squad-level parallelism | info | Add a governed integration workflow for parallel workers on one epic. |
+| `cost-accounting` - measure cost per role, task and repository | warn | Record model, token counts and elapsed time per dispatch in var/telemetry, surface cost per role in `saturnin board metrics`, and add a spend threshold to policies/improvement.yaml so the loop can flag an expensive role the same way it flags a slow one. |
+| `quality-regression-blindspot` - detect quality regressions, not only slow ones | warn | Track review outcomes per role - changes requested, follow-up findings, reverted merges - and treat a rising rejection rate as a finding. |
+| `policy-rollback` - make a bad policy change reversible | warn | Version policy changes, keep the previous revision in var/, and add `saturnin policy rollback` plus a dry run that replays the last N dispatches through the proposed routing table. |
+| `policy-schema` - validate policy structure with a schema | info | Add a JSON Schema per policy file and validate all of them in `doctor`. |
+| `evaluation-harness` - replay dispatches to evaluate a policy change | info | Record dispatch trajectories and replay them against a candidate policy, as Aider and SWE-agent do for agent behaviour. |
+| `observability-pipeline` - replace polled monitors with an alerting pipeline | warn | Adopt the Loki/Grafana path in docs/observability.md - projects alert, alerts become issues, the discovery loop turns issues into board tasks - and demote run_monitors.sh to the fallback for projects without a stack. |
+| `worktree-post-create-hook` - run project setup when a worktree is created | info | Read a post-create command from the managed repo manifest and run it in new_work_session.sh. |
+| `project-credentials` - document how workers obtain project credentials | info | Decide on a secret source (host keyring or pass), document it in SECURITY.md, and give workers a read-only accessor rather than the store. |
+<!-- /generated:backlog -->
 
 ## Deliberately not doing (yet)
 

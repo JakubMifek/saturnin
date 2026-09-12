@@ -32,6 +32,13 @@ def test_metrics_reflect_the_board(config: Config, board: Board) -> None:
     assert metrics["median_cycle_time_s"] is not None
 
 
+def test_dispatch_metrics_exclude_containers(config: Config, board: Board) -> None:
+    board.create("Roadmap", kind="objective")
+    board.create("Waiting leaf")
+
+    assert telemetry.collect(board)["undispatched"] == 1
+
+
 def test_bottleneck_detection(config: Config, board: Board) -> None:
     loop = ImprovementLoop(config, board)
     findings = {
@@ -83,3 +90,14 @@ def test_run_can_report_only(config: Config, board: Board) -> None:
     report = ImprovementLoop(config, board).run(create_tasks=False)
     assert report.findings
     assert report.proposed_tasks == []
+
+
+def test_dynamic_finding_can_recur_after_completion(config: Config, board: Board) -> None:
+    loop = ImprovementLoop(config, board)
+    for index in range(5):
+        board.create(f"Idle task {index}")
+    first = loop.run().proposed_tasks[0]
+    with board.edit(first) as task:
+        task.state = "done"
+
+    assert loop.run().proposed_tasks

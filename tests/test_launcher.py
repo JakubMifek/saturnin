@@ -119,6 +119,34 @@ def test_launcher_intersects_role_mcp_with_project_allowlist(
     assert mcp["mcpServers"] == {}
 
 
+def test_launcher_loads_project_local_contract(
+    config: Config, board: Board, git_repo: Path
+) -> None:
+    task = board.create("Run a project migration")
+    worktree = WorktreeManager(config, repo=git_repo, board=board).create(
+        "feature/local-agent"
+    )
+    agent = worktree.path / ".saturnin" / "agents" / "db-migrator.md"
+    agent.parent.mkdir(parents=True, exist_ok=True)
+    agent.write_text(
+        "---\nrole: db-migrator\nskills: [checkpointing]\nmcp: []\n---\n"
+        "# Database migrator\n",
+        encoding="utf-8",
+    )
+    (worktree.path / ".saturnin" / "repo.yaml").write_text(
+        "agents: [.saturnin/agents/db-migrator.md]\n",
+        encoding="utf-8",
+    )
+    with board.edit(task.id) as stored:
+        stored.role = "db-migrator"
+        stored.worktree = str(worktree.path)
+
+    contract = AgentLauncher(config, board)._contract(board.get(task.id))
+
+    assert contract.role == "db-migrator"
+    assert contract.path == agent
+
+
 def test_malformed_project_yaml_leaves_checkpoint_available_for_retry(
     config: Config, board: Board, git_repo: Path, monkeypatch
 ) -> None:

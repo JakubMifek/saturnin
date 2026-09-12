@@ -197,6 +197,15 @@ def test_labels_are_provisioned_before_create(
     assert not any("--force" in call for call in calls[:create_index])
 
 
+def test_long_internal_labels_are_encoded(config: Config, board: Board) -> None:
+    task = board.create("Fresh", labels=["source:" + "x" * 100])
+
+    labels = IssueMirror(config, board).labels_for(task)
+
+    assert all(len(label) <= 50 for label in labels)
+    assert any(label.startswith("saturnin:label/") for label in labels)
+
+
 def test_label_provisioning_failure_stops_issue_creation(
     config: Config, board: Board, monkeypatch: pytest.MonkeyPatch
 ) -> None:

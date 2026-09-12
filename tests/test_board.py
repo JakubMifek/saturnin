@@ -76,8 +76,8 @@ def test_listing_orders_by_priority(board: Board) -> None:
 
 def test_open_tasks_for_branch(board: Board) -> None:
     task = board.create("branchy")
-    task.branch = "feature/x"
-    board.save(task)
+    with board.edit(task.id) as stored:
+        stored.branch = "feature/x"
     assert [t.id for t in board.open_tasks_for_branch("feature/x")] == [task.id]
     board.transition(task, "cancelled")
     assert board.open_tasks_for_branch("feature/x") == []
