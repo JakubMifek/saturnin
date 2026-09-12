@@ -420,6 +420,30 @@ def _defer_launch(board: Board, task_id: str, reason: str) -> None:
         task.log("agent:deferred", actor="worktree-provisioner", reason=reason)
 
 
+def _configured_repo_checkout(config: Config, repo: str | None) -> tuple[Path | None, str]:
+    policy = config.policy("repos")
+    engine = policy.get("repos", {}).get("engine", {})
+    engine_slug = str(engine.get("slug", ""))
+    if not repo or repo.casefold() == engine_slug.casefold():
+        return config.root, ""
+    for source in policy.get("discovery", {}).get("sources", []) or []:
+        if not isinstance(source, dict):
+            continue
+        if str(source.get("slug", "")).casefold() != repo.casefold():
+            continue
+        checkout = source.get("checkout")
+        if not checkout:
+            return None, f"configure a checkout for managed repository {repo}"
+        path = Path(str(checkout)).expanduser()
+        if not path.is_absolute():
+            path = config.root / path
+        path = path.resolve()
+        if not path.is_dir():
+            return None, f"configured checkout does not exist for managed repository {repo}: {path}"
+        return path, ""
+    return None, f"managed repository {repo} is not configured as a discovery source"
+
+
 def _provision_and_launch(
     config: Config, board: Board, task_id: str
 ) -> LaunchResult | None:
@@ -428,16 +452,12 @@ def _provision_and_launch(
         return None
     task = board.get(task_id)
     if not task.worktree:
-        engine_repo = config.policy("repos").get("repos", {}).get("engine", {}).get("slug")
-        if task.repo and task.repo.casefold() != str(engine_repo).casefold():
-            _defer_launch(
-                board,
-                task.id,
-                f"attach a checkout for managed repository {task.repo}",
-            )
+        checkout, reason = _configured_repo_checkout(config, task.repo)
+        if checkout is None:
+            _defer_launch(board, task.id, reason)
             return None
         branch = f"feature/{task.id.lower()}"
-        manager = WorktreeManager(config, board=board)
+        manager = WorktreeManager(config, repo=checkout, board=board)
         try:
             with manager.lifecycle_lock():
                 worktree = manager.create(branch)

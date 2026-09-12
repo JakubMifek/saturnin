@@ -63,6 +63,7 @@ discovery:
   # Repositories to watch. Each entry is a slug, or a mapping with per-repo
   # labels and maintainer-applied trust labels:
   #   - slug: JakubMifek/widget-api
+  #     checkout: /home/saturnin/projects/widget-api
   #     labels: [alert, incident]
   #     require_labels: [saturnin:trusted]
   sources:

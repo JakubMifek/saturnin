@@ -7,6 +7,7 @@ from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
+import yaml
 
 from saturnin.board import Board
 from saturnin.checkpoints import Checkpoint, CheckpointStore
@@ -105,9 +106,13 @@ def test_task_add_provisions_worktree_before_launch(
     assert launched[0]["worktree"] == str(worktree)
 
 
-def test_discovery_defers_external_launch_until_worktree_is_attached(
+def test_deferred_external_discovery_provisions_configured_checkout_on_retry(
     home: Path, capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch
 ) -> None:
+    policy_path = home / "policies" / "repos.yaml"
+    policy = yaml.safe_load(policy_path.read_text(encoding="utf-8"))
+    policy["discovery"]["sources"].append({"slug": "JakubMifek/widget-api"})
+    policy_path.write_text(yaml.safe_dump(policy), encoding="utf-8")
     issue = InboundIssue(
         repo="JakubMifek/widget-api",
         number=7,
@@ -115,31 +120,55 @@ def test_discovery_defers_external_launch_until_worktree_is_attached(
         url="https://github.com/JakubMifek/widget-api/issues/7",
         labels=["incident"],
     )
-    launched: list[str] = []
+    launched: list[dict] = []
     monkeypatch.setattr(IssueDiscovery, "poll", lambda self: [issue])
     monkeypatch.setattr(AgentLauncher, "enabled", property(lambda self: True))
-    monkeypatch.setattr(
-        AgentLauncher,
-        "launch",
-        lambda self, task_id, **kwargs: launched.append(task_id),
-    )
+
+    def launch(self, task_id, **kwargs):
+        launched.append(self.board.get(task_id).to_dict())
+        with self.board.edit(task_id) as stored:
+            stored.launch_deferred_at = None
+            stored.launch_deferred_reason = None
+
+    monkeypatch.setattr(AgentLauncher, "launch", launch)
 
     assert run(capsys, "discover")[0] == 0
     task = next(iter(Board()))
     assert task.state == "routed"
     assert task.launch_deferred_reason == (
-        "attach a checkout for managed repository JakubMifek/widget-api"
+        "configure a checkout for managed repository JakubMifek/widget-api"
     )
     assert launched == []
 
-    worktree = home / "widget-api"
-    worktree.mkdir()
-    with Board().edit(task.id) as stored:
-        stored.branch = "feature/widget"
-        stored.worktree = str(worktree)
+    checkout = home / "projects" / "widget-api"
+    worktree = home / "var" / "worktrees" / "widget"
+    (worktree / ".saturnin" / "agents").mkdir(parents=True)
+    checkout.mkdir(parents=True)
+    (worktree / ".saturnin" / "agents" / "widget-worker.md").write_text(
+        "---\nrole: widget-worker\nunit: engineering\nskills: []\nmcp: []\n---\n"
+    )
+    (worktree / ".saturnin" / "repo.yaml").write_text(
+        "project: Widget\ncontext: python\nconventions: pytest\n"
+        "lead: widget-worker\nsquad: [widget-worker]\n"
+        "agents: [.saturnin/agents/widget-worker.md]\n"
+    )
+    policy["discovery"]["sources"][-1]["checkout"] = str(checkout)
+    policy_path.write_text(yaml.safe_dump(policy), encoding="utf-8")
+    provisioned_from: list[Path] = []
+
+    def create(manager, branch, base=None):
+        provisioned_from.append(manager.repo)
+        return SimpleNamespace(path=worktree, branch=branch)
+
+    monkeypatch.setattr(WorktreeManager, "create", create)
 
     assert run(capsys, "dispatch", "--all")[0] == 0
-    assert launched == [task.id]
+    stored = Board().get(task.id)
+    assert provisioned_from == [checkout]
+    assert launched[0]["role"] == "widget-worker"
+    assert launched[0]["worktree"] == str(worktree)
+    assert stored.launch_deferred_at is None
+    assert stored.launch_deferred_reason is None
 
 
 @pytest.mark.parametrize(

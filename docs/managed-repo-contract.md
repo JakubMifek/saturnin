@@ -109,5 +109,7 @@ monitors:
 3. `saturnin repo check .` until it exits 0.
 4. Register the repository in `policies/repos.yaml` - under `discovery.sources`
    so its labelled issues reach the board, and so Saturnin may file issues
-   there. Remember rule 5: in managed repositories Saturnin may open
+   there. Set `checkout` to its local Git checkout so discovery can create the
+   task's feature worktree before launching its project-local lead. Remember
+   rule 5: in managed repositories Saturnin may open
    issues, each one independently reviewed first - it never pushes directly.
