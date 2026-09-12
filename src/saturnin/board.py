@@ -121,6 +121,13 @@ def new_task_id(now: datetime | None = None) -> str:
     return f"T-{stamp}-{secrets.token_hex(3)}"
 
 
+def _escalation_reference(note: str) -> str:
+    prefix = "escalated:"
+    if not note.startswith(prefix):
+        return ""
+    return note[len(prefix):].strip()
+
+
 class Board:
     """File backed task store."""
 
@@ -275,6 +282,11 @@ class Board:
         if state != task.state and state not in allowed:
             raise BoardError(
                 f"illegal transition {task.state} -> {state} (allowed: {', '.join(allowed) or 'none'})"
+            )
+        if state == "blocked" and task.state != "blocked" and not _escalation_reference(note):
+            raise BoardError(
+                "blocking a task requires an escalation reference in the note "
+                "(use 'escalated: <issue-url>')"
             )
         task.state = state
         if state in TERMINAL_STATES:

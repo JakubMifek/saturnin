@@ -171,7 +171,7 @@ def test_review_subjects_are_exact_and_roles_are_valid(config: Config) -> None:
 
 
 def test_pr_review_requires_head_sha(config: Config) -> None:
-    with pytest.raises(ReviewError, match="head SHA"):
+    with pytest.raises(ReviewError, match="--head-sha"):
         ReviewLedger(config).record(
             subject="owner/repo#2",
             kind="pr",
@@ -405,6 +405,35 @@ def test_curl_output_dir_applies_even_when_url_comes_first() -> None:
         "/home/saturnin/downloads/download.tar.gz",
         "/home/saturnin/downloads",
     ]
+
+
+def test_curl_cookie_and_trace_outputs_are_checked() -> None:
+    assert _curl_targets([
+        "--cookie-jar",
+        "/home/saturnin/cookies.txt",
+        "--trace=/home/saturnin/trace.log",
+        "--trace-ascii",
+        "/home/saturnin/trace-ascii.log",
+        "https://example.test/ok",
+    ]) == [
+        "/home/saturnin/cookies.txt",
+        "/home/saturnin/trace.log",
+        "/home/saturnin/trace-ascii.log",
+    ]
+
+
+@pytest.mark.parametrize(
+    "command",
+    [
+        "curl --config /tmp/curlrc https://example.test/ok",
+        "curl --config=/tmp/curlrc https://example.test/ok",
+    ],
+)
+def test_curl_config_is_rejected(governance: Governance, command: str) -> None:
+    decision = governance.check_server_command(command)
+
+    assert not decision.allowed
+    assert "unsupported curl option '--config'" in decision.reasons[0]
 
 
 @pytest.mark.parametrize(

@@ -302,7 +302,7 @@ def test_checkpoint_sweep_does_not_mutate_when_launcher_is_disabled(
 ) -> None:
     task = board.create("Resume after dependency")
     Router(config).dispatch(board, task)
-    board.transition(task, "blocked")
+    board.transition(task, "blocked", note="escalated: https://example.test/escalations/42")
     CheckpointStore(config, board).save(
         Checkpoint(
             task_id=task.id,

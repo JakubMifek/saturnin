@@ -88,7 +88,7 @@ class ReviewLedger:
         if verdict not in VERDICTS:
             raise ReviewError(f"unknown verdict: {verdict}")
         if kind == "pr" and not head_sha.strip():
-            raise ReviewError("PR reviews require the reviewed head SHA")
+            raise ReviewError("PR reviews require --head-sha (pass the same SHA to review record and review gate)")
         if kind == "issue" and not issue_digest.strip():
             raise ReviewError("issue reviews require the reviewed issue-content digest")
         if reviewer.strip().lower() == author.strip().lower():

@@ -65,6 +65,15 @@ def test_transition_id_is_read_modify_write_under_lock(board: Board) -> None:
         board.transition_id(task.id, "done")
 
 
+def test_transition_to_blocked_requires_escalation_reference(board: Board) -> None:
+    task = board.create("Escalate blocker")
+    board.transition(task, "routed")
+    with pytest.raises(BoardError):
+        board.transition(task, "blocked")
+    blocked = board.transition(task, "blocked", note="escalated: https://example.test/issues/1")
+    assert blocked.state == "blocked"
+
+
 def test_listing_orders_by_priority(board: Board) -> None:
     low = board.create("low", priority="P3")
     high = board.create("high", priority="P0")

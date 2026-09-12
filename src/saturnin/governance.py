@@ -810,6 +810,25 @@ def _curl_targets(arguments: Sequence[str]) -> list[str]:
                 targets.append(value)
             index += 1
             continue
+        if argument in {"-c", "--cookie-jar", "--trace", "--trace-ascii"}:
+            index += 1
+            if index >= len(arguments):
+                raise _WriteScopeError(f"curl option {argument!r} requires a value")
+            value = arguments[index]
+            if value != "-":
+                targets.append(value)
+            index += 1
+            continue
+        if argument.startswith(("--cookie-jar=", "--trace=", "--trace-ascii=")):
+            value = argument.split("=", 1)[1]
+            if value and value != "-":
+                targets.append(value)
+            index += 1
+            continue
+        if argument in {"-K", "--config"} or argument.startswith("--config="):
+            raise _WriteScopeError(
+                "unsupported curl option '--config'; write scope is unknown"
+            )
         if argument == "--remote-name-all":
             remote_name_all = True
             index += 1

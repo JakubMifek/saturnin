@@ -83,6 +83,7 @@ def build_parser() -> argparse.ArgumentParser:
     move.add_argument("state")
     move.add_argument("--actor", default=None, help="default: the configured CEO role")
     move.add_argument("--note", default="")
+    move.add_argument("--escalation", default="", help="escalation issue URL/ref for blocked tasks")
 
     tree = task.add_parser("tree", help="show the work hierarchy")
     tree.add_argument("task_id", nargs="?", help="root; default: every top level item")
@@ -805,7 +806,11 @@ def _run_task(args: argparse.Namespace, config: Config, board: Board, as_json: b
                 )
         _emit(task.to_dict(), as_json, _task_line(task))
         return 0
-    task = board.transition_id(args.task_id, args.state, actor=args.actor, note=args.note)
+    note = args.note
+    if args.state == "blocked" and args.escalation.strip():
+        escalation_ref = args.escalation.strip()
+        note = f"escalated: {escalation_ref}" if not note else f"escalated: {escalation_ref}; {note}"
+    task = board.transition_id(args.task_id, args.state, actor=args.actor, note=note)
     _emit(task.to_dict(), as_json, _task_line(task))
     return 0
 
