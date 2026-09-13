@@ -1,7 +1,9 @@
 from __future__ import annotations
 
 import json
+import os
 from concurrent.futures import ThreadPoolExecutor
+from pathlib import Path
 
 import pytest
 
@@ -257,7 +259,9 @@ def test_corrupt_review_ledger_reports_file_and_line(config: Config) -> None:
         list(ledger)
 
 
-def test_review_ledger_recovers_from_unterminated_tail(config: Config) -> None:
+def test_review_ledger_recovers_from_unterminated_tail(
+    config: Config, monkeypatch: pytest.MonkeyPatch
+) -> None:
     ledger = ReviewLedger(config)
     subject = "JakubMifek/saturnin#interrupted"
     ledger.record(
@@ -273,6 +277,14 @@ def test_review_ledger_recovers_from_unterminated_tail(config: Config) -> None:
         handle.write('{"subject":')
 
     assert len(ledger.for_subject(subject, "pr")) == 1
+    replacements: list[tuple[Path, Path]] = []
+    original_replace = os.replace
+
+    def tracked_replace(source: Path, destination: Path) -> None:
+        replacements.append((Path(source), Path(destination)))
+        original_replace(source, destination)
+
+    monkeypatch.setattr("saturnin.jsonlines.os.replace", tracked_replace)
     ledger.record(
         subject=subject,
         kind="pr",
@@ -282,6 +294,25 @@ def test_review_ledger_recovers_from_unterminated_tail(config: Config) -> None:
         head_sha=TEST_HEAD_SHA,
     )
     assert ledger.for_subject(subject, "pr")[0].verdict == "changes_requested"
+    assert replacements and replacements[0][1] == path
+    assert replacements[0][0].parent == path.parent
+
+
+def test_review_record_validates_entry_before_append(config: Config) -> None:
+    ledger = ReviewLedger(config)
+
+    with pytest.raises(ReviewError, match="zero_context.*boolean"):
+        ledger.record(
+            subject="JakubMifek/saturnin#invalid-write",
+            kind="pr",
+            author="code-worker",
+            reviewer="pr-reviewer",
+            verdict="approved",
+            zero_context="true",
+            head_sha=TEST_HEAD_SHA,
+        )
+
+    assert list(ledger.dir.glob("*.jsonl")) == []
 
 
 def test_review_ledger_preserves_complete_unterminated_record(config: Config) -> None:

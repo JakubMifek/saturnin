@@ -14,8 +14,17 @@ from saturnin.board import Board
 from saturnin.checkpoints import Checkpoint, CheckpointStore
 from saturnin.config import Config
 from saturnin.launcher import AgentLauncher, LauncherError
+from saturnin.mcp import MCPError
 from saturnin.routing import Router
 from saturnin.worktrees import WorktreeManager
+
+
+@pytest.fixture(autouse=True)
+def verified_github_mcp(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(
+        "saturnin.launcher.verify_github_binary",
+        lambda config: config.var_dir / "bin" / "github-mcp-server",
+    )
 
 
 def test_launcher_starts_routed_role_with_filtered_mcp(
@@ -534,6 +543,68 @@ def test_launcher_keeps_engine_source_for_managed_repository(
 
     assert calls[0]["env"]["SATURNIN_HOME"] == str(config.root)
     assert calls[0]["env"]["PYTHONPATH"].split(":")[0] == str(config.root / "src")
+
+
+def test_launcher_rejects_unverified_github_binary(
+    config: Config,
+    board: Board,
+    git_repo: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    config.policy("mcp")["launcher"]["enabled"] = True
+    task = board.create("Implement checksum validation")
+    Router(config).dispatch(board, task)
+    worktree = WorktreeManager(config, repo=git_repo, board=board).create(
+        "feature/checksum-validation"
+    )
+    with board.edit(task.id) as stored:
+        stored.branch = "feature/checksum-validation"
+        stored.worktree = str(worktree.path)
+    monkeypatch.setattr("saturnin.launcher.shutil.which", lambda _: "/usr/bin/copilot")
+    verification_roots: list[Path] = []
+
+    def reject_binary(trusted: Config) -> Path:
+        verification_roots.append(trusted.root)
+        raise MCPError("checksum mismatch")
+
+    monkeypatch.setattr(
+        "saturnin.launcher.verify_github_binary",
+        reject_binary,
+    )
+
+    with pytest.raises(LauncherError, match="checksum mismatch"):
+        AgentLauncher(config, board).launch(task.id)
+
+    assert verification_roots == [config.data_root]
+    assert board.get(task.id).state == "routed"
+
+
+def test_launcher_rejects_branch_local_github_replacement(
+    config: Config, board: Board, git_repo: Path
+) -> None:
+    task = board.create("Reject a replaced GitHub server")
+    Router(config).dispatch(board, task)
+    worktree = WorktreeManager(config, repo=git_repo, board=board).create(
+        "feature/replaced-github-mcp"
+    )
+    policy_path = worktree.path / "policies" / "mcp.yaml"
+    policy = yaml.safe_load(policy_path.read_text(encoding="utf-8"))
+    policy["servers"]["github"]["command"] = "/bin/echo"
+    policy_path.write_text(yaml.safe_dump(policy), encoding="utf-8")
+    with board.edit(task.id) as stored:
+        stored.branch = "feature/replaced-github-mcp"
+        stored.worktree = str(worktree.path)
+    launcher = AgentLauncher(config, board)
+    worker_config = launcher._worker_config(worktree.path)
+    contract = launcher._contract(board.get(task.id), worker_config)
+
+    with pytest.raises(MCPError, match="canonical executable"):
+        launcher._write_mcp_config(
+            board.get(task.id),
+            contract,
+            config=worker_config,
+            worktree_scope=worktree.path,
+        )
 
 
 def test_root_mcp_config_has_no_blanket_grants() -> None:

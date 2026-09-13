@@ -57,7 +57,10 @@ def server_process(
     command = str(definition["command"]).format(**values)
     args = [str(value).format(**values) for value in definition.get("args", [])]
     canonical_github = (config.var_dir / "bin" / "github-mcp-server").resolve(strict=False)
-    if Path(command).expanduser().resolve(strict=False) == canonical_github:
+    configured = Path(command).expanduser().resolve(strict=False)
+    if name == "github" and configured != canonical_github:
+        raise MCPError(f"GitHub MCP server must use canonical executable {canonical_github}")
+    if name == "github" or configured == canonical_github:
         _validate_github_read_only(args)
     return command, args
 

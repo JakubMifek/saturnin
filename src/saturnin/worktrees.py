@@ -168,7 +168,13 @@ class WorktreeManager:
         base = base or self.governance.default_branch
         root = Path(self.config.governance.get("git", {}).get("worktree_root", "var/worktrees"))
         if not root.is_absolute():
-            root = self.repo / root
+            repository_config = Config(self.repo)
+            anchor = (
+                self.config.data_root
+                if repository_config.data_root == self.config.data_root
+                else self.repo
+            )
+            root = anchor / root
         root.mkdir(parents=True, exist_ok=True)
         target = path or root / branch.replace("/", "__")
         if target.exists():

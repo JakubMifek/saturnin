@@ -41,6 +41,42 @@ def test_create_and_list(manager: WorktreeManager) -> None:
     assert manager.is_clean(worktree.path)
 
 
+def test_relative_worktree_root_uses_shared_data_root_from_linked_source(
+    config: Config, git_repo: Path, board: Board
+) -> None:
+    linked = config.root / "linked-source"
+    git(["worktree", "add", "-b", "feature/linked-source", str(linked)], git_repo)
+    linked_config = Config(linked)
+
+    worktree = WorktreeManager(
+        linked_config, repo=linked, board=Board(linked_config)
+    ).create("feature/from-linked")
+
+    assert worktree.path.parent == config.data_root / "var" / "worktrees"
+
+
+def test_managed_repo_relative_worktree_root_stays_with_repo(
+    config: Config, git_repo: Path
+) -> None:
+    linked = config.root / "linked-engine"
+    git(["worktree", "add", "-b", "feature/linked-engine", str(linked)], git_repo)
+    linked_config = Config(linked)
+    managed = config.root / "managed-repo"
+    managed.mkdir()
+    git(["init", "-b", "main"], managed)
+    git(["config", "user.email", "managed@example.com"], managed)
+    git(["config", "user.name", "Managed"], managed)
+    (managed / "README.md").write_text("managed\n", encoding="utf-8")
+    git(["add", "."], managed)
+    git(["commit", "-m", "initial"], managed)
+
+    worktree = WorktreeManager(
+        linked_config, repo=managed, board=Board(linked_config)
+    ).create("feature/managed")
+
+    assert worktree.path.parent == managed / "var" / "worktrees"
+
+
 def test_list_identifies_main_worktree_by_path(
     manager: WorktreeManager, monkeypatch: pytest.MonkeyPatch
 ) -> None:

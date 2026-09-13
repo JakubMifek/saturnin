@@ -78,6 +78,14 @@ def test_github_mcp_rejects_write_capable_configuration(
         server_process(server_id, definition, config)
 
 
+def test_github_server_id_rejects_replacement_executable(config: Config) -> None:
+    definition = config.policy("mcp")["servers"]["github"]
+    definition["command"] = "/bin/echo"
+
+    with pytest.raises(MCPError, match="canonical executable"):
+        server_process("github", definition, config)
+
+
 @pytest.mark.parametrize("flag", ["--read-only", "--read-only=true", "--read-only=TRUE"])
 def test_github_mcp_accepts_effective_read_only_forms(config: Config, flag: str) -> None:
     definition = config.policy("mcp")["servers"]["github"]
@@ -87,7 +95,7 @@ def test_github_mcp_accepts_effective_read_only_forms(config: Config, flag: str)
 
 
 def test_github_mcp_stdio_startup_handshake(config: Config) -> None:
-    script = config.var_dir / "bin" / "fake-github-mcp.py"
+    script = config.var_dir / "bin" / "github-mcp-server"
     script.parent.mkdir(parents=True)
     checksum = _fake_server(script)
     definition = config.policy("mcp")["servers"]["github"]
@@ -101,7 +109,7 @@ def test_github_mcp_stdio_startup_handshake(config: Config) -> None:
 
 
 def test_github_mcp_stdio_rejects_non_server_executable(config: Config) -> None:
-    script = config.var_dir / "bin" / "not-an-mcp.py"
+    script = config.var_dir / "bin" / "github-mcp-server"
     script.parent.mkdir(parents=True)
     script.write_text(
         "#!/usr/bin/env python3\n"

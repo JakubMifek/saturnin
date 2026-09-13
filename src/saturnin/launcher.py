@@ -22,7 +22,7 @@ from .contracts import (
     mcp_authorization_problem,
     project_agent_path,
 )
-from .mcp import MCPError, server_process
+from .mcp import MCPError, server_process, verify_github_binary
 
 
 class LauncherError(RuntimeError):
@@ -359,6 +359,16 @@ class AgentLauncher:
                 config,
                 worktree_scope=worktree_scope,
             )
+            canonical_github = (
+                config.var_dir / "bin" / "github-mcp-server"
+            ).resolve(strict=False)
+            if Path(command).resolve(strict=False) == canonical_github:
+                trusted_config = Config(config.data_root)
+                verified = verify_github_binary(trusted_config).resolve()
+                if verified != canonical_github:
+                    raise LauncherError(
+                        "verified GitHub MCP executable does not match canonical path"
+                    )
             servers[name] = {
                 "type": definition.get("transport", "stdio"),
                 "command": command,

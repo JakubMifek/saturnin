@@ -16,7 +16,12 @@ from typing import Any, Iterator
 
 from .board import utcnow
 from .config import Config, default_config
-from .jsonlines import JSONLinesError, objects, repair_unterminated_tail
+from .jsonlines import (
+    JSONLinesError,
+    atomic_replace_text,
+    objects,
+    repair_unterminated_tail,
+)
 from .locking import file_lock
 
 VERDICTS = ("approved", "changes_requested", "rejected", "dismissed")
@@ -173,8 +178,13 @@ class ReviewLedger:
             issue_digest=digest,
             notes=notes,
         )
+        try:
+            ReviewRecord.validate_dict(entry.to_dict())
+        except (TypeError, ValueError) as exc:
+            raise ReviewError(f"invalid review record: {exc}") from exc
         path = self.dir / f"{kind}-{slugify(subject)}.jsonl"
         with file_lock(path):
+            serialized = json.dumps(entry.to_dict()) + "\n"
             if path.exists():
                 raw = path.read_text(encoding="utf-8")
                 try:
@@ -187,12 +197,10 @@ class ReviewLedger:
                 except JSONLinesError as exc:
                     raise ReviewError(f"corrupt review ledger {exc}") from exc
                 if repaired != raw:
-                    path.write_text(
-                        repaired,
-                        encoding="utf-8",
-                    )
+                    atomic_replace_text(path, repaired + serialized)
+                    return entry
             with path.open("a", encoding="utf-8") as handle:
-                handle.write(json.dumps(entry.to_dict()) + "\n")
+                handle.write(serialized)
         return entry
 
     def for_subject(self, subject: str, kind: str) -> list[ReviewRecord]:
