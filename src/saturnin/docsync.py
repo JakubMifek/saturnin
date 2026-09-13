@@ -25,6 +25,11 @@ MARKER = re.compile(
     r"(?P<close><!-- /generated:(?P=name) -->)",
     re.DOTALL,
 )
+MARKER_TOKEN = re.compile(r"<!-- (?P<close>/?)generated:(?P<name>[a-z-]+) -->")
+
+
+class GeneratedBlockError(ValueError):
+    pass
 
 
 def _rules_table(config: Config) -> str:
@@ -103,15 +108,47 @@ def render_text(text: str, config: Config) -> str:
     return MARKER.sub(replace, text)
 
 
+def _marker_problems(text: str, path: Path) -> list[str]:
+    problems: list[str] = []
+    opened: tuple[str, int] | None = None
+    for token in MARKER_TOKEN.finditer(text):
+        name = token.group("name")
+        line = text.count("\n", 0, token.start()) + 1
+        if not token.group("close"):
+            if opened is not None:
+                problems.append(
+                    f"{path}:{line}: generated block {name!r} opens before "
+                    f"{opened[0]!r} is closed"
+                )
+            else:
+                opened = (name, line)
+        elif opened is None:
+            problems.append(
+                f"{path}:{line}: generated block {name!r} has no opening marker"
+            )
+        elif opened[0] != name:
+            problems.append(
+                f"{path}:{line}: generated block {opened[0]!r} is closed as {name!r}"
+            )
+            opened = None
+        else:
+            opened = None
+    if opened is not None:
+        problems.append(
+            f"{path}:{opened[1]}: generated block {opened[0]!r} has no closing marker"
+        )
+    return problems
+
+
 def documents(config: Config) -> list[Path]:
-    """Every tracked markdown file that contains a generated block."""
+    """Every tracked markdown file that contains a generated marker."""
     roots = [config.root, config.root / "docs", config.root / "agents", config.root / ".github"]
     found: list[Path] = []
     for root in roots:
         if not root.is_dir():
             continue
         for path in sorted(root.rglob("*.md") if root.name == "docs" else root.glob("*.md")):
-            if MARKER.search(path.read_text(encoding="utf-8")):
+            if MARKER_TOKEN.search(path.read_text(encoding="utf-8")):
                 found.append(path)
     return found
 
@@ -122,6 +159,9 @@ def render(config: Config | None = None, *, write: bool = True) -> list[Path]:
     stale: list[Path] = []
     for path in documents(config):
         current = path.read_text(encoding="utf-8")
+        problems = _marker_problems(current, path.relative_to(config.root))
+        if problems:
+            raise GeneratedBlockError(problems[0])
         rendered = render_text(current, config)
         if rendered != current:
             stale.append(path)
@@ -132,9 +172,19 @@ def render(config: Config | None = None, *, write: bool = True) -> list[Path]:
 
 def audit(config: Config | None = None) -> list[str]:
     config = config or default_config()
+    problems: list[str] = []
+    for path in documents(config):
+        problems.extend(
+            _marker_problems(
+                path.read_text(encoding="utf-8"),
+                path.relative_to(config.root),
+            )
+        )
+    if problems:
+        return problems
     try:
         stale = render(config, write=False)
-    except KeyError as error:
+    except (GeneratedBlockError, KeyError) as error:
         return [str(error).strip("'")]
     if not stale:
         return []

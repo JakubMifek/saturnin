@@ -290,7 +290,7 @@ class Board:
                 "(use 'escalated: <issue-url>')"
             )
         task.state = state
-        if state in TERMINAL_STATES:
+        if state in TERMINAL_STATES and task.closed_at is None:
             task.closed_at = utcnow()
         task.log(f"state:{state}", actor=actor, note=note)
 

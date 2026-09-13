@@ -60,3 +60,28 @@ def test_audit_reports_unknown_generated_blocks(docs_home: Config, capsys) -> No
     assert docsync.audit(docs_home) == ["unknown generated block: nonsense"]
     assert main(["--home", str(docs_home.root), "doctor"]) == 2
     assert "unknown generated block: nonsense" in capsys.readouterr().out
+
+
+@pytest.mark.parametrize(
+    ("closing", "problem"),
+    [
+        ("", "has no closing marker"),
+        ("<!-- /generated:routing -->", "is closed as 'routing'"),
+    ],
+)
+def test_audit_reports_malformed_generated_blocks(
+    docs_home: Config,
+    capsys: pytest.CaptureFixture[str],
+    closing: str,
+    problem: str,
+) -> None:
+    path = docs_home.root / "docs" / "bad.md"
+    path.write_text(f"<!-- generated:rules -->\nstale policy text\n{closing}", encoding="utf-8")
+
+    errors = docsync.audit(docs_home)
+
+    assert len(errors) == 1
+    assert "docs/bad.md:" in errors[0]
+    assert problem in errors[0]
+    assert main(["--home", str(docs_home.root), "doctor"]) == 2
+    assert problem in capsys.readouterr().out

@@ -41,8 +41,9 @@ the CEO, stop and dispatch instead.
    --open`, `saturnin board metrics`). Workers checkpoint before long pauses.
 6. **Gate** - nothing merges or gets filed without
    `saturnin review gate ... --kind pr|issue`.
-7. **Mirror** - `saturnin task sync --all --push`, so the board survives the
-   loss of this machine.
+7. **Protect state** - while `tracking.mirror_tasks_as_issues` is false, keep
+   configured backups of `board/` and `var/` as described in the ops runbook.
+   Once mirroring is enabled, also run `saturnin task sync --all --push`.
 8. **Improve** - `saturnin improve` after every batch; findings become tasks.
 
 ## Non-negotiable governance
@@ -61,9 +62,10 @@ only its echo (`saturnin docs render`):
 8. The CEO never waits for a worker; every dispatch names a result contract.
 <!-- /generated:rules-list -->
 
-Operational details come from the policies above. Use `saturnin check branch`
-and `saturnin check command` before acting rather than copying policy values
-into instructions that can drift.
+Operational details come from the policies above. Route every push through
+`saturnin push`; use `saturnin check branch` and `saturnin check command` for
+preflight checks rather than copying policy values into instructions that can
+drift.
 
 ## Before you build anything
 

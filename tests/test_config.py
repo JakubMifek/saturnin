@@ -48,7 +48,7 @@ def test_ci_runs_on_default_branch_pushes_without_branch_gating_them() -> None:
     workflow = (REPO_ROOT / ".github/workflows/ci.yml").read_text(encoding="utf-8")
 
     assert "branches-ignore" not in workflow
-    assert "if: github.event_name == 'pull_request'" in workflow
+    assert "github.event_name == 'pull_request'" in workflow
 
 
 def test_ci_review_gate_does_not_claim_a_fixed_author_role() -> None:
@@ -64,6 +64,23 @@ def test_ci_governance_uses_trusted_base_code() -> None:
 
     governance = workflow.split("  governance:", 1)[1]
     assert "github.event.pull_request.base.sha" in governance
+    assert "mode=base" in governance
+    assert "mode=bootstrap" in governance
+    assert "TRUSTED_BOOTSTRAP_BASE_SHA" in governance
+    assert "actions/checkout" not in governance.split("Bootstrap initial governance", 1)[1]
+
+
+def test_ceo_instructions_require_backups_until_mirroring_is_enabled() -> None:
+    instructions = (REPO_ROOT / ".github/copilot-instructions.md").read_text(
+        encoding="utf-8"
+    )
+    policy = yaml.safe_load(
+        (REPO_ROOT / "policies/governance.yaml").read_text(encoding="utf-8")
+    )
+
+    assert policy["tracking"]["mirror_tasks_as_issues"] is False
+    assert "while `tracking.mirror_tasks_as_issues` is false" in instructions
+    assert "configured backups of `board/` and `var/`" in instructions
 
 
 def test_public_task_template_matches_discovery_policy() -> None:

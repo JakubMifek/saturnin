@@ -10,6 +10,7 @@ from __future__ import annotations
 import argparse
 import json
 import re
+import subprocess
 import sys
 from datetime import datetime, timezone
 from pathlib import Path
@@ -218,6 +219,9 @@ def build_parser() -> argparse.ArgumentParser:
         "--service",
         help="Saturnin-dedicated service that requires an apt command",
     )
+    push = sub.add_parser("push", help="push the current commit through the branch policy")
+    push.add_argument("--remote", default="origin")
+    push.add_argument("--branch", help="destination branch; default: current branch")
 
     # escalate ---------------------------------------------------------
     esc = sub.add_parser("escalate", help="render a human escalation issue body")
@@ -602,6 +606,28 @@ def _config(args: argparse.Namespace) -> Config:
     return Config.load(Path(args.home) if args.home else None)
 
 
+def _git_output(root: Path, *args: str) -> str:
+    result = subprocess.run(
+        ["git", *args],
+        cwd=root,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    if result.returncode:
+        raise RuntimeError(result.stderr.strip() or f"git {' '.join(args)} failed")
+    return result.stdout.strip()
+
+
+def _github_repo_slug(remote_url: str) -> str | None:
+    match = re.fullmatch(
+        r"(?:https://github\.com/|ssh://git@github\.com/|git@github\.com:)"
+        r"(?P<slug>[^/\s]+/[^/\s]+?)(?:\.git)?/?",
+        remote_url.strip(),
+    )
+    return match.group("slug") if match else None
+
+
 def main(argv: Sequence[str] | None = None) -> int:
     parser = build_parser()
     args = parser.parse_args(argv)
@@ -609,7 +635,14 @@ def main(argv: Sequence[str] | None = None) -> int:
     config.ensure_dirs()
     try:
         return _run(args, config)
-    except (BoardError, RoutingError, GitError, MirrorError, RuntimeError) as exc:
+    except (
+        BoardError,
+        RoutingError,
+        GitError,
+        MirrorError,
+        docsync.GeneratedBlockError,
+        RuntimeError,
+    ) as exc:
         print(f"saturnin: {exc}", file=sys.stderr)
         return 1
 
@@ -668,6 +701,28 @@ def _run(args: argparse.Namespace, config: Config) -> int:  # noqa: C901 - flat 
             ("ALLOWED: " if decision.allowed else "DENIED: ") + "; ".join(decision.reasons),
         )
         return 0 if decision.allowed else 2
+    if args.command == "push":
+        branch = args.branch or _git_output(config.root, "symbolic-ref", "--quiet", "--short", "HEAD")
+        remote_url = _git_output(config.root, "remote", "get-url", args.remote)
+        repo = _github_repo_slug(remote_url)
+        if repo is None:
+            raise RuntimeError(
+                f"remote {args.remote!r} is not an identifiable github.com repository"
+            )
+        decision = Governance(config).push_allowed(repo=repo, branch=branch)
+        if not decision.allowed:
+            _emit(
+                {"allowed": False, "reasons": decision.reasons},
+                as_json,
+                "DENIED: " + "; ".join(decision.reasons),
+            )
+            return 2
+        result = subprocess.run(
+            ["git", "push", args.remote, f"HEAD:refs/heads/{branch}"],
+            cwd=config.root,
+            check=False,
+        )
+        return result.returncode
     if args.command == "escalate":
         if args.push and args.task:
             task = board.get(args.task)

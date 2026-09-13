@@ -7,7 +7,7 @@ version: 1
 rules:
   - id: 1
     summary: Never push to the default branch
-    enforced_by: "`saturnin check branch`, `Governance.push_allowed`"
+    enforced_by: "`saturnin push`"
   - id: 2
     summary: Feature branches plus one worktree per parallel worker
     enforced_by: "`saturnin worktree create`"

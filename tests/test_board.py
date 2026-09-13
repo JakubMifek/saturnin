@@ -54,6 +54,23 @@ def test_transition_default_actor_uses_configured_ceo_role(board: Board) -> None
             delegation.pop("ceo_role", None)
 
 
+@pytest.mark.parametrize("terminal_state", ["done", "cancelled"])
+def test_noop_terminal_transition_preserves_closed_at(
+    board: Board, terminal_state: str
+) -> None:
+    task = board.create("Preserve terminal timestamp")
+    if terminal_state == "done":
+        for state in ("routed", "in_progress", "review", "done"):
+            task = board.transition(task, state)
+    else:
+        task = board.transition(task, "cancelled")
+    closed_at = task.closed_at
+
+    repeated = board.transition(task, terminal_state)
+
+    assert repeated.closed_at == closed_at
+
+
 def test_transition_id_is_read_modify_write_under_lock(board: Board) -> None:
     task = board.create("Implement widget")
     updated = board.transition_id(task.id, "routed", actor="router", note="dispatched")

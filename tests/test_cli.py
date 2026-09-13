@@ -205,6 +205,54 @@ def test_branch_and_command_checks(home: Path, capsys: pytest.CaptureFixture[str
     )
 
 
+def test_governed_push_uses_remote_repo_and_destination_branch(
+    home: Path, capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    calls: list[list[str]] = []
+
+    def fake_run(args, **kwargs):
+        calls.append(args)
+        if args[1:3] == ["symbolic-ref", "--quiet"]:
+            return subprocess.CompletedProcess(args, 0, "feature/safe\n", "")
+        if args[1:3] == ["remote", "get-url"]:
+            return subprocess.CompletedProcess(
+                args, 0, "git@github.com:JakubMifek/saturnin.git\n", ""
+            )
+        return subprocess.CompletedProcess(args, 0, "", "")
+
+    monkeypatch.setattr("saturnin.cli.subprocess.run", fake_run)
+
+    assert run(capsys, "push")[0] == 0
+    assert calls[-1] == [
+        "git",
+        "push",
+        "origin",
+        "HEAD:refs/heads/feature/safe",
+    ]
+
+
+def test_governed_push_refuses_protected_branch_before_push(
+    home: Path, capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    calls: list[list[str]] = []
+
+    def fake_run(args, **kwargs):
+        calls.append(args)
+        if args[1:3] == ["remote", "get-url"]:
+            return subprocess.CompletedProcess(
+                args, 0, "https://github.com/JakubMifek/saturnin.git\n", ""
+            )
+        return subprocess.CompletedProcess(args, 0, "", "")
+
+    monkeypatch.setattr("saturnin.cli.subprocess.run", fake_run)
+
+    code, out = run(capsys, "push", "--branch", "main")
+
+    assert code == 2
+    assert "protected" in out
+    assert not any(call[1:2] == ["push"] for call in calls)
+
+
 def test_review_gate_flow(home: Path, capsys: pytest.CaptureFixture[str]) -> None:
     subject = "JakubMifek/saturnin#42"
     head_sha = "a" * 40

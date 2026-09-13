@@ -28,7 +28,7 @@ intake --dispatch--> routed --> in_progress --> review --> done
 <!-- generated:rules -->
 | # | Rule | Enforced by |
 | --- | --- | --- |
-| 1 | Never push to the default branch | `saturnin check branch`, `Governance.push_allowed` |
+| 1 | Never push to the default branch | `saturnin push` |
 | 2 | Feature branches plus one worktree per parallel worker | `saturnin worktree create` |
 | 3 | Every code PR is reviewed by an independent zero-context reviewer | `saturnin review gate --kind pr` |
 | 4 | Autonomous PR flow in this repository once that review passed | `autonomy.self_repo_autonomous_merge` |
