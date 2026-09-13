@@ -6,6 +6,7 @@ import subprocess
 import sys
 import time
 
+import pytest
 import yaml
 from saturnin.automation import AutomationLibrary
 from saturnin.board import Board
@@ -188,6 +189,61 @@ def test_monitor_recovery_closes_recorded_incident_task(config: Config, board: B
     assert board.get(task.id).state == "cancelled"
     assert not marker.exists()
     assert not escalated.exists()
+
+
+@pytest.mark.parametrize("terminal_state", ["done", "cancelled"])
+def test_monitor_recovery_clears_stale_markers_for_terminal_incident_task(
+    config: Config, terminal_state: str
+) -> None:
+    repo = config.root / "managed-app"
+    (repo / ".saturnin").mkdir(parents=True)
+    (repo / ".saturnin" / "repo.yaml").write_text(
+        "monitors:\n"
+        "  - name: health\n"
+        "    url: https://93.184.216.34/health\n"
+        "    expect_status: 200\n",
+        encoding="utf-8",
+    )
+    _register_monitor_repo(config, repo)
+    monitor_dir = config.var_dir / "monitors"
+    monitor_dir.mkdir(parents=True)
+    repo_key = f"managed-app-{hashlib.sha256(str(repo.resolve()).encode()).hexdigest()[:12]}"
+    marker = monitor_dir / f"{repo_key}_health.task"
+    marker.write_text("T-terminal", encoding="utf-8")
+    escalated = monitor_dir / f"{repo_key}_health.escalated"
+    escalated.write_text("", encoding="utf-8")
+    args_log = config.root / "saturnin-args"
+    fake_bin = config.root / "fake-bin"
+    fake_bin.mkdir()
+    curl = fake_bin / "curl"
+    curl.write_text("#!/bin/sh\nprintf 200\n", encoding="utf-8")
+    curl.chmod(0o755)
+    saturnin = fake_bin / "saturnin"
+    saturnin.write_text(
+        "#!/bin/sh\n"
+        f"printf '%s\\n' \"$*\" >> {args_log}\n"
+        "if [ \"$1\" = '--json' ] && [ \"$2\" = 'task' ] && [ \"$3\" = 'show' ]; then\n"
+        f"  printf '%s\\n' '{{\"state\":\"{terminal_state}\"}}'\n"
+        "elif [ \"$1\" = 'task' ] && [ \"$2\" = 'move' ]; then\n"
+        "  exit 99\n"
+        "fi\n",
+        encoding="utf-8",
+    )
+    saturnin.chmod(0o755)
+
+    subprocess.run(
+        ["bash", str(config.root / "automation/library/run_monitors.sh"), str(repo)],
+        check=True,
+        capture_output=True,
+        text=True,
+        env={**os.environ, "PATH": f"{fake_bin}:{os.environ['PATH']}"},
+    )
+
+    assert not marker.exists()
+    assert not escalated.exists()
+    calls = args_log.read_text(encoding="utf-8")
+    assert "--json task show T-terminal" in calls
+    assert "task move T-terminal cancelled" not in calls
 
 
 def test_monitor_recreates_missing_incident_marker_before_escalating(config: Config) -> None:

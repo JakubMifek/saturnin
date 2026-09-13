@@ -641,6 +641,7 @@ def test_launcher_injects_role_scoped_attestation_key_only_for_reviewers(
     with monkeypatch.context() as scoped:
         scoped.setenv("SATURNIN_REVIEW_ATTESTATION_KEY", role_key)
         scoped.setenv("SATURNIN_REVIEW_ATTESTATION_KEY_SCOPE", "role")
+        scoped.setenv("SATURNIN_AGENT_ROLE", "pr-reviewer")
         ReviewLedger(config).record(
             subject="JakubMifek/saturnin#reviewer-key",
             kind="pr",

@@ -218,6 +218,17 @@ def review_attestation_signing_key(
     key = master_key if master_key is not None else _load_attestation_key(config)
     scope_env = str(settings.get("key_scope_env", "SATURNIN_REVIEW_ATTESTATION_KEY_SCOPE"))
     if os.environ.get(scope_env) == "role":
+        role_env = str(settings.get("role_env", "SATURNIN_AGENT_ROLE"))
+        current_role = os.environ.get(role_env, "").strip().lower()
+        reviewer_name = reviewer.strip().lower()
+        if not current_role:
+            raise ReviewError(
+                f"{role_env} is required when {scope_env}=role for review attestations"
+            )
+        if not reviewer_name:
+            raise ReviewError("reviewer role is required for role-scoped review attestations")
+        if current_role != reviewer_name:
+            raise ReviewError(f"{role_env}={current_role} may not sign as reviewer {reviewer_name}")
         return key
     if settings.get("role_scoped", True):
         return role_scoped_review_attestation_key(key, reviewer)
@@ -229,6 +240,19 @@ def _verification_key(config: Config, reviewer: str) -> str:
     key = _load_attestation_key(config)
     scope_env = str(settings.get("key_scope_env", "SATURNIN_REVIEW_ATTESTATION_KEY_SCOPE"))
     if os.environ.get(scope_env) == "role":
+        role_env = str(settings.get("role_env", "SATURNIN_AGENT_ROLE"))
+        current_role = os.environ.get(role_env, "").strip().lower()
+        reviewer_name = reviewer.strip().lower()
+        if not current_role:
+            raise ReviewError(
+                f"{role_env} is required when {scope_env}=role for review attestations"
+            )
+        if not reviewer_name:
+            raise ReviewError("reviewer role is required for role-scoped review attestations")
+        if current_role != reviewer_name:
+            raise ReviewError(
+                f"{role_env}={current_role} may not verify reviewer {reviewer_name}"
+            )
         return key
     if settings.get("role_scoped", True):
         return role_scoped_review_attestation_key(key, reviewer)

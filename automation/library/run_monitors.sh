@@ -182,7 +182,13 @@ else:
       task_marker="${RESULTS_DIR}/${repo_key}_${name}.task"
       if [[ -f "$task_marker" ]]; then
         incident_task="$(<"$task_marker")"
-        if saturnin task move "$incident_task" cancelled --actor monitors \
+        incident_state="$(
+          saturnin --json task show "$incident_task" 2>/dev/null | "$PYTHON" -c \
+            'import json, sys; print(json.load(sys.stdin).get("state", ""))'
+        )" || incident_state=""
+        if [[ "$incident_state" == "done" || "$incident_state" == "cancelled" ]]; then
+          rm -f "$task_marker" "${RESULTS_DIR}/${repo_key}_${name}.escalated"
+        elif saturnin task move "$incident_task" cancelled --actor monitors \
           --note "$app/$name recovered with HTTP $code before intervention" >/dev/null; then
           rm -f "$task_marker"
           rm -f "${RESULTS_DIR}/${repo_key}_${name}.escalated"

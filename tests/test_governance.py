@@ -249,6 +249,47 @@ def test_attestation_key_is_scoped_to_reviewer_role(config: Config) -> None:
         )
 
 
+def test_role_scoped_attestation_verification_rejects_cross_role_impersonation(
+    config: Config, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    ledger = ReviewLedger(config)
+    subject = "JakubMifek/saturnin#role-impersonation"
+    issue_key = review_attestation_signing_key(config, "issue-reviewer")
+    forged = sign_review_attestation(
+        key=issue_key,
+        subject=subject,
+        kind="pr",
+        author="code-worker",
+        reviewer="pr-reviewer",
+        verdict="approved",
+        head_sha=TEST_HEAD_SHA,
+    )
+    monkeypatch.setenv("SATURNIN_REVIEW_ATTESTATION_KEY", issue_key)
+    monkeypatch.setenv("SATURNIN_REVIEW_ATTESTATION_KEY_SCOPE", "role")
+    monkeypatch.setenv("SATURNIN_AGENT_ROLE", "issue-reviewer")
+
+    with pytest.raises(ReviewError, match="may not verify reviewer pr-reviewer"):
+        ledger.record(
+            subject=subject,
+            kind="pr",
+            author="code-worker",
+            reviewer="pr-reviewer",
+            verdict="approved",
+            head_sha=TEST_HEAD_SHA,
+            attestation=forged,
+        )
+
+
+def test_role_scoped_attestation_signing_requires_agent_role(
+    config: Config, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("SATURNIN_REVIEW_ATTESTATION_KEY_SCOPE", "role")
+    monkeypatch.delenv("SATURNIN_AGENT_ROLE", raising=False)
+
+    with pytest.raises(ReviewError, match="SATURNIN_AGENT_ROLE is required"):
+        review_attestation_signing_key(config, "pr-reviewer")
+
+
 def test_review_gate_rejects_tampered_attestation(config: Config) -> None:
     ledger = ReviewLedger(config)
     subject = "JakubMifek/saturnin#tampered"
