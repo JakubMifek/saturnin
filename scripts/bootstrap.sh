@@ -16,6 +16,7 @@ python3 -m venv .venv
 source .venv/bin/activate
 python -m pip install --upgrade pip >/dev/null
 python -m pip install -e ".[dev]"
+python -m saturnin.mcp install github
 
 mkdir -p board/tasks board/checkpoints board/reviews var/logs var/worktrees var/reports
 

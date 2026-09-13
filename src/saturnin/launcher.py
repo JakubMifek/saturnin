@@ -15,6 +15,7 @@ from .board import Board, Task, utcnow
 from .checkpoints import Checkpoint, CheckpointStore
 from .config import Config, default_config, load_yaml
 from .contracts import FRONT_MATTER, AgentContract, load_contracts, mcp_authorization_problem
+from .mcp import server_process
 
 
 class LauncherError(RuntimeError):
@@ -293,16 +294,15 @@ class AgentLauncher:
                     f"MCP server {name!r} is not authorized for role "
                     f"{contract.role!r}: {authorization_problem}"
                 )
+            command, args = server_process(
+                definition,
+                self.config,
+                worktree_scope=worktree_scope,
+            )
             servers[name] = {
                 "type": definition.get("transport", "stdio"),
-                "command": definition["command"],
-                "args": [
-                    str(value).format(
-                        worktrees=str(worktree_scope or (self.config.var_dir / "worktrees")),
-                        worktree=str(worktree_scope or (self.config.var_dir / "worktrees")),
-                    )
-                    for value in definition.get("args", [])
-                ],
+                "command": command,
+                "args": args,
             }
         path = self.dir / f"{task.id}.mcp.json"
         path.write_text(json.dumps({"mcpServers": servers}, indent=2) + "\n", encoding="utf-8")

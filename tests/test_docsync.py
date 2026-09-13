@@ -120,13 +120,14 @@ def test_audit_detects_malformed_marker_candidates(docs_home: Config) -> None:
 @pytest.mark.parametrize(
     "content",
     [
+        "<!-- generated:rules\nstale",
         "<!-- generated: -->\nstale\n<!-- /generated: -->",
         "prefix <!-- generated:rules -->\nstale\n<!-- /generated:rules --> suffix",
         "<!-- generated:RULES -->\nstale\n<!-- /generated:RULES -->",
     ],
 )
 def test_audit_rejects_empty_nonlowercase_or_embedded_markers(
-    docs_home: Config, content: str
+    docs_home: Config, content: str, capsys: pytest.CaptureFixture[str]
 ) -> None:
     (docs_home.root / "docs" / "bad.md").write_text(content, encoding="utf-8")
 
@@ -134,3 +135,5 @@ def test_audit_rejects_empty_nonlowercase_or_embedded_markers(
 
     assert errors
     assert all("malformed generated marker" in error for error in errors)
+    assert main(["--home", str(docs_home.root), "doctor"]) == 2
+    assert "malformed generated marker" in capsys.readouterr().out

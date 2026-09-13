@@ -10,8 +10,21 @@ servers:
   github:
     description: Issues, pull requests and review data for managed repositories.
     transport: stdio
-    command: npx
-    args: ["-y", "github-mcp-server@1.8.7"]
+    command: "{data_root}/var/bin/github-mcp-server"
+    args: [stdio]
+    install:
+      repository: github/github-mcp-server
+      tag: v1.12.1
+      commit: 7d13a7ad6f2a17f351a6d77ce280c85ae1821f4d
+      assets:
+        linux-amd64:
+          archive: github-mcp-server_Linux_x86_64.tar.gz
+          archive_sha256: e45c73a26a3c4cd643b40360db06f442de1e73a60d4eaf9e8639204ec3b95d3b
+          binary_sha256: c5828d540a9dab4b7fe7cfa94d29cad321eeda170f9736b3b500f37e4622de4b
+        linux-arm64:
+          archive: github-mcp-server_Linux_arm64.tar.gz
+          archive_sha256: 0f613c61fa524b30278a249ae199220465ff051e79177e58866e5e677191fda9
+          binary_sha256: 972d05c038fa3021e0d1f78333c161c7b85076b9c29a671814f00787b9bb5310
     # Roles allowed to mutate state through this server; everyone else is read-only.
     write_roles:
       [chief-of-staff, code-worker, ops-worker, architect, automation-smith, improver, scribe, test-worker]
