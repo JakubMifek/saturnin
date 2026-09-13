@@ -546,6 +546,33 @@ def test_curl_malformed_write_out_directives_fail_closed(
 
 
 @pytest.mark.parametrize(
+    "option",
+    [
+        "-w @file",
+        "-w@file",
+        "-sw@file",
+        "--write-out @-",
+        "--write-out=@file",
+    ],
+)
+def test_curl_external_write_out_formats_fail_closed(
+    governance: Governance, option: str
+) -> None:
+    decision = governance.check_server_command(f"curl -q {option} data:,ok")
+
+    assert not decision.allowed
+    assert "external curl --write-out formats are unsupported" in decision.reasons[0]
+
+
+def test_curl_literal_write_out_format_remains_allowed(
+    governance: Governance,
+) -> None:
+    assert governance.check_server_command(
+        "curl -q -w '%{http_code}' data:,ok"
+    ).allowed
+
+
+@pytest.mark.parametrize(
     ("argument", "target"),
     [
         ("-o/etc/response", "/etc/response"),

@@ -895,6 +895,10 @@ def _curl_bundled_write_action(argument: str) -> tuple[bool, str, str]:
 
 
 def _curl_write_out_targets(value: str) -> list[str]:
+    if value.startswith("@"):
+        raise _WriteScopeError(
+            "external curl --write-out formats are unsupported; write scope is unknown"
+        )
     targets: list[str] = []
     index = 0
     while index < len(value):
