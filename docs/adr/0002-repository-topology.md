@@ -27,7 +27,7 @@ repositories, declared in `policies/repos.yaml` and validated by
 | Repo | Visibility | Holds | Why separate |
 | --- | --- | --- | --- |
 | `JakubMifek/saturnin` | public | engine code, policies, agent and skill contracts, runbooks that contain no private detail | It is the reusable part. Public is also a discipline: nothing secret can accumulate here by accident. |
-| `JakubMifek/saturnin-ops` | private | mirrored task issues, the board's durable copy, escalation issues | Issues need automation (labels, assignees, timelines) and a real API. A wiki cannot be dispatched from. |
+| `JakubMifek/saturnin-ops` | private | mirrored task issues (durable copy once mirroring is enabled), escalation issues | Issues need automation (labels, assignees, timelines) and a real API. A wiki cannot be dispatched from. |
 | `JakubMifek/saturnin-notes` | private | long-form notes, project context, Obsidian vault | Notes are written and read by humans, change constantly, and would drown the engine's history in noise. |
 
 ### The open question, answered: separate board repo, not merged with the notes

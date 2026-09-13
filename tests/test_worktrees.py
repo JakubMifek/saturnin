@@ -120,7 +120,7 @@ def test_detached_worktree_is_skipped_during_plan_and_apply(
     assert any(a.target == str(detached) and a.reason == "detached HEAD" for a in plan.skipped)
 
     plan.actions.append(worktrees.Action("remove_worktree", str(detached), "stale"))
-    manager.apply(plan)
+    manager.apply(plan, now=later)
 
     assert detached.exists()
     assert any(a.target == str(detached) and a.reason == "detached HEAD" for a in plan.skipped)
@@ -168,7 +168,7 @@ def test_stale_worktree_is_planned_and_applied(
     assert str(worktree.path) in {a.target for a in plan.actions}
     assert not plan.applied
 
-    manager.apply(plan)
+    manager.apply(plan, now=later)
     assert plan.errors == []
     assert not worktree.path.exists()
     log = (manager.config.var_dir / "logs" / "janitor.log").read_text(encoding="utf-8")
@@ -199,12 +199,32 @@ def test_apply_rechecks_open_task_before_removing_worktree(
     with board.edit(task.id) as stored:
         stored.branch = "feature/recheck"
 
-    manager.apply(plan)
+    manager.apply(plan, now=later)
 
     assert worktree.path.exists()
     assert str(worktree.path) not in {a.target for a in plan.actions}
     assert any(
         action.target == str(worktree.path) and action.reason == "has an open board task"
+        for action in plan.skipped
+    )
+
+
+def test_apply_skips_recreated_worktree_from_stale_plan(manager: WorktreeManager) -> None:
+    worktree = manager.create("feature/recreated")
+    later = datetime.now(timezone.utc) + timedelta(days=30)
+    plan = manager.plan_cleanup(now=later)
+    assert str(worktree.path) in {a.target for a in plan.actions}
+
+    manager.rollback_create(worktree)
+    recreated = manager.create("feature/recreated", path=worktree.path)
+
+    manager.apply(plan, now=later)
+
+    assert recreated.path.exists()
+    assert str(recreated.path) not in {a.target for a in plan.actions}
+    assert any(
+        action.target == str(recreated.path)
+        and action.reason == "worktree identity changed since planning"
         for action in plan.skipped
     )
 
@@ -225,8 +245,35 @@ def test_merged_branch_is_deleted_and_protected_ones_are_not(
     assert ("delete_branch", "feature/merged") in targets
     assert ("delete_branch", "main") not in targets
 
-    manager.apply(plan)
+    manager.apply(plan, now=later)
     assert "feature/merged" not in git(["branch", "--format=%(refname:short)"], git_repo)
+
+
+def test_apply_rechecks_merge_grace_before_deleting_branch(
+    manager: WorktreeManager, git_repo: Path
+) -> None:
+    worktree = manager.create("feature/recently-merged")
+    (worktree.path / "file.txt").write_text("done\n", encoding="utf-8")
+    git(["add", "."], worktree.path)
+    git(["-c", "user.email=a@b.c", "-c", "user.name=w", "commit", "-m", "work"], worktree.path)
+    git(["merge", "--no-ff", "-m", "merge", "feature/recently-merged"], git_repo)
+    manager.remove(worktree.path)
+
+    now = datetime.now(timezone.utc)
+    plan = manager.plan_cleanup(now=now + timedelta(days=5))
+    assert ("delete_branch", "feature/recently-merged") in {
+        (a.kind, a.target) for a in plan.actions
+    }
+
+    manager.apply(plan, now=now)
+
+    assert "feature/recently-merged" in git(["branch", "--format=%(refname:short)"], git_repo)
+    assert any(
+        action.kind == "delete_branch"
+        and action.target == "feature/recently-merged"
+        and action.reason == "inside merge grace period"
+        for action in plan.skipped
+    )
 
 
 def test_removal_cap_defers_extra_actions(manager: WorktreeManager) -> None:

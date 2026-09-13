@@ -1,4 +1,4 @@
-# ADR-0001: GitHub Issues are the system of record; the board is a fast cache
+# ADR-0001: Target durability model after mirroring is enabled
 
 Status: **Proposed** - needs a decision from @jakubmifek on the repository split
 (see ADR-0002).
@@ -14,8 +14,10 @@ Three questions arrived together in review and turn out to be one question:
    assignee?"
 
 The board today is one JSON file per task under `board/tasks/`, gitignored.
-It is fast, offline, greppable and needs no network - which is exactly right for
-dispatch, and exactly wrong for durability. A rebuilt server loses everything.
+While mirroring stays disabled, the local board plus configured backups are the
+authoritative durability path. It is fast, offline, greppable and needs no
+network - which is exactly right for dispatch, and exactly why backups are
+required until mirroring is enabled.
 
 The obvious alternative - "just use GitHub Issues for everything" - has the
 opposite failure mode. Every dispatch would need a network round trip, the
@@ -27,12 +29,13 @@ per routing decision is waiting.
 
 Both, with an explicit direction of authority.
 
-- **GitHub Issues are the system of record.** Once ADR-0002 is accepted, every
-  task that matters is mirrored as an issue in a dedicated private repository.
-  The issue is what survives, what a human reads, and what can be recovered from.
-- **The local board is a cache and a work queue.** It carries the state machine,
-  the history, the dispatch metadata and the locking. It is rebuildable from the
-  issues; it is never the only copy.
+- **Current state while mirroring is disabled:** the local board plus configured
+  backups are authoritative.
+- **Target state once ADR-0002 is accepted and mirroring is enabled:** every
+  task that matters is mirrored as an issue in a dedicated private repository,
+  and those issues become the durable system of record.
+- **The local board remains a cache and a work queue.** It carries the state
+  machine, the history, the dispatch metadata and the locking.
 - **The mirror is a background job, not a blocking step** -
   `automation/library/mirror_tasks.sh` plus
   `saturnin task sync --all --push` on demand. The timer and doctor audit stay

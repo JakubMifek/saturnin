@@ -51,6 +51,14 @@ class Worktree:
         return self.path.name
 
 
+@dataclass(frozen=True)
+class WorktreeIdentity:
+    branch: str | None
+    head: str | None
+    inode: int | None
+    mtime_ns: int | None
+
+
 @dataclass
 class Action:
     kind: str  # remove_worktree | delete_branch
@@ -64,6 +72,9 @@ class CleanupPlan:
     skipped: list[Action] = field(default_factory=list)
     applied: bool = False
     errors: list[str] = field(default_factory=list)
+    worktree_identities: dict[str, WorktreeIdentity] = field(
+        default_factory=dict, repr=False
+    )
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -229,31 +240,12 @@ class WorktreeManager:
                     Action("remove_worktree", target, "uncommitted changes present")
                 )
                 continue
-            age = self._age_days(worktree, now)
-            if age is None:
-                plan.skipped.append(Action("remove_worktree", target, "age unknown"))
-                continue
-            is_merged = worktree.branch in merged
-            if is_merged:
-                threshold = wt_policy.get("merged_stale_after_days", 1)
-            elif worktree.branch and self.has_local_commits(worktree.branch):
-                # Branch has commits not yet in the default branch: be conservative.
-                threshold = wt_policy.get("hard_stale_after_days", 30)
+            eligible, reason = self._staleness_decision(worktree, now=now, merged=merged)
+            if eligible:
+                plan.actions.append(Action("remove_worktree", target, reason))
+                plan.worktree_identities[target] = self._worktree_identity(worktree)
             else:
-                # No local commits; use the normal stale threshold.
-                threshold = wt_policy.get("stale_after_days", 7)
-            if age >= threshold:
-                plan.actions.append(
-                    Action(
-                        "remove_worktree",
-                        target,
-                        f"idle {age:.1f}d >= {threshold}d ({'merged' if is_merged else 'unmerged'})",
-                    )
-                )
-            else:
-                plan.skipped.append(
-                    Action("remove_worktree", target, f"idle {age:.1f}d < {threshold}d")
-                )
+                plan.skipped.append(Action("remove_worktree", target, reason))
 
         if br_policy.get("delete_merged_local", True):
             grace = timedelta(days=br_policy.get("merged_grace_days", 1))
@@ -301,12 +293,13 @@ class WorktreeManager:
             return None
         return (now - max(stamps)).total_seconds() / 86400.0
 
-    def apply(self, plan: CleanupPlan) -> CleanupPlan:
+    def apply(self, plan: CleanupPlan, *, now: datetime | None = None) -> CleanupPlan:
         applied: list[Action] = []
+        now = now or datetime.now(timezone.utc)
         with self.lifecycle_lock():
             for action in plan.actions:
                 try:
-                    skip_reason = self._execution_skip_reason(action)
+                    skip_reason = self._execution_skip_reason(action, plan=plan, now=now)
                     if skip_reason is not None:
                         plan.skipped.append(Action(action.kind, action.target, skip_reason))
                         continue
@@ -326,18 +319,34 @@ class WorktreeManager:
         self.log_plan(plan)
         return plan
 
-    def _execution_skip_reason(self, action: Action) -> str | None:
+    def _execution_skip_reason(
+        self, action: Action, *, plan: CleanupPlan | None = None, now: datetime | None = None
+    ) -> str | None:
         if action.kind == "remove_worktree":
-            return self._remove_worktree_skip_reason(Path(action.target))
+            expected_identity = None
+            if plan is not None:
+                expected_identity = plan.worktree_identities.get(action.target)
+            return self._remove_worktree_skip_reason(
+                Path(action.target), expected_identity=expected_identity, now=now
+            )
         if action.kind == "delete_branch":
-            return self._delete_branch_skip_reason(action.target)
+            return self._delete_branch_skip_reason(action.target, now=now)
         return None
 
-    def _remove_worktree_skip_reason(self, path: Path) -> str | None:
+    def _remove_worktree_skip_reason(
+        self,
+        path: Path,
+        *,
+        expected_identity: WorktreeIdentity | None = None,
+        now: datetime | None = None,
+    ) -> str | None:
+        now = now or datetime.now(timezone.utc)
         matches = [worktree for worktree in self.list() if worktree.path == path]
         if not matches:
             return "worktree no longer exists"
         worktree = matches[0]
+        if expected_identity is not None and self._worktree_identity(worktree) != expected_identity:
+            return "worktree identity changed since planning"
         if worktree.locked:
             return "worktree is locked"
         if worktree.branch is None:
@@ -348,9 +357,13 @@ class WorktreeManager:
             return "has an open board task"
         if self.policy.get("safety", {}).get("require_clean_worktree", True) and not self.is_clean(path):
             return "uncommitted changes present"
+        stale, reason = self._staleness_decision(worktree, now=now)
+        if not stale:
+            return reason
         return None
 
-    def _delete_branch_skip_reason(self, branch: str) -> str | None:
+    def _delete_branch_skip_reason(self, branch: str, *, now: datetime | None = None) -> str | None:
+        now = now or datetime.now(timezone.utc)
         if branch in self.governance.protected_branches:
             return "protected branch"
         if branch in {worktree.branch for worktree in self.list()}:
@@ -360,7 +373,53 @@ class WorktreeManager:
                 return "has an open board task"
         if branch not in self.merged_branches():
             return "not merged into default branch"
+        grace_days = self.policy.get("branch", {}).get("merged_grace_days", 1)
+        try:
+            if now - self.branch_last_commit(branch) < timedelta(days=grace_days):
+                return "inside merge grace period"
+        except GitError:
+            return "cannot read history"
         return None
+
+    def _worktree_identity(self, worktree: Worktree) -> WorktreeIdentity:
+        inode: int | None = None
+        mtime_ns: int | None = None
+        try:
+            stat = worktree.path.stat()
+        except OSError:
+            pass
+        else:
+            inode = stat.st_ino
+            mtime_ns = stat.st_mtime_ns
+        return WorktreeIdentity(
+            branch=worktree.branch,
+            head=worktree.head,
+            inode=inode,
+            mtime_ns=mtime_ns,
+        )
+
+    def _staleness_decision(
+        self,
+        worktree: Worktree,
+        *,
+        now: datetime,
+        merged: set[str] | None = None,
+    ) -> tuple[bool, str]:
+        age = self._age_days(worktree, now)
+        if age is None:
+            return False, "age unknown"
+        wt_policy = self.policy.get("worktree", {})
+        merged_branches = merged if merged is not None else self.merged_branches()
+        is_merged = bool(worktree.branch and worktree.branch in merged_branches)
+        if is_merged:
+            threshold = wt_policy.get("merged_stale_after_days", 1)
+        elif worktree.branch and self.has_local_commits(worktree.branch):
+            threshold = wt_policy.get("hard_stale_after_days", 30)
+        else:
+            threshold = wt_policy.get("stale_after_days", 7)
+        if age >= threshold:
+            return True, f"idle {age:.1f}d >= {threshold}d ({'merged' if is_merged else 'unmerged'})"
+        return False, f"idle {age:.1f}d < {threshold}d"
 
     def log_plan(self, plan: CleanupPlan) -> Path:
         log_file = Path(self.policy.get("safety", {}).get("log_file", "var/logs/janitor.log"))

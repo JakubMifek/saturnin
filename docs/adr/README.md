@@ -6,7 +6,7 @@ gets a new ADR that supersedes the old one, so the reasoning survives.
 
 | ADR | Decision | Status |
 | --- | --- | --- |
-| [0001](0001-system-of-record.md) | GitHub Issues are the system of record; the board is a fast cache | Proposed |
+| [0001](0001-system-of-record.md) | Target durability model after mirroring is enabled | Proposed |
 | [0002](0002-repository-topology.md) | Three repositories: public engine, private board, private notes | Proposed |
 | [0003](0003-non-blocking-dispatch.md) | The CEO never waits for a worker | Accepted |
 | [0004](0004-policy-as-source-of-truth.md) | Policies are the source of truth; documentation is generated | Accepted |
