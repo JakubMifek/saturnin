@@ -30,7 +30,9 @@ MARKER_TOKEN = re.compile(
     re.MULTILINE,
 )
 MARKER_CANDIDATE = re.compile(
-    r"<!--[ \t]*/?generated:[^\n]*(?:-->|(?=\n)|\Z)",
+    r"<!--[ \t]*/?[ \t]*generated(?:"
+    r":[^\n]*(?:-->|(?=\n)|\Z)"
+    r"|[ \t]+:?[a-z-]+[ \t]*-->)",
     re.IGNORECASE,
 )
 
