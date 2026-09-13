@@ -888,6 +888,24 @@ def test_git_configuration_overrides_fail_closed(
 @pytest.mark.parametrize(
     ("command", "reason"),
     [
+        ("git config alias.pwn '!touch /etc/out'", "git config is unsupported"),
+        ("git pwn", "unsupported git subcommand"),
+        ("git --exec-path=/home/saturnin/helpers status", "executable dispatch options"),
+        ("git --config-env=alias.pwn=GIT_ALIAS pwn", "configuration overrides"),
+    ],
+)
+def test_git_executable_dispatch_fails_closed(
+    governance: Governance, command: str, reason: str
+) -> None:
+    decision = governance.check_server_command(command)
+
+    assert not decision.allowed
+    assert reason in decision.reasons[0]
+
+
+@pytest.mark.parametrize(
+    ("command", "reason"),
+    [
         (
             "git worktree add --porcelain /home/saturnin/worktrees/test",
             "unsupported git worktree add option",

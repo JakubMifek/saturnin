@@ -32,13 +32,13 @@ servers:
     description: Read-only web fetch for research.
     transport: stdio
     command: uvx
-    args: ["mcp-server-fetch"]
+    args: ["mcp-server-fetch@2026.8.18"]
     write_roles: []
   filesystem:
     description: Scoped filesystem access inside var/worktrees only.
     transport: stdio
     command: npx
-    args: ["-y", "@modelcontextprotocol/server-filesystem", "{worktrees}"]
+    args: ["-y", "@modelcontextprotocol/server-filesystem@2026.8.31", "{worktrees}"]
     write_roles: [code-worker, test-worker, architect, scribe, automation-smith, janitor]
 
 rules:

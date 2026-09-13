@@ -80,8 +80,10 @@ systemctl --user list-timers 'saturnin-*'
   watches `JakubMifek/saturnin` for `saturnin` issues only after a
   maintainer adds the `saturnin:trusted` label; see [observability](../observability.md).
 
-Without a login session, keep the timers alive across logouts:
-`loginctl enable-linger $USER`.
+Timers that must survive logout require systemd user lingering to be provisioned
+by the server administrator for the dedicated Saturnin user. This is host-level
+setup, not a Saturnin command. Without it, user timers run only while that
+user's systemd manager remains active.
 
 ## 7. The daily rhythm
 

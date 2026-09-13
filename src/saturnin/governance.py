@@ -49,6 +49,32 @@ _ALL_OPERANDS_WRITABLE = {
     "unlink",
 }
 _DESTINATION_WRITABLE = {"cp", "install", "ln", "mv", "rsync"}
+_GIT_SAFE_SUBCOMMANDS = frozenset(
+    {
+        "add",
+        "branch",
+        "checkout",
+        "clone",
+        "commit",
+        "diff",
+        "fetch",
+        "init",
+        "log",
+        "merge",
+        "pull",
+        "push",
+        "rebase",
+        "remote",
+        "reset",
+        "restore",
+        "rev-parse",
+        "show",
+        "status",
+        "switch",
+        "tag",
+        "worktree",
+    }
+)
 
 
 class _AssignmentError(ValueError):
@@ -690,10 +716,19 @@ def _git_targets(arguments: Sequence[str]) -> list[str]:
             targets.append(argument.split("=", 1)[1])
             index += 1
             continue
-        if argument == "-c" or argument.startswith("-c"):
+        if (
+            argument == "-c"
+            or argument.startswith("-c")
+            or argument == "--config-env"
+            or argument.startswith("--config-env=")
+        ):
             raise _WriteScopeError(
                 "git command-line configuration overrides are unsupported; "
                 "write scope is unknown"
+            )
+        if argument == "--exec-path" or argument.startswith("--exec-path="):
+            raise _WriteScopeError(
+                "git executable dispatch options are unsupported; write scope is unknown"
             )
         if not argument.startswith("-"):
             subcommand_index = index
@@ -703,6 +738,12 @@ def _git_targets(arguments: Sequence[str]) -> list[str]:
     if subcommand_index is None:
         return targets
     subcommand = arguments[subcommand_index]
+    if subcommand == "config":
+        raise _WriteScopeError("git config is unsupported; configuration can define shell aliases")
+    if subcommand not in _GIT_SAFE_SUBCOMMANDS:
+        raise _WriteScopeError(
+            f"unsupported git subcommand {subcommand!r}; executable dispatch is not allowed"
+        )
     subcommand_arguments = arguments[subcommand_index + 1 :]
     operands = _positional_arguments(subcommand_arguments)
     if subcommand == "clone" and len(operands) >= 2:

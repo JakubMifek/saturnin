@@ -205,6 +205,58 @@ def test_monitor_recreates_missing_incident_marker_before_escalating(config: Con
     assert "--task T-monitor" in calls
 
 
+def test_monitor_replaces_terminal_incident_marker_before_escalating(config: Config) -> None:
+    repo = config.root / "managed-app"
+    (repo / ".saturnin").mkdir(parents=True)
+    (repo / ".saturnin" / "repo.yaml").write_text(
+        "monitors:\n"
+        "  - name: health\n"
+        "    url: https://example.test/health\n"
+        "    expect_status: 200\n",
+        encoding="utf-8",
+    )
+    _register_monitor_repo(config, repo)
+    repo_key = f"managed-app-{hashlib.sha256(str(repo.resolve()).encode()).hexdigest()[:12]}"
+    monitor_dir = config.var_dir / "monitors"
+    monitor_dir.mkdir(parents=True)
+    (monitor_dir / f"{repo_key}_health.jsonl").write_text('{"ok":false}\n', encoding="utf-8")
+    (monitor_dir / f"{repo_key}_health.task").write_text("T-done", encoding="utf-8")
+    (monitor_dir / f"{repo_key}_health.escalated").write_text("", encoding="utf-8")
+    args_log = config.root / "saturnin-args"
+    fake_bin = config.root / "fake-bin"
+    fake_bin.mkdir()
+    curl = fake_bin / "curl"
+    curl.write_text("#!/bin/sh\nprintf 500\n", encoding="utf-8")
+    curl.chmod(0o755)
+    saturnin = config.root / ".venv" / "bin" / "saturnin"
+    saturnin.parent.mkdir(parents=True)
+    saturnin.write_text(
+        "#!/bin/sh\n"
+        f"printf '%s\\n' \"$*\" >> {args_log}\n"
+        "if [ \"$1\" = '--json' ] && [ \"$2\" = 'task' ] && [ \"$3\" = 'show' ]; then\n"
+        "  printf '%s\\n' '{\"state\":\"done\"}'\n"
+        "elif [ \"$1\" = '--json' ] && [ \"$2\" = 'task' ] && [ \"$3\" = 'add' ]; then\n"
+        "  printf '%s\\n' '{\"id\":\"T-new\"}'\n"
+        "fi\n",
+        encoding="utf-8",
+    )
+    saturnin.chmod(0o755)
+
+    subprocess.run(
+        ["bash", str(config.root / "automation/library/run_monitors.sh"), str(repo)],
+        check=True,
+        capture_output=True,
+        text=True,
+        env={**os.environ, "PATH": f"{fake_bin}:{os.environ['PATH']}"},
+    )
+
+    assert (monitor_dir / f"{repo_key}_health.task").read_text(encoding="utf-8") == "T-new"
+    calls = args_log.read_text(encoding="utf-8")
+    assert "--json task show T-done" in calls
+    assert "--json task add" in calls
+    assert "--task T-new" in calls
+
+
 def test_monitors_validate_manifest_name_and_url_before_curl(config: Config) -> None:
     repo = config.root / "managed-app"
     (repo / ".saturnin").mkdir(parents=True)

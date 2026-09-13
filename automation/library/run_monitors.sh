@@ -136,7 +136,16 @@ print(monitor["name"], monitor["url"], monitor.get("expect_status", 200),
     task_marker="${RESULTS_DIR}/${repo_key}_${name}.task"
     if [[ -s "$task_marker" ]]; then
       incident_task="$(<"$task_marker")"
+      if ! incident_state="$(saturnin --json task show "$incident_task" 2>/dev/null | "$PYTHON" -c \
+        'import json, sys; print(json.load(sys.stdin).get("state", ""))')" \
+        || [[ "$incident_state" == "done" || "$incident_state" == "cancelled" ]]; then
+        rm -f "$task_marker" "${RESULTS_DIR}/${repo_key}_${name}.escalated"
+        incident_task=""
+      fi
     else
+      incident_task=""
+    fi
+    if [[ -z "$incident_task" ]]; then
       task_add_args=(--repo "$repo_slug" --label incident --label monitor --priority P0 --dispatch)
       incident="$(
         saturnin --json task add "Monitor $app/$name failed: HTTP $code from $url" \

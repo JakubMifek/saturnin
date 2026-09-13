@@ -45,6 +45,17 @@ def test_github_mcp_uses_pinned_local_official_binary(config: Config) -> None:
     )
 
 
+def test_registry_mcp_servers_use_pinned_packages(config: Config) -> None:
+    servers = config.policy("mcp")["servers"]
+
+    assert servers["fetch"]["args"] == ["mcp-server-fetch@2026.8.18"]
+    assert servers["filesystem"]["args"] == [
+        "-y",
+        "@modelcontextprotocol/server-filesystem@2026.8.31",
+        "{worktrees}",
+    ]
+
+
 def test_github_mcp_stdio_startup_handshake(config: Config) -> None:
     script = config.var_dir / "bin" / "fake-github-mcp.py"
     script.parent.mkdir(parents=True)
