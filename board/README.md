@@ -22,8 +22,8 @@ board/reviews/<kind>-<subject>.jsonl append-only review verdicts
 | `priority` | `P0` drop everything … `P3` when idle |
 | `role` / `unit` | the lead role and its permanent organizational unit, set by the router |
 | `squad` | the ad-hoc crew for this task; assembled at dispatch, never a fixed team |
-| `result_contract` | how the result comes back, so the CEO never waits (rule 9) |
-| `issue` | the mirrored GitHub issue - the durable copy of this task (rule 8) |
+| `result_contract` | how the result comes back, so the CEO never waits (rule 8) |
+| `issue` | the mirrored GitHub issue when the optional mirror is enabled |
 | `repo` | the repository it concerns, if any |
 | `branch` / `worktree` | where the work happens |
 | `checkpoint` | timestamp of the latest checkpoint |

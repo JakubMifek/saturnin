@@ -54,7 +54,7 @@ done
 systemctl --user daemon-reload
 systemctl --user enable --now \
   saturnin-janitor.timer saturnin-improve.timer \
-  saturnin-poller.timer saturnin-mirror.timer saturnin-discovery.timer \
+  saturnin-poller.timer saturnin-discovery.timer \
   saturnin-resume.timer
 systemctl --user list-timers 'saturnin-*' || true
 

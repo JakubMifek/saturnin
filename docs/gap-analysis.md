@@ -27,7 +27,7 @@ keep running while nobody is looking (ADR-0003).
 | No `AGENTS.md` at the root - every coding tool looks for it first | added, pointing at the governance rules and the CLI | done |
 | Board had no concurrency control; parallel squads could lose updates | `flock` on every write, `Board.edit()` for read-modify-write, documented in `board/README.md` | done |
 | No work hierarchy - flat tasks only | `objective > epic > feature > task`, `saturnin task tree`, roll-up progress | done |
-| Tasks existed only on one machine | mirrored as GitHub issues, `doctor` fails when open work is unmirrored (ADR-0001) | done |
+| Tasks existed only on one machine | optional GitHub issue mirror drafted; ADR-0002 must be accepted before it becomes mandatory | proposed |
 | Rules duplicated across four documents | generated blocks from policy, checked in `doctor` and CI (ADR-0004) | done |
 | No per-agent tool boundary | `policies/mcp.yaml` + per-agent `mcp:` allow-list, validated by `doctor` | done |
 | Nothing watched hosted applications | monitors declared per project, `run_monitors.sh`, failures become P0 tasks | done |
@@ -41,7 +41,7 @@ keep running while nobody is looking (ADR-0003).
 These are not a list in a document - they live in `policies/improvement.yaml`
 under `backlog:`, and `saturnin improve` files each one as a board task
 (deduplicated by its `finding:<id>` marker) which is then mirrored as an issue
-under rule 8. A gap therefore has an owner and a state, and closing one means
+through the optional issue mirror once ADR-0002 is accepted. A gap therefore has an owner and a state, and closing one means
 deleting its entry from the policy, not editing this table.
 
 <!-- generated:backlog -->
@@ -65,7 +65,7 @@ deleting its entry from the policy, not editing this table.
 ## Anti-patterns deliberately not adopted
 
 - **Blocking human-input agents** (`HumanProxyAgent`, `HumanInputTool`) - they
-  deadlock a headless server; rule 9 forbids the shape entirely.
+  deadlock a headless server; rule 8 forbids the shape entirely.
 - **Redis or a message bus for agent communication** (MetaGPT) - infrastructure
   for a problem a single-user server does not have.
 - **Devcontainers as the production runtime** - the runtime is systemd user

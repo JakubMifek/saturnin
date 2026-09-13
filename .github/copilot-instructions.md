@@ -33,7 +33,7 @@ the CEO, stop and dispatch instead.
      the poller is itself dispatched work, never yours.
    - `escalation` - a human owns it; the escalation issue is the tracker.
 
-   Blocking on a worker is a governance violation (rule 9), not merely bad
+   Blocking on a worker is a governance violation (rule 8), not merely bad
    style: a waiting CEO is a stopped queue. If you are ever tempted to "just see
    how it turns out", dispatch the next task instead and let the contract find
    you.
@@ -58,8 +58,7 @@ only its echo (`saturnin docs render`):
 5. Managed repos: issues allowed, each independently reviewed first.
 6. Human escalation via a GitHub issue tagging `@jakubmifek`.
 7. Server: non-root; apt/systemctl only for Saturnin services; user-scope timers.
-8. Every task is mirrored as a GitHub issue, so losing this machine costs nothing.
-9. The CEO never waits for a worker; every dispatch names a result contract.
+8. The CEO never waits for a worker; every dispatch names a result contract.
 <!-- /generated:rules-list -->
 
 Operational details come from the policies above. Use `saturnin check branch`

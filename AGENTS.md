@@ -22,8 +22,7 @@ runtime.
 5. Managed repos: issues allowed, each independently reviewed first.
 6. Human escalation via a GitHub issue tagging `@jakubmifek`.
 7. Server: non-root; apt/systemctl only for Saturnin services; user-scope timers.
-8. Every task is mirrored as a GitHub issue, so losing this machine costs nothing.
-9. The CEO never waits for a worker; every dispatch names a result contract.
+8. The CEO never waits for a worker; every dispatch names a result contract.
 <!-- /generated:rules-list -->
 
 Rules live in `policies/governance.yaml`. Changing one is a reviewed PR like any

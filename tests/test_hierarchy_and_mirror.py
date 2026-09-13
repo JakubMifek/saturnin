@@ -5,12 +5,31 @@ import subprocess
 from concurrent.futures import ThreadPoolExecutor
 
 import pytest
+import yaml
 
 from saturnin.board import Board, BoardError
 from saturnin.cli import check_managed_repo, main
 from saturnin.config import Config
 from saturnin.governance import Governance
 from saturnin.issues import IssueMirror, MirrorError, run_gh
+
+
+def _set_issue_mirror(config: Config, *, repos: bool = True, mandatory: bool = False) -> None:
+    repos_path = config.root / "policies" / "repos.yaml"
+    repos_policy = yaml.safe_load(repos_path.read_text(encoding="utf-8"))
+    repos_policy["tracking"]["mirror_tasks_as_issues"] = repos
+    repos_path.write_text(yaml.safe_dump(repos_policy), encoding="utf-8")
+
+    governance_path = config.root / "policies" / "governance.yaml"
+    governance_policy = yaml.safe_load(governance_path.read_text(encoding="utf-8"))
+    governance_policy["tracking"]["mirror_tasks_as_issues"] = mandatory
+    governance_path.write_text(yaml.safe_dump(governance_policy), encoding="utf-8")
+    config._cache.clear()
+
+
+@pytest.fixture(autouse=True)
+def issue_mirror_enabled(config: Config) -> None:
+    _set_issue_mirror(config)
 
 
 def test_hierarchy_rollup(board: Board) -> None:
@@ -366,6 +385,7 @@ def test_result_contract_gate(config: Config) -> None:
 
 
 def test_doctor_flags_unmirrored_tasks(config: Config, board: Board, capsys) -> None:
+    _set_issue_mirror(config, mandatory=True)
     board.create("Endpoint")
     assert main(["--home", str(config.root), "doctor"]) == 2
     assert "not mirrored" in capsys.readouterr().out

@@ -49,3 +49,14 @@ def test_unknown_block_is_rejected(docs_home: Config) -> None:
         docsync.render_text(
             "<!-- generated:nonsense -->\n\n<!-- /generated:nonsense -->", docs_home
         )
+
+
+def test_audit_reports_unknown_generated_blocks(docs_home: Config, capsys) -> None:
+    (docs_home.root / "docs" / "bad.md").write_text(
+        "<!-- generated:nonsense -->\n\n<!-- /generated:nonsense -->",
+        encoding="utf-8",
+    )
+
+    assert docsync.audit(docs_home) == ["unknown generated block: nonsense"]
+    assert main(["--home", str(docs_home.root), "doctor"]) == 2
+    assert "unknown generated block: nonsense" in capsys.readouterr().out

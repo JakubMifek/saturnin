@@ -446,7 +446,7 @@ class Governance:
         return list(self.delegation.get("result_contracts", []))
 
     def check_result_contract(self, contract: str | None) -> Decision:
-        """Rule 9: a dispatch without an agreed result contract would force the
+        """Rule 8: a dispatch without an agreed result contract would force the
         CEO to wait for the worker, which is forbidden."""
         if self.delegation.get("ceo_may_wait_for_workers", False):
             return Decision.ok("policy permits waiting (not recommended)")
@@ -461,7 +461,7 @@ class Governance:
         return Decision.ok(f"results arrive via {contract}; the CEO does not wait")
 
     def mirror_required(self) -> bool:
-        """Rule 8: tasks are mirrored as issues so local loss is survivable."""
+        """Whether issue mirroring is mandatory before the topology is accepted."""
         return bool(self.tracking.get("mirror_tasks_as_issues", False))
 
     # -- self check ----------------------------------------------------

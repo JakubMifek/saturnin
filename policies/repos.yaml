@@ -30,8 +30,8 @@ repos:
     format: obsidian
 
 tracking:
-  # Rule 8: a task without a mirrored issue is not durable.
-  mirror_tasks_as_issues: true
+  # Optional until ADR-0002's repository topology is accepted and provisioned.
+  mirror_tasks_as_issues: false
   # Improvement findings and automation proposals are mirrored too.
   mirror_kinds: [objective, epic, feature, task, pr-review, issue-review, automation, improvement]
   # Label scheme applied to the mirrored issue.

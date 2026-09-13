@@ -1,8 +1,7 @@
 """Mirror board tasks as GitHub issues.
 
 The local board is fast and offline; GitHub is durable. ``policies/repos.yaml``
-names the private repository that holds the mirrored issues, and rule 8 of
-``policies/governance.yaml`` says a task without a mirror is not durable.
+can enable the issue mirror once the private board repository exists.
 
 Rendering is pure and testable; pushing shells out to ``gh`` so that Saturnin
 never has to hold a token itself.

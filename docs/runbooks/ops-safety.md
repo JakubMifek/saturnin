@@ -96,9 +96,9 @@ sibling state labels. Anything that was never mirrored is lost - which is what
 ## Backups
 
 Worth a nightly copy: `board/`, `policies/`, `var/reports/`, `var/logs/`.
-`var/worktrees/` is reproducible and needs no backup. The board additionally
-mirrors itself to GitHub every fifteen minutes (`saturnin-mirror.timer`), which
-is the backup that survives losing the machine entirely.
+`var/worktrees/` is reproducible and needs no backup. Once ADR-0002 is accepted,
+the board can additionally mirror itself to GitHub with `saturnin-mirror.timer`,
+which is the backup that survives losing the machine entirely.
 
 ## Making this repository public
 

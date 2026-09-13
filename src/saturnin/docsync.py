@@ -132,7 +132,10 @@ def render(config: Config | None = None, *, write: bool = True) -> list[Path]:
 
 def audit(config: Config | None = None) -> list[str]:
     config = config or default_config()
-    stale = render(config, write=False)
+    try:
+        stale = render(config, write=False)
+    except KeyError as error:
+        return [str(error).strip("'")]
     if not stale:
         return []
     names = ", ".join(str(path.relative_to(config.root)) for path in stale)

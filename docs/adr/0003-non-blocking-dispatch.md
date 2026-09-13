@@ -20,7 +20,7 @@ queue, and the whole system exists to keep that queue moving.
 
 ## Decision
 
-Waiting is a governance violation, not a style preference. It is **rule 9** in
+Waiting is a governance violation, not a style preference. It is **rule 8** in
 `policies/governance.yaml`, enforced in code by
 `Governance.check_result_contract` and applied at dispatch by the router.
 

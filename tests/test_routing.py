@@ -69,7 +69,7 @@ def test_dispatch_updates_task(config: Config, board: Board) -> None:
     assert stored.unit == "engineering"
     # Squads are ad hoc; the rule only suggests a starting crew.
     assert stored.squad and stored.role in stored.squad
-    # Rule 9: dispatch always agrees how the result comes back.
+    # Rule 8: dispatch always agrees how the result comes back.
     assert stored.result_contract == route.result_contract
     assert stored.routed_at is not None
     assert stored.history[-2]["event"] == "dispatch"
@@ -79,7 +79,7 @@ def test_dispatch_never_downgrades_a_preset_priority(
     config: Config, board: Board
 ) -> None:
     # A P0 incident (or a discovery-mapped priority) must survive dispatch even
-    # if the matched rule's own priority is less urgent (rule 9: never silently
+    # if the matched rule's own priority is less urgent (rule 8: never silently
     # downgrade urgent work).
     task = board.create("Update the runbook documentation", priority="P0")
     Router(config).dispatch(board, task)

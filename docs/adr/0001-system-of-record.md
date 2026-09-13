@@ -20,23 +20,23 @@ dispatch, and exactly wrong for durability. A rebuilt server loses everything.
 The obvious alternative - "just use GitHub Issues for everything" - has the
 opposite failure mode. Every dispatch would need a network round trip, the
 router would be rate limited, `saturnin doctor` could not run on a plane, and a
-GitHub outage would stop the CEO. Rule 9 says the CEO never waits; an API call
+GitHub outage would stop the CEO. Rule 8 says the CEO never waits; an API call
 per routing decision is waiting.
 
 ## Decision
 
 Both, with an explicit direction of authority.
 
-- **GitHub Issues are the system of record.** Every task that matters is
-  mirrored as an issue in a dedicated private repository (ADR-0002). The issue
-  is what survives, what a human reads, and what can be recovered from.
+- **GitHub Issues are the system of record.** Once ADR-0002 is accepted, every
+  task that matters is mirrored as an issue in a dedicated private repository.
+  The issue is what survives, what a human reads, and what can be recovered from.
 - **The local board is a cache and a work queue.** It carries the state machine,
   the history, the dispatch metadata and the locking. It is rebuildable from the
   issues; it is never the only copy.
 - **The mirror is a background job, not a blocking step** -
-  `automation/library/mirror_tasks.sh` on the `saturnin-mirror` timer, plus
-  `saturnin task sync --all --push` on demand. `saturnin doctor` fails when open
-  tasks have no issue, so drift is loud rather than silent.
+  `automation/library/mirror_tasks.sh` plus
+  `saturnin task sync --all --push` on demand. The timer and doctor audit stay
+  opt-in until ADR-0002 is accepted and the repositories exist.
 - **Board metadata travels as labels** (`saturnin:kind/epic`,
   `saturnin:state/in_progress`, `saturnin:role/code-worker`,
   `saturnin:priority/P0`), so the issue list is filterable without any custom

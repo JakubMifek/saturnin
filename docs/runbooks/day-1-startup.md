@@ -71,9 +71,9 @@ systemctl --user list-timers 'saturnin-*'
   default; set `APPLY=1` in the unit's environment when you trust it).
 - `saturnin-improve.timer` - hourly measure/detect/dispatch cycle.
 - `saturnin-poller.timer` - every five minutes, collects results for tasks whose
-  answer cannot report back on its own, so nobody ever waits (rule 9).
-- `saturnin-mirror.timer` - every fifteen minutes, mirrors open tasks as GitHub
-  issues so the board survives this machine (rule 8).
+  answer cannot report back on its own, so nobody ever waits (rule 8).
+- `saturnin-mirror.timer` - optional until ADR-0002 is accepted; when enabled,
+  mirrors open tasks as GitHub issues so the board survives this machine.
 - `saturnin-discovery.timer` - every ten minutes, adopts labelled issues raised
   in managed repositories (alerts, CI, humans) as board tasks. The scaffold
   watches `JakubMifek/saturnin` for `saturnin` issues only after a

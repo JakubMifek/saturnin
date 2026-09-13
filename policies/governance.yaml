@@ -27,9 +27,6 @@ rules:
     summary: "Server: non-root; apt/systemctl only for Saturnin services; user-scope timers"
     enforced_by: "`saturnin check command`"
   - id: 8
-    summary: Every task is mirrored as a GitHub issue, so losing this machine costs nothing
-    enforced_by: "`saturnin task sync`, `saturnin doctor`"
-  - id: 9
     summary: The CEO never waits for a worker; every dispatch names a result contract
     enforced_by: "`Governance.check_result_contract`, `saturnin dispatch`"
 
@@ -99,7 +96,7 @@ delegation:
   ceo_may_execute: false
   max_dispatch_seconds: 60
   max_deliberation_steps: 3
-  # Rule 9: the CEO never waits for a worker. Dispatch, agree how the result
+  # Rule 8: the CEO never waits for a worker. Dispatch, agree how the result
   # comes back, move on. Blocking on a worker is a governance violation.
   ceo_may_wait_for_workers: false
   # Every dispatched task must name one of these result contracts.
@@ -116,7 +113,6 @@ delegation:
   default_result_contract: board-callback
 
 tracking:
-  # Rule 8: every task is mirrored as a GitHub issue so that losing the local
-  # board costs nothing. Details in policies/repos.yaml.
-  mirror_tasks_as_issues: true
+  # Optional until ADR-0002's repository topology is accepted and provisioned.
+  mirror_tasks_as_issues: false
   policy_file: repos

@@ -155,6 +155,56 @@ def test_monitor_recovery_closes_recorded_incident_task(config: Config, board: B
     assert not escalated.exists()
 
 
+def test_monitor_recreates_missing_incident_marker_before_escalating(config: Config) -> None:
+    repo = config.root / "managed-app"
+    (repo / ".saturnin").mkdir(parents=True)
+    (repo / ".saturnin" / "repo.yaml").write_text(
+        "monitors:\n"
+        "  - name: health\n"
+        "    url: https://example.test/health\n"
+        "    expect_status: 200\n",
+        encoding="utf-8",
+    )
+    _register_monitor_repo(config, repo)
+    repo_key = f"managed-app-{hashlib.sha256(str(repo.resolve()).encode()).hexdigest()[:12]}"
+    monitor_log = config.var_dir / "monitors" / f"{repo_key}_health.jsonl"
+    monitor_log.parent.mkdir(parents=True)
+    monitor_log.write_text('{"ok":false}\n', encoding="utf-8")
+    args_log = config.root / "saturnin-args"
+    fake_bin = config.root / "fake-bin"
+    fake_bin.mkdir()
+    curl = fake_bin / "curl"
+    curl.write_text("#!/bin/sh\nprintf 500\n", encoding="utf-8")
+    curl.chmod(0o755)
+    saturnin = config.root / ".venv" / "bin" / "saturnin"
+    saturnin.parent.mkdir(parents=True)
+    saturnin.write_text(
+        "#!/bin/sh\n"
+        f"printf '%s\\n' \"$*\" >> {args_log}\n"
+        "if [ \"$1\" = '--json' ] && [ \"$2\" = 'task' ] && [ \"$3\" = 'add' ]; then\n"
+        "  printf '%s\\n' '{\"id\":\"T-monitor\"}'\n"
+        "fi\n",
+        encoding="utf-8",
+    )
+    saturnin.chmod(0o755)
+
+    subprocess.run(
+        ["bash", str(config.root / "automation/library/run_monitors.sh"), str(repo)],
+        check=True,
+        capture_output=True,
+        text=True,
+        env={**os.environ, "PATH": f"{fake_bin}:{os.environ['PATH']}"},
+    )
+
+    assert (config.var_dir / "monitors" / f"{repo_key}_health.task").read_text(
+        encoding="utf-8"
+    ) == "T-monitor"
+    calls = args_log.read_text(encoding="utf-8")
+    assert "--json task add" in calls
+    assert "escalate Monitor managed-app/health failing repeatedly" in calls
+    assert "--task T-monitor" in calls
+
+
 def test_monitors_validate_manifest_name_and_url_before_curl(config: Config) -> None:
     repo = config.root / "managed-app"
     (repo / ".saturnin").mkdir(parents=True)
@@ -357,6 +407,42 @@ def test_result_poller_reuses_escalation_reference_when_reblocking(config: Confi
         f"task move {task_id} blocked --actor result-poller --escalation "
         "https://example.test/issues/42"
     ) in calls
+
+
+def test_result_poller_archives_terminal_tasks_before_probe_execution(config: Config) -> None:
+    pollers = config.var_dir / "pollers"
+    pollers.mkdir(parents=True)
+    task_id = "T-done"
+    run_marker = config.root / "probe-ran"
+    probe = pollers / f"{task_id}.sh"
+    probe.write_text(f"#!/bin/bash\nprintf ran > {run_marker}\n", encoding="utf-8")
+    probe.chmod(0o755)
+    (pollers / f"{task_id}.escalated").write_text(
+        "https://example.test/issues/42\n", encoding="utf-8"
+    )
+    fake_saturin = config.root / ".venv" / "bin" / "saturnin"
+    fake_saturin.parent.mkdir(parents=True)
+    fake_saturin.write_text(
+        "#!/bin/sh\n"
+        "if [ \"$1\" = '--json' ] && [ \"$2\" = 'task' ] && [ \"$3\" = 'show' ]; then\n"
+        "  printf '%s\\n' '{\"state\":\"done\"}'\n"
+        "fi\n",
+        encoding="utf-8",
+    )
+    fake_saturin.chmod(0o755)
+
+    subprocess.run(
+        ["bash", str(config.root / "automation/library/result_poller.sh")],
+        check=True,
+        capture_output=True,
+        text=True,
+        env={**os.environ, "SATURNIN_HOME": str(config.root)},
+    )
+
+    assert not run_marker.exists()
+    assert not probe.exists()
+    assert (pollers / f"{task_id}.sh.done").exists()
+    assert not (pollers / f"{task_id}.escalated").exists()
 
 
 def test_review_gate_rejects_pr_subject_for_another_repo(config: Config) -> None:

@@ -133,13 +133,26 @@ print(monitor["name"], monitor["url"], monitor.get("expect_status", 200),
     monitor_results="${RESULTS_DIR}/${repo_key}_${name}.jsonl"
     printf '{"ts":"%s","app":"%s","monitor":"%s","status":"%s","ok":false}\n' \
       "$started" "$app" "$name" "$code" >> "$monitor_results"
+    task_marker="${RESULTS_DIR}/${repo_key}_${name}.task"
+    if [[ -s "$task_marker" ]]; then
+      incident_task="$(<"$task_marker")"
+    else
+      task_add_args=(--repo "$repo_slug" --label incident --label monitor --priority P0 --dispatch)
+      incident="$(
+        saturnin --json task add "Monitor $app/$name failed: HTTP $code from $url" \
+        --body "Expected $expect, observed $code at $started. Monitor declared in $manifest." \
+        "${task_add_args[@]}"
+      )"
+      incident_task="$(printf '%s' "$incident" | "$PYTHON" -c \
+        'import json, sys; print(json.load(sys.stdin)["id"])')"
+      printf '%s' "$incident_task" > "$task_marker"
+    fi
     recent_failures="$(tail -n 2 "$monitor_results" | grep -c '"ok":false' || true)"
     if (( recent_failures >= 2 )); then
       # Only escalate once per consecutive-failure streak.  The marker is
       # removed when the monitor recovers (ok=true path above).
       escalation_marker="${RESULTS_DIR}/${repo_key}_${name}.escalated"
       if [[ ! -f "$escalation_marker" ]]; then
-        incident_task="$(<"${RESULTS_DIR}/${repo_key}_${name}.task")"
         saturnin escalate "Monitor $app/$name failing repeatedly" \
           --context "Expected HTTP $expect from $url, got $code twice in a row." \
           --item "Confirm the service is meant to be up" \
@@ -150,16 +163,6 @@ print(monitor["name"], monitor["url"], monitor.get("expect_status", 200),
           --push
         touch "$escalation_marker"
       fi
-    else
-      task_add_args=(--repo "$repo_slug" --label incident --label monitor --priority P0 --dispatch)
-      incident="$(
-        saturnin --json task add "Monitor $app/$name failed: HTTP $code from $url" \
-        --body "Expected $expect, observed $code at $started. Monitor declared in $manifest." \
-        "${task_add_args[@]}"
-      )"
-      printf '%s' "$incident" | "$PYTHON" -c \
-        'import json, sys; print(json.load(sys.stdin)["id"])' \
-        > "${RESULTS_DIR}/${repo_key}_${name}.task"
     fi
   done
 done

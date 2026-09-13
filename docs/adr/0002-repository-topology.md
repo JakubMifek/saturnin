@@ -50,9 +50,9 @@ every note sync races the mirror timer. They stay separate.
 
 **Decision needed from @jakubmifek**: confirm the two private repository names
 (`saturnin-ops`, `saturnin-notes`) and create them, or say which naming you
-prefer. Until they exist, `saturnin task sync` runs in preview mode and
-`doctor` reports open tasks as unmirrored - nothing breaks, nothing is lost, but
-rule 8 is not actually in force.
+prefer. Until they exist, `saturnin task sync` remains a preview/opt-in mirror
+path, the mirror timer is not enabled by the installer, and `doctor` does not
+make this proposed topology a hard gate.
 
 ## Consequences
 

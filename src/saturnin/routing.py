@@ -207,7 +207,7 @@ class Router:
             # silently downgrade it, only raise it.
             if PRIORITIES.index(route.priority) < PRIORITIES.index(current.priority):
                 current.priority = route.priority
-            # Rule 9: agree up front how the result comes back. Saturnin dispatches
+            # Rule 8: agree up front how the result comes back. Saturnin dispatches
             # and moves on; it never blocks on a worker.
             current.result_contract = route.result_contract
             current.log(

@@ -35,8 +35,7 @@ intake --dispatch--> routed --> in_progress --> review --> done
 | 5 | Managed repos: issues allowed, each independently reviewed first | `saturnin review gate --kind issue` |
 | 6 | Human escalation via a GitHub issue tagging `@jakubmifek` | `saturnin escalate` |
 | 7 | Server: non-root; apt/systemctl only for Saturnin services; user-scope timers | `saturnin check command` |
-| 8 | Every task is mirrored as a GitHub issue, so losing this machine costs nothing | `saturnin task sync`, `saturnin doctor` |
-| 9 | The CEO never waits for a worker; every dispatch names a result contract | `Governance.check_result_contract`, `saturnin dispatch` |
+| 8 | The CEO never waits for a worker; every dispatch names a result contract | `Governance.check_result_contract`, `saturnin dispatch` |
 <!-- /generated:rules -->
 
 Rules live in `policies/governance.yaml` and `policies/server_scope.yaml`. They

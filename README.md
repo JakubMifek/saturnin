@@ -52,8 +52,7 @@ Full walkthrough: [`docs/runbooks/day-1-startup.md`](docs/runbooks/day-1-startup
 5. Managed repos: issues allowed, each independently reviewed first.
 6. Human escalation via a GitHub issue tagging `@jakubmifek`.
 7. Server: non-root; apt/systemctl only for Saturnin services; user-scope timers.
-8. Every task is mirrored as a GitHub issue, so losing this machine costs nothing.
-9. The CEO never waits for a worker; every dispatch names a result contract.
+8. The CEO never waits for a worker; every dispatch names a result contract.
 <!-- /generated:rules-list -->
 
 The rules are machine-readable in [`policies/`](policies) and enforced by

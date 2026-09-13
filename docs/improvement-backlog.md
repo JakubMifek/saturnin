@@ -37,9 +37,9 @@ Why the board keeps its own hierarchy instead of leaning entirely on GitHub is
 
 ## How an item gets here
 
-1. `saturnin improve` files a finding as a board task **and** the mirror files it
-   as a GitHub issue (rule 8) - a finding that lives only on one server is a
-   finding that will be lost. Issues carry the board metadata as labels
+1. `saturnin improve` files a finding as a board task; once ADR-0002 is accepted
+   and the optional mirror is enabled, that task can be mirrored as a GitHub
+   issue instead of living only on one server. Issues carry the board metadata as labels
    (`saturnin:kind/improvement`, `saturnin:state/...`), which is the practical
    form of "everything is an issue with a different label and assignee":
    dispatch stays local and fast, durability and human review happen on GitHub.

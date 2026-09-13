@@ -37,6 +37,13 @@ task_state() {
 
 for probe in "${probes[@]}"; do
   task_id="$(basename "$probe" .sh)"
+  current_state="$(task_state "$task_id")"
+  if [[ "$current_state" == "done" || "$current_state" == "cancelled" ]]; then
+    log "$task_id: task is $current_state; archiving stale probe"
+    rm -f "${POLLERS_DIR}/${task_id}.escalated"
+    mv "$probe" "$probe.done"
+    continue
+  fi
   status=0
   output="$(timeout 300 bash "$probe" 2>&1)" || status=$?
   if [[ "$status" -eq 124 ]]; then

@@ -83,7 +83,7 @@ class Task:
     launch_deferred_reason: str | None = None
     # Work hierarchy: objective > epic > feature > task.
     parent: str | None = None
-    # Rule 8: the mirrored GitHub issue is the durable copy of this task.
+    # Optional issue mirror once the board repository exists.
     issue: str | None = None
     issue_synced_at: str | None = None
     issue_synced_digest: str | None = None

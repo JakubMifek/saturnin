@@ -89,7 +89,7 @@ def build_parser() -> argparse.ArgumentParser:
     tree = task.add_parser("tree", help="show the work hierarchy")
     tree.add_argument("task_id", nargs="?", help="root; default: every top level item")
 
-    sync = task.add_parser("sync", help="mirror tasks as GitHub issues (rule 8)")
+    sync = task.add_parser("sync", help="preview or push the optional GitHub issue mirror")
     sync.add_argument("task_id", nargs="?")
     sync.add_argument(
         "--all", action="store_true", help="every open task eligible for mirroring"
@@ -276,7 +276,9 @@ def _tree_dict(board: Board, task: Task, lines: list[str], depth: int) -> dict[s
 
 
 def _mirror_audit(config: Config, board: Board) -> list[str]:
-    """Rule 8: warn when open work exists only on this machine."""
+    """Warn when mandatory mirroring is enabled and open work is local-only."""
+    if not Governance(config).mirror_required():
+        return []
     mirror = IssueMirror(config, board)
     if not mirror.enabled:
         return []

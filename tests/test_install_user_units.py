@@ -61,6 +61,36 @@ def test_install_user_units_escapes_checkout_path(tmp_path: Path) -> None:
         assert decode(environment) == str(saturnin_home)
 
 
+def test_install_does_not_enable_unaccepted_mirror_timer(tmp_path: Path) -> None:
+    saturnin_home = tmp_path / "checkout"
+    shutil.copytree(REPO_ROOT / "systemd", saturnin_home / "systemd")
+    fake_bin = tmp_path / "bin"
+    fake_bin.mkdir()
+    calls = tmp_path / "systemctl-calls"
+    (fake_bin / "id").write_text("#!/bin/sh\nprintf '1000\\n'\n", encoding="utf-8")
+    (fake_bin / "systemd-analyze").write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+    (fake_bin / "systemctl").write_text(
+        f"#!/bin/sh\nprintf '%s\\n' \"$*\" >> '{calls}'\n", encoding="utf-8"
+    )
+    for command in ("id", "systemctl", "systemd-analyze"):
+        (fake_bin / command).chmod(0o755)
+
+    subprocess.run(
+        ["bash", str(REPO_ROOT / "scripts/install_user_units.sh")],
+        check=True,
+        capture_output=True,
+        text=True,
+        env={
+            **os.environ,
+            "PATH": f"{fake_bin}:{os.environ['PATH']}",
+            "SATURNIN_HOME": str(saturnin_home),
+            "XDG_CONFIG_HOME": str(tmp_path / "config"),
+        },
+    )
+
+    assert "saturnin-mirror.timer" not in calls.read_text(encoding="utf-8")
+
+
 def test_install_stops_before_enable_when_verification_fails(tmp_path: Path) -> None:
     saturnin_home = tmp_path / "checkout"
     shutil.copytree(REPO_ROOT / "systemd", saturnin_home / "systemd")

@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Mirror every open board task as a GitHub issue (rule 8).
+# Mirror every open board task as a GitHub issue when the optional mirror is enabled.
 #
 # The local board is fast; GitHub is durable. Run on a timer so that losing this
 # machine costs a `git clone`, not a week of work. PUSH=1 actually files the
