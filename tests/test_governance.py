@@ -347,6 +347,77 @@ def test_review_ledger_rejects_terminated_malformed_records(
         )
 
 
+@pytest.mark.parametrize(
+    ("field", "value"),
+    [
+        ("subject", 7),
+        ("kind", "pull_request"),
+        ("verdict", "allow"),
+        ("zero_context", "false"),
+        ("head_sha", "a" * 39),
+        ("issue_digest", "not-a-digest"),
+        ("notes", []),
+        ("created_at", "yesterday"),
+        ("created_at", "2026-09-13T17:00:00"),
+    ],
+)
+def test_review_ledger_rejects_invalid_record_values_before_gate(
+    config: Config, field: str, value: object
+) -> None:
+    ledger = ReviewLedger(config)
+    subject = "JakubMifek/saturnin#invalid-values"
+    record = ledger.record(
+        subject=subject,
+        kind="pr",
+        author="code-worker",
+        reviewer="pr-reviewer",
+        verdict="approved",
+        head_sha=TEST_HEAD_SHA,
+    )
+    data = record.to_dict()
+    data[field] = value
+    path = next(ledger.dir.glob("*.jsonl"))
+    path.write_text(json.dumps(data) + "\n", encoding="utf-8")
+
+    with pytest.raises(ReviewError, match=r"corrupt review ledger .* at line 1"):
+        ledger.for_subject(subject, "pr")
+    with pytest.raises(ReviewError, match=r"corrupt review ledger .* at line 1"):
+        ledger.record(
+            subject=subject,
+            kind="pr",
+            author="code-worker",
+            reviewer="pr-reviewer",
+            verdict="changes_requested",
+            head_sha=TEST_HEAD_SHA,
+        )
+
+
+@pytest.mark.parametrize("mutation", ["missing", "unknown"])
+def test_review_ledger_rejects_invalid_record_shape(
+    config: Config, mutation: str
+) -> None:
+    ledger = ReviewLedger(config)
+    subject = "JakubMifek/saturnin#invalid-shape"
+    record = ledger.record(
+        subject=subject,
+        kind="pr",
+        author="code-worker",
+        reviewer="pr-reviewer",
+        verdict="approved",
+        head_sha=TEST_HEAD_SHA,
+    )
+    data = record.to_dict()
+    if mutation == "missing":
+        del data["zero_context"]
+    else:
+        data["zeroContext"] = True
+    path = next(ledger.dir.glob("*.jsonl"))
+    path.write_text(json.dumps(data) + "\n", encoding="utf-8")
+
+    with pytest.raises(ReviewError, match=r"corrupt review ledger .* at line 1"):
+        ledger.for_subject(subject, "pr")
+
+
 def test_review_ledger_serializes_concurrent_records(config: Config) -> None:
     ledger = ReviewLedger(config)
     subject = "JakubMifek/saturnin#concurrent"

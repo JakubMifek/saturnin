@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
-from typing import Any, Collection, Iterator
+from typing import Any, Callable, Collection, Iterator
 
 
 class JSONLinesError(ValueError):
@@ -21,6 +21,7 @@ def objects(
     *,
     required_fields: Collection[str] = (),
     tolerate_unterminated_tail: bool = False,
+    validator: Callable[[dict[str, Any]], None] | None = None,
 ) -> Iterator[dict[str, Any]]:
     lines = [
         (line_number, line, line.endswith("\n"))
@@ -35,26 +36,32 @@ def objects(
             missing = sorted(set(required_fields) - set(value))
             if missing:
                 raise TypeError(f"record is missing required field(s): {', '.join(missing)}")
+            if validator is not None:
+                validator(value)
             yield value
         except json.JSONDecodeError as exc:
             if tolerate_unterminated_tail and index == len(lines) - 1 and not terminated:
                 return
             raise JSONLinesError(path, line_number, exc) from exc
-        except TypeError as exc:
+        except (TypeError, ValueError) as exc:
             raise JSONLinesError(path, line_number, exc) from exc
 
 
 def repair_unterminated_tail(
-    text: str, path: Path, *, required_fields: Collection[str] = ()
+    text: str,
+    path: Path,
+    *,
+    required_fields: Collection[str] = (),
+    validator: Callable[[dict[str, Any]], None] | None = None,
 ) -> str:
     """Validate complete records and normalize or discard an interrupted tail."""
     if not text or text.endswith("\n"):
-        list(objects(text, path, required_fields=required_fields))
+        list(objects(text, path, required_fields=required_fields, validator=validator))
         return text
 
     boundary = text.rfind("\n") + 1
     prefix, tail = text[:boundary], text[boundary:]
-    list(objects(prefix, path, required_fields=required_fields))
+    list(objects(prefix, path, required_fields=required_fields, validator=validator))
     if not tail.strip():
         return prefix
     line_number = prefix.count("\n") + 1
@@ -71,4 +78,9 @@ def repair_unterminated_tail(
             line_number,
             TypeError(f"record is missing required field(s): {', '.join(missing)}"),
         )
+    if validator is not None:
+        try:
+            validator(value)
+        except (TypeError, ValueError) as exc:
+            raise JSONLinesError(path, line_number, exc) from exc
     return text + "\n"

@@ -53,7 +53,7 @@ def test_ceo_gets_no_mcp_servers(config: Config) -> None:
 def test_github_mcp_must_be_read_only(config: Config) -> None:
     config.policy("mcp")["servers"]["github"]["args"] = ["stdio"]
 
-    assert any("must be configured with --read-only" in problem for problem in audit(config))
+    assert any("effective --read-only" in problem for problem in audit(config))
 
 
 def test_duplicate_role_contracts_are_rejected(config: Config) -> None:

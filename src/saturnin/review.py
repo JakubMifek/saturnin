@@ -10,6 +10,7 @@ import hashlib
 import json
 import re
 from dataclasses import asdict, dataclass, field
+from datetime import datetime
 from pathlib import Path
 from typing import Any, Iterator
 
@@ -20,7 +21,6 @@ from .locking import file_lock
 
 VERDICTS = ("approved", "changes_requested", "rejected", "dismissed")
 KINDS = ("pr", "issue")
-REQUIRED_FIELDS = ("subject", "kind", "author", "reviewer", "verdict")
 _HEX_SHA_RE = re.compile(r"[0-9a-fA-F]{40}")
 _ISSUE_DIGEST_RE = re.compile(r"[0-9a-fA-F]{64}")
 
@@ -47,8 +47,59 @@ class ReviewRecord:
 
     @classmethod
     def from_dict(cls, data: dict[str, Any]) -> "ReviewRecord":
-        known = {f for f in cls.__dataclass_fields__}  # noqa: SLF001 - dataclass API
-        return cls(**{k: v for k, v in data.items() if k in known})
+        cls.validate_dict(data)
+        return cls(**data)
+
+    @classmethod
+    def validate_dict(cls, data: dict[str, Any]) -> None:
+        known = set(cls.__dataclass_fields__)  # noqa: SLF001 - dataclass API
+        missing = sorted(known - set(data))
+        if missing:
+            raise TypeError(f"review record is missing field(s): {', '.join(missing)}")
+        unknown = sorted(set(data) - known)
+        if unknown:
+            raise TypeError(f"review record has unknown field(s): {', '.join(unknown)}")
+        for name in (
+            "subject",
+            "kind",
+            "author",
+            "reviewer",
+            "verdict",
+            "head_sha",
+            "issue_digest",
+            "notes",
+            "created_at",
+        ):
+            if not isinstance(data[name], str):
+                raise TypeError(f"review record field {name!r} must be a string")
+        for name in ("subject", "author", "reviewer", "created_at"):
+            if not data[name].strip():
+                raise ValueError(f"review record field {name!r} must not be empty")
+        if data["kind"] not in KINDS:
+            raise ValueError(f"unknown review kind: {data['kind']}")
+        if data["verdict"] not in VERDICTS:
+            raise ValueError(f"unknown review verdict: {data['verdict']}")
+        if type(data["zero_context"]) is not bool:
+            raise TypeError("review record field 'zero_context' must be a boolean")
+        head = data["head_sha"]
+        digest = data["issue_digest"]
+        if head and not _HEX_SHA_RE.fullmatch(head):
+            raise ValueError("review record head_sha must be a full 40-character commit SHA")
+        if digest and not _ISSUE_DIGEST_RE.fullmatch(digest):
+            raise ValueError("review record issue_digest must be a 64-character SHA-256 digest")
+        if data["kind"] == "pr" and not head:
+            raise ValueError("PR review record requires head_sha")
+        if data["kind"] == "issue" and not digest:
+            raise ValueError("issue review record requires issue_digest")
+        try:
+            created_at = datetime.fromisoformat(data["created_at"])
+        except ValueError as exc:
+            raise ValueError("review record created_at must be ISO-8601") from exc
+        if created_at.tzinfo is None:
+            raise ValueError("review record created_at must include a timezone")
+
+
+REQUIRED_FIELDS = tuple(ReviewRecord.__dataclass_fields__)  # noqa: SLF001 - dataclass API
 
 
 def slugify(subject: str) -> str:
@@ -128,7 +179,10 @@ class ReviewLedger:
                 raw = path.read_text(encoding="utf-8")
                 try:
                     repaired = repair_unterminated_tail(
-                        raw, path, required_fields=REQUIRED_FIELDS
+                        raw,
+                        path,
+                        required_fields=REQUIRED_FIELDS,
+                        validator=ReviewRecord.validate_dict,
                     )
                 except JSONLinesError as exc:
                     raise ReviewError(f"corrupt review ledger {exc}") from exc
@@ -166,6 +220,7 @@ class ReviewLedger:
                 path,
                 required_fields=REQUIRED_FIELDS,
                 tolerate_unterminated_tail=True,
+                validator=ReviewRecord.validate_dict,
             ):
                 yield ReviewRecord.from_dict(data)
         except JSONLinesError as exc:
