@@ -813,7 +813,30 @@ def _curl_output_dir(arguments: Sequence[str]) -> str | None:
 _CURL_SHORT_OPTIONS_WITH_VALUES = frozenset(
     "AbcCdeEFDHKmoPQrtTuUwXxyz"
 )
-_CURL_SHORT_WRITE_OPTIONS = frozenset("oDc")
+_CURL_SHORT_WRITE_ACTIONS = {
+    "o": "target",
+    "D": "target",
+    "c": "target",
+    "w": "write-out",
+}
+_CURL_FILE_OPTIONS = frozenset(
+    {
+        "-o",
+        "--output",
+        "-D",
+        "--dump-header",
+        "-c",
+        "--cookie-jar",
+        "--trace",
+        "--trace-ascii",
+        "--stderr",
+        "--etag-save",
+        "--libcurl",
+        "--alt-svc",
+        "--hsts",
+    }
+)
+_CURL_WRITE_OUT_OPTIONS = frozenset({"-w", "--write-out"})
 
 
 def _expand_curl_short_next(arguments: Sequence[str]) -> list[str]:
@@ -864,14 +887,33 @@ def _curl_bundled_write_action(argument: str) -> tuple[bool, str, str]:
             raise _WriteScopeError(
                 "unsupported curl option '--config'; write scope is unknown"
             )
-        if option in _CURL_SHORT_WRITE_OPTIONS:
-            return remote_name, "target", argument[position + 1 :]
+        if option in _CURL_SHORT_WRITE_ACTIONS:
+            return remote_name, _CURL_SHORT_WRITE_ACTIONS[option], argument[position + 1 :]
         # The remainder belongs to this value-taking option, not to more flags.
         return remote_name, "", ""
     return remote_name, "", ""
 
 
+def _curl_write_out_targets(value: str) -> list[str]:
+    targets: list[str] = []
+    for match in re.finditer(r"(?<!%)%output\{(>>)?([^}]*)\}", value):
+        target = match.group(2)
+        if target and target not in {"stdout", "stderr"}:
+            targets.append(target)
+    return targets
+
+
+def _curl_disables_default_config(argument: str) -> bool:
+    return argument == "--disable" or (
+        argument.startswith("-q") and not argument.startswith("--")
+    )
+
+
 def _curl_targets(arguments: Sequence[str]) -> list[str]:
+    if not arguments or not _curl_disables_default_config(arguments[0]):
+        raise _WriteScopeError(
+            "curl must use '-q' or '--disable' as its first argument to disable implicit .curlrc"
+        )
     arguments = _expand_curl_short_next(arguments)
     targets: list[str] = []
     index = 0
@@ -901,29 +943,26 @@ def _curl_targets(arguments: Sequence[str]) -> list[str]:
                 targets.append(attached_output)
             index += 1
             continue
+        if bundled_action == "write-out":
+            if not attached_output:
+                index += 1
+                if index >= len(arguments):
+                    raise _WriteScopeError(f"curl option {argument!r} requires a value")
+                attached_output = arguments[index]
+            targets.extend(_curl_write_out_targets(attached_output))
+            index += 1
+            continue
         if bundled_remote_name:
             index += 1
             continue
-        attached_output = next(
-            (
-                argument[len(option) :]
-                for option in ("-o", "-D", "-c")
-                if argument.startswith(option) and argument != option
-            ),
-            None,
-        )
-        if attached_output is not None:
-            if attached_output != "-":
-                targets.append(attached_output)
+        if argument in _CURL_FILE_OPTIONS:
             index += 1
-            continue
-        if argument in {"-o", "--output", "-D", "--dump-header"}:
+            if index >= len(arguments):
+                raise _WriteScopeError(f"curl option {argument!r} requires a value")
+            value = arguments[index]
+            if value != "-":
+                targets.append(value)
             index += 1
-            if index < len(arguments):
-                value = arguments[index]
-                if value != "-":
-                    targets.append(value)
-                index += 1
             continue
         if argument in {"--output-dir"}:
             index += 1
@@ -934,12 +973,6 @@ def _curl_targets(arguments: Sequence[str]) -> list[str]:
                     targets.append(value)
                 index += 1
             continue
-        if argument.startswith("--output="):
-            value = argument.split("=", 1)[1]
-            if value and value != "-":
-                targets.append(value)
-            index += 1
-            continue
         if argument.startswith("--output-dir="):
             value = argument.split("=", 1)[1]
             if value and value != "-":
@@ -947,25 +980,21 @@ def _curl_targets(arguments: Sequence[str]) -> list[str]:
                 targets.append(value)
             index += 1
             continue
-        if argument.startswith("--dump-header="):
-            value = argument.split("=", 1)[1]
+        long_option, separator, value = argument.partition("=")
+        if separator and long_option in _CURL_FILE_OPTIONS:
             if value and value != "-":
                 targets.append(value)
             index += 1
             continue
-        if argument in {"-c", "--cookie-jar", "--trace", "--trace-ascii"}:
+        if argument in _CURL_WRITE_OUT_OPTIONS:
             index += 1
             if index >= len(arguments):
                 raise _WriteScopeError(f"curl option {argument!r} requires a value")
-            value = arguments[index]
-            if value != "-":
-                targets.append(value)
+            targets.extend(_curl_write_out_targets(arguments[index]))
             index += 1
             continue
-        if argument.startswith(("--cookie-jar=", "--trace=", "--trace-ascii=")):
-            value = argument.split("=", 1)[1]
-            if value and value != "-":
-                targets.append(value)
+        if separator and long_option == "--write-out":
+            targets.extend(_curl_write_out_targets(value))
             index += 1
             continue
         if argument in {"-K", "--config"} or argument.startswith("--config="):

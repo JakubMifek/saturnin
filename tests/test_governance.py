@@ -359,10 +359,10 @@ def test_out_of_scope_server_commands(governance: Governance, command: str) -> N
         "systemctl --user list-timers --all",
         "systemctl --user status --failed saturnin-improve.service",
         "journalctl --user -u saturnin-janitor.service -n 100",
-        "curl -o /home/saturnin/response.txt https://example.test/ok",
-        "curl --output /home/saturnin/response.txt https://example.test/ok",
-        "curl --output-dir /home/saturnin https://example.test/ok",
-        "curl -D /home/saturnin/headers.txt https://example.test/ok",
+        "curl -q -o /home/saturnin/response.txt https://example.test/ok",
+        "curl -q --output /home/saturnin/response.txt https://example.test/ok",
+        "curl -q --output-dir /home/saturnin https://example.test/ok",
+        "curl -q -D /home/saturnin/headers.txt https://example.test/ok",
         "python3 -m saturnin doctor",
     ],
 )
@@ -372,6 +372,7 @@ def test_in_scope_server_commands(governance: Governance, command: str) -> None:
 
 def test_curl_output_flags_are_parsed() -> None:
     assert _curl_targets([
+        "-q",
         "-o",
         "/home/saturnin/response.txt",
         "--output",
@@ -397,6 +398,7 @@ def test_curl_output_flags_are_parsed() -> None:
 
 def test_curl_output_dir_applies_even_when_url_comes_first() -> None:
     assert _curl_targets([
+        "-q",
         "-O",
         "https://example.test/download.tar.gz",
         "--output-dir",
@@ -409,6 +411,7 @@ def test_curl_output_dir_applies_even_when_url_comes_first() -> None:
 
 def test_curl_cookie_and_trace_outputs_are_checked() -> None:
     assert _curl_targets([
+        "-q",
         "--cookie-jar",
         "/home/saturnin/cookies.txt",
         "--trace=/home/saturnin/trace.log",
@@ -420,6 +423,86 @@ def test_curl_cookie_and_trace_outputs_are_checked() -> None:
         "/home/saturnin/trace.log",
         "/home/saturnin/trace-ascii.log",
     ]
+
+
+@pytest.mark.parametrize(
+    "command",
+    [
+        "curl data:,ok",
+        "curl -s -q data:,ok",
+        "curl -sq data:,ok",
+    ],
+)
+def test_curl_requires_config_suppression_as_first_argument(
+    governance: Governance, command: str
+) -> None:
+    decision = governance.check_server_command(command)
+
+    assert not decision.allowed
+    assert "first argument" in decision.reasons[0]
+
+
+@pytest.mark.parametrize(
+    "command",
+    [
+        "curl -q data:,ok",
+        "curl --disable data:,ok",
+        "curl -qO https://example.test/file --output-dir /home/saturnin",
+    ],
+)
+def test_curl_accepts_leading_config_suppression(
+    governance: Governance, command: str
+) -> None:
+    assert governance.check_server_command(command).allowed
+
+
+@pytest.mark.parametrize(
+    "option",
+    ["--stderr", "--etag-save", "--libcurl", "--alt-svc", "--hsts"],
+)
+def test_curl_long_file_options_are_scope_checked(
+    governance: Governance, option: str
+) -> None:
+    denied = governance.check_server_command(f"curl -q {option} /etc/curl-state data:,ok")
+    allowed = governance.check_server_command(
+        f"curl -q {option} /home/saturnin/curl-state data:,ok"
+    )
+
+    assert not denied.allowed
+    assert "forbidden root" in denied.reasons[0]
+    assert allowed.allowed
+
+
+@pytest.mark.parametrize(
+    "option",
+    [
+        "'-w%output{/etc/curl-report}'",
+        "'-sw%output{/etc/curl-report}'",
+        "'--write-out=%output{/etc/curl-report}'",
+        "--write-out '%output{/etc/curl-report}'",
+    ],
+)
+def test_curl_write_out_destinations_are_scope_checked(
+    governance: Governance, option: str
+) -> None:
+    decision = governance.check_server_command(f"curl -q {option} data:,ok")
+
+    assert not decision.allowed
+    assert "forbidden root" in decision.reasons[0]
+
+
+@pytest.mark.parametrize(
+    "option",
+    [
+        "'-w%output{/home/saturnin/curl-report}'",
+        "'-sw%output{/home/saturnin/curl-report}'",
+        "'--write-out=%output{/home/saturnin/curl-report}'",
+    ],
+)
+def test_curl_write_out_destinations_within_scope_are_allowed(
+    governance: Governance, option: str
+) -> None:
+    assert governance.check_server_command(f"curl -q {option} data:,ok").allowed
 
 
 @pytest.mark.parametrize(
@@ -436,7 +519,7 @@ def test_curl_cookie_and_trace_outputs_are_checked() -> None:
 def test_curl_attached_short_output_options_are_parsed(
     argument: str, target: str
 ) -> None:
-    assert _curl_targets([argument, "https://example.test/ok"]) == [target]
+    assert _curl_targets(["-q", argument, "https://example.test/ok"]) == [target]
 
 
 @pytest.mark.parametrize(
@@ -445,7 +528,7 @@ def test_curl_attached_short_output_options_are_parsed(
 def test_curl_attached_short_config_is_rejected(
     governance: Governance, option: str
 ) -> None:
-    decision = governance.check_server_command(f"curl {option} data:,ok")
+    decision = governance.check_server_command(f"curl -q {option} data:,ok")
 
     assert not decision.allowed
     assert "unsupported curl option '--config'" in decision.reasons[0]
@@ -461,14 +544,14 @@ def test_curl_attached_short_config_is_rejected(
 def test_curl_write_options_after_bundled_remote_name_are_parsed(
     option: str, target: str
 ) -> None:
-    assert target in _curl_targets([option, "data:,ok"])
+    assert target in _curl_targets(["-q", option, "data:,ok"])
 
 
 @pytest.mark.parametrize("option", ["-OD/etc/headers", "-Oo/etc/body"])
 def test_curl_write_options_after_bundled_remote_name_are_rejected(
     governance: Governance, option: str
 ) -> None:
-    decision = governance.check_server_command(f"curl {option} data:,ok")
+    decision = governance.check_server_command(f"curl -q {option} data:,ok")
 
     assert not decision.allowed
     assert "forbidden root" in decision.reasons[0]
@@ -476,6 +559,7 @@ def test_curl_write_options_after_bundled_remote_name_are_rejected(
 
 def test_curl_bundled_remote_name_uses_output_directory() -> None:
     assert _curl_targets([
+        "-q",
         "-sO",
         "https://example.test/download.tar.gz",
         "--output-dir",
@@ -489,6 +573,7 @@ def test_curl_bundled_remote_name_uses_output_directory() -> None:
 @pytest.mark.parametrize("next_option", ["--next", "-:", "-s:"])
 def test_curl_output_dir_resets_between_operations(next_option: str) -> None:
     assert _curl_targets([
+        "-q",
         "-O",
         "https://example.test/first.tar.gz",
         "--output-dir",
@@ -508,7 +593,7 @@ def test_curl_remote_name_requires_output_dir_in_each_operation(
     governance: Governance, next_option: str
 ) -> None:
     decision = governance.check_server_command(
-        "curl -O https://example.test/first.tar.gz "
+        "curl -q -O https://example.test/first.tar.gz "
         f"--output-dir /home/saturnin/downloads {next_option} "
         "-O https://example.test/second.tar.gz"
     )
@@ -522,7 +607,7 @@ def test_curl_each_operation_can_set_a_valid_output_dir(
     governance: Governance, next_option: str
 ) -> None:
     decision = governance.check_server_command(
-        "curl -O https://example.test/first.tar.gz "
+        "curl -q -O https://example.test/first.tar.gz "
         f"--output-dir /home/saturnin/first {next_option} "
         "-O https://example.test/second.tar.gz "
         "--output-dir /home/saturnin/second"
@@ -535,7 +620,7 @@ def test_curl_flags_after_bundled_short_next_apply_to_new_operation(
     governance: Governance,
 ) -> None:
     decision = governance.check_server_command(
-        "curl -O https://example.test/first.tar.gz "
+        "curl -q -O https://example.test/first.tar.gz "
         "--output-dir /home/saturnin/first "
         "-s:O https://example.test/second.tar.gz "
         "--output-dir /home/saturnin/second"
@@ -548,7 +633,7 @@ def test_curl_bundled_remote_name_outside_writable_root_is_rejected(
     governance: Governance,
 ) -> None:
     decision = governance.check_server_command(
-        "curl -sO https://example.test/download.tar.gz"
+        "curl -q -sO https://example.test/download.tar.gz"
     )
 
     assert not decision.allowed
@@ -558,8 +643,8 @@ def test_curl_bundled_remote_name_outside_writable_root_is_rejected(
 @pytest.mark.parametrize(
     "command",
     [
-        "curl --config /tmp/curlrc https://example.test/ok",
-        "curl --config=/tmp/curlrc https://example.test/ok",
+        "curl -q --config /tmp/curlrc https://example.test/ok",
+        "curl -q --config=/tmp/curlrc https://example.test/ok",
     ],
 )
 def test_curl_config_is_rejected(governance: Governance, command: str) -> None:
@@ -591,18 +676,18 @@ def test_shell_assignments_cannot_change_policy_home(
         ("rm -rf /etc", "forbidden root"),
         ("touch /usr/local/unsafe", "forbidden root"),
         ("mkdir /var/lib/saturnin", "forbidden root"),
-        ("curl -o /etc/headers.txt https://example.test/ok", "forbidden root"),
-        ("curl -o/etc/response https://example.test/ok", "forbidden root"),
-        ("curl -D/etc/headers https://example.test/ok", "forbidden root"),
-        ("curl -c/etc/cookies https://example.test/ok", "forbidden root"),
-        ("curl -so/etc/response data:,ok", "forbidden root"),
-        ("curl -sD/etc/headers data:,ok", "forbidden root"),
-        ("curl -sc/etc/cookies data:,ok", "forbidden root"),
-        ("curl --output-dir /opt https://example.test/ok", "outside writable roots"),
+        ("curl -q -o /etc/headers.txt https://example.test/ok", "forbidden root"),
+        ("curl -q -o/etc/response https://example.test/ok", "forbidden root"),
+        ("curl -q -D/etc/headers https://example.test/ok", "forbidden root"),
+        ("curl -q -c/etc/cookies https://example.test/ok", "forbidden root"),
+        ("curl -q -so/etc/response data:,ok", "forbidden root"),
+        ("curl -q -sD/etc/headers data:,ok", "forbidden root"),
+        ("curl -q -sc/etc/cookies data:,ok", "forbidden root"),
+        ("curl -q --output-dir /opt https://example.test/ok", "outside writable roots"),
         ("rm -rf /home/saturnin-other", "outside writable roots"),
         ("rm -- -outside-writable-roots", "outside writable roots"),
         ("cp --target-directory /opt source", "outside writable roots"),
-        ("curl --output /opt/response.txt https://example.test/ok", "outside writable roots"),
+        ("curl -q --output /opt/response.txt https://example.test/ok", "outside writable roots"),
         ("sed -i s/foo/bar/ /opt/status", "outside writable roots"),
         ("saturnin --home /tmp task add x", "outside writable roots"),
         ("python3 -m saturnin --home /tmp task add x", "outside writable roots"),
