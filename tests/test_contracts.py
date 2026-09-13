@@ -50,10 +50,10 @@ def test_ceo_gets_no_mcp_servers(config: Config) -> None:
     assert any("non-executing" in problem for problem in audit(config))
 
 
-def test_write_capable_mcp_servers_are_role_scoped(config: Config) -> None:
-    path = config.root / "agents" / "researcher.md"
-    path.write_text(path.read_text().replace("mcp: [fetch]", "mcp: [github, fetch]"))
-    assert any("write access" in problem for problem in audit(config))
+def test_github_mcp_must_be_read_only(config: Config) -> None:
+    config.policy("mcp")["servers"]["github"]["args"] = ["stdio"]
+
+    assert any("must be configured with --read-only" in problem for problem in audit(config))
 
 
 def test_duplicate_role_contracts_are_rejected(config: Config) -> None:

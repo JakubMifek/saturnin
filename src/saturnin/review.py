@@ -15,10 +15,12 @@ from typing import Any, Iterator
 
 from .board import utcnow
 from .config import Config, default_config
+from .jsonlines import JSONLinesError, objects, repair_unterminated_tail
 from .locking import file_lock
 
 VERDICTS = ("approved", "changes_requested", "rejected", "dismissed")
 KINDS = ("pr", "issue")
+REQUIRED_FIELDS = ("subject", "kind", "author", "reviewer", "verdict")
 _HEX_SHA_RE = re.compile(r"[0-9a-fA-F]{40}")
 _ISSUE_DIGEST_RE = re.compile(r"[0-9a-fA-F]{64}")
 
@@ -124,10 +126,15 @@ class ReviewLedger:
         with file_lock(path):
             if path.exists():
                 raw = path.read_text(encoding="utf-8")
-                if raw and not raw.endswith("\n"):
-                    last_complete = raw.rfind("\n")
+                try:
+                    repaired = repair_unterminated_tail(
+                        raw, path, required_fields=REQUIRED_FIELDS
+                    )
+                except JSONLinesError as exc:
+                    raise ReviewError(f"corrupt review ledger {exc}") from exc
+                if repaired != raw:
                     path.write_text(
-                        raw[: last_complete + 1] if last_complete >= 0 else "",
+                        repaired,
                         encoding="utf-8",
                     )
             with path.open("a", encoding="utf-8") as handle:
@@ -153,25 +160,16 @@ class ReviewLedger:
     def _records(path: Path) -> Iterator[ReviewRecord]:
         with file_lock(path, exclusive=False):
             text = path.read_text(encoding="utf-8")
-        lines = [
-            (line_number, line, line.endswith("\n"))
-            for line_number, line in enumerate(text.splitlines(keepends=True), start=1)
-            if line.strip()
-        ]
-        for index, (line_number, line, terminated) in enumerate(lines):
-            if not line.strip():
-                continue
-            try:
-                data = json.loads(line)
-                if not isinstance(data, dict):
-                    raise TypeError("record must be a JSON object")
+        try:
+            for data in objects(
+                text,
+                path,
+                required_fields=REQUIRED_FIELDS,
+                tolerate_unterminated_tail=True,
+            ):
                 yield ReviewRecord.from_dict(data)
-            except (json.JSONDecodeError, TypeError) as exc:
-                if index == len(lines) - 1 and not terminated:
-                    break
-                raise ReviewError(
-                    f"corrupt review ledger {path} at line {line_number}: {exc}"
-                ) from exc
+        except JSONLinesError as exc:
+            raise ReviewError(f"corrupt review ledger {exc}") from exc
 
 
 _KIND_TO_REVIEWER_ROLE: dict[str, str] = {

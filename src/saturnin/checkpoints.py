@@ -14,6 +14,7 @@ from typing import Any, Iterator
 
 from .board import Board, BoardError, utcnow
 from .config import Config, default_config
+from .jsonlines import JSONLinesError, objects, repair_unterminated_tail
 from .locking import file_lock
 
 REQUIRED_FIELDS = ("task_id", "role", "summary", "next_steps")
@@ -99,22 +100,16 @@ class CheckpointStore:
         _validate_resume_after(checkpoint.resume_after)
         path = self.path_for(checkpoint.task_id)
         with file_lock(path):
-            # Repair any unterminated JSON fragment left by an interrupted write.
             if path.exists():
                 raw = path.read_text(encoding="utf-8")
-                if raw and not raw.endswith("\n"):
-                    last_complete = raw.rfind("\n")
-                    tail = raw[last_complete + 1 :]
-                    try:
-                        parsed_tail = json.loads(tail)
-                        if not isinstance(parsed_tail, dict):
-                            raise TypeError("checkpoint tail must be a JSON object")
-                    except (json.JSONDecodeError, TypeError):
-                        repaired = raw[: last_complete + 1] if last_complete >= 0 else ""
-                    else:
-                        repaired = raw + "\n"
-                    if repaired != raw:
-                        path.write_text(repaired, encoding="utf-8")
+                try:
+                    repaired = repair_unterminated_tail(
+                        raw, path, required_fields=REQUIRED_FIELDS
+                    )
+                except JSONLinesError as exc:
+                    raise CheckpointError(f"corrupt checkpoint store {exc}") from exc
+                if repaired != raw:
+                    path.write_text(repaired, encoding="utf-8")
             with path.open("a", encoding="utf-8") as handle:
                 handle.write(json.dumps(checkpoint.to_dict()) + "\n")
             try:
@@ -135,27 +130,19 @@ class CheckpointStore:
         if not path.is_file():
             return []
         with file_lock(path, exclusive=False):
-            lines = [
-                (line_number, line, line.endswith("\n"))
-                for line_number, line in enumerate(
-                    path.read_text(encoding="utf-8").splitlines(keepends=True), start=1
+            text = path.read_text(encoding="utf-8")
+        try:
+            return [
+                Checkpoint.from_dict(data)
+                for data in objects(
+                    text,
+                    path,
+                    required_fields=REQUIRED_FIELDS,
+                    tolerate_unterminated_tail=True,
                 )
-                if line.strip()
             ]
-        checkpoints: list[Checkpoint] = []
-        for index, (line_number, line, terminated) in enumerate(lines):
-            try:
-                data = json.loads(line)
-                if not isinstance(data, dict):
-                    raise TypeError("checkpoint must be a JSON object")
-                checkpoints.append(Checkpoint.from_dict(data))
-            except (json.JSONDecodeError, TypeError) as exc:
-                if index == len(lines) - 1 and not terminated:
-                    break
-                raise CheckpointError(
-                    f"corrupt checkpoint store {path} at line {line_number}: {exc}"
-                ) from exc
-        return checkpoints
+        except JSONLinesError as exc:
+            raise CheckpointError(f"corrupt checkpoint store {exc}") from exc
 
     def __iter__(self) -> Iterator[Checkpoint]:
         for path in sorted(self.dir.glob("*.jsonl")):

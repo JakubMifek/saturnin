@@ -23,6 +23,7 @@ class MCPError(RuntimeError):
 
 
 def server_process(
+    name: str,
     definition: dict[str, Any],
     config: Config,
     *,
@@ -37,6 +38,8 @@ def server_process(
     }
     command = str(definition["command"]).format(**values)
     args = [str(value).format(**values) for value in definition.get("args", [])]
+    if name == "github" and "--read-only" not in args:
+        raise MCPError("GitHub MCP server must be configured with --read-only")
     return command, args
 
 
@@ -74,7 +77,7 @@ def _expected_binary(config: Config) -> tuple[Path, dict[str, str], dict[str, An
     asset = assets.get(_asset_key()) if isinstance(assets, dict) else None
     if not isinstance(asset, dict):
         raise MCPError(f"GitHub MCP has no asset for {_asset_key()}")
-    command, _ = server_process(definition, config)
+    command, _ = server_process("github", definition, config)
     return Path(command), {str(key): str(value) for key, value in asset.items()}, install
 
 
@@ -101,7 +104,7 @@ def probe_github_stdio(config: Config | None = None, *, timeout: float = 10) -> 
     config = config or default_config()
     definition = _github_definition(config)
     target = verify_github_binary(config)
-    _, args = server_process(definition, config)
+    _, args = server_process("github", definition, config)
     environment = dict(os.environ)
     environment.setdefault("GITHUB_PERSONAL_ACCESS_TOKEN", "saturnin-startup-check")
     process = subprocess.Popen(

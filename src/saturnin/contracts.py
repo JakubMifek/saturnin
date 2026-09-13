@@ -16,6 +16,7 @@ from typing import Any
 import yaml
 
 from .config import Config, default_config
+from .mcp import MCPError, server_process
 
 FRONT_MATTER = re.compile(r"^---\n(.*?)\n---\n", re.DOTALL)
 
@@ -134,6 +135,14 @@ def audit(config: Config | None = None) -> list[str]:
         if path.name != "README.md"
     }
     mcp_policy = config.policy("mcp")
+    for name, definition in mcp_policy.get("servers", {}).items():
+        if not isinstance(definition, dict):
+            problems.append(f"MCP server {name!r} must be a mapping")
+            continue
+        try:
+            server_process(str(name), definition, config)
+        except (KeyError, MCPError) as exc:
+            problems.append(f"MCP server {name!r}: {exc}")
 
     for role, contract in contracts.items():
         catalog = roles.get(role)

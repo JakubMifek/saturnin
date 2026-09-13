@@ -231,7 +231,7 @@ def test_project_agent_must_exist_and_not_shadow_a_global_role(
         "---\n"
         "role: db-migrator\n"
         "skills: [checkpointing]\n"
-        "mcp: [github]\n"
+        "mcp: [filesystem]\n"
         "---\n"
         "# Migrations\n"
     )
@@ -240,7 +240,7 @@ def test_project_agent_must_exist_and_not_shadow_a_global_role(
     (project / ".saturnin" / "agents" / "db-migrator.md").write_text(
         (project / ".saturnin" / "agents" / "db-migrator.md")
         .read_text()
-        .replace("mcp: [github]", "mcp: []")
+        .replace("mcp: [filesystem]", "mcp: []")
     )
     manifest = project / ".saturnin" / "repo.yaml"
     manifest.write_text(

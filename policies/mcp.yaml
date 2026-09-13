@@ -11,7 +11,7 @@ servers:
     description: Issues, pull requests and review data for managed repositories.
     transport: stdio
     command: "{data_root}/var/bin/github-mcp-server"
-    args: [stdio]
+    args: [stdio, --read-only]
     install:
       repository: github/github-mcp-server
       tag: v1.12.1
@@ -25,9 +25,8 @@ servers:
           archive: github-mcp-server_Linux_arm64.tar.gz
           archive_sha256: 0f613c61fa524b30278a249ae199220465ff051e79177e58866e5e677191fda9
           binary_sha256: 972d05c038fa3021e0d1f78333c161c7b85076b9c29a671814f00787b9bb5310
-    # Roles allowed to mutate state through this server; everyone else is read-only.
-    write_roles:
-      [chief-of-staff, code-worker, ops-worker, architect, automation-smith, improver, scribe, test-worker]
+    # GitHub mutations must go through Saturnin's reviewed governance commands.
+    write_roles: []
   fetch:
     description: Read-only web fetch for research.
     transport: stdio

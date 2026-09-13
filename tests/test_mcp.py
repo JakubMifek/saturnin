@@ -30,11 +30,11 @@ def _fake_server(path: Path) -> str:
 
 def test_github_mcp_uses_pinned_local_official_binary(config: Config) -> None:
     definition = config.policy("mcp")["servers"]["github"]
-    command, args = server_process(definition, config)
+    command, args = server_process("github", definition, config)
     install = definition["install"]
 
     assert command == str(config.data_root / "var/bin/github-mcp-server")
-    assert args == ["stdio"]
+    assert args == ["stdio", "--read-only"]
     assert install["repository"] == "github/github-mcp-server"
     assert install["tag"] == "v1.12.1"
     assert install["commit"] == "7d13a7ad6f2a17f351a6d77ce280c85ae1821f4d"
@@ -56,13 +56,21 @@ def test_registry_mcp_servers_use_pinned_packages(config: Config) -> None:
     ]
 
 
+def test_github_mcp_rejects_write_capable_configuration(config: Config) -> None:
+    definition = config.policy("mcp")["servers"]["github"]
+    definition["args"] = ["stdio"]
+
+    with pytest.raises(MCPError, match="must be configured with --read-only"):
+        server_process("github", definition, config)
+
+
 def test_github_mcp_stdio_startup_handshake(config: Config) -> None:
     script = config.var_dir / "bin" / "fake-github-mcp.py"
     script.parent.mkdir(parents=True)
     checksum = _fake_server(script)
     definition = config.policy("mcp")["servers"]["github"]
     definition["command"] = str(script)
-    definition["args"] = []
+    definition["args"] = ["--read-only"]
     definition["install"]["tag"] = "v1.0"
     for asset in definition["install"]["assets"].values():
         asset["binary_sha256"] = checksum
@@ -85,7 +93,7 @@ def test_github_mcp_stdio_rejects_non_server_executable(config: Config) -> None:
     script.chmod(0o755)
     definition = config.policy("mcp")["servers"]["github"]
     definition["command"] = str(script)
-    definition["args"] = []
+    definition["args"] = ["--read-only"]
     definition["install"]["tag"] = "v1.0"
     checksum = hashlib.sha256(script.read_bytes()).hexdigest()
     for asset in definition["install"]["assets"].values():

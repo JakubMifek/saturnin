@@ -22,7 +22,7 @@ from .contracts import (
     mcp_authorization_problem,
     project_agent_path,
 )
-from .mcp import server_process
+from .mcp import MCPError, server_process
 
 
 class LauncherError(RuntimeError):
@@ -64,7 +64,6 @@ class AgentLauncher:
         if not self.enabled:
             return None
         task = self.board.get(task_id)
-        contract = self._contract(task)
         checkpoint = CheckpointStore(self.config, self.board).latest(task.id)
         executable = str(self.policy.get("command", "copilot"))
         if shutil.which(executable) is None:
@@ -97,8 +96,20 @@ class AgentLauncher:
             claimed = Task.from_dict(stored.to_dict())
             try:
                 workdir = self._validated_workdir(claimed)
-                mcp_path = self._write_mcp_config(claimed, contract, worktree_scope=workdir)
-                prompt = self._prompt(claimed, contract, checkpoint=checkpoint)
+                worker_config = self._worker_config(workdir)
+                contract = self._contract(claimed, worker_config)
+                mcp_path = self._write_mcp_config(
+                    claimed,
+                    contract,
+                    config=worker_config,
+                    worktree_scope=workdir,
+                )
+                prompt = self._prompt(
+                    claimed,
+                    contract,
+                    config=worker_config,
+                    checkpoint=checkpoint,
+                )
                 args = [
                     str(value).format(mcp_config=str(mcp_path), prompt=prompt, task_id=claimed.id)
                     for value in self.policy.get(
@@ -117,7 +128,7 @@ class AgentLauncher:
                     process = subprocess.Popen(
                         [executable, *args],
                         cwd=workdir,
-                        env={**os.environ, "SATURNIN_HOME": str(self.config.root)},
+                        env=self._worker_environment(worker_config),
                         stdin=subprocess.DEVNULL,
                         stdout=output,
                         stderr=subprocess.STDOUT,
@@ -129,7 +140,7 @@ class AgentLauncher:
                             "agent launcher exited immediately with "
                             f"status {immediate_status}; see {log_path}"
                         )
-            except (LauncherError, OSError) as exc:
+            except (LauncherError, MCPError, OSError) as exc:
                 if previous_state in ("routed", "in_progress"):
                     stored.state = previous_state
                 stored.checkpoint_resumed_at = previous_checkpoint_resumed_at
@@ -225,18 +236,38 @@ class AgentLauncher:
             )
         return workdir
 
-    def _contract(self, task: Task) -> AgentContract:
+    def _worker_config(self, workdir: Path) -> Config:
+        candidate = Config(workdir)
+        if candidate.data_root.resolve() == self.config.data_root.resolve():
+            return candidate
+        return self.config
+
+    @staticmethod
+    def _worker_environment(config: Config) -> dict[str, str]:
+        environment = {**os.environ, "SATURNIN_HOME": str(config.root)}
+        source = str(config.root / "src")
+        inherited = environment.get("PYTHONPATH")
+        environment["PYTHONPATH"] = (
+            source + os.pathsep + inherited if inherited else source
+        )
+        return environment
+
+    def _contract(self, task: Task, config: Config | None = None) -> AgentContract:
         if not task.role:
             raise LauncherError(f"task {task.id} has no routed role")
-        contracts = {contract.role: contract for contract in load_contracts(self.config)}
+        config = config or self.config
+        contracts = {contract.role: contract for contract in load_contracts(config)}
         if task.worktree:
-            contracts.update(self._project_contracts(Path(task.worktree)))
+            contracts.update(self._project_contracts(Path(task.worktree), config))
         try:
             return contracts[task.role]
         except KeyError as exc:
             raise LauncherError(f"no agent contract for routed role {task.role!r}") from exc
 
-    def _project_contracts(self, worktree: Path) -> dict[str, AgentContract]:
+    def _project_contracts(
+        self, worktree: Path, config: Config | None = None
+    ) -> dict[str, AgentContract]:
+        config = config or self.config
         worktree_root = worktree.resolve(strict=False)
         manifest_path = (worktree_root / ".saturnin" / "repo.yaml").resolve(strict=False)
         if not manifest_path.is_relative_to(worktree_root):
@@ -251,7 +282,7 @@ class AgentLauncher:
         entries = manifest.get("agents") or []
         if not isinstance(entries, list):
             raise LauncherError("managed repository agents must be a list")
-        global_roles = {contract.role for contract in load_contracts(self.config)}
+        global_roles = {contract.role for contract in load_contracts(config)}
         for entry in entries:
             relative = Path(str(entry))
             try:
@@ -277,9 +308,11 @@ class AgentLauncher:
         task: Task,
         contract: AgentContract,
         *,
+        config: Config | None = None,
         worktree_scope: Path | None = None,
     ) -> Path:
-        definitions = self.config.policy("mcp").get("servers", {})
+        config = config or self.config
+        definitions = config.policy("mcp").get("servers", {})
         servers: dict[str, dict[str, Any]] = {}
         allowed = list(contract.mcp)
         if task.worktree:
@@ -312,7 +345,7 @@ class AgentLauncher:
             authorization_problem = mcp_authorization_problem(
                 contract.role,
                 name,
-                self.config.policy("mcp"),
+                config.policy("mcp"),
                 executes=contract.executes,
             )
             if authorization_problem:
@@ -321,8 +354,9 @@ class AgentLauncher:
                     f"{contract.role!r}: {authorization_problem}"
                 )
             command, args = server_process(
+                name,
                 definition,
-                self.config,
+                config,
                 worktree_scope=worktree_scope,
             )
             servers[name] = {
@@ -339,8 +373,10 @@ class AgentLauncher:
         task: Task,
         contract: AgentContract,
         *,
+        config: Config | None = None,
         checkpoint: Checkpoint | None = None,
     ) -> str:
+        config = config or self.config
         sections = [
             f"Complete Saturnin task {task.id}.",
             json.dumps(task.to_dict(), indent=2),
@@ -357,7 +393,7 @@ class AgentLauncher:
                     + manifest_path.read_text(encoding="utf-8")
                 )
         for skill in contract.skills:
-            path = self.config.root / "skills" / f"{skill}.md"
+            path = config.root / "skills" / f"{skill}.md"
             sections.append(path.read_text(encoding="utf-8"))
         if checkpoint is not None:
             sections.append(checkpoint.render())

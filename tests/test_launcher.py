@@ -8,6 +8,7 @@ from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
+import yaml
 
 from saturnin.board import Board
 from saturnin.checkpoints import Checkpoint, CheckpointStore
@@ -65,7 +66,7 @@ def test_launcher_starts_routed_role_with_filtered_mcp(
     assert mcp["mcpServers"]["github"]["command"] == str(
         config.data_root / "var/bin/github-mcp-server"
     )
-    assert mcp["mcpServers"]["github"]["args"] == ["stdio"]
+    assert mcp["mcpServers"]["github"]["args"] == ["stdio", "--read-only"]
     assert mcp["mcpServers"]["filesystem"]["args"][-1] == str(worktree.path)
     command = calls[0][0]
     assert "--no-ask-user" in command
@@ -74,7 +75,8 @@ def test_launcher_starts_routed_role_with_filtered_mcp(
     assert "Managed repository manifest (.saturnin/repo.yaml):" in command[-1]
     assert "stack: python" in command[-1]
     assert calls[0][1]["cwd"] == worktree.path
-    assert calls[0][1]["env"]["SATURNIN_HOME"] == str(config.root)
+    assert calls[0][1]["env"]["SATURNIN_HOME"] == str(worktree.path)
+    assert calls[0][1]["env"]["PYTHONPATH"].split(":")[0] == str(worktree.path / "src")
 
 
 def test_launcher_intersects_role_mcp_with_project_allowlist(
@@ -405,12 +407,12 @@ def test_launcher_rejects_unauthorized_project_mcp(
     agent = worktree.path / ".saturnin" / "agents" / "db-migrator.md"
     agent.parent.mkdir(parents=True, exist_ok=True)
     agent.write_text(
-        "---\nrole: db-migrator\nskills: [checkpointing]\nmcp: [github]\n---\n"
+        "---\nrole: db-migrator\nskills: [checkpointing]\nmcp: [filesystem]\n---\n"
         "# Database migrator\n",
         encoding="utf-8",
     )
     (worktree.path / ".saturnin" / "repo.yaml").write_text(
-        "agents: [.saturnin/agents/db-migrator.md]\nmcp: [github]\n",
+        "agents: [.saturnin/agents/db-migrator.md]\nmcp: [filesystem]\n",
         encoding="utf-8",
     )
     with board.edit(task.id) as stored:
@@ -422,6 +424,116 @@ def test_launcher_rejects_unauthorized_project_mcp(
 
     with pytest.raises(LauncherError, match="not authorized"):
         AgentLauncher(config, board).launch(task.id)
+
+
+def test_launcher_uses_linked_saturnin_source_with_shared_runtime(
+    config: Config, board: Board, git_repo: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    config.policy("mcp")["launcher"]["enabled"] = True
+    task = board.create("Use branch-local worker policy")
+    Router(config).dispatch(board, task)
+    worktree = WorktreeManager(config, repo=git_repo, board=board).create(
+        "feature/branch-local-source"
+    )
+    routed = board.get(task.id)
+    contract = worktree.path / "agents" / f"{routed.role}.md"
+    heading = contract.read_text(encoding="utf-8").splitlines()[8]
+    contract.write_text(
+        contract.read_text(encoding="utf-8").replace(
+            heading, "# Branch-local Worker"
+        ),
+        encoding="utf-8",
+    )
+    mcp_policy = worktree.path / "policies" / "mcp.yaml"
+    policy = yaml.safe_load(mcp_policy.read_text(encoding="utf-8"))
+    policy["servers"]["github"]["args"].append("--toolsets=repos")
+    mcp_policy.write_text(yaml.safe_dump(policy), encoding="utf-8")
+    with board.edit(task.id) as stored:
+        stored.branch = "feature/branch-local-source"
+        stored.worktree = str(worktree.path)
+    calls: list[tuple[list[str], dict]] = []
+    monkeypatch.setattr("saturnin.launcher.shutil.which", lambda _: "/usr/bin/copilot")
+    real_popen = subprocess.Popen
+
+    def fake_popen(command, **kwargs):
+        if command[0] == "git":
+            return real_popen(command, **kwargs)
+        calls.append((command, kwargs))
+        return SimpleNamespace(pid=4242)
+
+    monkeypatch.setattr("saturnin.launcher.subprocess.Popen", fake_popen)
+
+    launcher = AgentLauncher(config, board)
+    assert launcher._worker_config(worktree.path).root == worktree.path.resolve()
+    assert "# Branch-local Worker" in launcher._contract(
+        board.get(task.id), launcher._worker_config(worktree.path)
+    ).path.read_text(encoding="utf-8")
+    launcher.launch(task.id)
+
+    assert "# Branch-local Worker" in calls[0][0][-1]
+    assert calls[0][1]["env"]["SATURNIN_HOME"] == str(worktree.path)
+    generated = json.loads(
+        (config.var_dir / "launches" / f"{task.id}.mcp.json").read_text()
+    )
+    assert generated["mcpServers"]["github"]["args"] == [
+        "stdio",
+        "--read-only",
+        "--toolsets=repos",
+    ]
+    assert (config.var_dir / "launches" / f"{task.id}.json").is_file()
+
+
+def test_launcher_keeps_engine_source_for_managed_repository(
+    config: Config, board: Board, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    config.policy("mcp")["launcher"]["enabled"] = True
+    primary = config.root / "managed-project"
+    primary.mkdir()
+    subprocess.run(
+        ["git", "init", "-b", "main"],
+        cwd=primary,
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    subprocess.run(
+        ["git", "config", "user.email", "managed@example.com"],
+        cwd=primary,
+        check=True,
+    )
+    subprocess.run(["git", "config", "user.name", "Managed"], cwd=primary, check=True)
+    (primary / "README.md").write_text("managed\n", encoding="utf-8")
+    subprocess.run(["git", "add", "."], cwd=primary, check=True)
+    subprocess.run(["git", "commit", "-m", "initial"], cwd=primary, check=True)
+    worktree = config.root / "managed-project-worktree"
+    subprocess.run(
+        ["git", "worktree", "add", "-b", "feature/managed", str(worktree)],
+        cwd=primary,
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    task = board.create("Change a managed repository")
+    Router(config).dispatch(board, task)
+    with board.edit(task.id) as stored:
+        stored.branch = "feature/managed"
+        stored.worktree = str(worktree)
+    calls: list[dict] = []
+    monkeypatch.setattr("saturnin.launcher.shutil.which", lambda _: "/usr/bin/copilot")
+    real_popen = subprocess.Popen
+
+    def fake_popen(command, **kwargs):
+        if command[0] == "git":
+            return real_popen(command, **kwargs)
+        calls.append(kwargs)
+        return SimpleNamespace(pid=4242)
+
+    monkeypatch.setattr("saturnin.launcher.subprocess.Popen", fake_popen)
+
+    AgentLauncher(config, board).launch(task.id)
+
+    assert calls[0]["env"]["SATURNIN_HOME"] == str(config.root)
+    assert calls[0]["env"]["PYTHONPATH"].split(":")[0] == str(config.root / "src")
 
 
 def test_root_mcp_config_has_no_blanket_grants() -> None:

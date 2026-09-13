@@ -1,5 +1,8 @@
 from __future__ import annotations
 
+import json
+from concurrent.futures import ThreadPoolExecutor
+
 import pytest
 
 from saturnin.config import Config
@@ -279,6 +282,91 @@ def test_review_ledger_recovers_from_unterminated_tail(config: Config) -> None:
         head_sha=TEST_HEAD_SHA,
     )
     assert ledger.for_subject(subject, "pr")[0].verdict == "changes_requested"
+
+
+def test_review_ledger_preserves_complete_unterminated_record(config: Config) -> None:
+    ledger = ReviewLedger(config)
+    subject = "JakubMifek/saturnin#complete-tail"
+    first = ledger.record(
+        subject=subject,
+        kind="pr",
+        author="code-worker",
+        reviewer="pr-reviewer",
+        verdict="approved",
+        head_sha=TEST_HEAD_SHA,
+    )
+    path = next(ledger.dir.glob("*.jsonl"))
+    path.write_text(
+        json.dumps(first.to_dict()) + "\n" + json.dumps(first.to_dict()),
+        encoding="utf-8",
+    )
+
+    ledger.record(
+        subject=subject,
+        kind="pr",
+        author="code-worker",
+        reviewer="pr-reviewer",
+        verdict="changes_requested",
+        head_sha=TEST_HEAD_SHA,
+    )
+
+    assert [record.verdict for record in ledger] == [
+        "approved",
+        "approved",
+        "changes_requested",
+    ]
+
+
+@pytest.mark.parametrize("payload", ["not-json\n", "[]\n", "{}\nnot-json\n"])
+def test_review_ledger_rejects_terminated_malformed_records(
+    config: Config, payload: str
+) -> None:
+    ledger = ReviewLedger(config)
+    subject = "JakubMifek/saturnin#malformed"
+    ledger.record(
+        subject=subject,
+        kind="pr",
+        author="code-worker",
+        reviewer="pr-reviewer",
+        verdict="approved",
+        head_sha=TEST_HEAD_SHA,
+    )
+    path = next(ledger.dir.glob("*.jsonl"))
+    path.write_text(payload, encoding="utf-8")
+
+    with pytest.raises(ReviewError, match=r"corrupt review ledger .* at line"):
+        list(ledger)
+    with pytest.raises(ReviewError, match=r"corrupt review ledger .* at line"):
+        ledger.record(
+            subject=subject,
+            kind="pr",
+            author="code-worker",
+            reviewer="pr-reviewer",
+            verdict="changes_requested",
+            head_sha=TEST_HEAD_SHA,
+        )
+
+
+def test_review_ledger_serializes_concurrent_records(config: Config) -> None:
+    ledger = ReviewLedger(config)
+    subject = "JakubMifek/saturnin#concurrent"
+
+    def record(index: int) -> None:
+        ledger.record(
+            subject=subject,
+            kind="pr",
+            author="chief-of-staff",
+            reviewer="code-worker" if index % 2 else "test-worker",
+            verdict="approved",
+            zero_context=False,
+            head_sha=TEST_HEAD_SHA,
+            notes=str(index),
+        )
+
+    with ThreadPoolExecutor(max_workers=8) as pool:
+        list(pool.map(record, range(32)))
+
+    assert len(list(ledger)) == 32
 
 
 def test_merge_in_managed_repo_is_never_autonomous(
