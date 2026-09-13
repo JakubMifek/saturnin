@@ -896,10 +896,32 @@ def _curl_bundled_write_action(argument: str) -> tuple[bool, str, str]:
 
 def _curl_write_out_targets(value: str) -> list[str]:
     targets: list[str] = []
-    for match in re.finditer(r"(?<!%)%output\{(>>)?([^}]*)\}", value):
-        target = match.group(2)
-        if target and target not in {"stdout", "stderr"}:
+    index = 0
+    while index < len(value):
+        if value[index] != "%":
+            index += 1
+            continue
+        run_end = index
+        while run_end < len(value) and value[run_end] == "%":
+            run_end += 1
+        if (run_end - index) % 2 == 0:
+            index = run_end
+            continue
+        if not value.startswith("output{", run_end):
+            index = run_end
+            continue
+        target_start = run_end + len("output{")
+        target_end = value.find("}", target_start)
+        if target_end < 0:
+            raise _WriteScopeError("malformed curl --write-out %output directive")
+        target = value[target_start:target_end]
+        if target.startswith(">>"):
+            target = target[2:]
+        if not target:
+            raise _WriteScopeError("curl --write-out %output requires a destination")
+        if target not in {"stdout", "stderr"}:
             targets.append(target)
+        index = target_end + 1
     return targets
 
 

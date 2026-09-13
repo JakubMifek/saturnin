@@ -505,6 +505,46 @@ def test_curl_write_out_destinations_within_scope_are_allowed(
     assert governance.check_server_command(f"curl -q {option} data:,ok").allowed
 
 
+def test_curl_odd_percent_run_keeps_write_out_directive_active(
+    governance: Governance,
+) -> None:
+    decision = governance.check_server_command(
+        "curl -q '-w%%%output{/tmp/file}' data:,ok"
+    )
+
+    assert not decision.allowed
+    assert "outside writable roots" in decision.reasons[0]
+
+
+@pytest.mark.parametrize(
+    "format_string",
+    [
+        "%%",
+        "%%output{/tmp/file}",
+        "%%%%output{/tmp/file}",
+        "%{http_code}",
+    ],
+)
+def test_curl_even_percent_runs_and_variables_do_not_open_output_files(
+    governance: Governance, format_string: str
+) -> None:
+    assert governance.check_server_command(
+        f"curl -q '-w{format_string}' data:,ok"
+    ).allowed
+
+
+@pytest.mark.parametrize("format_string", ["%output{}", "%output{/tmp/file"])
+def test_curl_malformed_write_out_directives_fail_closed(
+    governance: Governance, format_string: str
+) -> None:
+    decision = governance.check_server_command(
+        f"curl -q '-w{format_string}' data:,ok"
+    )
+
+    assert not decision.allowed
+    assert "curl --write-out %output" in decision.reasons[0]
+
+
 @pytest.mark.parametrize(
     ("argument", "target"),
     [
