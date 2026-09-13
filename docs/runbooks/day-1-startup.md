@@ -76,7 +76,7 @@ systemctl --user list-timers 'saturnin-*'
   issues so the board survives this machine (rule 8).
 - `saturnin-discovery.timer` - every ten minutes, adopts labelled issues raised
   in managed repositories (alerts, CI, humans) as board tasks. The scaffold
-  watches `JakubMifek/saturnin` for `saturnin:task` issues only after a
+  watches `JakubMifek/saturnin` for `saturnin` issues only after a
   maintainer adds the `saturnin:trusted` label; see [observability](../observability.md).
 
 Without a login session, keep the timers alive across logouts:

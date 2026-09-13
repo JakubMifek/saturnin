@@ -19,6 +19,8 @@ from .locking import file_lock
 
 VERDICTS = ("approved", "changes_requested", "rejected", "dismissed")
 KINDS = ("pr", "issue")
+_HEX_SHA_RE = re.compile(r"[0-9a-fA-F]{40}")
+_ISSUE_DIGEST_RE = re.compile(r"[0-9a-fA-F]{64}")
 
 
 class ReviewError(RuntimeError):
@@ -87,10 +89,18 @@ class ReviewLedger:
             raise ReviewError(f"unknown review kind: {kind}")
         if verdict not in VERDICTS:
             raise ReviewError(f"unknown verdict: {verdict}")
-        if kind == "pr" and not head_sha.strip():
-            raise ReviewError("PR reviews require --head-sha (pass the same SHA to review record and review gate)")
-        if kind == "issue" and not issue_digest.strip():
+        head = head_sha.strip()
+        digest = issue_digest.strip()
+        if kind == "pr" and not head:
+            raise ReviewError(
+                "PR reviews require --head-sha (pass the same SHA to review record and review gate)"
+            )
+        if kind == "pr" and not _HEX_SHA_RE.fullmatch(head):
+            raise ReviewError("PR --head-sha must be a full 40-character commit SHA")
+        if kind == "issue" and not digest:
             raise ReviewError("issue reviews require the reviewed issue-content digest")
+        if kind == "issue" and not _ISSUE_DIGEST_RE.fullmatch(digest):
+            raise ReviewError("issue reviews require a 64-character SHA-256 issue-content digest")
         if reviewer.strip().lower() == author.strip().lower():
             raise ReviewError("a review must be written by somebody other than the author")
         roles = self.config.routing.get("roles", {})
@@ -106,8 +116,8 @@ class ReviewLedger:
             reviewer=reviewer_name,
             verdict=verdict,
             zero_context=zero_context,
-            head_sha=head_sha.strip(),
-            issue_digest=issue_digest.strip(),
+            head_sha=head,
+            issue_digest=digest,
             notes=notes,
         )
         path = self.dir / f"{kind}-{slugify(subject)}.jsonl"

@@ -1,7 +1,10 @@
 name: Task for Saturnin
 description: Something Saturnin should get done. It will be routed, not done by the CEO.
-labels: ["saturnin:task"]
+labels: ["saturnin"]
 body:
+  - type: markdown
+    attributes:
+      value: Maintainers add `saturnin:trusted` after validating the report.
   - type: input
     id: title
     attributes:

@@ -8,7 +8,7 @@ from saturnin.review import ReviewLedger, ReviewError, issue_content_digest
 
 SELF_REPO = "JakubMifek/saturnin"
 OTHER_REPO = "JakubMifek/some-project"
-TEST_HEAD_SHA = "abc1234567890"
+TEST_HEAD_SHA = "a" * 40
 
 
 @pytest.fixture()
@@ -193,6 +193,30 @@ def test_pr_review_requires_head_sha(config: Config) -> None:
             author="code-worker",
             reviewer="pr-reviewer",
             verdict="approved",
+        )
+
+
+def test_pr_review_requires_a_full_commit_sha(config: Config) -> None:
+    with pytest.raises(ReviewError, match="40-character"):
+        ReviewLedger(config).record(
+            subject="owner/repo#2",
+            kind="pr",
+            author="code-worker",
+            reviewer="pr-reviewer",
+            verdict="approved",
+            head_sha="abc123",
+        )
+
+
+def test_issue_review_requires_sha256_issue_digest(config: Config) -> None:
+    with pytest.raises(ReviewError, match="64-character"):
+        ReviewLedger(config).record(
+            subject="owner/repo#2",
+            kind="issue",
+            author="code-worker",
+            reviewer="issue-reviewer",
+            verdict="approved",
+            issue_digest="not-a-digest",
         )
 
 

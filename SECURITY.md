@@ -40,8 +40,9 @@ keeping the rules as data.
 - Nothing secret belongs in this repository. `board/tasks/`, `var/` and
   checkpoints are gitignored; private material belongs in the private
   companion repositories (ADR-0002).
-- `.pre-commit-config.yaml` runs secret detection before every commit. If it
-  fires, rotate first and clean the history second.
+- `.pre-commit-config.yaml` blocks committed private keys and malformed files.
+  Run a full secret scan before pushing changes; if it fires, rotate first and
+  clean the history second.
 
 ## Reporting a problem
 

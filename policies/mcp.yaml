@@ -38,6 +38,8 @@ rules:
   non_executing_roles_get_none: true
 
 launcher:
+  # Repository default is safety-first: routing/dispatch works everywhere,
+  # launch is enabled per host once copilot/npx/uvx are installed.
   enabled: false
   command: copilot
   args:

@@ -112,7 +112,7 @@ def test_public_task_intake_is_a_discovery_source(config: Config, board: Board) 
     sources = IssueDiscovery(config, board).sources()
     assert {
         "slug": "JakubMifek/saturnin",
-        "labels": ["saturnin:task"],
+        "labels": ["saturnin"],
         "require_labels": ["saturnin:trusted"],
     } in sources
 
@@ -122,13 +122,13 @@ def test_discovery_requires_maintainer_trust_labels(config: Config, board: Board
     policy["discovery"]["sources"] = [
         {
             "slug": "JakubMifek/widget-api",
-            "labels": ["saturnin:task"],
+            "labels": ["saturnin"],
             "require_labels": ["trusted"],
         }
     ]
     issues = [
-        _issue(1, labels=["saturnin:task"]),
-        _issue(2, labels=["saturnin:task", "trusted"]),
+        _issue(1, labels=["saturnin"]),
+        _issue(2, labels=["saturnin", "trusted"]),
     ]
     discovery = IssueDiscovery(config, board, fetcher=lambda repo, labels: list(issues))
 

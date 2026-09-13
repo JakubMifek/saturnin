@@ -56,6 +56,8 @@ named in `policies/repos.yaml` under `discovery.sources`, ignores anything it
 has already seen (a `source:<repo>#<n>` label on the task), copies the labels
 that matter, maps `incident`/`alert`/`security` to P0, and routes the result
 through the normal router. `saturnin-discovery.timer` runs it every ten minutes.
+For public intake in `JakubMifek/saturnin`, discovery reads issues labelled
+`saturnin` and only adopts them after a maintainer adds `saturnin:trusted`.
 
 The discovery loop is worth having whatever happens upstream: it is also how a
 human-filed issue, a failing nightly pipeline or a Dependabot alert reaches the

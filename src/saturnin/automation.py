@@ -78,7 +78,8 @@ class AutomationLibrary:
         for automation in self.list():
             score = 0.0
             for trigger in automation.triggers:
-                if trigger.lower() in lowered:
+                normalized = trigger.strip().lower()
+                if normalized and normalized in lowered:
                     score += 3
             identity = automation.id.lower().replace("-", " ")
             score += sum(1 for word in words if word in identity)

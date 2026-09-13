@@ -68,7 +68,7 @@ discovery:
   #     require_labels: [saturnin:trusted]
   sources:
     - slug: JakubMifek/saturnin
-      labels: ["saturnin:task"]
+      labels: ["saturnin"]
       require_labels: ["saturnin:trusted"]
 
 # Contract every Saturnin-managed project repository must satisfy.

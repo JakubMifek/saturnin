@@ -207,6 +207,7 @@ def test_branch_and_command_checks(home: Path, capsys: pytest.CaptureFixture[str
 
 def test_review_gate_flow(home: Path, capsys: pytest.CaptureFixture[str]) -> None:
     subject = "JakubMifek/saturnin#42"
+    head_sha = "a" * 40
     assert (
         run(
             capsys,
@@ -220,7 +221,7 @@ def test_review_gate_flow(home: Path, capsys: pytest.CaptureFixture[str]) -> Non
             "--author",
             "code-worker",
             "--head-sha",
-            "abc123",
+            head_sha,
         )[0]
         == 2
     )
@@ -238,7 +239,7 @@ def test_review_gate_flow(home: Path, capsys: pytest.CaptureFixture[str]) -> Non
         "--verdict",
         "approved",
         "--head-sha",
-        "abc123",
+        head_sha,
     )
     code, out = run(
         capsys,
@@ -252,7 +253,7 @@ def test_review_gate_flow(home: Path, capsys: pytest.CaptureFixture[str]) -> Non
         "--author",
         "code-worker",
         "--head-sha",
-        "abc123",
+        head_sha,
     )
     assert code == 0
     assert "ALLOWED" in out
@@ -351,7 +352,7 @@ def test_issue_review_gate_requires_matching_digest(
     home: Path, capsys: pytest.CaptureFixture[str]
 ) -> None:
     subject = "draft-for-managed-repo"
-    digest = "reviewed-digest"
+    digest = "b" * 64
     run(
         capsys,
         "review",
