@@ -428,6 +428,9 @@ def test_curl_cookie_and_trace_outputs_are_checked() -> None:
         ("-o/etc/response", "/etc/response"),
         ("-D/etc/headers", "/etc/headers"),
         ("-c/etc/cookies", "/etc/cookies"),
+        ("-so/etc/response", "/etc/response"),
+        ("-sD/etc/headers", "/etc/headers"),
+        ("-sc/etc/cookies", "/etc/cookies"),
     ],
 )
 def test_curl_attached_short_output_options_are_parsed(
@@ -436,10 +439,11 @@ def test_curl_attached_short_output_options_are_parsed(
     assert _curl_targets([argument, "https://example.test/ok"]) == [target]
 
 
-def test_curl_attached_short_config_is_rejected(governance: Governance) -> None:
-    decision = governance.check_server_command(
-        "curl -K/etc/curlrc https://example.test/ok"
-    )
+@pytest.mark.parametrize("option", ["-K/etc/curlrc", "-sK/etc/curlrc"])
+def test_curl_attached_short_config_is_rejected(
+    governance: Governance, option: str
+) -> None:
+    decision = governance.check_server_command(f"curl {option} data:,ok")
 
     assert not decision.allowed
     assert "unsupported curl option '--config'" in decision.reasons[0]
@@ -485,6 +489,9 @@ def test_shell_assignments_cannot_change_policy_home(
         ("curl -o/etc/response https://example.test/ok", "forbidden root"),
         ("curl -D/etc/headers https://example.test/ok", "forbidden root"),
         ("curl -c/etc/cookies https://example.test/ok", "forbidden root"),
+        ("curl -so/etc/response data:,ok", "forbidden root"),
+        ("curl -sD/etc/headers data:,ok", "forbidden root"),
+        ("curl -sc/etc/cookies data:,ok", "forbidden root"),
         ("curl --output-dir /opt https://example.test/ok", "outside writable roots"),
         ("rm -rf /home/saturnin-other", "outside writable roots"),
         ("rm -- -outside-writable-roots", "outside writable roots"),

@@ -810,6 +810,29 @@ def _curl_output_dir(arguments: Sequence[str]) -> str | None:
     return output_dir
 
 
+_CURL_SHORT_OPTIONS_WITH_VALUES = frozenset(
+    "AbcCdeEFDHKmoPQrtTuUwXxyz"
+)
+_CURL_SHORT_WRITE_OPTIONS = frozenset("oDc")
+
+
+def _curl_bundled_write_target(argument: str) -> tuple[bool, str]:
+    if not argument.startswith("-") or argument.startswith("--") or len(argument) <= 2:
+        return False, ""
+    for position, option in enumerate(argument[1:], start=1):
+        if option not in _CURL_SHORT_OPTIONS_WITH_VALUES:
+            continue
+        if option == "K":
+            raise _WriteScopeError(
+                "unsupported curl option '--config'; write scope is unknown"
+            )
+        if option in _CURL_SHORT_WRITE_OPTIONS:
+            return True, argument[position + 1 :]
+        # The remainder belongs to this value-taking option, not to more flags.
+        return False, ""
+    return False, ""
+
+
 def _curl_targets(arguments: Sequence[str]) -> list[str]:
     targets: list[str] = []
     index = 0
@@ -818,10 +841,17 @@ def _curl_targets(arguments: Sequence[str]) -> list[str]:
     output_dir = _curl_output_dir(arguments)
     while index < len(arguments):
         argument = arguments[index]
-        if argument.startswith("-K") and argument != "-K":
-            raise _WriteScopeError(
-                "unsupported curl option '--config'; write scope is unknown"
-            )
+        bundled_write, attached_output = _curl_bundled_write_target(argument)
+        if bundled_write:
+            if not attached_output:
+                index += 1
+                if index >= len(arguments):
+                    raise _WriteScopeError(f"curl option {argument!r} requires a value")
+                attached_output = arguments[index]
+            if attached_output != "-":
+                targets.append(attached_output)
+            index += 1
+            continue
         attached_output = next(
             (
                 argument[len(option) :]
