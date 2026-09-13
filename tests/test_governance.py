@@ -486,7 +486,7 @@ def test_curl_bundled_remote_name_uses_output_directory() -> None:
     ]
 
 
-@pytest.mark.parametrize("next_option", ["--next", "-:"])
+@pytest.mark.parametrize("next_option", ["--next", "-:", "-s:"])
 def test_curl_output_dir_resets_between_operations(next_option: str) -> None:
     assert _curl_targets([
         "-O",
@@ -503,7 +503,7 @@ def test_curl_output_dir_resets_between_operations(next_option: str) -> None:
     ]
 
 
-@pytest.mark.parametrize("next_option", ["--next", "-:"])
+@pytest.mark.parametrize("next_option", ["--next", "-:", "-s:"])
 def test_curl_remote_name_requires_output_dir_in_each_operation(
     governance: Governance, next_option: str
 ) -> None:
@@ -517,7 +517,7 @@ def test_curl_remote_name_requires_output_dir_in_each_operation(
     assert "outside writable roots" in decision.reasons[0]
 
 
-@pytest.mark.parametrize("next_option", ["--next", "-:"])
+@pytest.mark.parametrize("next_option", ["--next", "-:", "-s:"])
 def test_curl_each_operation_can_set_a_valid_output_dir(
     governance: Governance, next_option: str
 ) -> None:
@@ -525,6 +525,19 @@ def test_curl_each_operation_can_set_a_valid_output_dir(
         "curl -O https://example.test/first.tar.gz "
         f"--output-dir /home/saturnin/first {next_option} "
         "-O https://example.test/second.tar.gz "
+        "--output-dir /home/saturnin/second"
+    )
+
+    assert decision.allowed
+
+
+def test_curl_flags_after_bundled_short_next_apply_to_new_operation(
+    governance: Governance,
+) -> None:
+    decision = governance.check_server_command(
+        "curl -O https://example.test/first.tar.gz "
+        "--output-dir /home/saturnin/first "
+        "-s:O https://example.test/second.tar.gz "
         "--output-dir /home/saturnin/second"
     )
 

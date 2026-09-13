@@ -810,6 +810,35 @@ def _curl_output_dir(arguments: Sequence[str]) -> str | None:
     return output_dir
 
 
+_CURL_SHORT_OPTIONS_WITH_VALUES = frozenset(
+    "AbcCdeEFDHKmoPQrtTuUwXxyz"
+)
+_CURL_SHORT_WRITE_OPTIONS = frozenset("oDc")
+
+
+def _expand_curl_short_next(arguments: Sequence[str]) -> list[str]:
+    expanded: list[str] = []
+    for argument in arguments:
+        if not argument.startswith("-") or argument.startswith("--") or len(argument) <= 2:
+            expanded.append(argument)
+            continue
+        segment: list[str] = []
+        for position, option in enumerate(argument[1:], start=1):
+            if option in _CURL_SHORT_OPTIONS_WITH_VALUES:
+                segment.append(argument[position:])
+                break
+            if option == ":":
+                if segment:
+                    expanded.append("-" + "".join(segment))
+                    segment = []
+                expanded.append("-:")
+                continue
+            segment.append(option)
+        if segment:
+            expanded.append("-" + "".join(segment))
+    return expanded
+
+
 def _curl_operation(arguments: Sequence[str], start: int) -> Sequence[str]:
     end = next(
         (
@@ -820,12 +849,6 @@ def _curl_operation(arguments: Sequence[str], start: int) -> Sequence[str]:
         len(arguments),
     )
     return arguments[start:end]
-
-
-_CURL_SHORT_OPTIONS_WITH_VALUES = frozenset(
-    "AbcCdeEFDHKmoPQrtTuUwXxyz"
-)
-_CURL_SHORT_WRITE_OPTIONS = frozenset("oDc")
 
 
 def _curl_bundled_write_action(argument: str) -> tuple[bool, str, str]:
@@ -849,6 +872,7 @@ def _curl_bundled_write_action(argument: str) -> tuple[bool, str, str]:
 
 
 def _curl_targets(arguments: Sequence[str]) -> list[str]:
+    arguments = _expand_curl_short_next(arguments)
     targets: list[str] = []
     index = 0
     remote_name_all = False
