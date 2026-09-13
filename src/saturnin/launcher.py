@@ -129,7 +129,7 @@ class AgentLauncher:
                     process = subprocess.Popen(
                         [executable, *args],
                         cwd=workdir,
-                        env=self._worker_environment(worker_config),
+                        env=self._worker_environment(worker_config, contract),
                         stdin=subprocess.DEVNULL,
                         stdout=output,
                         stderr=subprocess.STDOUT,
@@ -249,15 +249,49 @@ class AgentLauncher:
             return config
         return Config(config.data_root)
 
-    @staticmethod
-    def _worker_environment(config: Config) -> dict[str, str]:
-        environment = {**os.environ, "SATURNIN_HOME": str(config.root)}
+    def _worker_environment(self, config: Config, contract: AgentContract) -> dict[str, str]:
+        environment = {
+            name: value
+            for name in self._worker_env_allowlist()
+            if (value := os.environ.get(name)) is not None
+        }
+        environment["SATURNIN_HOME"] = str(config.root)
         source = str(config.root / "src")
         inherited = environment.get("PYTHONPATH")
         environment["PYTHONPATH"] = (
             source + os.pathsep + inherited if inherited else source
         )
+        if "github" in contract.mcp:
+            token_name = str(
+                self.policy.get("github_read_token_env", "SATURNIN_GITHUB_MCP_TOKEN")
+            )
+            token = os.environ.get(token_name, "")
+            if token:
+                environment["GITHUB_PERSONAL_ACCESS_TOKEN"] = token
         return environment
+
+    def _worker_env_allowlist(self) -> tuple[str, ...]:
+        configured = self.policy.get("env_allowlist")
+        if configured is None:
+            return (
+                "PATH",
+                "HOME",
+                "LANG",
+                "LC_ALL",
+                "LC_CTYPE",
+                "TERM",
+                "TMPDIR",
+                "USER",
+                "LOGNAME",
+                "SHELL",
+                "XDG_RUNTIME_DIR",
+                "PYTHONPATH",
+            )
+        if not isinstance(configured, list) or not all(
+            isinstance(name, str) and name.strip() for name in configured
+        ):
+            raise LauncherError("mcp.launcher.env_allowlist must be a non-empty list of env names")
+        return tuple(dict.fromkeys(name.strip() for name in configured))
 
     def _contract(self, task: Task, config: Config | None = None) -> AgentContract:
         if not task.role:

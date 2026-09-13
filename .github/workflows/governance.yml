@@ -37,6 +37,7 @@ jobs:
         uses: actions/github-script@v7
         with:
           script: |
+            const bootstrapReviewer = "copilot-pull-request-reviewer[bot]";
             const {owner, repo} = context.repo;
             const pull_number = context.payload.pull_request.number;
             const author = context.payload.pull_request.user.login;
@@ -49,7 +50,11 @@ jobs:
             });
             const latest = new Map();
             for (const review of reviews) {
-              if (review.user.login !== author) {
+              if (
+                review.user.login !== author &&
+                review.user.type === "Bot" &&
+                review.user.login === bootstrapReviewer
+              ) {
                 latest.set(review.user.login, {
                   state: review.state,
                   commit_id: review.commit_id,
@@ -62,7 +67,7 @@ jobs:
               )
             ) {
               core.setFailed(
-                "Initial governance bootstrap requires a current-head repository-native approval from someone other than the PR author."
+                "Initial governance bootstrap requires a current-head approval from copilot-pull-request-reviewer[bot]."
               );
             }
       - uses: actions/setup-python@v5

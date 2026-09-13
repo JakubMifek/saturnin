@@ -14,6 +14,7 @@ from saturnin.checkpoints import Checkpoint, CheckpointStore
 from saturnin.cli import main
 from saturnin.discovery import InboundIssue, IssueDiscovery
 from saturnin.launcher import AgentLauncher
+from saturnin.review import issue_content_digest
 from saturnin.routing import Router
 from saturnin.worktrees import WorktreeManager
 
@@ -582,6 +583,218 @@ def test_issue_review_gate_requires_matching_digest(
 
     assert code == 0
     assert "ALLOWED" in out
+
+
+def test_review_merge_blocks_when_pr_head_changed_after_approval(
+    home: Path, capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    subject = "JakubMifek/saturnin#7"
+    reviewed_head = "a" * 40
+    current_head = "b" * 40
+    run(
+        capsys,
+        "review",
+        "record",
+        subject,
+        "--kind",
+        "pr",
+        "--author",
+        "code-worker",
+        "--reviewer",
+        "pr-reviewer",
+        "--verdict",
+        "approved",
+        "--head-sha",
+        reviewed_head,
+    )
+    calls: list[list[str]] = []
+
+    def fake_run_gh(args: list[str]) -> str:
+        calls.append(args)
+        if args[:2] == ["api", f"repos/JakubMifek/saturnin/pulls/7"]:
+            return json.dumps({"head": {"sha": current_head}})
+        raise AssertionError(f"unexpected gh call: {args}")
+
+    monkeypatch.setattr("saturnin.cli.run_gh", fake_run_gh)
+
+    code, out = run(
+        capsys,
+        "review",
+        "merge",
+        subject,
+        "--repo",
+        "JakubMifek/saturnin",
+        "--author",
+        "code-worker",
+    )
+
+    assert code == 2
+    assert "no review records match the current head SHA" in out
+    assert calls == [["api", "repos/JakubMifek/saturnin/pulls/7"]]
+
+
+def test_review_merge_uses_expected_head_precondition(
+    home: Path, capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    subject = "JakubMifek/saturnin#8"
+    head_sha = "c" * 40
+    run(
+        capsys,
+        "review",
+        "record",
+        subject,
+        "--kind",
+        "pr",
+        "--author",
+        "code-worker",
+        "--reviewer",
+        "pr-reviewer",
+        "--verdict",
+        "approved",
+        "--head-sha",
+        head_sha,
+    )
+    calls: list[list[str]] = []
+
+    def fake_run_gh(args: list[str]) -> str:
+        calls.append(args)
+        if args[:2] == ["api", f"repos/JakubMifek/saturnin/pulls/8"]:
+            return json.dumps({"head": {"sha": head_sha}})
+        if args[:4] == ["api", "--method", "PUT", "repos/JakubMifek/saturnin/pulls/8/merge"]:
+            assert f"sha={head_sha}" in args
+            return json.dumps({"merged": True, "message": "Pull Request successfully merged", "sha": "d" * 40})
+        raise AssertionError(f"unexpected gh call: {args}")
+
+    monkeypatch.setattr("saturnin.cli.run_gh", fake_run_gh)
+
+    code, out = run(
+        capsys,
+        "review",
+        "merge",
+        subject,
+        "--repo",
+        "JakubMifek/saturnin",
+        "--author",
+        "code-worker",
+        "--method",
+        "squash",
+    )
+
+    assert code == 0
+    assert "successfully merged" in out
+    assert calls[1][:4] == ["api", "--method", "PUT", "repos/JakubMifek/saturnin/pulls/8/merge"]
+
+
+def test_review_submit_issue_uses_reviewed_title_and_body_digest(
+    home: Path, capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    subject = "managed-issue-draft"
+    title = "Need safer rollout guardrails"
+    body = "Gate deployments on verified backup snapshots."
+    digest = issue_content_digest(title, body)
+    run(
+        capsys,
+        "review",
+        "record",
+        subject,
+        "--kind",
+        "issue",
+        "--author",
+        "researcher",
+        "--reviewer",
+        "issue-reviewer",
+        "--verdict",
+        "approved",
+        "--issue-digest",
+        digest,
+    )
+    calls: list[list[str]] = []
+
+    def fake_run_gh(args: list[str]) -> str:
+        calls.append(args)
+        if args[:2] == ["issue", "create"]:
+            assert args[args.index("--title") + 1] == title
+            assert args[args.index("--body") + 1] == body
+            return "https://github.com/JakubMifek/saturnin-ops/issues/77\n"
+        raise AssertionError(f"unexpected gh call: {args}")
+
+    monkeypatch.setattr("saturnin.cli.run_gh", fake_run_gh)
+
+    code, out = run(
+        capsys,
+        "review",
+        "submit-issue",
+        subject,
+        "--repo",
+        "JakubMifek/saturnin-ops",
+        "--author",
+        "researcher",
+        "--title",
+        title,
+        "--body",
+        body,
+        "--label",
+        "incident",
+    )
+
+    assert code == 0
+    assert out.strip().endswith("/issues/77")
+    assert calls == [
+        [
+            "issue",
+            "create",
+            "--repo",
+            "JakubMifek/saturnin-ops",
+            "--title",
+            title,
+            "--body",
+            body,
+            "--label",
+            "incident",
+        ]
+    ]
+
+
+def test_review_submit_issue_blocks_when_reviewed_content_differs(
+    home: Path, capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    subject = "content-mismatch-draft"
+    reviewed_digest = "e" * 64
+    run(
+        capsys,
+        "review",
+        "record",
+        subject,
+        "--kind",
+        "issue",
+        "--author",
+        "researcher",
+        "--reviewer",
+        "issue-reviewer",
+        "--verdict",
+        "approved",
+        "--issue-digest",
+        reviewed_digest,
+    )
+    monkeypatch.setattr("saturnin.cli.run_gh", lambda args: (_ for _ in ()).throw(AssertionError(args)))
+
+    code, out = run(
+        capsys,
+        "review",
+        "submit-issue",
+        subject,
+        "--repo",
+        "JakubMifek/saturnin-ops",
+        "--author",
+        "researcher",
+        "--title",
+        "Reviewed title",
+        "--body",
+        "Different body than the reviewed draft",
+    )
+
+    assert code == 2
+    assert "no issue review records match the current issue-content digest" in out
 
 
 def test_checkpoint_sweep_does_not_mutate_when_launcher_is_disabled(

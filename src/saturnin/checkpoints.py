@@ -14,7 +14,7 @@ from typing import Any, Iterator
 
 from .board import Board, BoardError, utcnow
 from .config import Config, default_config
-from .jsonlines import JSONLinesError, objects, repair_unterminated_tail
+from .jsonlines import JSONLinesError, atomic_replace_text, objects, repair_unterminated_tail
 from .locking import file_lock
 
 REQUIRED_FIELDS = ("task_id", "role", "summary", "next_steps")
@@ -109,7 +109,7 @@ class CheckpointStore:
                 except JSONLinesError as exc:
                     raise CheckpointError(f"corrupt checkpoint store {exc}") from exc
                 if repaired != raw:
-                    path.write_text(repaired, encoding="utf-8")
+                    atomic_replace_text(path, repaired)
             with path.open("a", encoding="utf-8") as handle:
                 handle.write(json.dumps(checkpoint.to_dict()) + "\n")
             try:

@@ -1,5 +1,4 @@
 from __future__ import annotations
-
 from contextlib import contextmanager
 from datetime import datetime, timezone
 from pathlib import Path
@@ -79,6 +78,39 @@ def test_save_preserves_complete_unterminated_tail(config: Config, board: Board)
 
     store.save(Checkpoint(task_id=task.id, role="scribe", summary="after", next_steps=["c"]))
 
+    assert [checkpoint.summary for checkpoint in store.history(task.id)] == [
+        "safe",
+        "complete-tail",
+        "after",
+    ]
+
+
+def test_save_repairs_unterminated_tail_with_atomic_replace(
+    config: Config, board: Board, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    task = board.create("Atomic tail repair")
+    store = CheckpointStore(config, board)
+    store.save(Checkpoint(task_id=task.id, role="scribe", summary="safe", next_steps=["a"]))
+    with store.path_for(task.id).open("a", encoding="utf-8") as handle:
+        handle.write(
+            '{"task_id":"'
+            + task.id
+            + '","role":"scribe","summary":"complete-tail","next_steps":["b"]}'
+        )
+
+    replaced: list[str] = []
+
+    def tracked_replace(path: Path, text: str) -> None:
+        replaced.append(text)
+        path.write_text(text, encoding="utf-8")
+
+    monkeypatch.setattr("saturnin.checkpoints.atomic_replace_text", tracked_replace)
+
+    store.save(Checkpoint(task_id=task.id, role="scribe", summary="after", next_steps=["c"]))
+
+    assert len(replaced) == 1
+    assert replaced[0].endswith("\n")
+    assert '"summary":"complete-tail"' in replaced[0]
     assert [checkpoint.summary for checkpoint in store.history(task.id)] == [
         "safe",
         "complete-tail",

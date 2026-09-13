@@ -37,7 +37,7 @@ from .governance import Governance
 from .improve import ImprovementLoop
 from .issues import IssueMirror, MirrorError, run_gh
 from .launcher import AgentLauncher, LauncherError, LaunchResult
-from .review import ReviewError, ReviewLedger
+from .review import ReviewError, ReviewLedger, issue_content_digest
 from .routing import Router, RoutingError
 from .worktrees import GitError, WorktreeManager
 
@@ -212,6 +212,26 @@ def build_parser() -> argparse.ArgumentParser:
         default="",
         help="current issue title/body digest to match reviews against",
     )
+    merge = review.add_parser("merge", help="gate and merge a PR at the reviewed head")
+    merge.add_argument("subject", help="owner/repo#number")
+    merge.add_argument("--repo", required=True)
+    merge.add_argument("--author", required=True)
+    merge.add_argument(
+        "--method",
+        choices=["merge", "squash", "rebase"],
+        default="squash",
+        help="GitHub merge method",
+    )
+    issue_submit = review.add_parser(
+        "submit-issue",
+        help="gate and submit reviewed issue content to a managed repository",
+    )
+    issue_submit.add_argument("subject", help="review subject id used in review record")
+    issue_submit.add_argument("--repo", required=True)
+    issue_submit.add_argument("--author", required=True)
+    issue_submit.add_argument("--title", required=True)
+    issue_submit.add_argument("--body", required=True)
+    issue_submit.add_argument("--label", action="append", default=[])
 
     # governance -------------------------------------------------------
     gov = sub.add_parser("check", help="governance checks").add_subparsers(
@@ -406,14 +426,7 @@ def _project_routing_context(
 
 
 def _current_pr_head(subject: str, repo: str | None = None) -> str:
-    subject_repo, separator, number = subject.rpartition("#")
-    if (
-        not separator
-        or not number.isdigit()
-        or not re.fullmatch(r"[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+", subject_repo)
-        or (repo is not None and subject_repo.casefold() != repo.casefold())
-    ):
-        raise ReviewError("PR subject must be owner/repo#number and match --repo")
+    subject_repo, number = _parse_pr_subject(subject, repo=repo)
     try:
         response = json.loads(run_gh(["api", f"repos/{subject_repo}/pulls/{number}"]))
         head_sha = str(response["head"]["sha"]).strip()
@@ -422,6 +435,18 @@ def _current_pr_head(subject: str, repo: str | None = None) -> str:
     if not re.fullmatch(r"[0-9a-fA-F]{40}", head_sha):
         raise ReviewError(f"GitHub returned an invalid head SHA for {subject}")
     return head_sha
+
+
+def _parse_pr_subject(subject: str, *, repo: str | None = None) -> tuple[str, str]:
+    subject_repo, separator, number = subject.rpartition("#")
+    if (
+        not separator
+        or not number.isdigit()
+        or not re.fullmatch(r"[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+", subject_repo)
+        or (repo is not None and subject_repo.casefold() != repo.casefold())
+    ):
+        raise ReviewError("PR subject must be owner/repo#number and match --repo")
+    return subject_repo, number
 
 
 def _prepare_project_route(config: Config, board: Board, task_id: str) -> Task:
@@ -1201,13 +1226,13 @@ def _run_checkpoint(args: argparse.Namespace, config: Config, board: Board, as_j
 
 def _run_review(args: argparse.Namespace, config: Config, as_json: bool) -> int:
     ledger = ReviewLedger(config)
-    head_sha = getattr(args, "head_sha", "")
-    if args.kind == "pr" and not head_sha:
-        head_sha = _current_pr_head(
-            args.subject,
-            getattr(args, "repo", None),
-        )
     if args.review_command == "record":
+        head_sha = getattr(args, "head_sha", "")
+        if args.kind == "pr" and not head_sha:
+            head_sha = _current_pr_head(
+                args.subject,
+                getattr(args, "repo", None),
+            )
         record = ledger.record(
             subject=args.subject,
             kind=args.kind,
@@ -1225,6 +1250,107 @@ def _run_review(args: argparse.Namespace, config: Config, as_json: bool) -> int:
             f"recorded {record.verdict} for {record.subject} by {record.reviewer}",
         )
         return 0
+    if args.review_command == "merge":
+        subject_repo, number = _parse_pr_subject(args.subject, repo=args.repo)
+        head_sha = _current_pr_head(args.subject, args.repo)
+        governance = Governance(config)
+        records = ledger.for_subject(args.subject, "pr")
+        decision = governance.merge_allowed(
+            repo=args.repo,
+            author=args.author,
+            records=records,
+            head_sha=head_sha,
+        )
+        if not decision.allowed:
+            _emit(
+                {"allowed": False, "reasons": decision.reasons, "head_sha": head_sha},
+                as_json,
+                "BLOCKED: " + "; ".join(decision.reasons),
+            )
+            return 2
+        try:
+            response = json.loads(
+                run_gh(
+                    [
+                        "api",
+                        "--method",
+                        "PUT",
+                        f"repos/{subject_repo}/pulls/{number}/merge",
+                        "-f",
+                        f"sha={head_sha}",
+                        "-f",
+                        f"merge_method={args.method}",
+                    ]
+                )
+            )
+        except (MirrorError, json.JSONDecodeError) as exc:
+            raise ReviewError(f"governed merge failed for {args.subject}: {exc}") from exc
+        _emit(
+            {
+                "allowed": True,
+                "reasons": decision.reasons,
+                "head_sha": head_sha,
+                "merged": bool(response.get("merged")),
+                "message": str(response.get("message", "")),
+                "sha": str(response.get("sha", "")),
+            },
+            as_json,
+            str(response.get("message", "merge attempted")),
+        )
+        return 0 if response.get("merged") else 2
+    if args.review_command == "submit-issue":
+        digest = issue_content_digest(args.title, args.body)
+        governance = Governance(config)
+        records = ledger.for_subject(args.subject, "issue")
+        decision = governance.issue_submission_allowed(
+            repo=args.repo,
+            author=args.author,
+            records=records,
+            issue_digest=digest,
+        )
+        if not decision.allowed:
+            _emit(
+                {"allowed": False, "reasons": decision.reasons, "issue_digest": digest},
+                as_json,
+                "BLOCKED: " + "; ".join(decision.reasons),
+            )
+            return 2
+        create_args = [
+            "issue",
+            "create",
+            "--repo",
+            args.repo,
+            "--title",
+            args.title,
+            "--body",
+            args.body,
+        ]
+        for label in args.label:
+            create_args.extend(["--label", label])
+        try:
+            output = run_gh(create_args)
+        except MirrorError as exc:
+            raise ReviewError(f"governed issue submission failed for {args.subject}: {exc}") from exc
+        url = output.strip().splitlines()[-1].strip() if output.strip() else ""
+        if not url:
+            raise ReviewError("governed issue submission returned no issue URL")
+        _emit(
+            {
+                "allowed": True,
+                "reasons": decision.reasons,
+                "issue_digest": digest,
+                "url": url,
+            },
+            as_json,
+            url,
+        )
+        return 0
+    head_sha = getattr(args, "head_sha", "")
+    if args.kind == "pr" and not head_sha:
+        head_sha = _current_pr_head(
+            args.subject,
+            getattr(args, "repo", None),
+        )
     governance = Governance(config)
     records = ledger.for_subject(args.subject, args.kind)
     decision = (

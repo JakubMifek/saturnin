@@ -6,10 +6,12 @@ Make the independent-review requirement mechanical instead of aspirational.
 ## Commands
 - PR: capture the current head SHA, then pass the same value to
   `saturnin review record <subject> --kind pr ... --head-sha <sha>` and
-  `saturnin review gate <subject> --kind pr ... --head-sha <sha>`.
+  either `saturnin review gate <subject> --kind pr ... --head-sha <sha>` or
+  `saturnin review merge <subject> --repo <repo> --author <role>`.
 - Issue: compute `issue_content_digest(title, body)` and pass it to both
   `saturnin review record <subject> --kind issue ... --issue-digest <digest>`
-  and `saturnin review gate <subject> --kind issue ... --issue-digest <digest>`.
+  and either `saturnin review gate <subject> --kind issue ... --issue-digest <digest>`
+  or `saturnin review submit-issue <subject> --repo <repo> --author <role> --title ... --body ...`.
 
 ## Guarantees
 - Author and reviewer can never be the same role.

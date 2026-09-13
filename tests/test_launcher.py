@@ -540,6 +540,38 @@ def test_launcher_keeps_engine_source_for_managed_repository(
     assert calls[0]["env"]["PYTHONPATH"].split(":")[0] == str(config.root / "src")
 
 
+def test_launcher_worker_environment_uses_allowlist_and_constrained_github_token(
+    config: Config, board: Board, git_repo: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    task = board.create("Constrain worker environment")
+    Router(config).dispatch(board, task)
+    worktree = WorktreeManager(config, repo=git_repo, board=board).create(
+        "feature/worker-env-allowlist"
+    )
+    with board.edit(task.id) as stored:
+        stored.branch = "feature/worker-env-allowlist"
+        stored.worktree = str(worktree.path)
+
+    monkeypatch.setenv("PATH", "/usr/bin")
+    monkeypatch.setenv("LANG", "C.UTF-8")
+    monkeypatch.setenv("GH_TOKEN", "host-gh-token")
+    monkeypatch.setenv("GITHUB_TOKEN", "host-github-token")
+    monkeypatch.setenv("AWS_SECRET_ACCESS_KEY", "host-secret")
+    monkeypatch.setenv("SATURNIN_GITHUB_MCP_TOKEN", "scoped-read-token")
+
+    launcher = AgentLauncher(config, board)
+    worker_config = launcher._worker_config(worktree.path)
+    contract = launcher._contract(board.get(task.id), worker_config)
+    environment = launcher._worker_environment(worker_config, contract)
+
+    assert environment["SATURNIN_HOME"] == str(worktree.path)
+    assert environment["PYTHONPATH"].split(":")[0] == str(worktree.path / "src")
+    assert environment["GITHUB_PERSONAL_ACCESS_TOKEN"] == "scoped-read-token"
+    assert "GH_TOKEN" not in environment
+    assert "GITHUB_TOKEN" not in environment
+    assert "AWS_SECRET_ACCESS_KEY" not in environment
+
+
 def test_launcher_rejects_unverified_github_binary(
     config: Config,
     board: Board,
