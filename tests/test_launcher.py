@@ -137,6 +137,33 @@ def test_launcher_loads_project_local_contract(
     assert contract.path == agent
 
 
+def test_launcher_rejects_project_agent_symlink_escape(
+    config: Config, board: Board, git_repo: Path
+) -> None:
+    task = board.create("Run a project migration")
+    worktree = WorktreeManager(config, repo=git_repo, board=board).create(
+        "feature/symlink-agent"
+    )
+    outside = config.root / "outside-agent.md"
+    outside.write_text(
+        "---\nrole: db-migrator\nskills: [checkpointing]\nmcp: []\n---\n",
+        encoding="utf-8",
+    )
+    agent = worktree.path / ".saturnin" / "agents" / "db-migrator.md"
+    agent.parent.mkdir(parents=True, exist_ok=True)
+    agent.symlink_to(outside)
+    (worktree.path / ".saturnin" / "repo.yaml").write_text(
+        "agents: [.saturnin/agents/db-migrator.md]\n",
+        encoding="utf-8",
+    )
+    with board.edit(task.id) as stored:
+        stored.role = "db-migrator"
+        stored.worktree = str(worktree.path)
+
+    with pytest.raises(LauncherError, match="stay inside"):
+        AgentLauncher(config, board)._contract(board.get(task.id))
+
+
 def test_malformed_project_yaml_leaves_checkpoint_available_for_retry(
     config: Config, board: Board, git_repo: Path, monkeypatch
 ) -> None:
@@ -309,6 +336,41 @@ def test_launcher_rolls_back_claim_when_spawn_fails(
     assert stored.checkpoint_resumed_at is None
     assert stored.history[-1]["event"] == "agent:launch_failed"
     assert not any(entry["event"] == "state:in_progress" for entry in stored.history)
+
+
+def test_launcher_rolls_back_claim_when_child_exits_immediately(
+    config: Config, board: Board, git_repo: Path, monkeypatch
+) -> None:
+    config.policy("mcp")["launcher"]["enabled"] = True
+    task = board.create("Implement a small fix")
+    Router(config).dispatch(board, task)
+    worktree = WorktreeManager(config, repo=git_repo, board=board).create("feature/exit-launch")
+    with board.edit(task.id) as stored:
+        stored.branch = "feature/exit-launch"
+        stored.worktree = str(worktree.path)
+    monkeypatch.setattr("saturnin.launcher.shutil.which", lambda _: "/usr/bin/copilot")
+    real_popen = subprocess.Popen
+
+    class ExitedProcess:
+        pid = 4242
+
+        def wait(self, timeout=None):
+            return 17
+
+    monkeypatch.setattr(
+        "saturnin.launcher.subprocess.Popen",
+        lambda command, **kwargs: real_popen(command, **kwargs)
+        if command[0] == "git"
+        else ExitedProcess(),
+    )
+
+    with pytest.raises(LauncherError, match="exited immediately"):
+        AgentLauncher(config, board).launch(task.id, resumed_checkpoint="checkpoint-1")
+
+    stored = board.get(task.id)
+    assert stored.state == "routed"
+    assert stored.checkpoint_resumed_at is None
+    assert stored.history[-1]["event"] == "agent:launch_failed"
 
 
 def test_launcher_rejects_unauthorized_project_mcp(

@@ -537,7 +537,7 @@ def test_checkpoint_sweep_continues_after_launch_failure(
 
     code, out = run(capsys, "--json", "checkpoint", "sweep")
 
-    assert code == 0
+    assert code == 1
     assert json.loads(out) == [
         {"task_id": first.id, "error": "invalid checkpoint"},
         {"task_id": second.id, "pid": 42},

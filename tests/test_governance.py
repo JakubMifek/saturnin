@@ -810,14 +810,14 @@ def test_shell_assignments_cannot_change_policy_home(
         ("sed -i s/foo/bar/ /opt/status", "outside writable roots"),
         ("saturnin --home /tmp task add x", "outside writable roots"),
         ("python3 -m saturnin --home /tmp task add x", "outside writable roots"),
-        ("git -C /tmp clone https://example.test/repo.git", "outside writable roots"),
         ("git -C /tmp init", "outside writable roots"),
         ("git --git-dir=/tmp/repo.git status", "outside writable roots"),
         ("git --work-tree /tmp/repo checkout -- file", "outside writable roots"),
         ("git init /tmp/repo", "outside writable roots"),
         ("git worktree add /tmp/worktree feature/test", "outside writable roots"),
         ("git worktree add -b feature/test /tmp/worktree", "outside writable roots"),
-        ("git clone https://example.test/repo.git /tmp/repo", "outside writable roots"),
+        ("git diff --output=/etc/result HEAD", "outside writable roots"),
+        ("git diff --output /opt/result HEAD", "outside writable roots"),
         ("find /tmp/job -delete", "outside writable roots"),
         ("find /home/saturnin -fprint /opt/results", "outside writable roots"),
     ],
@@ -867,6 +867,58 @@ def test_git_control_paths_and_mutation_destinations_are_write_targets(
     arguments: list[str], target: str
 ) -> None:
     assert target in _git_targets(arguments)
+
+
+@pytest.mark.parametrize(
+    ("arguments", "target"),
+    [
+        (["diff", "--output=/etc/result", "HEAD"], "/etc/result"),
+        (["diff", "--output", "/opt/result", "HEAD"], "/opt/result"),
+    ],
+)
+def test_git_write_bearing_options_are_write_targets(
+    arguments: list[str], target: str
+) -> None:
+    assert target in _git_targets(arguments)
+
+
+@pytest.mark.parametrize(
+    "command",
+    [
+        "git clone ext::sh -c id /home/saturnin/worktrees/repo",
+        "git fetch origin main",
+        "git pull origin main",
+        "git push origin HEAD:main",
+        "git clone --upload-pack=/bin/sh https://example.test/repo.git repo",
+        "git push --receive-pack=/bin/sh origin HEAD",
+    ],
+)
+def test_git_network_subcommands_require_governed_wrappers(
+    governance: Governance, command: str
+) -> None:
+    decision = governance.check_server_command(command)
+
+    assert not decision.allowed
+    assert "dedicated governed wrapper" in decision.reasons[0]
+
+
+@pytest.mark.parametrize(
+    "command",
+    [
+        "cp source /etc/target --suffix .bak",
+        "mv source /etc/target --suffix .bak",
+        "install source /etc/target --mode 600",
+        "ln source /etc/target --suffix .bak",
+        "rsync source /etc/target --suffix .bak",
+    ],
+)
+def test_destination_commands_reject_options_after_operands(
+    governance: Governance, command: str
+) -> None:
+    decision = governance.check_server_command(command)
+
+    assert not decision.allowed
+    assert "option after operands" in decision.reasons[0]
 
 
 @pytest.mark.parametrize(

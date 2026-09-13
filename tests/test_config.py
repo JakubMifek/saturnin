@@ -74,7 +74,21 @@ def test_ci_governance_uses_base_controlled_workflow_and_code() -> None:
     assert "persist-credentials: false" in workflow
     assert "pull_request.head.sha" not in workflow
     assert "TRUSTED_BOOTSTRAP_BASE_SHA" not in workflow
-    assert "Bootstrap initial governance" not in workflow
+    assert "Detect initial governance bootstrap" in workflow
+    assert "steps.bootstrap.outputs.initial != 'true'" in workflow
+
+
+def test_public_task_template_matches_discovery_source_labels() -> None:
+    policy = yaml.safe_load((REPO_ROOT / "policies/repos.yaml").read_text(encoding="utf-8"))
+    template = yaml.safe_load(
+        (REPO_ROOT / ".github/ISSUE_TEMPLATE/task.yml").read_text(encoding="utf-8")
+    )
+    engine = policy["repos"]["engine"]["slug"]
+    source = next(item for item in policy["discovery"]["sources"] if item["slug"] == engine)
+
+    assert set(template["labels"]) & set(source["labels"])
+    assert "saturnin:trusted" in source["require_labels"]
+    assert "saturnin:trusted" in template["body"][0]["attributes"]["value"]
 
 
 def test_ceo_instructions_require_backups_until_mirroring_is_enabled() -> None:

@@ -25,7 +25,12 @@ from .automation import AutomationLibrary
 from .board import CONTAINER_KINDS, TRANSITIONS, Board, BoardError, Task
 from .checkpoints import Checkpoint, CheckpointStore
 from .config import Config
-from .contracts import FRONT_MATTER, audit as audit_contracts, mcp_authorization_problem
+from .contracts import (
+    FRONT_MATTER,
+    audit as audit_contracts,
+    mcp_authorization_problem,
+    project_agent_path,
+)
 from .discovery import DiscoveryError, IssueDiscovery
 from . import docsync
 from .governance import Governance
@@ -351,10 +356,10 @@ def _project_agent_catalog(
     if not isinstance(entries, list):
         return result
     for entry in entries:
-        rel = Path(str(entry))
-        if rel.is_absolute() or ".." in rel.parts or not str(rel).startswith(f"{agents_dir}/"):
+        try:
+            agent_path = project_agent_path(path, entry, agents_dir)
+        except ValueError:
             continue
-        agent_path = path / rel
         if not agent_path.is_file():
             continue
         match = FRONT_MATTER.match(agent_path.read_text(encoding="utf-8"))
@@ -544,13 +549,11 @@ def _check_project_agents(
     problems: list[str] = []
     for entry in entries:
         rel = str(entry)
-        if Path(rel).is_absolute() or ".." in Path(rel).parts:
-            problems.append(f"agent path must stay inside the repository: {rel}")
+        try:
+            agent_path = project_agent_path(path, rel, agents_dir)
+        except ValueError as exc:
+            problems.append(str(exc))
             continue
-        if not rel.startswith(f"{agents_dir}/"):
-            problems.append(f"project agents belong in {agents_dir}/: {rel}")
-            continue
-        agent_path = path / rel
         if not agent_path.is_file():
             problems.append(f"agent contract declared but missing: {rel}")
             continue
@@ -1151,10 +1154,12 @@ def _run_checkpoint(args: argparse.Namespace, config: Config, board: Board, as_j
         due = store.due()
         if args.dry_run:
             payload = [checkpoint.to_dict() for checkpoint in due]
+            had_errors = False
         else:
             router = Router(config)
             launcher = AgentLauncher(config, board)
             payload = []
+            had_errors = False
             if not launcher.enabled:
                 payload = [
                     {"task_id": checkpoint.task_id, "disabled": True}
@@ -1172,6 +1177,7 @@ def _run_checkpoint(args: argparse.Namespace, config: Config, board: Board, as_j
                         )
                         payload.append(launched.to_dict())
                     except RuntimeError as exc:
+                        had_errors = True
                         payload.append(
                             {"task_id": checkpoint.task_id, "error": str(exc)}
                         )
@@ -1180,7 +1186,7 @@ def _run_checkpoint(args: argparse.Namespace, config: Config, board: Board, as_j
             as_json,
             "\n".join(item["task_id"] for item in payload) or "(no checkpoints due)",
         )
-        return 0
+        return 1 if had_errors else 0
     note = store.resume(args.task_id)
     _emit({"note": note}, as_json, note)
     return 0

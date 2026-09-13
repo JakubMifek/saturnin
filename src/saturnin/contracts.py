@@ -43,6 +43,25 @@ class AgentContract:
         return list(self.front_matter.get("mcp", []))
 
 
+def project_agent_path(worktree: Path, entry: Any, agents_dir: str) -> Path:
+    """Resolve a project-local agent path without following it out of scope."""
+    relative = Path(str(entry))
+    if relative.is_absolute() or ".." in relative.parts:
+        raise ValueError(f"agent path must stay inside the repository: {entry}")
+    worktree_root = worktree.resolve(strict=False)
+    agents_root = (worktree_root / agents_dir).resolve(strict=False)
+    if not agents_root.is_relative_to(worktree_root):
+        raise ValueError(
+            f"project agents directory must stay inside the repository: {agents_dir}"
+        )
+    if not str(relative).startswith(f"{agents_dir}/"):
+        raise ValueError(f"project agents belong in {agents_dir}/: {entry}")
+    candidate = (worktree_root / relative).resolve(strict=False)
+    if not candidate.is_relative_to(agents_root):
+        raise ValueError(f"agent path must stay inside {agents_dir}: {entry}")
+    return candidate
+
+
 def mcp_authorization_problem(
     role: str,
     server: str,

@@ -54,15 +54,11 @@ _GIT_SAFE_SUBCOMMANDS = frozenset(
         "add",
         "branch",
         "checkout",
-        "clone",
         "commit",
         "diff",
-        "fetch",
         "init",
         "log",
         "merge",
-        "pull",
-        "push",
         "rebase",
         "remote",
         "reset",
@@ -75,6 +71,7 @@ _GIT_SAFE_SUBCOMMANDS = frozenset(
         "worktree",
     }
 )
+_GIT_NETWORK_SUBCOMMANDS = frozenset({"clone", "fetch", "pull", "push"})
 
 
 class _AssignmentError(ValueError):
@@ -651,10 +648,7 @@ def _writable_targets(binary: str, arguments: Sequence[str]) -> list[str]:
     if binary in _ALL_OPERANDS_WRITABLE:
         return positional
     if binary in _DESTINATION_WRITABLE:
-        target_directory = _target_directory(arguments)
-        if target_directory is not None:
-            return [target_directory]
-        return positional[-1:]
+        return _destination_targets(binary, arguments)
     if binary == "curl":
         return _curl_targets(arguments)
     if binary == "dd":
@@ -740,18 +734,44 @@ def _git_targets(arguments: Sequence[str]) -> list[str]:
     subcommand = arguments[subcommand_index]
     if subcommand == "config":
         raise _WriteScopeError("git config is unsupported; configuration can define shell aliases")
+    if subcommand in _GIT_NETWORK_SUBCOMMANDS:
+        raise _WriteScopeError(
+            f"git {subcommand} is unsupported here; use a dedicated governed wrapper"
+        )
     if subcommand not in _GIT_SAFE_SUBCOMMANDS:
         raise _WriteScopeError(
             f"unsupported git subcommand {subcommand!r}; executable dispatch is not allowed"
         )
     subcommand_arguments = arguments[subcommand_index + 1 :]
+    targets.extend(_git_write_option_targets(subcommand, subcommand_arguments))
     operands = _positional_arguments(subcommand_arguments)
-    if subcommand == "clone" and len(operands) >= 2:
-        targets.append(operands[-1])
-    elif subcommand == "init" and operands:
+    if subcommand == "init" and operands:
         targets.append(operands[-1])
     elif subcommand == "worktree" and subcommand_arguments[:1] == ["add"]:
         targets.append(_git_worktree_add_target(subcommand_arguments[1:]))
+    return targets
+
+
+def _git_write_option_targets(subcommand: str, arguments: Sequence[str]) -> list[str]:
+    targets: list[str] = []
+    value_options = {"--separate-git-dir"}
+    if subcommand == "diff":
+        value_options.add("--output")
+    index = 0
+    while index < len(arguments):
+        argument = arguments[index]
+        if argument == "--":
+            break
+        if argument in value_options:
+            if index + 1 >= len(arguments):
+                raise _WriteScopeError(f"git option {argument} requires a value")
+            targets.append(arguments[index + 1])
+            index += 2
+            continue
+        matched = next((option for option in value_options if argument.startswith(f"{option}=")), None)
+        if matched:
+            targets.append(argument.split("=", 1)[1])
+        index += 1
     return targets
 
 
@@ -1146,6 +1166,73 @@ def _positional_arguments(arguments: Sequence[str]) -> list[str]:
         elif after_options or not argument.startswith("-"):
             positional.append(argument)
     return positional
+
+
+def _destination_targets(binary: str, arguments: Sequence[str]) -> list[str]:
+    target_directory = _target_directory(arguments)
+    if target_directory is not None:
+        return [target_directory]
+    value_options = {
+        "cp": {"-S", "--suffix"},
+        "install": {"-g", "--group", "-m", "--mode", "-o", "--owner", "-S", "--suffix"},
+        "ln": {"-S", "--suffix"},
+        "mv": {"-S", "--suffix"},
+        "rsync": {
+            "--backup-dir",
+            "--compare-dest",
+            "--copy-dest",
+            "--link-dest",
+            "--suffix",
+        },
+    }.get(binary, set())
+    short_value_prefixes = {
+        option
+        for option in value_options
+        if option.startswith("-") and not option.startswith("--")
+    }
+    positionals: list[str] = []
+    after_options = False
+    seen_operand = False
+    index = 0
+    while index < len(arguments):
+        argument = arguments[index]
+        if after_options:
+            positionals.append(argument)
+            index += 1
+            continue
+        if argument == "--":
+            after_options = True
+            index += 1
+            continue
+        if argument.startswith("-"):
+            if seen_operand:
+                raise _WriteScopeError(
+                    f"unsupported {binary} option after operands; write target is ambiguous"
+                )
+            if argument in value_options:
+                if index + 1 >= len(arguments):
+                    raise _WriteScopeError(f"{binary} option {argument} requires a value")
+                index += 2
+                continue
+            if any(
+                argument.startswith(f"{option}=")
+                for option in value_options
+                if option.startswith("--")
+            ):
+                index += 1
+                continue
+            if any(
+                argument.startswith(option) and len(argument) > len(option)
+                for option in short_value_prefixes
+            ):
+                index += 1
+                continue
+            index += 1
+            continue
+        seen_operand = True
+        positionals.append(argument)
+        index += 1
+    return positionals[-1:]
 
 
 def _target_directory(arguments: Sequence[str]) -> str | None:

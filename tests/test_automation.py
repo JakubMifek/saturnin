@@ -265,14 +265,25 @@ def test_monitors_validate_manifest_name_and_url_before_curl(config: Config) -> 
         "  - name: ../escape\n"
         "    url: https://example.test/health\n"
         "  - name: option-url\n"
-        "    url: --config=/tmp/curlrc\n",
+        "    url: --config=/tmp/curlrc\n"
+        "  - name: loopback\n"
+        "    url: http://127.0.0.1/health\n"
+        "  - name: ipv6-loopback\n"
+        "    url: http://[::1]/health\n"
+        "  - name: metadata\n"
+        "    url: http://169.254.169.254/latest/meta-data/\n"
+        "  - name: credentials\n"
+        "    url: http://user@example.test/health\n"
+        "  - name: missing-host\n"
+        "    url: https:///health\n",
         encoding="utf-8",
     )
     _register_monitor_repo(config, repo)
     fake_bin = config.root / "fake-bin"
     fake_bin.mkdir()
     curl = fake_bin / "curl"
-    curl.write_text("#!/bin/sh\nexit 99\n", encoding="utf-8")
+    curl_marker = config.root / "curl-called"
+    curl.write_text(f"#!/bin/sh\nprintf called > {curl_marker}\nexit 99\n", encoding="utf-8")
     curl.chmod(0o755)
 
     result = subprocess.run(
@@ -286,6 +297,7 @@ def test_monitors_validate_manifest_name_and_url_before_curl(config: Config) -> 
     assert "unsafe name" in result.stdout
     assert "unsupported monitor URL" in result.stdout
     assert not list((config.root / "var" / "monitors").glob("*escape*"))
+    assert not curl_marker.exists()
 
 
 def test_monitor_state_is_namespaced_by_repository_path(config: Config) -> None:

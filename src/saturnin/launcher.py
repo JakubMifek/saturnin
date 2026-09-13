@@ -14,7 +14,13 @@ from yaml import YAMLError
 from .board import Board, Task, utcnow
 from .checkpoints import Checkpoint, CheckpointStore
 from .config import Config, default_config, load_yaml
-from .contracts import FRONT_MATTER, AgentContract, load_contracts, mcp_authorization_problem
+from .contracts import (
+    FRONT_MATTER,
+    AgentContract,
+    load_contracts,
+    mcp_authorization_problem,
+    project_agent_path,
+)
 from .mcp import server_process
 
 
@@ -115,6 +121,12 @@ class AgentLauncher:
                         stderr=subprocess.STDOUT,
                         start_new_session=True,
                     )
+                    immediate_status = self._immediate_exit_status(process)
+                    if immediate_status is not None:
+                        raise LauncherError(
+                            "agent launcher exited immediately with "
+                            f"status {immediate_status}; see {log_path}"
+                        )
             except (LauncherError, OSError) as exc:
                 if previous_state in ("routed", "in_progress"):
                     stored.state = previous_state
@@ -159,6 +171,15 @@ class AgentLauncher:
             log=str(log_path),
             mcp_config=str(mcp_path),
         )
+
+    def _immediate_exit_status(self, process: subprocess.Popen[bytes]) -> int | None:
+        wait = getattr(process, "wait", None)
+        if wait is None:
+            return None
+        try:
+            return wait(timeout=float(self.policy.get("failure_grace_seconds", 0.05)))
+        except subprocess.TimeoutExpired:
+            return None
 
     def _validated_workdir(self, task: Task) -> Path:
         if not task.branch:
@@ -228,13 +249,10 @@ class AgentLauncher:
         global_roles = {contract.role for contract in load_contracts(self.config)}
         for entry in entries:
             relative = Path(str(entry))
-            if (
-                relative.is_absolute()
-                or ".." in relative.parts
-                or not str(relative).startswith(".saturnin/agents/")
-            ):
-                raise LauncherError(f"invalid project agent path: {entry}")
-            path = worktree / relative
+            try:
+                path = project_agent_path(worktree, entry, ".saturnin/agents")
+            except ValueError as exc:
+                raise LauncherError(f"invalid project agent path: {exc}") from exc
             if not path.is_file():
                 raise LauncherError(f"project agent contract does not exist: {entry}")
             match = FRONT_MATTER.match(path.read_text(encoding="utf-8"))

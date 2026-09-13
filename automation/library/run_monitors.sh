@@ -93,7 +93,40 @@ print(monitor["name"], monitor["url"], monitor.get("expect_status", 200),
       log "$app monitor has unsafe name: $name"
       continue
     fi
-    if [[ ! "$url" =~ ^https?:// ]]; then
+    url_problem="$("$PYTHON" -c '
+import ipaddress, sys
+from urllib.parse import urlsplit
+url = sys.argv[1]
+parts = urlsplit(url)
+if parts.scheme not in {"http", "https"}:
+    print("unsupported scheme")
+elif not parts.hostname:
+    print("missing hostname")
+elif parts.username or parts.password:
+    print("embedded credentials")
+else:
+    host = parts.hostname.rstrip(".").lower()
+    if host in {"localhost", "localhost.localdomain"} or host.endswith(".localhost"):
+        print("local hostname")
+    else:
+        try:
+            address = ipaddress.ip_address(host)
+        except ValueError:
+            print("")
+        else:
+            if (
+                address.is_private
+                or address.is_loopback
+                or address.is_link_local
+                or address.is_reserved
+                or address.is_multicast
+                or address.is_unspecified
+            ):
+                print("non-public address")
+            else:
+                print("")
+' "$url")"
+    if [[ -n "$url_problem" ]]; then
       log "$app/$name has unsupported monitor URL: $url"
       continue
     fi

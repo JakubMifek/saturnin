@@ -201,6 +201,13 @@ def test_project_agent_must_live_inside_the_project(project, config: Config) -> 
     _manifest(project, "docs/db-migrator.md")
     assert any(".saturnin/agents/" in p for p in check_managed_repo(project, config))
 
+    outside = project.parent / "outside-contract.md"
+    outside.write_text("---\nrole: db-migrator\nskills: []\nmcp: []\n---\n", encoding="utf-8")
+    link = project / ".saturnin" / "agents" / "db-migrator.md"
+    link.symlink_to(outside)
+    _manifest(project, ".saturnin/agents/db-migrator.md")
+    assert any("stay inside" in p for p in check_managed_repo(project, config))
+
 
 def test_project_agent_must_exist_and_not_shadow_a_global_role(
     project, config: Config

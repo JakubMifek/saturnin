@@ -23,16 +23,29 @@ jobs:
         with:
           ref: ${{ github.event.pull_request.base.sha }}
           persist-credentials: false
+      - name: Detect initial governance bootstrap
+        id: bootstrap
+        run: |
+          if [ ! -f pyproject.toml ] || [ ! -x automation/library/review_gate.sh ]; then
+            echo "initial=true" >> "$GITHUB_OUTPUT"
+            echo "::notice::Base branch has no Saturnin governance runtime; repository-native required reviews are the trusted bootstrap gate for this first scaffold PR."
+          else
+            echo "initial=false" >> "$GITHUB_OUTPUT"
+          fi
       - uses: actions/setup-python@v5
+        if: steps.bootstrap.outputs.initial != 'true'
         with:
           python-version: "3.12"
       - name: Install trusted base governance
+        if: steps.bootstrap.outputs.initial != 'true'
         run: python -m pip install -e ".[dev]"
       - name: PR head must be a feature branch (rules 1 and 2)
+        if: steps.bootstrap.outputs.initial != 'true'
         env:
           HEAD_REF: ${{ github.event.pull_request.head.ref }}
         run: saturnin check branch "$HEAD_REF"
       - name: Independent review gate (rule 3)
+        if: steps.bootstrap.outputs.initial != 'true'
         env:
           GITHUB_TOKEN: ${{ github.token }}
         run: automation/library/review_gate.sh pr "${{ github.event.pull_request.base.repo.full_name }}#${{ github.event.pull_request.number }}" "${{ github.event.pull_request.base.repo.full_name }}"

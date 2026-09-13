@@ -49,14 +49,17 @@ saturnin checkpoint save <task-id> --role code-worker \
 ## 5. Review before merge
 
 ```bash
-HEAD_SHA="$(git rev-parse HEAD)"
 saturnin review record JakubMifek/saturnin#12 --kind pr \
-  --author code-worker --reviewer pr-reviewer --verdict approved \
-  --head-sha "$HEAD_SHA"
+  --author code-worker --reviewer pr-reviewer --verdict approved
 saturnin review gate JakubMifek/saturnin#12 --kind pr \
-  --repo JakubMifek/saturnin --author code-worker --head-sha "$HEAD_SHA"
+  --repo JakubMifek/saturnin --author code-worker
 # exit 0 = may merge
 ```
+
+When `--head-sha` is omitted for PR reviews, Saturnin resolves the current
+GitHub PR head and binds both the recorded verdict and the gate to that commit.
+Do not substitute a local checkout SHA unless it has just been verified against
+the PR head.
 
 For another repository: draft the issue, `--kind issue`, and let the
 issue-reviewer gate it before filing.
