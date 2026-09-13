@@ -40,6 +40,7 @@ jobs:
             const {owner, repo} = context.repo;
             const pull_number = context.payload.pull_request.number;
             const author = context.payload.pull_request.user.login;
+            const head = context.payload.pull_request.head.sha;
             const {data: reviews} = await github.rest.pulls.listReviews({
               owner,
               repo,
@@ -49,12 +50,19 @@ jobs:
             const latest = new Map();
             for (const review of reviews) {
               if (review.user.login !== author) {
-                latest.set(review.user.login, review.state);
+                latest.set(review.user.login, {
+                  state: review.state,
+                  commit_id: review.commit_id,
+                });
               }
             }
-            if (![...latest.values()].includes("APPROVED")) {
+            if (
+              ![...latest.values()].some(
+                (review) => review.state === "APPROVED" && review.commit_id === head
+              )
+            ) {
               core.setFailed(
-                "Initial governance bootstrap requires a repository-native approval from someone other than the PR author."
+                "Initial governance bootstrap requires a current-head repository-native approval from someone other than the PR author."
               );
             }
       - uses: actions/setup-python@v5

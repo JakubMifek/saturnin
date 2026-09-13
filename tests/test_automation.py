@@ -275,7 +275,9 @@ def test_monitors_validate_manifest_name_and_url_before_curl(config: Config) -> 
         "  - name: credentials\n"
         "    url: http://user@93.184.216.34/health\n"
         "  - name: missing-host\n"
-        "    url: https:///health\n",
+        "    url: https:///health\n"
+        "  - name: bad-port\n"
+        "    url: https://93.184.216.34:not-a-port/health\n",
         encoding="utf-8",
     )
     _register_monitor_repo(config, repo)
@@ -298,6 +300,10 @@ def test_monitors_validate_manifest_name_and_url_before_curl(config: Config) -> 
     assert "unsupported monitor URL" in result.stdout
     assert not list((config.root / "var" / "monitors").glob("*escape*"))
     assert not curl_marker.exists()
+    script = (config.root / "automation/library/run_monitors.sh").read_text(
+        encoding="utf-8"
+    )
+    assert "-q -sS --noproxy '*'" in script
 
 
 def test_monitor_state_is_namespaced_by_repository_path(config: Config) -> None:

@@ -72,13 +72,14 @@ def test_ci_governance_uses_base_controlled_workflow_and_code() -> None:
     assert "\n  pull_request:\n" not in workflow
     assert "github.event.pull_request.base.sha" in workflow
     assert "persist-credentials: false" in workflow
-    assert "pull_request.head.sha" not in workflow
+    assert "ref: ${{ github.event.pull_request.head.sha }}" not in workflow
     assert "TRUSTED_BOOTSTRAP_BASE_SHA" not in workflow
     assert "Detect initial governance bootstrap" in workflow
     assert "steps.bootstrap.outputs.initial != 'true'" in workflow
     assert "Repository-native bootstrap approval" in workflow
     assert "listReviews" in workflow
     assert "review.user.login !== author" in workflow
+    assert "review.commit_id === head" in workflow
 
 
 def test_public_task_template_matches_discovery_source_labels() -> None:

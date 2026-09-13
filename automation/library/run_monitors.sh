@@ -109,7 +109,11 @@ else:
     if host in {"localhost", "localhost.localdomain"} or host.endswith(".localhost"):
         print("ERR\tlocal hostname")
     else:
-        port = parts.port or (443 if parts.scheme == "https" else 80)
+        try:
+            port = parts.port or (443 if parts.scheme == "https" else 80)
+        except ValueError:
+            print("ERR\tinvalid port")
+            raise SystemExit
         try:
             direct = ipaddress.ip_address(host)
         except ValueError:
@@ -153,7 +157,7 @@ else:
     fi
 
     started="$(date -Is)"
-    curl_args=(-sS -o /dev/null -w '%{http_code}' --max-time "$timeout")
+    curl_args=(-q -sS --noproxy '*' -o /dev/null -w '%{http_code}' --max-time "$timeout")
     if [[ -n "$url_detail" ]]; then
       curl_args+=(--resolve "$url_detail")
     fi
