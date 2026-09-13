@@ -6,6 +6,5 @@ Documentation=file://@SATURNIN_HOME@/docs/operating-model.md
 Type=oneshot
 WorkingDirectory=@SATURNIN_HOME@
 Environment=SATURNIN_HOME="@SATURNIN_HOME_ENV@"
-EnvironmentFile=-@SATURNIN_HOME@/var/secrets/review-attestation.env
 ExecStart=@SATURNIN_HOME@/automation/library/improvement_cycle.sh
 Nice=10

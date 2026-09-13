@@ -135,6 +135,41 @@ def test_discovery_requires_maintainer_trust_labels(config: Config, board: Board
     assert [issue.number for issue in discovery.poll()] == [2]
 
 
+def test_discovery_provisions_saturnin_and_trusted_labels(
+    config: Config, board: Board, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    policy = config.policy("repos")
+    policy["discovery"]["sources"] = [
+        {
+            "slug": "JakubMifek/widget-api",
+            "labels": ["saturnin"],
+            "require_labels": ["saturnin:trusted"],
+        }
+    ]
+    issued: list[tuple[str, list[str]]] = []
+    monkeypatch.setattr(
+        "saturnin.discovery.ensure_labels",
+        lambda repo, labels: issued.append((repo, list(labels))),
+    )
+    monkeypatch.setattr("saturnin.discovery._gh_fetch", lambda repo, labels: [])
+    discovery = IssueDiscovery(config, board)
+
+    discovery.poll()
+
+    assert issued == [
+        ("JakubMifek/widget-api", ["saturnin", "saturnin:trusted"])
+    ]
+
+
+def test_discovery_audit_requires_saturnin_and_trusted_pair(config: Config, board: Board) -> None:
+    policy = config.policy("repos")
+    policy["discovery"]["sources"] = [{"slug": "JakubMifek/widget-api", "labels": ["saturnin"]}]
+
+    problems = IssueDiscovery(config, board).audit()
+
+    assert any("must require saturnin:trusted" in problem for problem in problems)
+
+
 def test_discover_command_reports_when_there_is_nothing(config: Config, capsys) -> None:
     policy_path = config.policies / "repos.yaml"
     policy = yaml.safe_load(policy_path.read_text(encoding="utf-8"))

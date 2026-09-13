@@ -18,16 +18,7 @@ python -m pip install --upgrade pip >/dev/null
 python -m pip install -e ".[dev]"
 python -m saturnin.mcp install github
 
-mkdir -p board/tasks board/checkpoints board/reviews var/logs var/worktrees var/reports var/secrets
-chmod 700 var/secrets
-if [[ ! -f var/secrets/review-attestation.env ]]; then
-  umask 077
-  python - <<'PY' > var/secrets/review-attestation.env
-import secrets
-
-print(f"SATURNIN_REVIEW_ATTESTATION_KEY={secrets.token_urlsafe(48)}")
-PY
-fi
+mkdir -p board/tasks board/checkpoints board/reviews var/logs var/worktrees var/reports
 
 echo "--- saturnin doctor ---"
 saturnin doctor
@@ -36,7 +27,7 @@ cat <<'MSG'
 
 Saturnin is installed. Next:
   source .venv/bin/activate
-  set -a; source var/secrets/review-attestation.env; set +a
+  export SATURNIN_REVIEW_ATTESTATION_KEY='<trusted-supervisor-secret>'
   saturnin task add "<your first task>" --dispatch
   scripts/install_user_units.sh    # scheduled janitor + improvement workers
 See docs/runbooks/day-1-startup.md.

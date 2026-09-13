@@ -934,6 +934,7 @@ def _run(args: argparse.Namespace, config: Config) -> int:  # noqa: C901 - flat 
             Governance(config).audit()
             + Router(config).validate_policy()
             + AutomationLibrary(config).audit()
+            + IssueDiscovery(config, board).audit()
             + audit_contracts(config)
             + docsync.audit(config)
             + _mirror_audit(config, board)

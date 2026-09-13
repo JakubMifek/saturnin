@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import os
-import re
 import shutil
 import subprocess
 from pathlib import Path
@@ -10,8 +9,37 @@ from pathlib import Path
 REPO_ROOT = Path(__file__).resolve().parents[1]
 
 
-def test_install_user_units_escapes_checkout_path(tmp_path: Path) -> None:
-    saturnin_home = tmp_path / "checkout with spaces%&pipe|slash\\home\"quote\tline\nbreak"
+def test_install_user_units_rejects_unsupported_checkout_path(tmp_path: Path) -> None:
+    saturnin_home = tmp_path / "checkout with spaces"
+    shutil.copytree(REPO_ROOT / "systemd", saturnin_home / "systemd")
+    fake_bin = tmp_path / "bin"
+    fake_bin.mkdir()
+    (fake_bin / "id").write_text("#!/bin/sh\nprintf '1000\\n'\n", encoding="utf-8")
+    (fake_bin / "systemctl").write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+    (fake_bin / "systemd-analyze").write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+    for command in ("id", "systemctl", "systemd-analyze"):
+        (fake_bin / command).chmod(0o755)
+
+    config_home = tmp_path / "config"
+    env = {
+        **os.environ,
+        "PATH": f"{fake_bin}:{os.environ['PATH']}",
+        "SATURNIN_HOME": str(saturnin_home),
+        "XDG_CONFIG_HOME": str(config_home),
+    }
+    result = subprocess.run(
+        ["bash", str(REPO_ROOT / "scripts/install_user_units.sh")],
+        check=False,
+        capture_output=True,
+        text=True,
+        env=env,
+    )
+    assert result.returncode == 1
+    assert "Use a checkout path containing only [A-Za-z0-9/._-]." in result.stderr
+
+
+def test_install_user_units_installs_safe_checkout_path(tmp_path: Path) -> None:
+    saturnin_home = tmp_path / "checkout-safe_path"
     shutil.copytree(REPO_ROOT / "systemd", saturnin_home / "systemd")
     fake_bin = tmp_path / "bin"
     fake_bin.mkdir()
@@ -37,14 +65,6 @@ def test_install_user_units_escapes_checkout_path(tmp_path: Path) -> None:
     )
 
     installed_dir = config_home / "systemd" / "user"
-    def decode(value: str) -> str:
-        value = value.replace("%%", "%")
-        return re.sub(
-            r"\\x([0-9a-fA-F]{2})",
-            lambda match: chr(int(match.group(1), 16)),
-            value,
-        )
-
     for installed in installed_dir.glob("saturnin-*.service"):
         text = installed.read_text(encoding="utf-8")
         working_directory = next(
@@ -57,17 +77,9 @@ def test_install_user_units_escapes_checkout_path(tmp_path: Path) -> None:
             for line in text.splitlines()
             if line.startswith("Environment=SATURNIN_HOME=")
         )
-        assert decode(working_directory) == str(saturnin_home)
-        assert decode(environment) == str(saturnin_home)
-        assert (
-            f"EnvironmentFile=-{working_directory}/var/secrets/review-attestation.env"
-            in text
-        )
-    secret = saturnin_home / "var" / "secrets" / "review-attestation.env"
-    assert secret.read_text(encoding="utf-8").startswith(
-        "SATURNIN_REVIEW_ATTESTATION_KEY="
-    )
-    assert secret.stat().st_mode & 0o777 == 0o600
+        assert working_directory == str(saturnin_home)
+        assert environment == str(saturnin_home)
+        assert "EnvironmentFile=-" not in text
 
 
 def test_install_does_not_enable_unaccepted_mirror_timer(tmp_path: Path) -> None:

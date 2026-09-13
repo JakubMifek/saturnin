@@ -49,6 +49,20 @@ def test_doctor_is_healthy(home: Path, capsys: pytest.CaptureFixture[str]) -> No
     assert "in order" in out
 
 
+def test_doctor_reports_discovery_label_pairing_problem(
+    home: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    policy_path = home / "policies" / "repos.yaml"
+    policy = yaml.safe_load(policy_path.read_text(encoding="utf-8"))
+    policy["discovery"]["sources"] = [{"slug": "JakubMifek/widget-api", "labels": ["saturnin"]}]
+    policy_path.write_text(yaml.safe_dump(policy), encoding="utf-8")
+
+    code, out = run(capsys, "--json", "doctor")
+    payload = json.loads(out)
+    assert code == 2
+    assert any("must require saturnin:trusted" in problem for problem in payload["problems"])
+
+
 def test_task_intake_and_dispatch(home: Path, capsys: pytest.CaptureFixture[str]) -> None:
     code, out = run(
         capsys, "--json", "task", "add", "Fix the failing deploy", "--dispatch"

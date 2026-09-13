@@ -61,6 +61,7 @@ _GIT_SAFE_SUBCOMMANDS = frozenset(
         "merge",
         "rebase",
         "remote",
+        "reflog",
         "reset",
         "restore",
         "rev-parse",

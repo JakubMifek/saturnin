@@ -27,16 +27,14 @@ Disable a misbehaving worker: `systemctl --user disable --now saturnin-<name>.ti
 
 ## Review attestation key
 
-`scripts/bootstrap.sh` and `scripts/install_user_units.sh` create
-`var/secrets/review-attestation.env` if it is missing. Keep that file out of
-git, readable only by the Saturnin service user, and load it only into trusted
-supervisor processes. Worker launches derive a role-scoped signing key and pass
-it only to configured reviewer roles.
+Keep `SATURNIN_REVIEW_ATTESTATION_KEY` outside the checkout and outside worker
+unit environments. Only trusted supervisor processes (for example CI jobs or a
+dedicated supervisor shell profile) should load it. Worker launches derive
+role-scoped signing keys and pass them only to configured reviewer roles.
 
-To rotate the key, stop `saturnin-*` timers, move the old env file aside,
-re-run `scripts/bootstrap.sh`, and restart the timers. Existing ledger entries
-were signed with the old key, so close or re-record any pending reviews before
-rotation.
+To rotate the key, stop `saturnin-*` timers, replace the trusted supervisor
+secret value, and restart timers. Existing ledger entries were signed with the
+old key, so close or re-record any pending reviews before rotation.
 
 ## Cleanup safety model
 
@@ -62,7 +60,8 @@ saturnin worktree cleanup --apply    # execute the plan
 **A branch was deleted by mistake**
 
 ```bash
-git reflog | grep <branch>            # find the last commit of the branch
+saturnin check command "git reflog show --date=iso refs/heads/<branch>"
+git reflog show --date=iso refs/heads/<branch>   # find the last commit SHA
 git branch <branch> <sha>             # recreate it
 ```
 

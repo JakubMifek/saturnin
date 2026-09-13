@@ -16,7 +16,7 @@ from typing import Any
 
 import yaml
 
-from .board import Board, Task
+from .board import CONTAINER_KINDS, Board, Task
 from .config import Config, default_config
 
 DEFAULT_THRESHOLD = 3
@@ -25,6 +25,15 @@ STOPWORDS = {
     "that", "this", "with", "from", "into", "some", "have", "when", "then",
     "them", "your", "about", "which", "while", "there", "their", "please",
 }
+EXCLUDED_REPEAT_KINDS = frozenset(
+    {
+        *CONTAINER_KINDS,
+        "pr-review",
+        "issue-review",
+        "improvement",
+        "automation",
+    }
+)
 
 
 @dataclass
@@ -106,7 +115,7 @@ class AutomationLibrary:
         counter: Counter[str] = Counter()
         by_signature: dict[str, list[str]] = defaultdict(list)
         for task in board:
-            if task.kind in ("pr-review", "issue-review", "improvement", "automation"):
+            if task.kind in EXCLUDED_REPEAT_KINDS:
                 continue
             counter[task.signature] += 1
             by_signature[task.signature].append(task.id)

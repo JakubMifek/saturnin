@@ -11,38 +11,17 @@ if [[ "$(id -u)" -eq 0 ]]; then
 fi
 
 mkdir -p "$UNIT_DIR"
-mkdir -p "$SATURNIN_HOME/var/secrets"
-chmod 700 "$SATURNIN_HOME/var/secrets"
-if [[ ! -f "$SATURNIN_HOME/var/secrets/review-attestation.env" ]]; then
-  umask 077
-  python3 - <<'PY' > "$SATURNIN_HOME/var/secrets/review-attestation.env"
-import secrets
-
-print(f"SATURNIN_REVIEW_ATTESTATION_KEY={secrets.token_urlsafe(48)}")
-PY
+if [[ ! "$SATURNIN_HOME" =~ ^[A-Za-z0-9/._-]+$ ]]; then
+  cat >&2 <<'ERR'
+SATURNIN_HOME contains characters that cannot be rendered safely for all
+systemd directives used by Saturnin units.
+Use a checkout path containing only [A-Za-z0-9/._-].
+ERR
+  exit 1
 fi
-mapfile -t escaped_values < <(SATURNIN_HOME="$SATURNIN_HOME" python3 -c '
-import os
-value = os.environ["SATURNIN_HOME"]
-
-def escape_for_unit():
-    safe = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789/._-"
-    escaped = []
-    for byte in value.encode("utf-8"):
-        if byte in safe:
-            escaped.append(chr(byte))
-        else:
-            escaped.append(f"\\x{byte:02x}")
-    return "".join(escaped).replace("%", "%%")
-
-print(escape_for_unit())
-print(escape_for_unit())
-')
-escaped_home="${escaped_values[0]}"
-escaped_home_env="${escaped_values[1]}"
 for unit in "$SATURNIN_HOME"/systemd/saturnin-*; do
   name="$(basename "$unit")"
-  SATURNIN_HOME_ESCAPED="$escaped_home" SATURNIN_HOME_ENV_ESCAPED="$escaped_home_env" \
+  SATURNIN_HOME_ESCAPED="$SATURNIN_HOME" SATURNIN_HOME_ENV_ESCAPED="$SATURNIN_HOME" \
     TEMPLATE="$unit" DEST="$UNIT_DIR/$name" python3 -c '
 from pathlib import Path
 import os

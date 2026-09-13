@@ -1301,6 +1301,15 @@ def test_filesystem_writes_within_writable_roots_are_allowed(
     assert governance.check_server_command(command).allowed
 
 
+def test_git_reflog_recovery_command_is_allowed(
+    governance: Governance, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr("os.getcwd", lambda: "/home/saturnin")
+    assert governance.check_server_command(
+        "git reflog show --date=iso refs/heads/feature/recovery",
+    ).allowed
+
+
 @pytest.mark.parametrize("binary", ["cp", "install", "ln", "mv", "rsync"])
 def test_single_destination_operand_is_checked(
     governance: Governance, binary: str

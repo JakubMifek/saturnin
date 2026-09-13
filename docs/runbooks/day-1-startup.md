@@ -13,9 +13,10 @@ source .venv/bin/activate
 ```
 
 `bootstrap.sh` is idempotent: run it again after every pull.
-It also creates `var/secrets/review-attestation.env` with mode `0600`; source
-that file only in the trusted Saturnin supervisor shell or user services. The
-launcher derives role-scoped signing keys from it and injects them only into
+Provision `SATURNIN_REVIEW_ATTESTATION_KEY` only in the trusted supervisor
+environment (for example CI secrets or a dedicated supervisor shell profile),
+never in the repository checkout or worker-authored scripts. The launcher
+derives role-scoped signing keys from it and injects them only into
 `pr-reviewer` and `issue-reviewer` workers.
 
 ## 2. Verify the installation

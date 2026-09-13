@@ -25,6 +25,7 @@ from typing import Any, Callable, Iterable
 
 from .board import Board, Task
 from .config import Config, default_config
+from .issues import MirrorError, ensure_labels
 
 
 class DiscoveryError(RuntimeError):
@@ -61,6 +62,7 @@ class IssueDiscovery:
         self.config = config or default_config()
         self.board = board or Board(self.config)
         self._fetch = fetcher or _gh_fetch
+        self._provision_labels = fetcher is None
 
     # -- policy --------------------------------------------------------
     @property
@@ -97,6 +99,23 @@ class IssueDiscovery:
         prefix = str(self.policy.get("source_label_prefix", "source")).casefold()
         return f"{prefix}:{issue.ref.casefold()}"
 
+    def audit(self) -> list[str]:
+        if not self.enabled:
+            return []
+        problems: list[str] = []
+        for source in self.sources():
+            labels = {str(label).casefold() for label in source.get("labels", [])}
+            required = {str(label).casefold() for label in source.get("require_labels", [])}
+            if "saturnin" in labels and "saturnin:trusted" not in required:
+                problems.append(
+                    f"discovery source {source['slug']} must require saturnin:trusted when labels include saturnin"
+                )
+            if "saturnin:trusted" in required and "saturnin" not in labels:
+                problems.append(
+                    f"discovery source {source['slug']} must include saturnin when requiring saturnin:trusted"
+                )
+        return problems
+
     # -- ingest --------------------------------------------------------
     def known_markers(self) -> set[str]:
         prefix = str(self.policy.get("source_label_prefix", "source")).casefold() + ":"
@@ -130,6 +149,7 @@ class IssueDiscovery:
             return []
         found: list[InboundIssue] = []
         for source in self.sources():
+            self._provision_source_labels(source)
             issues = self._fetch(source["slug"], list(source["labels"]))
             found += [
                 issue
@@ -140,6 +160,23 @@ class IssueDiscovery:
 
     def run(self) -> list[Task]:
         return self.ingest(self.poll())
+
+    def _provision_source_labels(self, source: dict[str, Any]) -> None:
+        labels = {str(label) for label in source.get("labels", []) if str(label)}
+        required = {str(label) for label in source.get("require_labels", []) if str(label)}
+        if "saturnin" in {label.casefold() for label in labels | required}:
+            labels.add("saturnin")
+            labels.add("saturnin:trusted")
+        if not labels:
+            return
+        if not self._provision_labels:
+            return
+        try:
+            ensure_labels(str(source["slug"]), sorted(labels))
+        except MirrorError as exc:
+            raise DiscoveryError(
+                f"could not provision discovery labels for {source['slug']}: {exc}"
+            ) from exc
 
 
 def _carried_labels(issue: InboundIssue, policy: dict[str, Any]) -> list[str]:

@@ -77,6 +77,15 @@ def test_detect_repeats_normalises_punctuated_titles(config: Config, board: Boar
     assert candidates[0].count == 3
 
 
+def test_detect_repeats_skips_container_kinds(config: Config, board: Board) -> None:
+    for _ in range(4):
+        board.create("Roadmap", kind="objective")
+        board.create("Roadmap", kind="epic")
+        board.create("Roadmap", kind="feature")
+
+    assert AutomationLibrary(config).detect_repeats(board, threshold=3) == []
+
+
 def test_propose_files_one_task_only(config: Config, board: Board) -> None:
     library = AutomationLibrary(config)
     for _ in range(3):
