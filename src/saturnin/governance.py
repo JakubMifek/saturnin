@@ -810,6 +810,18 @@ def _curl_output_dir(arguments: Sequence[str]) -> str | None:
     return output_dir
 
 
+def _curl_operation(arguments: Sequence[str], start: int) -> Sequence[str]:
+    end = next(
+        (
+            index
+            for index in range(start, len(arguments))
+            if arguments[index] in {"--next", "-:"}
+        ),
+        len(arguments),
+    )
+    return arguments[start:end]
+
+
 _CURL_SHORT_OPTIONS_WITH_VALUES = frozenset(
     "AbcCdeEFDHKmoPQrtTuUwXxyz"
 )
@@ -841,9 +853,15 @@ def _curl_targets(arguments: Sequence[str]) -> list[str]:
     index = 0
     remote_name_all = False
     remote_name_pending = False
-    output_dir = _curl_output_dir(arguments)
+    output_dir = _curl_output_dir(_curl_operation(arguments, 0))
     while index < len(arguments):
         argument = arguments[index]
+        if argument in {"--next", "-:"}:
+            remote_name_all = False
+            remote_name_pending = False
+            index += 1
+            output_dir = _curl_output_dir(_curl_operation(arguments, index))
+            continue
         bundled_remote_name, bundled_action, attached_output = (
             _curl_bundled_write_action(argument)
         )

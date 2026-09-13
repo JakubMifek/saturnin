@@ -486,6 +486,51 @@ def test_curl_bundled_remote_name_uses_output_directory() -> None:
     ]
 
 
+@pytest.mark.parametrize("next_option", ["--next", "-:"])
+def test_curl_output_dir_resets_between_operations(next_option: str) -> None:
+    assert _curl_targets([
+        "-O",
+        "https://example.test/first.tar.gz",
+        "--output-dir",
+        "/home/saturnin/downloads",
+        next_option,
+        "-O",
+        "https://example.test/second.tar.gz",
+    ]) == [
+        "/home/saturnin/downloads/first.tar.gz",
+        "/home/saturnin/downloads",
+        "second.tar.gz",
+    ]
+
+
+@pytest.mark.parametrize("next_option", ["--next", "-:"])
+def test_curl_remote_name_requires_output_dir_in_each_operation(
+    governance: Governance, next_option: str
+) -> None:
+    decision = governance.check_server_command(
+        "curl -O https://example.test/first.tar.gz "
+        f"--output-dir /home/saturnin/downloads {next_option} "
+        "-O https://example.test/second.tar.gz"
+    )
+
+    assert not decision.allowed
+    assert "outside writable roots" in decision.reasons[0]
+
+
+@pytest.mark.parametrize("next_option", ["--next", "-:"])
+def test_curl_each_operation_can_set_a_valid_output_dir(
+    governance: Governance, next_option: str
+) -> None:
+    decision = governance.check_server_command(
+        "curl -O https://example.test/first.tar.gz "
+        f"--output-dir /home/saturnin/first {next_option} "
+        "-O https://example.test/second.tar.gz "
+        "--output-dir /home/saturnin/second"
+    )
+
+    assert decision.allowed
+
+
 def test_curl_bundled_remote_name_outside_writable_root_is_rejected(
     governance: Governance,
 ) -> None:
