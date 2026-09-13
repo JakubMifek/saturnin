@@ -816,23 +816,24 @@ _CURL_SHORT_OPTIONS_WITH_VALUES = frozenset(
 _CURL_SHORT_WRITE_OPTIONS = frozenset("oDc")
 
 
-def _curl_bundled_write_action(argument: str) -> tuple[str, str]:
+def _curl_bundled_write_action(argument: str) -> tuple[bool, str, str]:
     if not argument.startswith("-") or argument.startswith("--") or len(argument) <= 2:
-        return "", ""
+        return False, "", ""
+    remote_name = False
     for position, option in enumerate(argument[1:], start=1):
         if option not in _CURL_SHORT_OPTIONS_WITH_VALUES:
             if option == "O":
-                return "remote-name", ""
+                remote_name = True
             continue
         if option == "K":
             raise _WriteScopeError(
                 "unsupported curl option '--config'; write scope is unknown"
             )
         if option in _CURL_SHORT_WRITE_OPTIONS:
-            return "target", argument[position + 1 :]
+            return remote_name, "target", argument[position + 1 :]
         # The remainder belongs to this value-taking option, not to more flags.
-        return "", ""
-    return "", ""
+        return remote_name, "", ""
+    return remote_name, "", ""
 
 
 def _curl_targets(arguments: Sequence[str]) -> list[str]:
@@ -843,7 +844,11 @@ def _curl_targets(arguments: Sequence[str]) -> list[str]:
     output_dir = _curl_output_dir(arguments)
     while index < len(arguments):
         argument = arguments[index]
-        bundled_action, attached_output = _curl_bundled_write_action(argument)
+        bundled_remote_name, bundled_action, attached_output = (
+            _curl_bundled_write_action(argument)
+        )
+        if bundled_remote_name:
+            remote_name_pending = True
         if bundled_action == "target":
             if not attached_output:
                 index += 1
@@ -854,8 +859,7 @@ def _curl_targets(arguments: Sequence[str]) -> list[str]:
                 targets.append(attached_output)
             index += 1
             continue
-        if bundled_action == "remote-name":
-            remote_name_pending = True
+        if bundled_remote_name:
             index += 1
             continue
         attached_output = next(

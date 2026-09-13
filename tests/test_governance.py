@@ -439,7 +439,9 @@ def test_curl_attached_short_output_options_are_parsed(
     assert _curl_targets([argument, "https://example.test/ok"]) == [target]
 
 
-@pytest.mark.parametrize("option", ["-K/etc/curlrc", "-sK/etc/curlrc"])
+@pytest.mark.parametrize(
+    "option", ["-K/etc/curlrc", "-sK/etc/curlrc", "-OsK/etc/curlrc"]
+)
 def test_curl_attached_short_config_is_rejected(
     governance: Governance, option: str
 ) -> None:
@@ -447,6 +449,29 @@ def test_curl_attached_short_config_is_rejected(
 
     assert not decision.allowed
     assert "unsupported curl option '--config'" in decision.reasons[0]
+
+
+@pytest.mark.parametrize(
+    ("option", "target"),
+    [
+        ("-OD/etc/headers", "/etc/headers"),
+        ("-Oo/etc/body", "/etc/body"),
+    ],
+)
+def test_curl_write_options_after_bundled_remote_name_are_parsed(
+    option: str, target: str
+) -> None:
+    assert target in _curl_targets([option, "data:,ok"])
+
+
+@pytest.mark.parametrize("option", ["-OD/etc/headers", "-Oo/etc/body"])
+def test_curl_write_options_after_bundled_remote_name_are_rejected(
+    governance: Governance, option: str
+) -> None:
+    decision = governance.check_server_command(f"curl {option} data:,ok")
+
+    assert not decision.allowed
+    assert "forbidden root" in decision.reasons[0]
 
 
 def test_curl_bundled_remote_name_uses_output_directory() -> None:
