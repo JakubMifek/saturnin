@@ -12,7 +12,7 @@ from typing import Any
 from yaml import YAMLError
 
 from .board import Board, Task, utcnow
-from .checkpoints import CheckpointStore
+from .checkpoints import Checkpoint, CheckpointStore
 from .config import Config, default_config, load_yaml
 from .contracts import FRONT_MATTER, AgentContract, load_contracts, mcp_authorization_problem
 
@@ -57,6 +57,7 @@ class AgentLauncher:
             return None
         task = self.board.get(task_id)
         contract = self._contract(task)
+        checkpoint = CheckpointStore(self.config, self.board).latest(task.id)
         executable = str(self.policy.get("command", "copilot"))
         if shutil.which(executable) is None:
             raise LauncherError(f"agent launcher executable not found: {executable}")
@@ -89,7 +90,7 @@ class AgentLauncher:
             try:
                 workdir = self._validated_workdir(claimed)
                 mcp_path = self._write_mcp_config(claimed, contract, worktree_scope=workdir)
-                prompt = self._prompt(claimed, contract)
+                prompt = self._prompt(claimed, contract, checkpoint=checkpoint)
                 args = [
                     str(value).format(mcp_config=str(mcp_path), prompt=prompt, task_id=claimed.id)
                     for value in self.policy.get(
@@ -168,6 +169,25 @@ class AgentLauncher:
             raise LauncherError(f"task {task.id} cannot launch in the main checkout")
         if not workdir.is_dir():
             raise LauncherError(f"task worktree does not exist: {workdir}")
+        registration = subprocess.run(  # noqa: S603 - fixed executable and arguments
+            ["git", "worktree", "list", "--porcelain", "-z"],
+            cwd=str(workdir),
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        if registration.returncode != 0:
+            raise LauncherError(f"task worktree is not a Git worktree: {workdir}")
+        registered = [
+            Path(line.removeprefix("worktree ")).resolve()
+            for line in registration.stdout.split("\0")
+            if line.startswith("worktree ")
+        ]
+        resolved_workdir = workdir.resolve()
+        if not registered or resolved_workdir not in registered:
+            raise LauncherError(f"task worktree is not registered with Git: {workdir}")
+        if resolved_workdir == registered[0]:
+            raise LauncherError(f"task {task.id} cannot launch in a repository's main checkout")
         current = subprocess.run(  # noqa: S603 - fixed executable, arguments are not shell-parsed
             ["git", "branch", "--show-current"],
             cwd=str(workdir),
@@ -288,7 +308,13 @@ class AgentLauncher:
         path.write_text(json.dumps({"mcpServers": servers}, indent=2) + "\n", encoding="utf-8")
         return path
 
-    def _prompt(self, task: Task, contract: AgentContract) -> str:
+    def _prompt(
+        self,
+        task: Task,
+        contract: AgentContract,
+        *,
+        checkpoint: Checkpoint | None = None,
+    ) -> str:
         sections = [
             f"Complete Saturnin task {task.id}.",
             json.dumps(task.to_dict(), indent=2),
@@ -304,7 +330,6 @@ class AgentLauncher:
         for skill in contract.skills:
             path = self.config.root / "skills" / f"{skill}.md"
             sections.append(path.read_text(encoding="utf-8"))
-        checkpoint = CheckpointStore(self.config, self.board).latest(task.id)
         if checkpoint is not None:
             sections.append(checkpoint.render())
         return "\n\n---\n\n".join(sections)

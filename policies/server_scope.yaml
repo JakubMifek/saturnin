@@ -37,9 +37,9 @@ filesystem:
   # Executables that are allowed even though their write targets cannot be
   # statically determined. Commands not in this list and not handled by the
   # built-in binary recogniser will be denied (see governance.py for details).
+  python_module_allowlist: [saturnin]
   executable_allowlist:
     - saturnin
-    - python3
     - git
     - gh
     - curl

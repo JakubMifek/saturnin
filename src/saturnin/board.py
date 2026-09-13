@@ -86,6 +86,7 @@ class Task:
     # Rule 8: the mirrored GitHub issue is the durable copy of this task.
     issue: str | None = None
     issue_synced_at: str | None = None
+    issue_synced_digest: str | None = None
     # How the dispatcher will learn that this task finished, so that nobody has
     # to sit and wait for a worker (see docs/operating-model.md).
     result_contract: str | None = None

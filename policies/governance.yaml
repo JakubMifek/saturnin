@@ -58,7 +58,10 @@ review:
     independent: true
     zero_context: true
     min_approvals: 1
-    github_reviewer_login: "copilot-pull-request-reviewer[bot]"
+    allowed_reviewer_roles: [pr-reviewer]
+    # Copilot approval reviews require the repository's approval-review setting.
+    # The owner is a fallback for PRs they did not author.
+    github_reviewer_logins: ["copilot-pull-request-reviewer[bot]", "JakubMifek"]
     # The agent that authored the change may never review it.
     author_may_review: false
   # Rule 5: issues opened in other Saturnin-managed repos need an issue review.
@@ -66,6 +69,7 @@ review:
     required_for_external_repos: true
     independent: true
     author_may_review: false
+    allowed_reviewer_roles: [issue-reviewer]
 
 autonomy:
   # Rule 4: in this repository Saturnin may merge on its own once review passed.

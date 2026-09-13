@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import json
+import subprocess
+from contextlib import contextmanager
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from types import SimpleNamespace
@@ -13,33 +15,6 @@ from saturnin.config import Config
 from saturnin.launcher import AgentLauncher, LauncherError
 from saturnin.routing import Router
 from saturnin.worktrees import WorktreeManager
-
-
-class FakeProcess:
-    def __init__(self, command, *, stdout: str = "", returncode: int = 0, pid: int = 4242):
-        self.args = command
-        self._stdout = stdout
-        self._stderr = ""
-        self.returncode = returncode
-        self.pid = pid
-
-    def __enter__(self):
-        return self
-
-    def __exit__(self, *args):
-        return False
-
-    def communicate(self, input=None, timeout=None):  # noqa: A002 - subprocess API
-        return self._stdout, self._stderr
-
-    def poll(self):
-        return self.returncode
-
-    def wait(self, timeout=None):
-        return self.returncode
-
-    def kill(self):
-        self.returncode = -9
 
 
 def test_launcher_starts_routed_role_with_filtered_mcp(
@@ -63,10 +38,11 @@ def test_launcher_starts_routed_role_with_filtered_mcp(
     calls: list[tuple[list[str], dict]] = []
 
     monkeypatch.setattr("saturnin.launcher.shutil.which", lambda _: "/usr/bin/copilot")
+    real_popen = subprocess.Popen
 
     def fake_popen(command, **kwargs):
-        if command == ["git", "branch", "--show-current"]:
-            return FakeProcess(command, stdout="feature/launch\n")
+        if command[0] == "git":
+            return real_popen(command, **kwargs)
         calls.append((command, kwargs))
         return SimpleNamespace(pid=4242)
 
@@ -113,11 +89,12 @@ def test_launcher_intersects_role_mcp_with_project_allowlist(
         stored.worktree = str(worktree.path)
 
     monkeypatch.setattr("saturnin.launcher.shutil.which", lambda _: "/usr/bin/copilot")
+    real_popen = subprocess.Popen
     monkeypatch.setattr(
         "saturnin.launcher.subprocess.Popen",
         lambda command, **kwargs: (
-            FakeProcess(command, stdout="feature/restricted-launch\n")
-            if command == ["git", "branch", "--show-current"]
+            real_popen(command, **kwargs)
+            if command[0] == "git"
             else SimpleNamespace(pid=4242)
         ),
     )
@@ -193,11 +170,12 @@ def test_malformed_project_yaml_leaves_checkpoint_available_for_retry(
     assert [item.task_id for item in CheckpointStore(config, board).due()] == [task.id]
 
     manifest.write_text("mcp: []\n", encoding="utf-8")
+    real_popen = subprocess.Popen
     monkeypatch.setattr(
         "saturnin.launcher.subprocess.Popen",
         lambda command, **kwargs: (
-            FakeProcess(command, stdout="feature/retry-launch\n")
-            if command == ["git", "branch", "--show-current"]
+            real_popen(command, **kwargs)
+            if command[0] == "git"
             else SimpleNamespace(pid=4242)
         ),
     )
@@ -227,6 +205,73 @@ def test_launcher_refuses_to_run_without_attached_worktree(
     assert stored.checkpoint_resumed_at is None
 
 
+def test_launcher_refuses_an_external_repository_main_checkout(
+    config: Config, board: Board
+) -> None:
+    checkout = config.root / "managed-main"
+    checkout.mkdir()
+    subprocess.run(
+        ["git", "init", "-b", "feature/direct"],
+        cwd=checkout,
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    task = board.create("Do not launch in a primary checkout")
+    with board.edit(task.id) as stored:
+        stored.branch = "feature/direct"
+        stored.worktree = str(checkout)
+
+    with pytest.raises(LauncherError, match="repository's main checkout"):
+        AgentLauncher(config, board)._validated_workdir(board.get(task.id))
+
+
+def test_launcher_reads_checkpoint_before_claiming_board_lock(
+    config: Config, board: Board, git_repo: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    config.policy("mcp")["launcher"]["enabled"] = True
+    task = board.create("Launch without inverted locks")
+    Router(config).dispatch(board, task)
+    worktree = WorktreeManager(config, repo=git_repo, board=board).create(
+        "feature/ordered-locks"
+    )
+    with board.edit(task.id) as stored:
+        stored.branch = "feature/ordered-locks"
+        stored.worktree = str(worktree.path)
+
+    inside_edit = False
+    original_edit = board.edit
+
+    @contextmanager
+    def tracked_edit(task_id):
+        nonlocal inside_edit
+        with original_edit(task_id) as stored:
+            inside_edit = True
+            try:
+                yield stored
+            finally:
+                inside_edit = False
+
+    def latest(self, task_id):
+        assert not inside_edit
+        return None
+
+    monkeypatch.setattr(board, "edit", tracked_edit)
+    monkeypatch.setattr(CheckpointStore, "latest", latest)
+    monkeypatch.setattr("saturnin.launcher.shutil.which", lambda _: "/usr/bin/copilot")
+    real_popen = subprocess.Popen
+    monkeypatch.setattr(
+        "saturnin.launcher.subprocess.Popen",
+        lambda command, **kwargs: (
+            real_popen(command, **kwargs)
+            if command[0] == "git"
+            else SimpleNamespace(pid=4242)
+        ),
+    )
+
+    AgentLauncher(config, board).launch(task.id)
+
+
 def test_launcher_rolls_back_claim_when_spawn_fails(
     config: Config, board: Board, git_repo: Path, monkeypatch
 ) -> None:
@@ -238,11 +283,12 @@ def test_launcher_rolls_back_claim_when_spawn_fails(
         stored.branch = "feature/fail-launch"
         stored.worktree = str(worktree.path)
     monkeypatch.setattr("saturnin.launcher.shutil.which", lambda _: "/usr/bin/copilot")
+    real_popen = subprocess.Popen
     monkeypatch.setattr(
         "saturnin.launcher.subprocess.Popen",
         lambda command, **kwargs: (
-            FakeProcess(command, stdout="feature/fail-launch\n")
-            if command == ["git", "branch", "--show-current"]
+            real_popen(command, **kwargs)
+            if command[0] == "git"
             else (_ for _ in ()).throw(OSError("boom"))
         ),
     )

@@ -36,7 +36,10 @@ jobs:
   governance:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - name: Check out trusted governance code
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ (github.event_name == 'pull_request' || github.event_name == 'pull_request_review') && github.event.pull_request.base.sha || github.sha }}
       - uses: actions/setup-python@v5
         with:
           python-version: "3.12"
@@ -51,4 +54,4 @@ jobs:
         if: github.event_name == 'pull_request' || github.event_name == 'pull_request_review'
         env:
           GITHUB_TOKEN: ${{ github.token }}
-        run: automation/library/review_gate.sh pr "JakubMifek/saturnin#${{ github.event.pull_request.number }}" "JakubMifek/saturnin"
+        run: automation/library/review_gate.sh pr "${{ github.event.pull_request.base.repo.full_name }}#${{ github.event.pull_request.number }}" "${{ github.event.pull_request.base.repo.full_name }}"

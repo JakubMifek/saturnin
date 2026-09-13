@@ -35,6 +35,7 @@ if (( $# == 0 )); then
   exit 64
 fi
 
+exit_code=0
 for repo_path in "$@"; do
   manifest="${repo_path%/}/.saturnin/repo.yaml"
   if [[ ! -f "$manifest" ]]; then
@@ -70,6 +71,11 @@ import hashlib, pathlib, sys
 path = str(pathlib.Path(sys.argv[1]).resolve())
 print(f"{pathlib.Path(path).name}-{hashlib.sha256(path.encode()).hexdigest()[:12]}")' "$repo_path")"
   results="${RESULTS_DIR}/${repo_key}.jsonl"
+  if [[ -z "$repo_slug" ]]; then
+    log "$app is not registered as a managed discovery source; refusing to create incidents"
+    exit_code=1
+    continue
+  fi
 
   # monitors: [{name, url, expect_status, timeout_seconds}]
   count="$("$PYTHON" -c '
@@ -145,10 +151,7 @@ print(monitor["name"], monitor["url"], monitor.get("expect_status", 200),
         touch "$escalation_marker"
       fi
     else
-      task_add_args=(--label incident --label monitor --priority P0 --dispatch)
-      if [[ -n "$repo_slug" ]]; then
-        task_add_args=(--repo "$repo_slug" "${task_add_args[@]}")
-      fi
+      task_add_args=(--repo "$repo_slug" --label incident --label monitor --priority P0 --dispatch)
       incident="$(
         saturnin --json task add "Monitor $app/$name failed: HTTP $code from $url" \
         --body "Expected $expect, observed $code at $started. Monitor declared in $manifest." \
@@ -160,3 +163,4 @@ print(monitor["name"], monitor["url"], monitor.get("expect_status", 200),
     fi
   done
 done
+exit "$exit_code"

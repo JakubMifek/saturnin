@@ -475,6 +475,30 @@ class Governance:
             problems.append("PR review is not required")
         if self.review.get("pr", {}).get("author_may_review", False):
             problems.append("PR authors are allowed to review themselves")
+        for kind in ("pr", "issue"):
+            reviewers = self.review.get(kind, {}).get("allowed_reviewer_roles", [])
+            if not isinstance(reviewers, list) or not reviewers or not all(
+                isinstance(role, str) and role.strip() for role in reviewers
+            ):
+                problems.append(
+                    f"{kind} review policy requires a non-empty list of reviewer roles"
+                )
+                continue
+            unknown = sorted(
+                {role.strip() for role in reviewers}
+                - set(self.config.routing.get("roles", {}))
+            )
+            if unknown:
+                problems.append(
+                    f"{kind} review policy names unknown reviewer role(s): {', '.join(unknown)}"
+                )
+        github_reviewers = self.review.get("pr", {}).get("github_reviewer_logins", [])
+        if not isinstance(github_reviewers, list) or not github_reviewers or not all(
+            isinstance(login, str) and login.strip() for login in github_reviewers
+        ):
+            problems.append(
+                "PR review policy requires a non-empty list of GitHub reviewer logins"
+            )
         if self.policy.get("delegation", {}).get("ceo_may_execute", False):
             problems.append("CEO is allowed to execute work; delegation-first is violated")
         if self.config.server_scope.get("user", {}).get("allow_root", False):
@@ -534,23 +558,28 @@ def _check_filesystem_scope(
         # detect, so they must be denied unless an explicit allowlist permits
         # them.  For non-interpreter binaries the allowlist is also checked.
         allowlist = set(filesystem.get("executable_allowlist", []))
-        if binary in _SHELL_BINARIES or binary in {"python", "python3", "ruby", "perl", "node"}:
+        if binary in {"python", "python3"}:
+            allowed_modules = {
+                str(module) for module in filesystem.get("python_module_allowlist", [])
+            }
+            if not (
+                len(arguments) >= 2
+                and arguments[0] == "-m"
+                and arguments[1] in allowed_modules
+            ):
+                return Decision.deny(
+                    f"{binary!r} is only allowed for configured Python module invocations"
+                )
+            if arguments[1] == "saturnin":
+                targets = _saturnin_targets(arguments[2:])
+                if targets:
+                    return _check_filesystem_targets(targets, filesystem)
+        elif binary in _SHELL_BINARIES or binary in {"ruby", "perl", "node"}:
             if binary not in allowlist:
                 return Decision.deny(
                     f"{binary!r} is an interpreter whose filesystem writes cannot be "
                     "statically determined; add it to executable_allowlist to permit it"
                 )
-            # Even when allow-listed, interpreters are restricted to validated
-            # Saturnin module invocations (``python3 -m saturnin ...``).
-            if binary in {"python", "python3"}:
-                if not (len(arguments) >= 2 and arguments[0] == "-m" and arguments[1] == "saturnin"):
-                    return Decision.deny(
-                        f"{binary!r} is only allowed for Saturnin module invocations "
-                        "(python3 -m saturnin ...)"
-                    )
-                targets = _saturnin_targets(arguments[2:])
-                if targets:
-                    return _check_filesystem_targets(targets, filesystem)
         elif allowlist and binary not in allowlist:
             return Decision.deny(
                 f"{binary!r} is not in the executable allowlist; "
@@ -661,12 +690,11 @@ def _git_targets(arguments: Sequence[str]) -> list[str]:
             targets.append(argument.split("=", 1)[1])
             index += 1
             continue
-        if argument == "-c":
-            index += 2
-            continue
-        if argument.startswith("-c"):
-            index += 1
-            continue
+        if argument == "-c" or argument.startswith("-c"):
+            raise _WriteScopeError(
+                "git command-line configuration overrides are unsupported; "
+                "write scope is unknown"
+            )
         if not argument.startswith("-"):
             subcommand_index = index
             break

@@ -24,6 +24,11 @@ if (( ${#probes[@]} == 0 )); then
 fi
 
 exit_code=0
+exec {poller_lock_fd}>"${POLLERS_DIR}/.result-poller"
+if ! flock -n "$poller_lock_fd"; then
+  log "another result-poller run is active; leaving probes to that run"
+  exit 0
+fi
 for probe in "${probes[@]}"; do
   task_id="$(basename "$probe" .sh)"
   status=0

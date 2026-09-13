@@ -56,6 +56,14 @@ def test_ci_review_gate_does_not_claim_a_fixed_author_role() -> None:
 
     gate_line = next(line for line in workflow.splitlines() if "review_gate.sh pr" in line)
     assert "code-worker" not in gate_line
+    assert "github.event.pull_request.base.repo.full_name" in gate_line
+
+
+def test_ci_governance_uses_trusted_base_code() -> None:
+    workflow = (REPO_ROOT / ".github/workflows/ci.yml").read_text(encoding="utf-8")
+
+    governance = workflow.split("  governance:", 1)[1]
+    assert "github.event.pull_request.base.sha" in governance
 
 
 def test_public_task_template_matches_discovery_policy() -> None:

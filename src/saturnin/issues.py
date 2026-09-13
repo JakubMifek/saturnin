@@ -139,6 +139,11 @@ class IssueMirror:
             if not task.issue:
                 result.append(task)
                 continue
+            synced_digest = getattr(task, "issue_synced_digest", None)
+            if synced_digest:
+                if synced_digest != self._payload_digest(self.render(task)):
+                    result.append(task)
+                continue
             synced_at = getattr(task, "issue_synced_at", None)
             if not synced_at or synced_at < self._rendered_updated_at(task):
                 result.append(task)
@@ -155,6 +160,11 @@ class IssueMirror:
                 child_timestamps.append(child.updated_at)
         return max([task.updated_at, *child_timestamps])
 
+    @staticmethod
+    def _payload_digest(payload: IssuePayload) -> str:
+        rendered = json.dumps(payload.to_dict(), sort_keys=True, separators=(",", ":"))
+        return hashlib.sha256(rendered.encode("utf-8")).hexdigest()
+
     def sync(self, task: Task, *, push: bool = False, actor: str = "chief-of-staff") -> IssuePayload:
         if not push:
             return self.render(self.board.get(task.id))
@@ -162,11 +172,13 @@ class IssueMirror:
         with file_lock(sync_lock):
             task = self.board.get(task.id)
             payload = self.render(task)
-            rendered_updated_at = self._rendered_updated_at(task)
+            rendered_task_updated_at = task.updated_at
+            rendered_digest = self._payload_digest(payload)
             url = self._push(task, payload)
             with self.board.edit(task.id) as stored:
                 stored.issue = url
-                if self._rendered_updated_at(stored) == rendered_updated_at:
+                stored.issue_synced_digest = rendered_digest
+                if stored.updated_at == rendered_task_updated_at:
                     stored.log("issue:synced", actor=actor, note=url)
                     stored.issue_synced_at = stored.updated_at
             task.issue = url

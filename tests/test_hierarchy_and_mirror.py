@@ -149,6 +149,7 @@ def test_existing_mirror_updates_content_and_reconciles_metadata_labels(
     assert "saturnin:state/in_progress" in edit
     stored = board.get(task.id)
     assert stored.issue_synced_at is not None
+    assert stored.issue_synced_digest is not None
     assert stored.history[-1]["event"] == "issue:synced"
 
 
@@ -174,6 +175,25 @@ def test_concurrent_change_is_left_pending_after_mirror_push(
     assert stored.state == "done"
     assert stored.issue_synced_at is None
     assert stored.id in {candidate.id for candidate in mirror.syncable()}
+
+
+def test_child_change_during_push_keeps_parent_pending(
+    config: Config, board: Board, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    parent = board.create("Parent", kind="epic")
+    child = board.create("Child", parent=parent.id)
+    mirror = IssueMirror(config, board)
+
+    def concurrent_push(current, payload):
+        with board.edit(child.id) as stored:
+            stored.state = "done"
+            stored.log("state:done", actor="code-worker")
+        return "https://github.com/example/repo/issues/8"
+
+    monkeypatch.setattr(mirror, "_push", concurrent_push)
+    mirror.sync(parent, push=True)
+
+    assert parent.id in {candidate.id for candidate in mirror.syncable()}
 
 
 def test_labels_are_provisioned_before_create(

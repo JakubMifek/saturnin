@@ -219,6 +219,8 @@ def test_review_gate_flow(home: Path, capsys: pytest.CaptureFixture[str]) -> Non
             "JakubMifek/saturnin",
             "--author",
             "code-worker",
+            "--head-sha",
+            "abc123",
         )[0]
         == 2
     )
@@ -254,6 +256,95 @@ def test_review_gate_flow(home: Path, capsys: pytest.CaptureFixture[str]) -> Non
     )
     assert code == 0
     assert "ALLOWED" in out
+
+
+def test_review_cli_resolves_omitted_pr_head(
+    home: Path, capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    subject = "JakubMifek/saturnin#42"
+    head_sha = "a" * 40
+    monkeypatch.setattr(
+        "saturnin.cli.run_gh",
+        lambda args: json.dumps({"head": {"sha": head_sha}}),
+    )
+
+    assert run(
+        capsys,
+        "review",
+        "record",
+        subject,
+        "--kind",
+        "pr",
+        "--author",
+        "code-worker",
+        "--reviewer",
+        "pr-reviewer",
+        "--verdict",
+        "approved",
+    )[0] == 0
+    code, out = run(
+        capsys,
+        "review",
+        "gate",
+        subject,
+        "--kind",
+        "pr",
+        "--repo",
+        "JakubMifek/saturnin",
+        "--author",
+        "code-worker",
+    )
+
+    assert code == 0
+    assert "ALLOWED" in out
+
+
+def test_dispatch_all_defers_one_launch_failure_and_continues(
+    config: Config, board: Board, capsys: pytest.CaptureFixture[str],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    first = board.create("First launch")
+    second = board.create("Second launch")
+    monkeypatch.setattr(AgentLauncher, "enabled", property(lambda self: True))
+    worktree = config.root / "var" / "worktrees" / "queued"
+    worktree.mkdir(parents=True)
+    monkeypatch.setattr(
+        WorktreeManager,
+        "create",
+        lambda self, branch, base=None: SimpleNamespace(path=worktree, branch=branch),
+    )
+    launched: list[str] = []
+
+    def launch(self, task_id, **kwargs):
+        launched.append(task_id)
+        if task_id == first.id:
+            from saturnin.launcher import LauncherError
+
+            raise LauncherError("cannot spawn")
+        return SimpleNamespace(to_dict=lambda: {"task_id": task_id, "pid": 42})
+
+    monkeypatch.setattr(AgentLauncher, "launch", launch)
+
+    code, out = run(capsys, "--json", "dispatch", "--all")
+
+    assert code == 0
+    assert launched == [first.id, second.id]
+    assert "agent launch failed: cannot spawn" in board.get(first.id).launch_deferred_reason
+    assert json.loads(out)[1]["launch"]["task_id"] == second.id
+
+
+def test_invalid_project_manifest_is_reported_as_a_routing_error(
+    config: Config, board: Board, capsys: pytest.CaptureFixture[str]
+) -> None:
+    task = board.create("Malformed project")
+    worktree = config.root / "malformed-project"
+    (worktree / ".saturnin").mkdir(parents=True)
+    (worktree / ".saturnin" / "repo.yaml").write_text("squad: [\n", encoding="utf-8")
+    with board.edit(task.id) as stored:
+        stored.worktree = str(worktree)
+
+    assert main(["dispatch", task.id, "--dry-run"]) == 1
+    assert "invalid managed repository manifest" in capsys.readouterr().err
 
 
 def test_issue_review_gate_requires_matching_digest(

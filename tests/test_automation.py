@@ -4,10 +4,19 @@ import hashlib
 import os
 import subprocess
 import sys
+import time
 
+import yaml
 from saturnin.automation import AutomationLibrary
 from saturnin.board import Board
 from saturnin.config import Config
+
+
+def _register_monitor_repo(config: Config, repo, slug: str = "owner/managed-app") -> None:
+    path = config.root / "policies" / "repos.yaml"
+    policy = yaml.safe_load(path.read_text(encoding="utf-8"))
+    policy["discovery"]["sources"].append({"slug": slug, "checkout": str(repo)})
+    path.write_text(yaml.safe_dump(policy), encoding="utf-8")
 
 
 def test_registry_files_exist(config: Config) -> None:
@@ -68,6 +77,7 @@ def test_monitors_use_project_virtualenv_python(config: Config) -> None:
         "    expect_status: 200\n",
         encoding="utf-8",
     )
+    _register_monitor_repo(config, repo)
     marker = config.root / "python-used"
     venv_bin = config.root / ".venv" / "bin"
     venv_bin.mkdir(parents=True)
@@ -115,6 +125,7 @@ def test_monitor_recovery_closes_recorded_incident_task(config: Config, board: B
         "    expect_status: 200\n",
         encoding="utf-8",
     )
+    _register_monitor_repo(config, repo)
     task = board.create("Monitor managed-app/health failed")
     (config.var_dir / "monitors").mkdir(parents=True)
     repo_key = f"managed-app-{hashlib.sha256(str(repo.resolve()).encode()).hexdigest()[:12]}"
@@ -155,6 +166,7 @@ def test_monitors_validate_manifest_name_and_url_before_curl(config: Config) -> 
         "    url: --config=/tmp/curlrc\n",
         encoding="utf-8",
     )
+    _register_monitor_repo(config, repo)
     fake_bin = config.root / "fake-bin"
     fake_bin.mkdir()
     curl = fake_bin / "curl"
@@ -184,6 +196,7 @@ def test_monitor_state_is_namespaced_by_repository_path(config: Config) -> None:
             "    url: https://example.test/health\n",
             encoding="utf-8",
         )
+        _register_monitor_repo(config, repo, f"owner/{repo.parent.name}-managed-app")
     fake_bin = config.root / "fake-bin"
     fake_bin.mkdir()
     curl = fake_bin / "curl"
@@ -206,6 +219,70 @@ def test_monitor_state_is_namespaced_by_repository_path(config: Config) -> None:
     repository_logs = [path for path in result_files if not path.stem.endswith("_health")]
     assert len(repository_logs) == 2
     assert repository_logs[0].name != repository_logs[1].name
+
+
+def test_monitors_fail_closed_for_an_unregistered_checkout(config: Config) -> None:
+    repo = config.root / "unregistered-app"
+    (repo / ".saturnin").mkdir(parents=True)
+    (repo / ".saturnin" / "repo.yaml").write_text(
+        "monitors:\n"
+        "  - name: health\n"
+        "    url: https://example.test/health\n",
+        encoding="utf-8",
+    )
+    fake_bin = config.root / "fake-bin"
+    fake_bin.mkdir()
+    curl_marker = config.root / "curl-called"
+    curl = fake_bin / "curl"
+    curl.write_text(f"#!/bin/sh\nprintf called > {curl_marker}\n", encoding="utf-8")
+    curl.chmod(0o755)
+
+    result = subprocess.run(
+        ["bash", str(config.root / "automation/library/run_monitors.sh"), str(repo)],
+        capture_output=True,
+        text=True,
+        env={**os.environ, "PATH": f"{fake_bin}:{os.environ['PATH']}"},
+    )
+
+    assert result.returncode == 1
+    assert "not registered as a managed discovery source" in result.stdout
+    assert not curl_marker.exists()
+
+
+def test_result_poller_serializes_overlapping_runs(config: Config) -> None:
+    pollers = config.var_dir / "pollers"
+    pollers.mkdir(parents=True)
+    run_marker = config.root / "probe-runs"
+    probe = pollers / "T-concurrent.sh"
+    probe.write_text(
+        f"#!/bin/bash\nprintf x >> {run_marker}\nsleep 0.4\nexit 2\n",
+        encoding="utf-8",
+    )
+    script = config.root / "automation" / "library" / "result_poller.sh"
+    env = {**os.environ, "SATURNIN_HOME": str(config.root)}
+    first = subprocess.Popen(
+        ["bash", str(script)],
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+        env=env,
+    )
+    for _ in range(100):
+        if run_marker.exists():
+            break
+        time.sleep(0.01)
+    second = subprocess.run(
+        ["bash", str(script)],
+        check=True,
+        capture_output=True,
+        text=True,
+        env=env,
+    )
+    first_stdout, first_stderr = first.communicate(timeout=5)
+
+    assert first.returncode == 0, first_stderr or first_stdout
+    assert "another result-poller run is active" in second.stdout
+    assert run_marker.read_text(encoding="utf-8") == "x"
 
 
 def test_review_gate_rejects_pr_subject_for_another_repo(config: Config) -> None:
@@ -264,8 +341,8 @@ def test_review_gate_imports_only_the_designated_reviewer(config: Config) -> Non
         encoding="utf-8"
     )
 
-    assert "user.casefold() != reviewer_login.casefold()" in script
-    assert 'elif latest == "dismissed":' in script
-    assert 'print(f"dismissed\\t{reviewer_login}")' in script
+    assert "user.casefold() not in reviewer_logins" in script
+    assert '"changes_requested", "rejected", "dismissed"' in script
+    assert "state not in" in script
     assert "Imported from GitHub reviewer ${github_reviewer}" in script
     assert 'author="github:${pr_author}"' in script

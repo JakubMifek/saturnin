@@ -20,6 +20,21 @@ def test_policies_audit_clean(governance: Governance) -> None:
     assert governance.audit() == []
 
 
+@pytest.mark.parametrize(
+    ("setting", "value", "problem"),
+    [
+        ("github_reviewer_logins", [], "non-empty list of GitHub reviewer logins"),
+        ("allowed_reviewer_roles", [1], "non-empty list of reviewer roles"),
+    ],
+)
+def test_audit_rejects_unusable_pr_reviewer_policy(
+    config: Config, setting: str, value: object, problem: str
+) -> None:
+    config.governance["review"]["pr"][setting] = value
+
+    assert any(problem in item for item in Governance(config).audit())
+
+
 @pytest.mark.parametrize("branch", ["main", "master", "release"])
 def test_default_branch_is_never_writable(governance: Governance, branch: str) -> None:
     assert not governance.check_branch(branch).allowed
@@ -179,6 +194,19 @@ def test_pr_review_requires_head_sha(config: Config) -> None:
             reviewer="pr-reviewer",
             verdict="approved",
         )
+
+
+def test_python_allowlist_is_limited_to_configured_modules(
+    governance: Governance, config: Config
+) -> None:
+    filesystem = config.server_scope["filesystem"]
+
+    assert "python3" not in filesystem["executable_allowlist"]
+    assert filesystem["python_module_allowlist"] == ["saturnin"]
+    assert governance.check_server_command("python3 -m saturnin doctor").allowed
+    assert not governance.check_server_command(
+        "python3 -c 'open(\"/home/saturnin/out\", \"w\")'"
+    ).allowed
 
 
 def test_corrupt_review_ledger_reports_file_and_line(config: Config) -> None:
@@ -815,6 +843,22 @@ def test_git_control_paths_and_mutation_destinations_are_write_targets(
     arguments: list[str], target: str
 ) -> None:
     assert target in _git_targets(arguments)
+
+
+@pytest.mark.parametrize(
+    "command",
+    [
+        "git -c alias.pwn='!touch /etc/out' pwn",
+        "git -calias.pwn='!touch /etc/out' pwn",
+    ],
+)
+def test_git_configuration_overrides_fail_closed(
+    governance: Governance, command: str
+) -> None:
+    decision = governance.check_server_command(command)
+
+    assert not decision.allowed
+    assert "configuration overrides are unsupported" in decision.reasons[0]
 
 
 @pytest.mark.parametrize(

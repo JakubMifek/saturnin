@@ -27,15 +27,21 @@ if [[ "$kind" == "pr" ]]; then
     echo "invalid PR subject; expected owner/repo#number" >&2
     exit 2
   }
-  reviewer_login="$(
+  reviewer_logins="$(
     python3 -c '
-import sys, yaml
+import json, sys, yaml
 policy = yaml.safe_load(open(sys.argv[1], encoding="utf-8")) or {}
-print(policy.get("review", {}).get("pr", {}).get("github_reviewer_login", ""))' \
+settings = policy.get("review", {}).get("pr", {})
+logins = settings.get("github_reviewer_logins")
+if logins is None:
+    logins = [settings.get("github_reviewer_login", "")]
+elif isinstance(logins, str):
+    logins = [logins]
+print(json.dumps([login for login in logins if isinstance(login, str) and login]))' \
       "${SATURNIN_HOME}/policies/governance.yaml"
   )"
-  [[ -n "$reviewer_login" ]] || {
-    echo "review.pr.github_reviewer_login is not configured" >&2
+  [[ "$reviewer_logins" != "[]" ]] || {
+    echo "review.pr.github_reviewer_logins is not configured" >&2
     exit 2
   }
   github_headers=(-H "Accept: application/vnd.github+json")
@@ -51,19 +57,22 @@ print(policy.get("review", {}).get("pr", {}).get("github_reviewer_login", ""))' 
   author="github:${pr_author}"
   args+=(--author "$author")
   IFS=$'\t' read -r github_verdict github_reviewer < <(
-    python3 - "$repo" "$pr_number" "$head_sha" "$pr_author" "$reviewer_login" <<'PY'
+    python3 - "$repo" "$pr_number" "$head_sha" "$pr_author" "$reviewer_logins" <<'PY'
 import json
 import os
 import sys
 import urllib.request
 
-repo, pr_number, head_sha, pr_author, reviewer_login = sys.argv[1:]
+repo, pr_number, head_sha, pr_author, reviewer_logins_json = sys.argv[1:]
+reviewer_logins = {
+    str(login).casefold(): str(login) for login in json.loads(reviewer_logins_json)
+}
 headers = {"Accept": "application/vnd.github+json", "User-Agent": "saturnin-review-gate"}
 token = os.environ.get("GITHUB_TOKEN") or os.environ.get("GH_TOKEN")
 if token:
     headers["Authorization"] = f"token {token}"
 
-latest = None
+latest = {}
 for page in range(1, 11):
     request = urllib.request.Request(
         f"https://api.github.com/repos/{repo}/pulls/{pr_number}/reviews?per_page=100&page={page}",
@@ -77,20 +86,26 @@ for page in range(1, 11):
         if review.get("commit_id") != head_sha:
             continue
         user = (review.get("user") or {}).get("login", "")
+        state = str(review.get("state", "")).lower()
         if (
             not user
             or user.casefold() == pr_author.casefold()
-            or user.casefold() != reviewer_login.casefold()
+            or user.casefold() not in reviewer_logins
+            or state not in {"approved", "changes_requested", "rejected", "dismissed"}
         ):
             continue
-        latest = str(review.get("state", "")).lower()
+        latest[user.casefold()] = (state, user)
 
-if latest in {"changes_requested", "rejected"}:
-    print(f"changes_requested\t{reviewer_login}")
-elif latest == "dismissed":
-    print(f"dismissed\t{reviewer_login}")
-elif latest == "approved":
-    print(f"approved\t{reviewer_login}")
+blocking = [review for review in latest.values() if review[0] in {
+    "changes_requested", "rejected", "dismissed"
+}]
+approved = [review for review in latest.values() if review[0] == "approved"]
+if blocking:
+    state, user = blocking[-1]
+    print(f"{'dismissed' if state == 'dismissed' else 'changes_requested'}\t{user}")
+elif approved:
+    _, user = approved[-1]
+    print(f"approved\t{user}")
 else:
     print("none\t")
 PY

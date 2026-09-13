@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import re
 import sys
 from datetime import datetime, timezone
 from pathlib import Path
@@ -27,9 +28,9 @@ from .discovery import DiscoveryError, IssueDiscovery
 from . import docsync
 from .governance import Governance
 from .improve import ImprovementLoop
-from .issues import IssueMirror, MirrorError
-from .launcher import AgentLauncher, LaunchResult
-from .review import ReviewLedger
+from .issues import IssueMirror, MirrorError, run_gh
+from .launcher import AgentLauncher, LauncherError, LaunchResult
+from .review import ReviewError, ReviewLedger
 from .routing import Router, RoutingError
 from .worktrees import GitError, WorktreeManager
 
@@ -365,7 +366,10 @@ def _project_routing_context(
     manifest_path = worktree / ".saturnin" / "repo.yaml"
     if not manifest_path.is_file():
         return {}, None, None
-    manifest = yaml.safe_load(manifest_path.read_text(encoding="utf-8")) or {}
+    try:
+        manifest = yaml.safe_load(manifest_path.read_text(encoding="utf-8")) or {}
+    except (OSError, yaml.YAMLError) as exc:
+        raise RoutingError(f"invalid managed repository manifest: {exc}") from exc
     if not isinstance(manifest, dict):
         raise RoutingError("managed repository manifest must contain a mapping")
     local_roles = _project_agent_catalog(
@@ -382,6 +386,25 @@ def _project_routing_context(
     ):
         raise RoutingError("managed repository squad must be a list of role ids")
     return local_roles, lead, squad
+
+
+def _current_pr_head(subject: str, repo: str | None = None) -> str:
+    subject_repo, separator, number = subject.rpartition("#")
+    if (
+        not separator
+        or not number.isdigit()
+        or not re.fullmatch(r"[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+", subject_repo)
+        or (repo is not None and subject_repo.casefold() != repo.casefold())
+    ):
+        raise ReviewError("PR subject must be owner/repo#number and match --repo")
+    try:
+        response = json.loads(run_gh(["api", f"repos/{subject_repo}/pulls/{number}"]))
+        head_sha = str(response["head"]["sha"]).strip()
+    except (json.JSONDecodeError, KeyError, TypeError) as exc:
+        raise ReviewError(f"could not resolve current PR head for {subject}: {exc}") from exc
+    if not re.fullmatch(r"[0-9a-fA-F]{40}", head_sha):
+        raise ReviewError(f"GitHub returned an invalid head SHA for {subject}")
+    return head_sha
 
 
 def _prepare_project_route(config: Config, board: Board, task_id: str) -> Task:
@@ -475,7 +498,11 @@ def _provision_and_launch(
             _defer_launch(board, task.id, f"worktree provisioning failed: {exc}")
             return None
     _prepare_project_route(config, board, task.id)
-    return launcher.launch(task.id)
+    try:
+        return launcher.launch(task.id)
+    except LauncherError as exc:
+        _defer_launch(board, task.id, f"agent launch failed: {exc}")
+        return None
 
 
 def _check_project_agents(
@@ -1043,6 +1070,12 @@ def _run_checkpoint(args: argparse.Namespace, config: Config, board: Board, as_j
 
 def _run_review(args: argparse.Namespace, config: Config, as_json: bool) -> int:
     ledger = ReviewLedger(config)
+    head_sha = getattr(args, "head_sha", "")
+    if args.kind == "pr" and not head_sha:
+        head_sha = _current_pr_head(
+            args.subject,
+            getattr(args, "repo", None),
+        )
     if args.review_command == "record":
         record = ledger.record(
             subject=args.subject,
@@ -1051,7 +1084,7 @@ def _run_review(args: argparse.Namespace, config: Config, as_json: bool) -> int:
             reviewer=args.reviewer,
             verdict=args.verdict,
             zero_context=not args.with_context,
-            head_sha=getattr(args, "head_sha", ""),
+            head_sha=head_sha,
             issue_digest=getattr(args, "issue_digest", ""),
             notes=args.notes,
         )
@@ -1066,7 +1099,7 @@ def _run_review(args: argparse.Namespace, config: Config, as_json: bool) -> int:
     decision = (
         governance.merge_allowed(
             repo=args.repo, author=args.author, records=records,
-            head_sha=getattr(args, "head_sha", ""),
+            head_sha=head_sha,
         )
         if args.kind == "pr"
         else governance.issue_submission_allowed(
