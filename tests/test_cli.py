@@ -678,6 +678,79 @@ def test_worktree_task_attachment_uses_locked_edit(
     assert stored.history[-1]["actor"] == "code-worker"
 
 
+def test_worktree_start_attaches_and_transitions_in_one_lifecycle(
+    home: Path, capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    task = Board().create("Start work session")
+    Board().transition(task, "routed")
+    worktree_path = home / "worktree"
+    monkeypatch.setattr(
+        WorktreeManager,
+        "create",
+        lambda *args, **kwargs: SimpleNamespace(
+            branch="feature/start-session", path=worktree_path
+        ),
+    )
+
+    assert (
+        main(
+            [
+                "worktree",
+                "create",
+                "feature/start-session",
+                "--task",
+                task.id,
+                "--actor",
+                "code-worker",
+                "--start",
+            ]
+        )
+        == 0
+    )
+
+    stored = Board().get(task.id)
+    assert stored.state == "in_progress"
+    assert stored.branch == "feature/start-session"
+    assert stored.worktree == str(worktree_path)
+    assert stored.history[-1]["actor"] == "code-worker"
+
+
+def test_worktree_start_rejects_an_unstartable_task_before_creation(
+    capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    task = Board().create("Unrouted task")
+    calls: list[str] = []
+    monkeypatch.setattr(WorktreeManager, "create", lambda *args, **kwargs: calls.append("create"))
+
+    assert main(["worktree", "create", "feature/unrouted", "--task", task.id, "--start"]) == 1
+    assert calls == []
+    assert Board().get(task.id).worktree is None
+
+
+def test_worktree_start_rolls_back_when_final_transition_fails(
+    home: Path, capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    task = Board().create("Rollback failed start")
+    Board().transition(task, "routed")
+    worktree = SimpleNamespace(branch="feature/rollback", path=home / "worktree")
+    rollback: list[object] = []
+    monkeypatch.setattr(WorktreeManager, "create", lambda *args, **kwargs: worktree)
+    monkeypatch.setattr(WorktreeManager, "rollback_create", lambda _self, item: rollback.append(item))
+
+    def fail_transition(*args: object, **kwargs: object) -> None:
+        raise RuntimeError("state write failed")
+
+    monkeypatch.setattr(Board, "_apply_transition", fail_transition)
+
+    assert (
+        main(["worktree", "create", "feature/rollback", "--task", task.id, "--start"]) == 1
+    )
+    assert rollback == [worktree]
+    stored = Board().get(task.id)
+    assert stored.state == "routed"
+    assert stored.worktree is None
+
+
 def test_worktree_create_rejects_already_attached_task(
     capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch
 ) -> None:

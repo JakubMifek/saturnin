@@ -85,10 +85,12 @@ for page in range(1, 11):
     for review in reviews:
         if review.get("commit_id") != head_sha:
             continue
-        user = (review.get("user") or {}).get("login", "")
+        review_user = review.get("user") or {}
+        user = review_user.get("login", "")
         state = str(review.get("state", "")).lower()
         if (
             not user
+            or review_user.get("type") != "Bot"
             or user.casefold() == pr_author.casefold()
             or user.casefold() not in reviewer_logins
             or state not in {"approved", "changes_requested", "rejected", "dismissed"}

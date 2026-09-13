@@ -285,6 +285,80 @@ def test_result_poller_serializes_overlapping_runs(config: Config) -> None:
     assert run_marker.read_text(encoding="utf-8") == "x"
 
 
+def test_result_poller_persists_escalation_reference(config: Config) -> None:
+    pollers = config.var_dir / "pollers"
+    pollers.mkdir(parents=True)
+    task_id = "T-persist"
+    (pollers / f"{task_id}.sh").write_text("#!/bin/bash\nexit 1\n", encoding="utf-8")
+    args_log = config.root / "saturnin-args"
+    fake_saturin = config.root / ".venv" / "bin" / "saturnin"
+    fake_saturin.parent.mkdir(parents=True)
+    fake_saturin.write_text(
+        "#!/bin/sh\n"
+        f"printf '%s\\n' \"$*\" >> {args_log}\n"
+        "if [ \"$1\" = '--json' ] && [ \"$2\" = 'escalate' ]; then\n"
+        "  printf '%s\\n' '{\"url\":\"https://example.test/issues/42\"}'\n"
+        "elif [ \"$1\" = '--json' ] && [ \"$2\" = 'task' ] && [ \"$3\" = 'show' ]; then\n"
+        "  printf '%s\\n' '{\"state\":\"blocked\"}'\n"
+        "fi\n",
+        encoding="utf-8",
+    )
+    fake_saturin.chmod(0o755)
+
+    subprocess.run(
+        ["bash", str(config.root / "automation/library/result_poller.sh")],
+        check=True,
+        capture_output=True,
+        text=True,
+        env={**os.environ, "SATURNIN_HOME": str(config.root)},
+    )
+
+    assert (pollers / f"{task_id}.escalated").read_text(encoding="utf-8") == (
+        "https://example.test/issues/42\n"
+    )
+    assert f"--json task show {task_id}" in args_log.read_text(encoding="utf-8")
+
+
+def test_result_poller_reuses_escalation_reference_when_reblocking(config: Config) -> None:
+    pollers = config.var_dir / "pollers"
+    pollers.mkdir(parents=True)
+    task_id = "T-retry"
+    (pollers / f"{task_id}.sh").write_text("#!/bin/bash\nexit 1\n", encoding="utf-8")
+    (pollers / f"{task_id}.escalated").write_text(
+        "https://example.test/issues/42\n", encoding="utf-8"
+    )
+    args_log = config.root / "saturnin-args"
+    fake_saturin = config.root / ".venv" / "bin" / "saturnin"
+    fake_saturin.parent.mkdir(parents=True)
+    fake_saturin.write_text(
+        "#!/bin/sh\n"
+        f"printf '%s\\n' \"$*\" >> {args_log}\n"
+        "if [ \"$1\" = '--json' ] && [ \"$2\" = 'task' ] && [ \"$3\" = 'show' ]; then\n"
+        "  printf '%s\\n' '{\"state\":\"in_progress\"}'\n"
+        "elif [ \"$1\" = '--json' ] && [ \"$2\" = 'escalate' ]; then\n"
+        "  exit 99\n"
+        "fi\n",
+        encoding="utf-8",
+    )
+    fake_saturin.chmod(0o755)
+
+    subprocess.run(
+        ["bash", str(config.root / "automation/library/result_poller.sh")],
+        check=True,
+        capture_output=True,
+        text=True,
+        env={**os.environ, "SATURNIN_HOME": str(config.root)},
+    )
+
+    calls = args_log.read_text(encoding="utf-8")
+    assert f"--json task show {task_id}" in calls
+    assert "escalate" not in calls
+    assert (
+        f"task move {task_id} blocked --actor result-poller --escalation "
+        "https://example.test/issues/42"
+    ) in calls
+
+
 def test_review_gate_rejects_pr_subject_for_another_repo(config: Config) -> None:
     result = subprocess.run(
         [
@@ -341,6 +415,10 @@ def test_review_gate_imports_only_the_designated_reviewer(config: Config) -> Non
         encoding="utf-8"
     )
 
+    assert config.governance["review"]["pr"]["github_reviewer_logins"] == [
+        "copilot-pull-request-reviewer[bot]"
+    ]
+    assert 'review_user.get("type") != "Bot"' in script
     assert "user.casefold() not in reviewer_logins" in script
     assert '"changes_requested", "rejected", "dismissed"' in script
     assert "state not in" in script

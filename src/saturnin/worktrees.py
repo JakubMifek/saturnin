@@ -182,6 +182,13 @@ class WorktreeManager:
             args.append("--force")
         git(args, self.repo)
 
+    def rollback_create(self, worktree: Worktree) -> None:
+        """Remove a worktree and branch that were created by an uncommitted lifecycle."""
+        with self.lifecycle_lock():
+            self.remove(worktree.path)
+            if worktree.branch:
+                git(["branch", "-D", worktree.branch], self.repo)
+
     # -- cleanup -------------------------------------------------------
     def plan_cleanup(self, *, now: datetime | None = None) -> CleanupPlan:
         now = now or datetime.now(timezone.utc)

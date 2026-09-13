@@ -29,6 +29,12 @@ if ! flock -n "$poller_lock_fd"; then
   log "another result-poller run is active; leaving probes to that run"
   exit 0
 fi
+
+task_state() {
+  saturnin --json task show "$1" 2>/dev/null \
+    | python3 -c 'import json,sys; print(json.load(sys.stdin).get("state",""))' 2>/dev/null || true
+}
+
 for probe in "${probes[@]}"; do
   task_id="$(basename "$probe" .sh)"
   status=0
@@ -45,8 +51,7 @@ for probe in "${probes[@]}"; do
       rm -f "${POLLERS_DIR}/${task_id}.escalated"
       # The task may be in blocked (previous probe error) or in_progress.
       # Transition through in_progress first so blocked->review is never attempted.
-      current_state="$(saturnin --json task show "$task_id" 2>/dev/null \
-        | python3 -c 'import json,sys; print(json.load(sys.stdin).get("state",""))' 2>/dev/null || true)"
+      current_state="$(task_state "$task_id")"
       if [[ "$current_state" == "blocked" ]]; then
         if ! saturnin task move "$task_id" in_progress --actor result-poller \
           --note "poller recovered - retrying"; then
@@ -73,28 +78,49 @@ for probe in "${probes[@]}"; do
       # is removed on recovery (exit 0 branch) so a *new* failure after
       # recovery will escalate again.
       escalation_marker="${POLLERS_DIR}/${task_id}.escalated"
+      escalation_ref=""
       if [[ -f "$escalation_marker" ]]; then
-        log "$task_id: already escalated for this failure episode - skipping"
-      else
+        escalation_ref="$(<"$escalation_marker")"
+        if [[ -n "$escalation_ref" ]]; then
+          log "$task_id: reusing escalation $escalation_ref"
+        else
+          # Markers from before escalation references were persisted cannot
+          # safely satisfy Board's blocked-state invariant.
+          rm -f "$escalation_marker"
+        fi
+      fi
+      if [[ -z "$escalation_ref" ]]; then
         # Submit escalation BEFORE moving to blocked so the task is never
         # left blocked without an attached escalation issue.
-        if ! saturnin escalate "Poller failed for task $task_id" \
+        escalation_json=""
+        if ! escalation_json="$(saturnin --json escalate "Poller failed for task $task_id" \
           --context "$note" \
           --item "Check the poller probe at var/pollers/${task_id}.sh" \
           --item "Confirm whether the awaited signal still applies" \
           --urgency high \
           --task "$task_id" \
           --unblock "State whether to retry the poller or resolve the task manually" \
-          --push; then
+          --push)"; then
+          escalation_ref="$(python3 -c 'import json,sys; print((json.load(sys.stdin).get("url") or ""))' <<<"$escalation_json" 2>/dev/null || true)"
+          if [[ -z "$escalation_ref" ]]; then
+            log "$task_id: failed to submit escalation issue - not blocking task"
+            exit_code=1
+            continue
+          fi
+        else
+          escalation_ref="$(python3 -c 'import json,sys; print((json.load(sys.stdin).get("url") or ""))' <<<"$escalation_json" 2>/dev/null || true)"
+        fi
+        if [[ -z "$escalation_ref" ]]; then
           log "$task_id: failed to submit escalation issue - not blocking task"
           exit_code=1
           continue
         fi
-        touch "$escalation_marker"
+        printf '%s\n' "$escalation_ref" > "$escalation_marker"
       fi
-      current_state="$(saturnin --json task show "$task_id" 2>/dev/null | python3 -c 'import json,sys; print(json.load(sys.stdin).get("state",""))' 2>/dev/null || true)"
+      current_state="$(task_state "$task_id")"
       if [[ "$current_state" != "blocked" ]]; then
-        if ! saturnin task move "$task_id" blocked --actor result-poller --note "$note"; then
+        if ! saturnin task move "$task_id" blocked --actor result-poller \
+          --escalation "$escalation_ref" --note "$note"; then
           log "$task_id: failed to move task to blocked - board is out of sync"
           exit_code=1
           continue

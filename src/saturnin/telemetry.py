@@ -30,11 +30,12 @@ def _median(values: Iterable[float | None]) -> float | None:
 def collect(board: Board, *, now: datetime | None = None) -> dict[str, Any]:
     now = now or datetime.now(timezone.utc)
     tasks = list(board)
-    open_tasks = [t for t in tasks if t.state not in TERMINAL_STATES]
+    work_items = [t for t in tasks if t.kind not in CONTAINER_KINDS]
+    open_tasks = [t for t in work_items if t.state not in TERMINAL_STATES]
     by_state: dict[str, int] = {}
     by_role: dict[str, int] = {}
     by_priority: dict[str, int] = {}
-    for task in tasks:
+    for task in work_items:
         by_state[task.state] = by_state.get(task.state, 0) + 1
         by_priority[task.priority] = by_priority.get(task.priority, 0) + 1
     for task in open_tasks:
@@ -43,17 +44,18 @@ def collect(board: Board, *, now: datetime | None = None) -> dict[str, Any]:
     ages = [(now - parse_ts(t.created_at)).total_seconds() / 86400.0 for t in open_tasks]
     return {
         "generated_at": now.isoformat(timespec="seconds"),
-        "total": len(tasks),
+        "total": len(work_items),
+        "containers": len(tasks) - len(work_items),
         "open": len(open_tasks),
         "by_state": by_state,
         "wip_by_role": by_role,
         "by_priority": by_priority,
         "undispatched": sum(
-            1 for t in open_tasks if t.state == "intake" and t.kind not in CONTAINER_KINDS
+            1 for t in open_tasks if t.state == "intake"
         ),
         "blocked": sum(1 for t in open_tasks if t.state == "blocked"),
-        "median_dispatch_latency_s": _median(dispatch_latency_seconds(t) for t in tasks),
-        "median_cycle_time_s": _median(cycle_time_seconds(t) for t in tasks),
+        "median_dispatch_latency_s": _median(dispatch_latency_seconds(t) for t in work_items),
+        "median_cycle_time_s": _median(cycle_time_seconds(t) for t in work_items),
         "oldest_open_age_days": round(max(ages), 2) if ages else 0.0,
         "checkpointed_open": sum(1 for t in open_tasks if t.checkpoint),
     }

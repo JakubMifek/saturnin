@@ -20,7 +20,7 @@ import yaml
 from . import escalation as escalation_mod
 from . import telemetry
 from .automation import AutomationLibrary
-from .board import CONTAINER_KINDS, Board, BoardError, Task
+from .board import CONTAINER_KINDS, TRANSITIONS, Board, BoardError, Task
 from .checkpoints import Checkpoint, CheckpointStore
 from .config import Config
 from .contracts import FRONT_MATTER, audit as audit_contracts, mcp_authorization_problem
@@ -144,6 +144,11 @@ def build_parser() -> argparse.ArgumentParser:
     create.add_argument("--base")
     create.add_argument("--task")
     create.add_argument("--actor")
+    create.add_argument(
+        "--start",
+        action="store_true",
+        help="atomically attach the worktree and move its task to in_progress",
+    )
     worktree.add_parser("list", help="list worktrees")
     cleanup = worktree.add_parser("cleanup", help="plan (and optionally apply) stale cleanup")
     cleanup.add_argument("--apply", action="store_true", help="actually remove things")
@@ -956,27 +961,45 @@ def _run_dispatch(args: argparse.Namespace, config: Config, board: Board, as_jso
 def _run_worktree(args: argparse.Namespace, config: Config, board: Board, as_json: bool) -> int:
     manager = WorktreeManager(config, board=board)
     if args.worktree_command == "create":
+        if args.start and not args.task:
+            raise BoardError("--start requires --task")
         with manager.lifecycle_lock():
             attachment_error = "already has an attached branch/worktree"
             actor = args.actor or "cli"
+            worktree = None
             if args.task:
-                with board.edit(args.task) as task:
-                    if task.branch or task.worktree:
-                        raise BoardError(f"task {task.id} {attachment_error}")
-                    actor = args.actor or task.role or "cli"
-            worktree = manager.create(args.branch, base=args.base)
-            if args.task:
-                with board.edit(args.task) as task:
-                    if task.branch or task.worktree:
-                        raise BoardError(f"task {task.id} {attachment_error}")
-                    task.branch = args.branch
-                    task.worktree = str(worktree.path)
-                    task.log(
-                        "worktree",
-                        actor=actor,
-                        branch=args.branch,
-                        worktree=str(worktree.path),
-                    )
+                try:
+                    with board.edit(args.task) as task:
+                        if task.branch or task.worktree:
+                            raise BoardError(f"task {task.id} {attachment_error}")
+                        if args.start and "in_progress" not in TRANSITIONS[task.state]:
+                            raise BoardError(
+                                f"illegal transition {task.state} -> in_progress "
+                                f"(allowed: {', '.join(TRANSITIONS[task.state]) or 'none'})"
+                            )
+                        actor = args.actor or task.role or "cli"
+                        worktree = manager.create(args.branch, base=args.base)
+                        task.branch = args.branch
+                        task.worktree = str(worktree.path)
+                        task.log(
+                            "worktree",
+                            actor=actor,
+                            branch=args.branch,
+                            worktree=str(worktree.path),
+                        )
+                        if args.start:
+                            board._apply_transition(  # noqa: SLF001 - same atomic lifecycle
+                                task,
+                                "in_progress",
+                                actor=actor,
+                                note=f"work session started on {args.branch}",
+                            )
+                except Exception:
+                    if worktree is not None:
+                        manager.rollback_create(worktree)
+                    raise
+            else:
+                worktree = manager.create(args.branch, base=args.base)
         _emit(
             {"branch": worktree.branch, "path": str(worktree.path)},
             as_json,

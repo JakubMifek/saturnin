@@ -33,10 +33,27 @@ def test_metrics_reflect_the_board(config: Config, board: Board) -> None:
 
 
 def test_dispatch_metrics_exclude_containers(config: Config, board: Board) -> None:
-    board.create("Roadmap", kind="objective")
+    now = datetime.now(timezone.utc)
+    roadmap = board.create("Roadmap", kind="objective")
     board.create("Waiting leaf")
+    with board.edit(roadmap.id) as stored:
+        stored.state = "blocked"
+        stored.role = "code-worker"
+        stored.checkpoint = "CP-old"
+        stored.created_at = (now - timedelta(days=30)).isoformat()
 
-    assert telemetry.collect(board)["undispatched"] == 1
+    metrics = telemetry.collect(board, now=now)
+
+    assert metrics["total"] == 1
+    assert metrics["containers"] == 1
+    assert metrics["open"] == 1
+    assert metrics["by_state"] == {"intake": 1}
+    assert metrics["by_priority"] == {"P2": 1}
+    assert metrics["wip_by_role"] == {}
+    assert metrics["undispatched"] == 1
+    assert metrics["blocked"] == 0
+    assert metrics["checkpointed_open"] == 0
+    assert metrics["oldest_open_age_days"] < 1
 
 
 def test_bottleneck_detection(config: Config, board: Board) -> None:

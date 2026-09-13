@@ -17,8 +17,7 @@ role="${3:-}"
 saturnin check branch "$branch"
 if [[ -n "$task" ]]; then
   : "${role:?usage: new_work_session.sh <branch> <task-id> <role> - role is required when a task is given}"
-  saturnin worktree create "$branch" --task "$task"
-  saturnin task move "$task" in_progress --actor "$role" --note "work session started on $branch"
+  saturnin worktree create "$branch" --task "$task" --actor "$role" --start
 else
   saturnin worktree create "$branch"
 fi

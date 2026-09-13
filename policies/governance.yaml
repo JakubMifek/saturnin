@@ -60,8 +60,8 @@ review:
     min_approvals: 1
     allowed_reviewer_roles: [pr-reviewer]
     # Copilot approval reviews require the repository's approval-review setting.
-    # The owner is a fallback for PRs they did not author.
-    github_reviewer_logins: ["copilot-pull-request-reviewer[bot]", "JakubMifek"]
+    # Only this bot is evidence of a zero-context agent review.
+    github_reviewer_logins: ["copilot-pull-request-reviewer[bot]"]
     # The agent that authored the change may never review it.
     author_may_review: false
   # Rule 5: issues opened in other Saturnin-managed repos need an issue review.
