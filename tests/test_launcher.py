@@ -453,10 +453,6 @@ def test_launcher_uses_linked_saturnin_source_with_shared_runtime(
         ),
         encoding="utf-8",
     )
-    mcp_policy = worktree.path / "policies" / "mcp.yaml"
-    policy = yaml.safe_load(mcp_policy.read_text(encoding="utf-8"))
-    policy["servers"]["github"]["args"].append("--toolsets=repos")
-    mcp_policy.write_text(yaml.safe_dump(policy), encoding="utf-8")
     with board.edit(task.id) as stored:
         stored.branch = "feature/branch-local-source"
         stored.worktree = str(worktree.path)
@@ -487,7 +483,6 @@ def test_launcher_uses_linked_saturnin_source_with_shared_runtime(
     assert generated["mcpServers"]["github"]["args"] == [
         "stdio",
         "--read-only",
-        "--toolsets=repos",
     ]
     assert (config.var_dir / "launches" / f"{task.id}.json").is_file()
 
@@ -598,7 +593,7 @@ def test_launcher_rejects_branch_local_github_replacement(
     worker_config = launcher._worker_config(worktree.path)
     contract = launcher._contract(board.get(task.id), worker_config)
 
-    with pytest.raises(MCPError, match="canonical executable"):
+    with pytest.raises(LauncherError, match="differs from trusted canonical policy"):
         launcher._write_mcp_config(
             board.get(task.id),
             contract,

@@ -313,6 +313,8 @@ class AgentLauncher:
     ) -> Path:
         config = config or self.config
         definitions = config.policy("mcp").get("servers", {})
+        trusted_config = Config(config.data_root)
+        trusted_definitions = trusted_config.policy("mcp").get("servers", {})
         servers: dict[str, dict[str, Any]] = {}
         allowed = list(contract.mcp)
         if task.worktree:
@@ -342,10 +344,23 @@ class AgentLauncher:
             definition = definitions.get(name)
             if not isinstance(definition, dict):
                 raise LauncherError(f"unknown MCP server {name!r} for role {contract.role}")
+            process_config = config
+            authorization_policy = config.policy("mcp")
+            if name == "github":
+                trusted_definition = trusted_definitions.get(name)
+                if not isinstance(trusted_definition, dict):
+                    raise LauncherError("trusted canonical policy has no GitHub MCP server")
+                if definition != trusted_definition:
+                    raise LauncherError(
+                        "branch-local GitHub MCP definition differs from trusted canonical policy"
+                    )
+                definition = trusted_definition
+                process_config = trusted_config
+                authorization_policy = trusted_config.policy("mcp")
             authorization_problem = mcp_authorization_problem(
                 contract.role,
                 name,
-                config.policy("mcp"),
+                authorization_policy,
                 executes=contract.executes,
             )
             if authorization_problem:
@@ -356,14 +371,13 @@ class AgentLauncher:
             command, args = server_process(
                 name,
                 definition,
-                config,
+                process_config,
                 worktree_scope=worktree_scope,
             )
             canonical_github = (
                 config.var_dir / "bin" / "github-mcp-server"
             ).resolve(strict=False)
             if Path(command).resolve(strict=False) == canonical_github:
-                trusted_config = Config(config.data_root)
                 verified = verify_github_binary(trusted_config).resolve()
                 if verified != canonical_github:
                     raise LauncherError(

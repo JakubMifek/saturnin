@@ -227,7 +227,6 @@ class ReviewLedger:
                 text,
                 path,
                 required_fields=REQUIRED_FIELDS,
-                tolerate_unterminated_tail=True,
                 validator=ReviewRecord.validate_dict,
             ):
                 yield ReviewRecord.from_dict(data)

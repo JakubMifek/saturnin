@@ -274,9 +274,14 @@ def test_review_ledger_recovers_from_unterminated_tail(
     )
     path = next(ledger.dir.glob("*.jsonl"))
     with path.open("a", encoding="utf-8") as handle:
-        handle.write('{"subject":')
+        handle.write(
+            '{"subject":"'
+            + subject
+            + '","kind":"pr","verdict":"changes_requested"'
+        )
 
-    assert len(ledger.for_subject(subject, "pr")) == 1
+    with pytest.raises(ReviewError, match=r"corrupt review ledger .* at line 2"):
+        ledger.for_subject(subject, "pr")
     replacements: list[tuple[Path, Path]] = []
     original_replace = os.replace
 

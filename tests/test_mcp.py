@@ -60,11 +60,12 @@ def test_registry_mcp_servers_use_pinned_packages(config: Config) -> None:
     ("server_id", "args"),
     [
         ("github", ["stdio"]),
-        ("renamed-server", ["stdio"]),
         ("github", ["stdio", "--read-only=false"]),
+        ("github", ["stdio", "--read_only=false"]),
         ("github", ["stdio", "--read-only=invalid"]),
         ("github", ["stdio", "--read-only", "--read-only=false"]),
         ("github", ["stdio", "--read-only=false", "--read-only"]),
+        ("github", ["stdio", "--read-only", "--read_only=true"]),
         ("github", ["stdio", "--", "--read-only"]),
     ],
 )
@@ -86,12 +87,21 @@ def test_github_server_id_rejects_replacement_executable(config: Config) -> None
         server_process("github", definition, config)
 
 
-@pytest.mark.parametrize("flag", ["--read-only", "--read-only=true", "--read-only=TRUE"])
+def test_canonical_github_executable_rejects_alias_id(config: Config) -> None:
+    definition = config.policy("mcp")["servers"]["github"]
+
+    with pytest.raises(MCPError, match="only use server id 'github'"):
+        server_process("renamed-server", definition, config)
+
+
+@pytest.mark.parametrize(
+    "flag", ["--read-only", "--read-only=true", "--read-only=TRUE", "--read_only=true"]
+)
 def test_github_mcp_accepts_effective_read_only_forms(config: Config, flag: str) -> None:
     definition = config.policy("mcp")["servers"]["github"]
     definition["args"] = ["stdio", flag]
 
-    assert server_process("renamed-server", definition, config)[1] == ["stdio", flag]
+    assert server_process("github", definition, config)[1] == ["stdio", flag]
 
 
 def test_github_mcp_stdio_startup_handshake(config: Config) -> None:

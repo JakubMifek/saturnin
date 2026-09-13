@@ -23,21 +23,20 @@ class MCPError(RuntimeError):
 
 
 def _validate_github_read_only(args: Sequence[str]) -> None:
-    enabled = False
+    values: list[str] = []
     for argument in args:
         if argument == "--":
             break
-        if argument == "--read-only":
-            enabled = True
-        elif argument.startswith("--read-only="):
-            value = argument.partition("=")[2].casefold()
-            if value != "true":
-                raise MCPError(
-                    "GitHub MCP --read-only must not be false, invalid, or conflicting"
-                )
-            enabled = True
-    if not enabled:
+        option, separator, value = argument.partition("=")
+        if option.replace("_", "-") != "--read-only":
+            continue
+        values.append(value.casefold() if separator else "true")
+    if not values:
         raise MCPError("GitHub MCP server must be configured with effective --read-only")
+    if len(values) != 1 or values[0] != "true":
+        raise MCPError(
+            "GitHub MCP --read-only must be true and specified exactly once"
+        )
 
 
 def server_process(
@@ -60,7 +59,9 @@ def server_process(
     configured = Path(command).expanduser().resolve(strict=False)
     if name == "github" and configured != canonical_github:
         raise MCPError(f"GitHub MCP server must use canonical executable {canonical_github}")
-    if name == "github" or configured == canonical_github:
+    if name != "github" and configured == canonical_github:
+        raise MCPError("canonical GitHub MCP executable may only use server id 'github'")
+    if name == "github":
         _validate_github_read_only(args)
     return command, args
 
