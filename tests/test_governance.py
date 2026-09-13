@@ -423,6 +423,29 @@ def test_curl_cookie_and_trace_outputs_are_checked() -> None:
 
 
 @pytest.mark.parametrize(
+    ("argument", "target"),
+    [
+        ("-o/etc/response", "/etc/response"),
+        ("-D/etc/headers", "/etc/headers"),
+        ("-c/etc/cookies", "/etc/cookies"),
+    ],
+)
+def test_curl_attached_short_output_options_are_parsed(
+    argument: str, target: str
+) -> None:
+    assert _curl_targets([argument, "https://example.test/ok"]) == [target]
+
+
+def test_curl_attached_short_config_is_rejected(governance: Governance) -> None:
+    decision = governance.check_server_command(
+        "curl -K/etc/curlrc https://example.test/ok"
+    )
+
+    assert not decision.allowed
+    assert "unsupported curl option '--config'" in decision.reasons[0]
+
+
+@pytest.mark.parametrize(
     "command",
     [
         "curl --config /tmp/curlrc https://example.test/ok",
@@ -459,6 +482,9 @@ def test_shell_assignments_cannot_change_policy_home(
         ("touch /usr/local/unsafe", "forbidden root"),
         ("mkdir /var/lib/saturnin", "forbidden root"),
         ("curl -o /etc/headers.txt https://example.test/ok", "forbidden root"),
+        ("curl -o/etc/response https://example.test/ok", "forbidden root"),
+        ("curl -D/etc/headers https://example.test/ok", "forbidden root"),
+        ("curl -c/etc/cookies https://example.test/ok", "forbidden root"),
         ("curl --output-dir /opt https://example.test/ok", "outside writable roots"),
         ("rm -rf /home/saturnin-other", "outside writable roots"),
         ("rm -- -outside-writable-roots", "outside writable roots"),

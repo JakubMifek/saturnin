@@ -51,4 +51,4 @@ jobs:
         if: github.event_name == 'pull_request' || github.event_name == 'pull_request_review'
         env:
           GITHUB_TOKEN: ${{ github.token }}
-        run: automation/library/review_gate.sh pr "JakubMifek/saturnin#${{ github.event.pull_request.number }}" "JakubMifek/saturnin" code-worker
+        run: automation/library/review_gate.sh pr "JakubMifek/saturnin#${{ github.event.pull_request.number }}" "JakubMifek/saturnin"

@@ -51,6 +51,13 @@ def test_ci_runs_on_default_branch_pushes_without_branch_gating_them() -> None:
     assert "if: github.event_name == 'pull_request'" in workflow
 
 
+def test_ci_review_gate_does_not_claim_a_fixed_author_role() -> None:
+    workflow = (REPO_ROOT / ".github/workflows/ci.yml").read_text(encoding="utf-8")
+
+    gate_line = next(line for line in workflow.splitlines() if "review_gate.sh pr" in line)
+    assert "code-worker" not in gate_line
+
+
 def test_public_task_template_matches_discovery_policy() -> None:
     template = yaml.safe_load(
         (REPO_ROOT / ".github/ISSUE_TEMPLATE/task.yml").read_text(encoding="utf-8")

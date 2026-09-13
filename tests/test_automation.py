@@ -268,3 +268,4 @@ def test_review_gate_imports_only_the_designated_reviewer(config: Config) -> Non
     assert 'elif latest == "dismissed":' in script
     assert 'print(f"dismissed\\t{reviewer_login}")' in script
     assert "Imported from GitHub reviewer ${github_reviewer}" in script
+    assert 'author="github:${pr_author}"' in script

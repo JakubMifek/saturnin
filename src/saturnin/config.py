@@ -83,6 +83,7 @@ class Config:
     tasks_dir: Path = field(init=False)
     checkpoints_dir: Path = field(init=False)
     automation_dir: Path = field(init=False)
+    data_root: Path = field(init=False)
     var_dir: Path = field(init=False)
     _cache: dict[str, dict[str, Any]] = field(init=False, default_factory=dict, repr=False)
 
@@ -91,12 +92,17 @@ class Config:
         self.policies = self.root / "policies"
         # Board, checkpoints and automation stay in the main checkout so that
         # linked worktrees share a single data root (and its locks coordinate).
-        data_root = _canonical_worktree(self.root)
-        self.board_dir = data_root / "board"
+        self.data_root = _canonical_worktree(self.root)
+        self.board_dir = self.data_root / "board"
         self.tasks_dir = self.board_dir / "tasks"
         self.checkpoints_dir = self.board_dir / "checkpoints"
         self.automation_dir = self.root / "automation"
-        self.var_dir = data_root / "var"
+        self.var_dir = self.data_root / "var"
+
+    def shared_path(self, path: Path | str) -> Path:
+        """Resolve a runtime path against the canonical shared data root."""
+        candidate = Path(path)
+        return candidate if candidate.is_absolute() else self.data_root / candidate
 
     @classmethod
     def load(cls, root: Path | str | None = None) -> "Config":

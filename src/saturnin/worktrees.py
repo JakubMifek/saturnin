@@ -351,8 +351,7 @@ class WorktreeManager:
 
     def log_plan(self, plan: CleanupPlan) -> Path:
         log_file = Path(self.policy.get("safety", {}).get("log_file", "var/logs/janitor.log"))
-        if not log_file.is_absolute():
-            log_file = self.config.root / log_file
+        log_file = self.config.shared_path(log_file)
         log_file.parent.mkdir(parents=True, exist_ok=True)
         stamp = datetime.now(timezone.utc).isoformat(timespec="seconds")
         lines: Iterable[str] = (

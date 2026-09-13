@@ -5,7 +5,7 @@ from datetime import datetime, timedelta, timezone
 from saturnin import telemetry
 from saturnin.board import Board
 from saturnin.config import Config
-from saturnin.improve import ImprovementLoop
+from saturnin.improve import ImprovementLoop, ImprovementReport
 from saturnin.routing import Router
 
 
@@ -90,6 +90,18 @@ def test_run_can_report_only(config: Config, board: Board) -> None:
     report = ImprovementLoop(config, board).run(create_tasks=False)
     assert report.findings
     assert report.proposed_tasks == []
+
+
+def test_report_path_uses_shared_data_root_from_linked_source(
+    config: Config, board: Board
+) -> None:
+    linked_root = config.root / "var" / "worktrees" / "linked"
+    linked_root.mkdir(parents=True)
+    config.root = linked_root
+
+    path = ImprovementLoop(config, board).write_report(ImprovementReport(metrics={}))
+
+    assert path.parent == config.var_dir / "reports"
 
 
 def test_dynamic_finding_can_recur_after_completion(config: Config, board: Board) -> None:

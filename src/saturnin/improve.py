@@ -219,8 +219,7 @@ class ImprovementLoop:
 
     def write_report(self, report: ImprovementReport, *, now: datetime | None = None) -> Path:
         report_dir = Path(self.actions.get("report_dir", "var/reports"))
-        if not report_dir.is_absolute():
-            report_dir = self.config.root / report_dir
+        report_dir = self.config.shared_path(report_dir)
         report_dir.mkdir(parents=True, exist_ok=True)
         stamp = (now or datetime.now(timezone.utc)).strftime("%Y%m%dT%H%M%S")
         path = report_dir / f"improvement-{stamp}.json"

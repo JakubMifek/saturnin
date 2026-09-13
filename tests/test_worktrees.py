@@ -135,8 +135,20 @@ def test_stale_worktree_is_planned_and_applied(
     manager.apply(plan)
     assert plan.errors == []
     assert not worktree.path.exists()
-    log = (manager.config.root / "var" / "logs" / "janitor.log").read_text(encoding="utf-8")
+    log = (manager.config.var_dir / "logs" / "janitor.log").read_text(encoding="utf-8")
     assert "APPLY remove_worktree" in log
+
+
+def test_janitor_log_uses_shared_data_root_from_linked_source(
+    manager: WorktreeManager,
+) -> None:
+    linked_root = manager.config.root / "var" / "worktrees" / "linked"
+    linked_root.mkdir(parents=True)
+    manager.config.root = linked_root
+
+    path = manager.log_plan(worktrees.CleanupPlan())
+
+    assert path == manager.config.var_dir / "logs" / "janitor.log"
 
 
 def test_apply_rechecks_open_task_before_removing_worktree(

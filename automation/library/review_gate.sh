@@ -1,16 +1,17 @@
 #!/usr/bin/env bash
-# Usage: review_gate.sh <pr|issue> <subject> <repo> <author> [issue-digest]
-# PR gates resolve the head SHA and import GitHub review state available to CI.
+# Usage: review_gate.sh pr <subject> <repo>
+#        review_gate.sh issue <subject> <repo> <author-role> <issue-digest>
+# PR gates resolve the head SHA and preserve the GitHub author identity.
 # Issue gates require the digest of the exact reviewed title and body.
 # Exits non-zero when the independent review requirement is not satisfied.
 set -Eeuo pipefail
 SCRIPT_NAME=review-gate
 source "$(dirname "${BASH_SOURCE[0]}")/_common.sh"
 
-kind="${1:?usage: review_gate.sh <pr|issue> <subject> <repo> <author> [issue-digest]}"
+kind="${1:?usage: review_gate.sh <pr|issue> <subject> <repo> [author] [issue-digest]}"
 subject="${2:?missing subject}"
 repo="${3:?missing repo}"
-author="${4:?missing author}"
+author="${4:-}"
 review_target="${5:-}"
 
 case "$kind" in
@@ -18,7 +19,7 @@ case "$kind" in
   *) echo "invalid review kind: $kind (expected pr or issue)" >&2; exit 2 ;;
 esac
 
-args=("$subject" --kind "$kind" --repo "$repo" --author "$author")
+args=("$subject" --kind "$kind" --repo "$repo")
 if [[ "$kind" == "pr" ]]; then
   subject_repo="${subject%#*}"
   pr_number="${subject##*#}"
@@ -46,6 +47,9 @@ print(policy.get("review", {}).get("pr", {}).get("github_reviewer_login", ""))' 
   [[ -n "$head_sha" ]] || { echo "GitHub PR response contained no head SHA" >&2; exit 2; }
   args+=(--head-sha "$head_sha")
   pr_author="$(python3 -c 'import json, sys; print(json.load(sys.stdin)["user"]["login"])' <<<"$pr_json")"
+  [[ -n "$pr_author" ]] || { echo "GitHub PR response contained no author login" >&2; exit 2; }
+  author="github:${pr_author}"
+  args+=(--author "$author")
   IFS=$'\t' read -r github_verdict github_reviewer < <(
     python3 - "$repo" "$pr_number" "$head_sha" "$pr_author" "$reviewer_login" <<'PY'
 import json
@@ -97,11 +101,15 @@ PY
       --notes "Imported from GitHub reviewer ${github_reviewer} for CI." >/dev/null
   fi
 else
+  [[ -n "$author" ]] || {
+    echo "missing issue author role" >&2
+    exit 2
+  }
   [[ -n "$review_target" ]] || {
     echo "missing reviewed issue-content digest" >&2
     exit 2
   }
   issue_digest="$review_target"
-  args+=(--issue-digest "$issue_digest")
+  args+=(--author "$author" --issue-digest "$issue_digest")
 fi
 saturnin review gate "${args[@]}"

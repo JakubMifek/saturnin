@@ -818,6 +818,23 @@ def _curl_targets(arguments: Sequence[str]) -> list[str]:
     output_dir = _curl_output_dir(arguments)
     while index < len(arguments):
         argument = arguments[index]
+        if argument.startswith("-K") and argument != "-K":
+            raise _WriteScopeError(
+                "unsupported curl option '--config'; write scope is unknown"
+            )
+        attached_output = next(
+            (
+                argument[len(option) :]
+                for option in ("-o", "-D", "-c")
+                if argument.startswith(option) and argument != option
+            ),
+            None,
+        )
+        if attached_output is not None:
+            if attached_output != "-":
+                targets.append(attached_output)
+            index += 1
+            continue
         if argument in {"-o", "--output", "-D", "--dump-header"}:
             index += 1
             if index < len(arguments):
