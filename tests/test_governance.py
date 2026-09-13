@@ -1311,6 +1311,10 @@ def test_apt_configuration_hooks_fail_closed(
         "gh api -iXDELETE repos/JakubMifek/saturnin/pulls/1",
         "gh api -ifstate=closed repos/JakubMifek/saturnin/pulls/1",
         "gh api graphql -f query='mutation { x }'",
+        "gh issue create --repo JakubMifek/saturnin --title t --body b",
+        "gh issue edit 1 --repo JakubMifek/saturnin --title t",
+        "gh issue close 1 --repo JakubMifek/saturnin",
+        "gh label create incident --repo JakubMifek/saturnin",
     ],
 )
 def test_gh_admin_commands_fail_closed(governance: Governance, command: str) -> None:
@@ -1324,11 +1328,12 @@ def test_gh_admin_commands_fail_closed(governance: Governance, command: str) -> 
     "command",
     [
         "gh api repos/JakubMifek/saturnin/pulls/1",
-        "gh issue create --repo JakubMifek/saturnin --title t --body b",
+        "gh issue list --repo JakubMifek/saturnin",
+        "gh issue view 1 --repo JakubMifek/saturnin",
         "gh label list --repo JakubMifek/saturnin",
     ],
 )
-def test_gh_issue_label_and_api_helpers_are_allowed(
+def test_gh_read_only_issue_label_and_api_helpers_are_allowed(
     governance: Governance, command: str
 ) -> None:
     assert governance.check_server_command(command).allowed

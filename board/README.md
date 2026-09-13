@@ -1,8 +1,9 @@
 # The work board
 
-Everything Saturnin owns is represented as a task here. The local board is the
-fast work queue and cache; mirrored GitHub Issues are the durable system of
-record. Chat transcripts are neither.
+Everything Saturnin owns is represented as a task here. While issue mirroring is
+disabled, the local board plus configured backups are the authoritative record.
+Mirrored GitHub Issues become the durable system of record only after mirroring
+is enabled. Chat transcripts are neither.
 
 ```
 board/tasks/T-YYYYMMDD-xxxxxx.json   one task, full history, gitignored runtime state

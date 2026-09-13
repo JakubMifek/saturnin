@@ -499,6 +499,7 @@ def _provision_and_launch(
             return None
         branch = f"feature/{task.id.lower()}"
         manager = WorktreeManager(config, repo=checkout, board=board)
+        worktree = None
         try:
             with manager.lifecycle_lock():
                 worktree = manager.create(branch)
@@ -511,9 +512,15 @@ def _provision_and_launch(
                         branch=branch,
                         worktree=str(worktree.path),
                     )
-        except (GitError, OSError) as exc:
+        except (BoardError, GitError, OSError) as exc:
+            if worktree is not None:
+                manager.rollback_create(worktree)
             _defer_launch(board, task.id, f"worktree provisioning failed: {exc}")
             return None
+        except Exception:
+            if worktree is not None:
+                manager.rollback_create(worktree)
+            raise
     _prepare_project_route(config, board, task.id)
     try:
         return launcher.launch(task.id)

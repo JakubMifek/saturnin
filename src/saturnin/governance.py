@@ -795,8 +795,8 @@ def _check_gh_command(arguments: Sequence[str]) -> None:
         raise _WriteScopeError("gh requires a subcommand")
     allowed = {
         "api": None,
-        "issue": {"create", "edit", "close", "list", "view"},
-        "label": {"create", "list"},
+        "issue": {"list", "view"},
+        "label": {"list"},
     }
     subcommand = arguments[0]
     if subcommand not in allowed:

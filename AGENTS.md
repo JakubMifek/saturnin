@@ -38,7 +38,7 @@ other change.
 | `skills/*.md` | reusable capabilities agents may claim |
 | `automation/library/*.sh` | reusable scripts, indexed in `automation/registry.yaml` |
 | `docs/`, `docs/adr/` | architecture, operating model, runbooks, decisions |
-| `board/` | local work board (task JSON is gitignored; issues are the durable copy) |
+| `board/` | local work board (task JSON is gitignored; configured backups are authoritative until mirroring is enabled) |
 | `systemd/` | user-scope timers - the actual scheduler |
 
 ## Working here

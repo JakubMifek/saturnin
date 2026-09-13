@@ -106,6 +106,48 @@ def test_task_add_provisions_worktree_before_launch(
     assert launched[0]["worktree"] == str(worktree)
 
 
+def test_auto_provision_rolls_back_created_worktree_when_attach_fails(
+    home: Path, capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    created = SimpleNamespace(
+        branch="feature/rollback-auto",
+        path=home / "var" / "worktrees" / "rollback-auto",
+    )
+    rollbacks: list[object] = []
+    original_edit = Board.edit
+
+    monkeypatch.setattr(AgentLauncher, "enabled", property(lambda self: True))
+    monkeypatch.setattr(WorktreeManager, "create", lambda self, branch, base=None: created)
+    monkeypatch.setattr(
+        WorktreeManager, "rollback_create", lambda self, worktree: rollbacks.append(worktree)
+    )
+    failed = False
+
+    def fail_attach_once(self, task_id):
+        nonlocal failed
+        task = self.get(task_id)
+        if (
+            not failed
+            and task.state == "routed"
+            and task.branch is None
+            and task.worktree is None
+        ):
+            failed = True
+            raise OSError("task write failed")
+        return original_edit(self, task_id)
+
+    monkeypatch.setattr(Board, "edit", fail_attach_once)
+
+    code, out = run(capsys, "--json", "task", "add", "Rollback auto provision", "--dispatch")
+
+    task = json.loads(out)
+    assert code == 0
+    assert rollbacks == [created]
+    assert task["branch"] is None
+    assert task["worktree"] is None
+    assert "worktree provisioning failed: task write failed" in task["launch_deferred_reason"]
+
+
 def test_deferred_external_discovery_provisions_configured_checkout_on_retry(
     home: Path, capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch
 ) -> None:
