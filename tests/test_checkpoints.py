@@ -66,6 +66,26 @@ def test_save_truncates_incomplete_trailing_checkpoint(config: Config, board: Bo
     assert [checkpoint.summary for checkpoint in store.history(task.id)] == ["safe", "after"]
 
 
+def test_save_preserves_complete_unterminated_tail(config: Config, board: Board) -> None:
+    task = board.create("Interrupted checkpoint")
+    store = CheckpointStore(config, board)
+    store.save(Checkpoint(task_id=task.id, role="scribe", summary="safe", next_steps=["a"]))
+    with store.path_for(task.id).open("a", encoding="utf-8") as handle:
+        handle.write(
+            '{"task_id":"'
+            + task.id
+            + '","role":"scribe","summary":"complete-tail","next_steps":["b"]}'
+        )
+
+    store.save(Checkpoint(task_id=task.id, role="scribe", summary="after", next_steps=["c"]))
+
+    assert [checkpoint.summary for checkpoint in store.history(task.id)] == [
+        "safe",
+        "complete-tail",
+        "after",
+    ]
+
+
 def test_newline_terminated_trailing_corruption_is_reported(
     config: Config, board: Board
 ) -> None:

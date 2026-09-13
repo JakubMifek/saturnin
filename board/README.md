@@ -43,12 +43,14 @@ saturnin task tree            # the whole board, with roll-up progress per conta
 
 ## Durability
 
-Task files are gitignored: the board is state, not source. The durable copy is a
-GitHub issue in the private board repository, kept in step by
-`saturnin task sync --all --push` and the `saturnin-mirror` timer.
-`saturnin doctor` fails while open tasks have no issue, so "it only exists on
-that server" is a condition the system complains about rather than one you
-discover after the disk dies. See [ADR-0001](../docs/adr/0001-system-of-record.md).
+Task files are gitignored: the board is state, not source. By default the board
+is local-only durability and must be backed up (`board/` + `var/`).
+
+Optional issue mirroring (disabled until explicitly enabled) keeps a second copy
+in the private board repository via `saturnin task sync --all --push` and the
+`saturnin-mirror` timer. When mirroring is required by policy, `saturnin doctor`
+fails while open tasks have no issue. See
+[ADR-0001](../docs/adr/0001-system-of-record.md).
 
 ## Concurrency: several squads write here at once
 

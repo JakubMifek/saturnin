@@ -104,8 +104,17 @@ class CheckpointStore:
                 raw = path.read_text(encoding="utf-8")
                 if raw and not raw.endswith("\n"):
                     last_complete = raw.rfind("\n")
-                    repaired = raw[: last_complete + 1] if last_complete >= 0 else ""
-                    path.write_text(repaired, encoding="utf-8")
+                    tail = raw[last_complete + 1 :]
+                    try:
+                        parsed_tail = json.loads(tail)
+                        if not isinstance(parsed_tail, dict):
+                            raise TypeError("checkpoint tail must be a JSON object")
+                    except (json.JSONDecodeError, TypeError):
+                        repaired = raw[: last_complete + 1] if last_complete >= 0 else ""
+                    else:
+                        repaired = raw + "\n"
+                    if repaired != raw:
+                        path.write_text(repaired, encoding="utf-8")
             with path.open("a", encoding="utf-8") as handle:
                 handle.write(json.dumps(checkpoint.to_dict()) + "\n")
             try:

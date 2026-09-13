@@ -28,7 +28,7 @@ if [[ "$kind" == "pr" ]]; then
     exit 2
   }
   reviewer_logins="$(
-    python3 -c '
+    saturnin_python -c '
 import json, sys, yaml
 policy = yaml.safe_load(open(sys.argv[1], encoding="utf-8")) or {}
 settings = policy.get("review", {}).get("pr", {})
@@ -49,15 +49,15 @@ print(json.dumps([login for login in logins if isinstance(login, str) and login]
     github_headers+=(-H "Authorization: token ${GITHUB_TOKEN:-${GH_TOKEN:-}}")
   pr_json="$(curl --fail --silent --show-error --location --max-time 30 \
     "${github_headers[@]}" "https://api.github.com/repos/${repo}/pulls/${pr_number}")"
-  head_sha="$(python3 -c 'import json, sys; print(json.load(sys.stdin)["head"]["sha"])' <<<"$pr_json")"
+  head_sha="$(saturnin_python -c 'import json, sys; print(json.load(sys.stdin)["head"]["sha"])' <<<"$pr_json")"
   [[ -n "$head_sha" ]] || { echo "GitHub PR response contained no head SHA" >&2; exit 2; }
   args+=(--head-sha "$head_sha")
-  pr_author="$(python3 -c 'import json, sys; print(json.load(sys.stdin)["user"]["login"])' <<<"$pr_json")"
+  pr_author="$(saturnin_python -c 'import json, sys; print(json.load(sys.stdin)["user"]["login"])' <<<"$pr_json")"
   [[ -n "$pr_author" ]] || { echo "GitHub PR response contained no author login" >&2; exit 2; }
   author="github:${pr_author}"
   args+=(--author "$author")
   IFS=$'\t' read -r github_verdict github_reviewer < <(
-    python3 - "$repo" "$pr_number" "$head_sha" "$pr_author" "$reviewer_logins" <<'PY'
+    saturnin_python - "$repo" "$pr_number" "$head_sha" "$pr_author" "$reviewer_logins" <<'PY'
 import json
 import os
 import sys

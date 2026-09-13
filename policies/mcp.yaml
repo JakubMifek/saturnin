@@ -11,7 +11,7 @@ servers:
     description: Issues, pull requests and review data for managed repositories.
     transport: stdio
     command: npx
-    args: ["-y", "@modelcontextprotocol/server-github"]
+    args: ["-y", "github-mcp-server@1.8.7"]
     # Roles allowed to mutate state through this server; everyone else is read-only.
     write_roles:
       [chief-of-staff, code-worker, ops-worker, architect, automation-smith, improver, scribe, test-worker]

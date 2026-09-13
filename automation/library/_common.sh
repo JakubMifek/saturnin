@@ -16,3 +16,11 @@ saturnin() {
     PYTHONPATH="${SATURNIN_HOME}/src:${PYTHONPATH:-}" python3 -m saturnin "$@"
   fi
 }
+
+saturnin_python() {
+  if [[ -x "${SATURNIN_HOME}/.venv/bin/python" ]]; then
+    "${SATURNIN_HOME}/.venv/bin/python" "$@"
+  else
+    python3 "$@"
+  fi
+}

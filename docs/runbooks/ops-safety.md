@@ -78,12 +78,15 @@ process exits.
 
 **The board is gone (disk loss, fresh server)**
 
-The durable copy is the mirrored GitHub issues in the private board repository
-([ADR-0001](../adr/0001-system-of-record.md)). Reinstall with
-`scripts/bootstrap.sh`, then rebuild the open tasks from
-`gh issue list --repo <board-repo> --label "saturnin:state/in_progress"` and the
-sibling state labels. Anything that was never mirrored is lost - which is what
-`saturnin doctor` complains about every time it runs.
+By default mirroring is disabled (`tracking.mirror_tasks_as_issues: false`), so
+the primary recovery path is your own backups of `board/` and `var/`. Restore
+those first, then reinstall with `scripts/bootstrap.sh`.
+
+If optional mirroring is enabled for your installation, you can also rebuild
+from the private board repository issues
+([ADR-0001](../adr/0001-system-of-record.md)): list open tasks with
+`gh issue list --repo <board-repo> --label "saturnin:state/in_progress"` and
+the sibling state labels. Anything that was never mirrored is lost.
 
 **Everything is on fire**
 

@@ -510,3 +510,5 @@ def test_review_gate_imports_only_the_designated_reviewer(config: Config) -> Non
     assert "state not in" in script
     assert "Imported from GitHub reviewer ${github_reviewer}" in script
     assert 'author="github:${pr_author}"' in script
+    assert "saturnin_python -c '" in script
+    assert "import json, sys, yaml" in script
