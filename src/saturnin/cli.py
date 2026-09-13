@@ -427,12 +427,12 @@ def _current_pr_head(subject: str, repo: str | None = None) -> str:
 def _prepare_project_route(config: Config, board: Board, task_id: str) -> Task:
     task = board.get(task_id)
     local_roles, lead, project_squad = _project_routing_context(task, config)
-    if not lead:
+    if not lead and not project_squad:
         return task
     router = Router(config)
     route = router.resolve(task, additional_roles=local_roles, lead_role=lead)
     squad = list(project_squad or route.squad)
-    if lead not in squad:
+    if lead and lead not in squad:
         squad.insert(0, lead)
     router.validate_dispatch_squad(squad, local_roles)
     with board.edit(task_id) as stored:

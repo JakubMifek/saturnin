@@ -56,6 +56,21 @@ def test_github_mcp_must_be_read_only(config: Config) -> None:
     assert any("effective --read-only" in problem for problem in audit(config))
 
 
+def test_issue_reviewer_contract_declares_read_only_github_access(config: Config) -> None:
+    issue_reviewer = next(contract for contract in load_contracts(config) if contract.role == "issue-reviewer")
+
+    assert issue_reviewer.mcp == ["github"]
+    assert audit(config) == []
+
+
+def test_escalation_contracts_use_atomic_push_task_path(config: Config) -> None:
+    chief = (config.root / "agents" / "chief-of-staff.md").read_text(encoding="utf-8")
+    skill = (config.root / "skills" / "escalation.md").read_text(encoding="utf-8")
+
+    assert "--task <task-id> --push" in chief
+    assert "--task <id> --push" in skill
+
+
 def test_duplicate_role_contracts_are_rejected(config: Config) -> None:
     duplicate = config.root / "agents" / "duplicate-code-worker.md"
     duplicate.write_text(

@@ -171,6 +171,61 @@ def test_deferred_external_discovery_provisions_configured_checkout_on_retry(
     assert stored.launch_deferred_reason is None
 
 
+def test_deferred_external_discovery_applies_project_squad_without_lead(
+    home: Path, capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    policy_path = home / "policies" / "repos.yaml"
+    policy = yaml.safe_load(policy_path.read_text(encoding="utf-8"))
+    policy["discovery"]["sources"].append({"slug": "JakubMifek/widget-api"})
+    policy_path.write_text(yaml.safe_dump(policy), encoding="utf-8")
+    issue = InboundIssue(
+        repo="JakubMifek/widget-api",
+        number=9,
+        title="Fix widget retry flow",
+        url="https://github.com/JakubMifek/widget-api/issues/9",
+        labels=["incident"],
+    )
+    launched: list[dict] = []
+    monkeypatch.setattr(IssueDiscovery, "poll", lambda self: [issue])
+    monkeypatch.setattr(AgentLauncher, "enabled", property(lambda self: True))
+
+    def launch(self, task_id, **kwargs):
+        launched.append(self.board.get(task_id).to_dict())
+        with self.board.edit(task_id) as stored:
+            stored.launch_deferred_at = None
+            stored.launch_deferred_reason = None
+
+    monkeypatch.setattr(AgentLauncher, "launch", launch)
+
+    assert run(capsys, "discover")[0] == 0
+    task = next(iter(Board()))
+    assert task.state == "routed"
+    assert launched == []
+
+    checkout = home / "projects" / "widget-api"
+    worktree = home / "var" / "worktrees" / "widget-retry"
+    (worktree / ".saturnin").mkdir(parents=True)
+    checkout.mkdir(parents=True)
+    (worktree / ".saturnin" / "repo.yaml").write_text(
+        "project: Widget\ncontext: python\nconventions: pytest\n"
+        "squad: [code-worker, scribe]\n"
+    )
+    policy["discovery"]["sources"][-1]["checkout"] = str(checkout)
+    policy_path.write_text(yaml.safe_dump(policy), encoding="utf-8")
+
+    monkeypatch.setattr(
+        WorktreeManager,
+        "create",
+        lambda self, branch, base=None: SimpleNamespace(path=worktree, branch=branch),
+    )
+
+    assert run(capsys, "dispatch", "--all")[0] == 0
+    stored = Board().get(task.id)
+    assert launched[0]["role"] == "code-worker"
+    assert launched[0]["squad"] == ["code-worker", "scribe"]
+    assert stored.squad == ["code-worker", "scribe"]
+
+
 @pytest.mark.parametrize(
     ("squad", "error"),
     [("ghost", "unknown squad members"), ("ceo", "CEO never executes")],

@@ -17,8 +17,9 @@ the escalations the CEO decided on.
    dispatch failure; report it to the improver.
 2. For an unclassified task: clarify the intent in one line, add the labels that
    would have routed it, then re-dispatch (`saturnin dispatch <id>`).
-3. For escalations: `saturnin escalate "<title>" --context ... --item ... --unblock ... --urgency ...`
-   and open the resulting body as a GitHub issue mentioning `@jakubmifek`.
+3. For escalations: `saturnin escalate "<title>" --context ... --item ... --unblock ... --urgency ... --task <task-id> --push`.
+   This governed path opens the GitHub issue and atomically moves the task to
+   `blocked` with the escalation URL.
 4. Chase stale work: any open task untouched for a week gets a checkpoint or is
    cancelled with a reason.
 
