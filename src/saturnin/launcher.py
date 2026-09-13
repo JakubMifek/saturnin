@@ -47,7 +47,8 @@ class AgentLauncher:
     def __init__(self, config: Config | None = None, board: Board | None = None) -> None:
         self.config = config or default_config()
         self.board = board or Board(self.config)
-        self.policy = self.config.policy("mcp").get("launcher", {})
+        trusted_config = self._trusted_config(self.config)
+        self.policy = trusted_config.policy("mcp").get("launcher", {})
         self.dir = self.config.var_dir / "launches"
         self.dir.mkdir(parents=True, exist_ok=True)
 
@@ -243,6 +244,12 @@ class AgentLauncher:
         return self.config
 
     @staticmethod
+    def _trusted_config(config: Config) -> Config:
+        if config.root == config.data_root:
+            return config
+        return Config(config.data_root)
+
+    @staticmethod
     def _worker_environment(config: Config) -> dict[str, str]:
         environment = {**os.environ, "SATURNIN_HOME": str(config.root)}
         source = str(config.root / "src")
@@ -312,9 +319,32 @@ class AgentLauncher:
         worktree_scope: Path | None = None,
     ) -> Path:
         config = config or self.config
-        definitions = config.policy("mcp").get("servers", {})
-        trusted_config = Config(config.data_root)
+        trusted_config = self._trusted_config(config)
         trusted_definitions = trusted_config.policy("mcp").get("servers", {})
+        source_definitions = config.policy("mcp").get("servers", {})
+        if not isinstance(source_definitions, dict) or not isinstance(
+            trusted_definitions, dict
+        ):
+            raise LauncherError("MCP server catalog must be a mapping")
+        unknown = sorted(set(source_definitions) - set(trusted_definitions))
+        if unknown:
+            raise LauncherError(
+                "branch-local policy defines untrusted MCP server(s): "
+                + ", ".join(unknown)
+            )
+        altered = sorted(
+            name
+            for name, definition in source_definitions.items()
+            if definition != trusted_definitions[name]
+        )
+        if altered:
+            raise LauncherError(
+                "branch-local policy alters trusted MCP server(s): "
+                + ", ".join(altered)
+            )
+        definitions = {
+            name: trusted_definitions[name] for name in source_definitions
+        }
         servers: dict[str, dict[str, Any]] = {}
         allowed = list(contract.mcp)
         if task.worktree:
@@ -344,23 +374,10 @@ class AgentLauncher:
             definition = definitions.get(name)
             if not isinstance(definition, dict):
                 raise LauncherError(f"unknown MCP server {name!r} for role {contract.role}")
-            process_config = config
-            authorization_policy = config.policy("mcp")
-            if name == "github":
-                trusted_definition = trusted_definitions.get(name)
-                if not isinstance(trusted_definition, dict):
-                    raise LauncherError("trusted canonical policy has no GitHub MCP server")
-                if definition != trusted_definition:
-                    raise LauncherError(
-                        "branch-local GitHub MCP definition differs from trusted canonical policy"
-                    )
-                definition = trusted_definition
-                process_config = trusted_config
-                authorization_policy = trusted_config.policy("mcp")
             authorization_problem = mcp_authorization_problem(
                 contract.role,
                 name,
-                authorization_policy,
+                trusted_config.policy("mcp"),
                 executes=contract.executes,
             )
             if authorization_problem:
@@ -371,7 +388,7 @@ class AgentLauncher:
             command, args = server_process(
                 name,
                 definition,
-                process_config,
+                trusted_config,
                 worktree_scope=worktree_scope,
             )
             canonical_github = (

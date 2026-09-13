@@ -593,13 +593,74 @@ def test_launcher_rejects_branch_local_github_replacement(
     worker_config = launcher._worker_config(worktree.path)
     contract = launcher._contract(board.get(task.id), worker_config)
 
-    with pytest.raises(LauncherError, match="differs from trusted canonical policy"):
+    with pytest.raises(LauncherError, match="alters trusted MCP server"):
         launcher._write_mcp_config(
             board.get(task.id),
             contract,
             config=worker_config,
             worktree_scope=worktree.path,
         )
+
+
+def test_launcher_rejects_branch_local_shell_alias_for_github(
+    config: Config, board: Board, git_repo: Path
+) -> None:
+    task = board.create("Implement an MCP alias rejection")
+    Router(config).dispatch(board, task)
+    worktree = WorktreeManager(config, repo=git_repo, board=board).create(
+        "feature/reject-mcp-alias"
+    )
+    policy_path = worktree.path / "policies" / "mcp.yaml"
+    policy = yaml.safe_load(policy_path.read_text(encoding="utf-8"))
+    policy["servers"]["github-write"] = {
+        "transport": "stdio",
+        "command": "sh",
+        "args": [
+            "-c",
+            "{data_root}/var/bin/github-mcp-server stdio",
+        ],
+        "write_roles": ["code-worker"],
+    }
+    policy_path.write_text(yaml.safe_dump(policy), encoding="utf-8")
+    contract_path = worktree.path / "agents" / "code-worker.md"
+    contract_path.write_text(
+        contract_path.read_text(encoding="utf-8").replace(
+            "mcp: [github, filesystem]",
+            "mcp: [github, filesystem, github-write]",
+        ),
+        encoding="utf-8",
+    )
+    with board.edit(task.id) as stored:
+        stored.branch = "feature/reject-mcp-alias"
+        stored.worktree = str(worktree.path)
+    launcher = AgentLauncher(config, board)
+    worker_config = launcher._worker_config(worktree.path)
+    contract = launcher._contract(board.get(task.id), worker_config)
+
+    with pytest.raises(LauncherError, match="defines untrusted MCP server"):
+        launcher._write_mcp_config(
+            board.get(task.id),
+            contract,
+            config=worker_config,
+            worktree_scope=worktree.path,
+        )
+
+
+def test_launcher_policy_always_comes_from_canonical_checkout(
+    config: Config, board: Board, git_repo: Path
+) -> None:
+    worktree = WorktreeManager(config, repo=git_repo, board=board).create(
+        "feature/untrusted-launcher"
+    )
+    policy_path = worktree.path / "policies" / "mcp.yaml"
+    policy = yaml.safe_load(policy_path.read_text(encoding="utf-8"))
+    policy["launcher"]["command"] = "sh"
+    policy_path.write_text(yaml.safe_dump(policy), encoding="utf-8")
+    linked_config = Config(worktree.path)
+
+    launcher = AgentLauncher(linked_config, Board(linked_config))
+
+    assert launcher.policy["command"] == config.policy("mcp")["launcher"]["command"]
 
 
 def test_root_mcp_config_has_no_blanket_grants() -> None:
