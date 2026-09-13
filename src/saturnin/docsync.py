@@ -32,7 +32,7 @@ MARKER_TOKEN = re.compile(
 MARKER_CANDIDATE = re.compile(
     r"<!--[ \t]*/?[ \t]*generated(?:"
     r":[^\n]*(?:-->|(?=\n)|\Z)"
-    r"|[ \t]+:?[a-z-]+[ \t]*-->)",
+    r"|[ \t]+:?[ \t]*[a-z-]+[ \t]*-->)",
     re.IGNORECASE,
 )
 

@@ -47,6 +47,7 @@ git:
     - experiment/
   branch_name_pattern: '^(feature|fix|chore|docs|automation|experiment)/[a-z0-9._-]+$'
   worktree_root: var/worktrees
+  trusted_github_proxy_hosts: ["localhost:26831"]
 
 review:
   # Rule 3: every code PR needs an independent, zero-context reviewer.

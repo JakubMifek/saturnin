@@ -8,7 +8,6 @@ stay in one place.
 from __future__ import annotations
 
 import argparse
-import ipaddress
 import json
 import re
 import subprocess
@@ -621,7 +620,9 @@ def _git_output(root: Path, *args: str) -> str:
     return result.stdout.strip()
 
 
-def _github_repo_slug(remote_url: str) -> str | None:
+def _github_repo_slug(
+    remote_url: str, *, trusted_proxy_hosts: Sequence[str] = ()
+) -> str | None:
     remote_url = remote_url.strip()
     scp = re.fullmatch(
         r"git@github\.com:(?P<slug>[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+?)(?:\.git)?",
@@ -635,18 +636,12 @@ def _github_repo_slug(remote_url: str) -> str | None:
         host = (parsed.hostname or "").casefold()
     except ValueError:
         return None
-    loopback = host == "localhost"
-    if not loopback:
-        try:
-            loopback = ipaddress.ip_address(host).is_loopback
-        except ValueError:
-            pass
     if parsed.query or parsed.fragment:
         return None
     if host == "github.com":
         if parsed.scheme not in {"https", "ssh"}:
             return None
-    elif loopback:
+    elif f"{host}:{parsed.port}" in {value.casefold() for value in trusted_proxy_hosts}:
         if parsed.scheme not in {"http", "https"} or parsed.username or parsed.password:
             return None
     else:
@@ -739,8 +734,14 @@ def _run(args: argparse.Namespace, config: Config) -> int:  # noqa: C901 - flat 
         ).splitlines()
         if not push_urls:
             raise RuntimeError(f"remote {args.remote!r} has no push destination")
+        trusted_proxy_hosts = config.governance.get("git", {}).get(
+            "trusted_github_proxy_hosts", []
+        )
         for remote_url in push_urls:
-            repo = _github_repo_slug(remote_url)
+            repo = _github_repo_slug(
+                remote_url,
+                trusted_proxy_hosts=trusted_proxy_hosts,
+            )
             if repo is None:
                 raise RuntimeError(
                     f"remote {args.remote!r} has an unrecognized push destination"

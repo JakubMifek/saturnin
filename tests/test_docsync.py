@@ -123,6 +123,7 @@ def test_audit_detects_malformed_marker_candidates(docs_home: Config) -> None:
         "<!-- generated:rules\nstale",
         "<!-- generated rules -->\nstale\n<!-- /generated:rules -->",
         "<!-- generated :rules -->\nstale\n<!-- /generated:rules -->",
+        "<!-- generated : rules -->\nstale\n<!-- /generated : rules -->",
         "<!-- generated: -->\nstale\n<!-- /generated: -->",
         "prefix <!-- generated:rules -->\nstale\n<!-- /generated:rules --> suffix",
         "<!-- generated:RULES -->\nstale\n<!-- /generated:RULES -->",

@@ -254,6 +254,28 @@ def test_governed_push_refuses_protected_branch_before_push(
     assert not any(call[1:2] == ["push"] for call in calls)
 
 
+def test_governed_push_rejects_unconfigured_loopback_proxy(
+    home: Path, capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    calls: list[list[str]] = []
+
+    def fake_run(args, **kwargs):
+        calls.append(args)
+        if args[1:] == ["remote", "get-url", "--push", "--all", "origin"]:
+            return subprocess.CompletedProcess(
+                args, 0, "http://127.0.0.1:26831/JakubMifek/saturnin\n", ""
+            )
+        return subprocess.CompletedProcess(args, 0, "", "")
+
+    monkeypatch.setattr("saturnin.cli.subprocess.run", fake_run)
+
+    code, out = run(capsys, "push", "--branch", "feature/safe")
+
+    assert code == 1
+    assert "unrecognized push destination" in out
+    assert not any(call[1:2] == ["push"] for call in calls)
+
+
 def test_governed_push_authorizes_pushurl_not_fetch_url(
     home: Path, capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch
 ) -> None:
