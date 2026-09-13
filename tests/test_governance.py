@@ -449,6 +449,29 @@ def test_curl_attached_short_config_is_rejected(
     assert "unsupported curl option '--config'" in decision.reasons[0]
 
 
+def test_curl_bundled_remote_name_uses_output_directory() -> None:
+    assert _curl_targets([
+        "-sO",
+        "https://example.test/download.tar.gz",
+        "--output-dir",
+        "/home/saturnin/downloads",
+    ]) == [
+        "/home/saturnin/downloads/download.tar.gz",
+        "/home/saturnin/downloads",
+    ]
+
+
+def test_curl_bundled_remote_name_outside_writable_root_is_rejected(
+    governance: Governance,
+) -> None:
+    decision = governance.check_server_command(
+        "curl -sO https://example.test/download.tar.gz"
+    )
+
+    assert not decision.allowed
+    assert "outside writable roots" in decision.reasons[0]
+
+
 @pytest.mark.parametrize(
     "command",
     [

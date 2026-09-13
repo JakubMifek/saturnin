@@ -816,21 +816,23 @@ _CURL_SHORT_OPTIONS_WITH_VALUES = frozenset(
 _CURL_SHORT_WRITE_OPTIONS = frozenset("oDc")
 
 
-def _curl_bundled_write_target(argument: str) -> tuple[bool, str]:
+def _curl_bundled_write_action(argument: str) -> tuple[str, str]:
     if not argument.startswith("-") or argument.startswith("--") or len(argument) <= 2:
-        return False, ""
+        return "", ""
     for position, option in enumerate(argument[1:], start=1):
         if option not in _CURL_SHORT_OPTIONS_WITH_VALUES:
+            if option == "O":
+                return "remote-name", ""
             continue
         if option == "K":
             raise _WriteScopeError(
                 "unsupported curl option '--config'; write scope is unknown"
             )
         if option in _CURL_SHORT_WRITE_OPTIONS:
-            return True, argument[position + 1 :]
+            return "target", argument[position + 1 :]
         # The remainder belongs to this value-taking option, not to more flags.
-        return False, ""
-    return False, ""
+        return "", ""
+    return "", ""
 
 
 def _curl_targets(arguments: Sequence[str]) -> list[str]:
@@ -841,8 +843,8 @@ def _curl_targets(arguments: Sequence[str]) -> list[str]:
     output_dir = _curl_output_dir(arguments)
     while index < len(arguments):
         argument = arguments[index]
-        bundled_write, attached_output = _curl_bundled_write_target(argument)
-        if bundled_write:
+        bundled_action, attached_output = _curl_bundled_write_action(argument)
+        if bundled_action == "target":
             if not attached_output:
                 index += 1
                 if index >= len(arguments):
@@ -850,6 +852,10 @@ def _curl_targets(arguments: Sequence[str]) -> list[str]:
                 attached_output = arguments[index]
             if attached_output != "-":
                 targets.append(attached_output)
+            index += 1
+            continue
+        if bundled_action == "remote-name":
+            remote_name_pending = True
             index += 1
             continue
         attached_output = next(
