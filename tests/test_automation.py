@@ -272,6 +272,10 @@ def test_monitors_validate_manifest_name_and_url_before_curl(config: Config) -> 
         "    url: http://[::1]/health\n"
         "  - name: metadata\n"
         "    url: http://169.254.169.254/latest/meta-data/\n"
+        "  - name: cgnat\n"
+        "    url: http://100.64.0.1/health\n"
+        "  - name: dotted\n"
+        "    url: https://93.184.216.34./health\n"
         "  - name: credentials\n"
         "    url: http://user@93.184.216.34/health\n"
         "  - name: missing-host\n"
@@ -304,6 +308,12 @@ def test_monitors_validate_manifest_name_and_url_before_curl(config: Config) -> 
         encoding="utf-8"
     )
     assert "-q -sS --noproxy '*'" in script
+
+
+def test_result_poller_is_executable_for_systemd(config: Config) -> None:
+    script = config.root / "automation/library/result_poller.sh"
+
+    assert os.access(script, os.X_OK)
 
 
 def test_monitor_state_is_namespaced_by_repository_path(config: Config) -> None:

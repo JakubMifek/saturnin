@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import os
 import shutil
 import subprocess
 from dataclasses import asdict, dataclass
@@ -116,6 +117,7 @@ class AgentLauncher:
                     process = subprocess.Popen(
                         [executable, *args],
                         cwd=workdir,
+                        env={**os.environ, "SATURNIN_HOME": str(self.config.root)},
                         stdin=subprocess.DEVNULL,
                         stdout=output,
                         stderr=subprocess.STDOUT,
@@ -235,7 +237,10 @@ class AgentLauncher:
             raise LauncherError(f"no agent contract for routed role {task.role!r}") from exc
 
     def _project_contracts(self, worktree: Path) -> dict[str, AgentContract]:
-        manifest_path = worktree / ".saturnin" / "repo.yaml"
+        worktree_root = worktree.resolve(strict=False)
+        manifest_path = (worktree_root / ".saturnin" / "repo.yaml").resolve(strict=False)
+        if not manifest_path.is_relative_to(worktree_root):
+            raise LauncherError("managed repository manifest must stay inside the worktree")
         if not manifest_path.is_file():
             return {}
         try:
@@ -278,7 +283,10 @@ class AgentLauncher:
         servers: dict[str, dict[str, Any]] = {}
         allowed = list(contract.mcp)
         if task.worktree:
-            manifest_path = Path(task.worktree) / ".saturnin" / "repo.yaml"
+            worktree_root = Path(task.worktree).resolve(strict=False)
+            manifest_path = (worktree_root / ".saturnin" / "repo.yaml").resolve(strict=False)
+            if not manifest_path.is_relative_to(worktree_root):
+                raise LauncherError("managed repository manifest must stay inside the worktree")
             if manifest_path.is_file():
                 try:
                     manifest = load_yaml(manifest_path)
@@ -339,7 +347,10 @@ class AgentLauncher:
             contract.path.read_text(encoding="utf-8"),
         ]
         if task.worktree:
-            manifest_path = Path(task.worktree) / ".saturnin" / "repo.yaml"
+            worktree_root = Path(task.worktree).resolve(strict=False)
+            manifest_path = (worktree_root / ".saturnin" / "repo.yaml").resolve(strict=False)
+            if not manifest_path.is_relative_to(worktree_root):
+                raise LauncherError("managed repository manifest must stay inside the worktree")
             if manifest_path.is_file():
                 sections.append(
                     "Managed repository manifest (.saturnin/repo.yaml):\n"

@@ -1088,6 +1088,68 @@ def test_apt_requires_a_saturnin_dedicated_service(governance: Governance) -> No
 @pytest.mark.parametrize(
     "command",
     [
+        "apt update -o APT::Update::Pre-Invoke::=/usr/bin/touch /tmp/outside",
+        "apt -o APT::Update::Pre-Invoke::=/usr/bin/touch update",
+        "apt install ripgrep --option=Dpkg::Pre-Invoke::=/bin/sh",
+        "apt install ripgrep -c /home/saturnin/hook.conf",
+        "apt install ripgrep --config-file=/home/saturnin/hook.conf",
+    ],
+)
+def test_apt_configuration_hooks_fail_closed(
+    governance: Governance, command: str
+) -> None:
+    decision = governance.check_server_command(
+        command, dedicated_service="saturnin-discovery.service"
+    )
+
+    assert not decision.allowed
+    assert "configuration" in decision.reasons[0]
+
+
+@pytest.mark.parametrize(
+    "command",
+    [
+        "gh pr merge 123 --admin --repo JakubMifek/saturnin",
+        "gh repo edit JakubMifek/saturnin --visibility private",
+        "gh api --method DELETE repos/JakubMifek/saturnin",
+        "gh api -XPATCH -fstate=closed repos/JakubMifek/saturnin/pulls/1",
+        "gh api -iXDELETE repos/JakubMifek/saturnin/pulls/1",
+        "gh api -ifstate=closed repos/JakubMifek/saturnin/pulls/1",
+        "gh api graphql -f query='mutation { x }'",
+    ],
+)
+def test_gh_admin_commands_fail_closed(governance: Governance, command: str) -> None:
+    decision = governance.check_server_command(command)
+
+    assert not decision.allowed
+    assert "unsupported" in decision.reasons[0]
+
+
+@pytest.mark.parametrize(
+    "command",
+    [
+        "gh api repos/JakubMifek/saturnin/pulls/1",
+        "gh issue create --repo JakubMifek/saturnin --title t --body b",
+        "gh label list --repo JakubMifek/saturnin",
+    ],
+)
+def test_gh_issue_label_and_api_helpers_are_allowed(
+    governance: Governance, command: str
+) -> None:
+    assert governance.check_server_command(command).allowed
+
+
+@pytest.mark.parametrize("command", ["env --chdir /tmp touch status", "env -C/tmp touch status"])
+def test_env_chdir_fails_closed(governance: Governance, command: str) -> None:
+    decision = governance.check_server_command(command)
+
+    assert not decision.allowed
+    assert "env wrapper" in decision.reasons[0]
+
+
+@pytest.mark.parametrize(
+    "command",
+    [
         "env nice -n 5 /usr/bin/apt remove ripgrep",
         "env - apt remove ripgrep",
         "env -a harmless apt remove ripgrep",

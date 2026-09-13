@@ -105,9 +105,12 @@ elif not parts.hostname:
 elif parts.username or parts.password:
     print("ERR\tembedded credentials")
 else:
-    host = parts.hostname.rstrip(".").lower()
+    hostname = parts.hostname.lower()
+    host = hostname.rstrip(".")
     if host in {"localhost", "localhost.localdomain"} or host.endswith(".localhost"):
         print("ERR\tlocal hostname")
+    elif hostname != host:
+        print("ERR\ttrailing-dot hostname")
     else:
         try:
             port = parts.port or (443 if parts.scheme == "https" else 80)
@@ -134,14 +137,7 @@ else:
             blocked = []
             for value in addresses:
                 address = ipaddress.ip_address(value)
-                if (
-                    address.is_private
-                    or address.is_loopback
-                    or address.is_link_local
-                    or address.is_reserved
-                    or address.is_multicast
-                    or address.is_unspecified
-                ):
+                if not address.is_global:
                     blocked.append(value)
             if blocked:
                 print(f"ERR\tnon-public address: {blocked[0]}")

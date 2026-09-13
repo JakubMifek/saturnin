@@ -74,6 +74,7 @@ def test_launcher_starts_routed_role_with_filtered_mcp(
     assert "Managed repository manifest (.saturnin/repo.yaml):" in command[-1]
     assert "stack: python" in command[-1]
     assert calls[0][1]["cwd"] == worktree.path
+    assert calls[0][1]["env"]["SATURNIN_HOME"] == str(config.root)
 
 
 def test_launcher_intersects_role_mcp_with_project_allowlist(
@@ -161,6 +162,26 @@ def test_launcher_rejects_project_agent_symlink_escape(
         stored.worktree = str(worktree.path)
 
     with pytest.raises(LauncherError, match="stay inside"):
+        AgentLauncher(config, board)._contract(board.get(task.id))
+
+
+def test_launcher_rejects_manifest_symlink_escape(
+    config: Config, board: Board, git_repo: Path
+) -> None:
+    task = board.create("Run a project migration")
+    worktree = WorktreeManager(config, repo=git_repo, board=board).create(
+        "feature/symlink-manifest"
+    )
+    manifest = worktree.path / ".saturnin" / "repo.yaml"
+    manifest.parent.mkdir(parents=True, exist_ok=True)
+    outside = config.root / "outside-manifest.yaml"
+    outside.write_text("agents: []\n", encoding="utf-8")
+    manifest.symlink_to(outside)
+    with board.edit(task.id) as stored:
+        stored.role = "code-worker"
+        stored.worktree = str(worktree.path)
+
+    with pytest.raises(LauncherError, match="manifest must stay inside"):
         AgentLauncher(config, board)._contract(board.get(task.id))
 
 

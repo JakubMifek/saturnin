@@ -377,6 +377,10 @@ class Governance:
         if binary == "apt" or binary.startswith("apt-"):
             if not packages.get("apt_allowed", False):
                 return Decision.deny("apt is not allowed")
+            try:
+                _check_apt_options(parts[1:])
+            except _WriteScopeError as exc:
+                return Decision.deny(str(exc))
             sub = parts[1] if len(parts) > 1 else ""
             allowed = packages.get("apt_allowed_subcommands", [])
             if allowed and sub not in allowed:
@@ -461,6 +465,12 @@ class Governance:
                 if value in ("-n", "--lines") and index + 1 == len(args):
                     return Decision.deny(f"journalctl option {value} requires a value")
             return Decision.ok("journalctl limited to Saturnin user units")
+        if binary == "gh":
+            try:
+                _check_gh_command(parts[1:])
+            except _WriteScopeError as exc:
+                return Decision.deny(str(exc))
+            return Decision.ok("gh limited to Saturnin issue, label and API helpers")
         return Decision.ok(f"{binary}: no elevated capability required")
 
     # -- delegation ----------------------------------------------------
@@ -766,6 +776,53 @@ def _check_git_remote_subcommand(arguments: Sequence[str]) -> None:
                 "require a dedicated governed wrapper"
             )
         return
+
+
+def _check_apt_options(arguments: Sequence[str]) -> None:
+    for argument in arguments:
+        if argument == "-o" or argument.startswith(("-o=", "-o")):
+            raise _WriteScopeError("apt configuration overrides are unsupported")
+        if argument.startswith("--option"):
+            raise _WriteScopeError("apt configuration overrides are unsupported")
+        if argument == "-c" or argument.startswith("-c"):
+            raise _WriteScopeError("apt configuration files are unsupported")
+        if argument.startswith("--config-file"):
+            raise _WriteScopeError("apt configuration files are unsupported")
+
+
+def _check_gh_command(arguments: Sequence[str]) -> None:
+    if not arguments:
+        raise _WriteScopeError("gh requires a subcommand")
+    allowed = {
+        "api": None,
+        "issue": {"create", "edit", "close", "list", "view"},
+        "label": {"create", "list"},
+    }
+    subcommand = arguments[0]
+    if subcommand not in allowed:
+        raise _WriteScopeError(f"gh {subcommand} is unsupported by the server gate")
+    if subcommand == "api":
+        _check_gh_api(arguments[1:])
+        return
+    allowed_children = allowed[subcommand]
+    child = next((arg for arg in arguments[1:] if not arg.startswith("-")), "")
+    if child not in allowed_children:
+        raise _WriteScopeError(
+            f"gh {subcommand} {child or '<missing>'} is unsupported by the server gate"
+        )
+
+
+def _check_gh_api(arguments: Sequence[str]) -> None:
+    endpoint = ""
+    for argument in arguments:
+        if argument.startswith("-"):
+            raise _WriteScopeError("gh api options are unsupported")
+        if argument == "graphql":
+            raise _WriteScopeError("gh api graphql is unsupported by the server gate")
+        if not argument.startswith("-") and not endpoint:
+            endpoint = argument
+    if not re.fullmatch(r"repos/[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+/pulls/[0-9]+", endpoint):
+        raise _WriteScopeError("gh api endpoint is not in the read-only allowlist")
 
 
 def _git_write_option_targets(subcommand: str, arguments: Sequence[str]) -> list[str]:
@@ -1293,12 +1350,12 @@ def _wrapped_command(binary: str, args: list[str]) -> list[str]:
     if binary == "env":
         return _after_options(
             args,
-            value_options={"-u", "--unset", "-C", "--chdir", "-a", "--argv0"},
+            value_options={"-u", "--unset", "-a", "--argv0"},
             flag_options={"-", "-i", "--ignore-environment", "-0", "--null", "--debug"},
             optional_value_options={
                 "--default-signal", "--ignore-signal", "--block-signal"
             },
-            forbidden_options={"-S", "--split-string"},
+            forbidden_options={"-S", "--split-string", "-C", "--chdir"},
             assignments=True,
         )
     if binary == "nice":
