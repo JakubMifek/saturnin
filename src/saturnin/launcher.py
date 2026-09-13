@@ -129,7 +129,12 @@ class AgentLauncher:
                     process = subprocess.Popen(
                         [executable, *args],
                         cwd=workdir,
-                        env=self._worker_environment(worker_config, contract),
+                        env=self._worker_environment(
+                            worker_config,
+                            contract,
+                            task=claimed,
+                            workdir=workdir,
+                        ),
                         stdin=subprocess.DEVNULL,
                         stdout=output,
                         stderr=subprocess.STDOUT,
@@ -240,8 +245,8 @@ class AgentLauncher:
     def _worker_config(self, workdir: Path) -> Config:
         candidate = Config(workdir)
         if candidate.data_root.resolve() == self.config.data_root.resolve():
-            return candidate
-        return self.config
+            return Config(candidate.data_root)
+        return self._trusted_config(self.config)
 
     @staticmethod
     def _trusted_config(config: Config) -> Config:
@@ -249,18 +254,29 @@ class AgentLauncher:
             return config
         return Config(config.data_root)
 
-    def _worker_environment(self, config: Config, contract: AgentContract) -> dict[str, str]:
+    def _worker_environment(
+        self,
+        config: Config,
+        contract: AgentContract,
+        *,
+        task: Task,
+        workdir: Path,
+    ) -> dict[str, str]:
         environment = {
             name: value
             for name in self._worker_env_allowlist()
             if (value := os.environ.get(name)) is not None
         }
-        environment["SATURNIN_HOME"] = str(config.root)
+        trusted_config = self._trusted_config(config)
+        home = self._isolated_home(task.id)
+        environment["HOME"] = str(home)
+        environment["XDG_CONFIG_HOME"] = str(home / ".config")
+        environment["XDG_CACHE_HOME"] = str(home / ".cache")
+        environment["XDG_DATA_HOME"] = str(home / ".local" / "share")
+        environment["SATURNIN_HOME"] = str(trusted_config.root)
+        environment["SATURNIN_WORKTREE"] = str(workdir)
         source = str(config.root / "src")
-        inherited = environment.get("PYTHONPATH")
-        environment["PYTHONPATH"] = (
-            source + os.pathsep + inherited if inherited else source
-        )
+        environment["PYTHONPATH"] = source
         if "github" in contract.mcp:
             token_name = str(
                 self.policy.get("github_read_token_env", "SATURNIN_GITHUB_MCP_TOKEN")
@@ -270,12 +286,36 @@ class AgentLauncher:
                 environment["GITHUB_PERSONAL_ACCESS_TOKEN"] = token
         return environment
 
+    def _isolated_home(self, task_id: str) -> Path:
+        root = self.dir / f"{task_id}.home"
+        for path in (
+            root,
+            root / ".config",
+            root / ".cache",
+            root / ".local" / "share",
+        ):
+            path.mkdir(parents=True, exist_ok=True)
+            path.chmod(0o700)
+        for entry in self.policy.get("approved_home_config", []) or []:
+            source = Path(str(entry)).expanduser()
+            if not source.is_absolute():
+                raise LauncherError("approved_home_config entries must be absolute paths")
+            if not source.exists():
+                continue
+            destination = root / source.name
+            if source.is_dir():
+                if destination.exists():
+                    shutil.rmtree(destination)
+                shutil.copytree(source, destination, symlinks=False)
+            else:
+                shutil.copy2(source, destination)
+        return root
+
     def _worker_env_allowlist(self) -> tuple[str, ...]:
         configured = self.policy.get("env_allowlist")
         if configured is None:
             return (
                 "PATH",
-                "HOME",
                 "LANG",
                 "LC_ALL",
                 "LC_CTYPE",
@@ -284,8 +324,6 @@ class AgentLauncher:
                 "USER",
                 "LOGNAME",
                 "SHELL",
-                "XDG_RUNTIME_DIR",
-                "PYTHONPATH",
             )
         if not isinstance(configured, list) or not all(
             isinstance(name, str) and name.strip() for name in configured
@@ -296,7 +334,7 @@ class AgentLauncher:
     def _contract(self, task: Task, config: Config | None = None) -> AgentContract:
         if not task.role:
             raise LauncherError(f"task {task.id} has no routed role")
-        config = config or self.config
+        config = self._trusted_config(config or self.config)
         contracts = {contract.role: contract for contract in load_contracts(config)}
         if task.worktree:
             contracts.update(self._project_contracts(Path(task.worktree), config))
@@ -308,7 +346,7 @@ class AgentLauncher:
     def _project_contracts(
         self, worktree: Path, config: Config | None = None
     ) -> dict[str, AgentContract]:
-        config = config or self.config
+        config = self._trusted_config(config or self.config)
         worktree_root = worktree.resolve(strict=False)
         manifest_path = (worktree_root / ".saturnin" / "repo.yaml").resolve(strict=False)
         if not manifest_path.is_relative_to(worktree_root):
@@ -341,7 +379,28 @@ class AgentLauncher:
                 raise LauncherError(f"project agent role must match its filename: {entry}")
             if role in global_roles:
                 raise LauncherError(f"project agent shadows global role {role!r}")
-            contracts[role] = AgentContract(role=role, path=path, front_matter=data)
+            contract = AgentContract(role=role, path=path, front_matter=data)
+            skills = {
+                skill_path.stem
+                for skill_path in (config.root / "skills").glob("*.md")
+                if skill_path.name != "README.md"
+            }
+            for skill in contract.skills:
+                if skill not in skills:
+                    raise LauncherError(f"project agent {role!r} names unknown skill {skill!r}")
+            for server in contract.mcp:
+                authorization_problem = mcp_authorization_problem(
+                    role,
+                    server,
+                    config.policy("mcp"),
+                    executes=contract.executes,
+                )
+                if authorization_problem:
+                    raise LauncherError(
+                        f"MCP server {server!r} is not authorized for project role "
+                        f"{role!r}: {authorization_problem}"
+                    )
+            contracts[role] = contract
         return contracts
 
     def _write_mcp_config(
@@ -356,6 +415,10 @@ class AgentLauncher:
         trusted_config = self._trusted_config(config)
         trusted_definitions = trusted_config.policy("mcp").get("servers", {})
         source_definitions = config.policy("mcp").get("servers", {})
+        if task.worktree:
+            source_policy_path = Path(task.worktree) / "policies" / "mcp.yaml"
+            if source_policy_path.is_file():
+                source_definitions = load_yaml(source_policy_path).get("servers", {})
         if not isinstance(source_definitions, dict) or not isinstance(
             trusted_definitions, dict
         ):

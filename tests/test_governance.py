@@ -9,11 +9,31 @@ import pytest
 
 from saturnin.config import Config
 from saturnin.governance import Governance, _curl_targets, _git_targets
-from saturnin.review import ReviewLedger, ReviewError, issue_content_digest
+from saturnin.review import (
+    ReviewLedger,
+    ReviewError,
+    issue_content_digest,
+    sign_review_attestation,
+)
 
 SELF_REPO = "JakubMifek/saturnin"
 OTHER_REPO = "JakubMifek/some-project"
 TEST_HEAD_SHA = "a" * 40
+
+
+def record_review(ledger: ReviewLedger, **kwargs):
+    attestation = sign_review_attestation(
+        key=os.environ["SATURNIN_REVIEW_ATTESTATION_KEY"],
+        subject=kwargs["subject"],
+        kind=kwargs["kind"],
+        author=kwargs["author"],
+        reviewer=kwargs["reviewer"],
+        verdict=kwargs["verdict"],
+        zero_context=kwargs.get("zero_context", True),
+        head_sha=kwargs.get("head_sha", ""),
+        issue_digest=kwargs.get("issue_digest", ""),
+    )
+    return ledger.record(attestation=attestation, **kwargs)
 
 
 @pytest.fixture()
@@ -66,7 +86,7 @@ def test_merge_requires_independent_zero_context_review(
         head_sha=TEST_HEAD_SHA,
     ).allowed
 
-    ledger.record(
+    record_review(ledger,
         subject=subject,
         kind="pr",
         author="code-worker",
@@ -79,7 +99,7 @@ def test_merge_requires_independent_zero_context_review(
         head_sha=TEST_HEAD_SHA,
     ).allowed
 
-    ledger.record(
+    record_review(ledger,
         subject=subject,
         kind="pr",
         author="code-worker",
@@ -96,7 +116,7 @@ def test_merge_requires_independent_zero_context_review(
 def test_dismissed_review_blocks_merge(governance: Governance, config: Config) -> None:
     ledger = ReviewLedger(config)
     subject = "JakubMifek/saturnin#dismissed"
-    ledger.record(
+    record_review(ledger,
         subject=subject,
         kind="pr",
         author="code-worker",
@@ -104,7 +124,7 @@ def test_dismissed_review_blocks_merge(governance: Governance, config: Config) -
         verdict="approved",
         head_sha=TEST_HEAD_SHA,
     )
-    ledger.record(
+    record_review(ledger,
         subject=subject,
         kind="pr",
         author="code-worker",
@@ -127,7 +147,7 @@ def test_reviewer_with_context_does_not_satisfy_gate(
 ) -> None:
     ledger = ReviewLedger(config)
     subject = "JakubMifek/saturnin#8"
-    ledger.record(
+    record_review(ledger,
         subject=subject,
         kind="pr",
         author="code-worker",
@@ -147,7 +167,7 @@ def test_reviewer_with_context_does_not_satisfy_gate(
 def test_self_review_is_impossible(config: Config) -> None:
     ledger = ReviewLedger(config)
     with pytest.raises(ReviewError):
-        ledger.record(
+        record_review(ledger,
             subject="x#1",
             kind="pr",
             author="code-worker",
@@ -156,11 +176,78 @@ def test_self_review_is_impossible(config: Config) -> None:
         )
 
 
+def test_review_record_requires_valid_signed_attestation(config: Config) -> None:
+    ledger = ReviewLedger(config)
+    subject = "JakubMifek/saturnin#signed"
+    attestation = sign_review_attestation(
+        key=os.environ["SATURNIN_REVIEW_ATTESTATION_KEY"],
+        subject=subject,
+        kind="pr",
+        author="code-worker",
+        reviewer="pr-reviewer",
+        verdict="approved",
+        head_sha=TEST_HEAD_SHA,
+    )
+    forged = attestation.replace("code-worker", "chief-of-staff")
+
+    with pytest.raises(ReviewError, match="signature does not match"):
+        ledger.record(
+            subject=subject,
+            kind="pr",
+            author="chief-of-staff",
+            reviewer="pr-reviewer",
+            verdict="approved",
+            head_sha=TEST_HEAD_SHA,
+            attestation=forged,
+        )
+
+    ledger.record(
+        subject=subject,
+        kind="pr",
+        author="code-worker",
+        reviewer="pr-reviewer",
+        verdict="approved",
+        head_sha=TEST_HEAD_SHA,
+        attestation=attestation,
+    )
+    with pytest.raises(ReviewError, match="already been recorded"):
+        ledger.record(
+            subject=subject,
+            kind="pr",
+            author="code-worker",
+            reviewer="pr-reviewer",
+            verdict="approved",
+            head_sha=TEST_HEAD_SHA,
+            attestation=attestation,
+        )
+
+
+def test_review_gate_rejects_tampered_attestation(config: Config) -> None:
+    ledger = ReviewLedger(config)
+    subject = "JakubMifek/saturnin#tampered"
+    record = record_review(
+        ledger,
+        subject=subject,
+        kind="pr",
+        author="code-worker",
+        reviewer="pr-reviewer",
+        verdict="approved",
+        head_sha=TEST_HEAD_SHA,
+    )
+    path = next(ledger.dir.glob("*.jsonl"))
+    data = record.to_dict()
+    data["author"] = "chief-of-staff"
+    path.write_text(json.dumps(data) + "\n", encoding="utf-8")
+
+    with pytest.raises(ReviewError, match="invalid review attestation"):
+        ledger.for_subject(subject, "pr")
+
+
 def test_review_subjects_are_exact_and_roles_are_valid(config: Config) -> None:
     ledger = ReviewLedger(config)
     first = "owner/repo#1"
     second = "owner-repo-1"
-    ledger.record(
+    record_review(ledger,
         subject=first,
         kind="pr",
         author="code-worker",
@@ -168,7 +255,7 @@ def test_review_subjects_are_exact_and_roles_are_valid(config: Config) -> None:
         verdict="approved",
         head_sha=TEST_HEAD_SHA,
     )
-    ledger.record(
+    record_review(ledger,
         subject=second,
         kind="pr",
         author="code-worker",
@@ -180,7 +267,7 @@ def test_review_subjects_are_exact_and_roles_are_valid(config: Config) -> None:
     assert {record.subject for record in ledger.for_subject(second, "pr")} == {second}
 
     with pytest.raises(ReviewError, match="unknown reviewer role"):
-        ledger.record(
+        record_review(ledger,
             subject="x#2",
             kind="pr",
             author="code-worker",
@@ -241,7 +328,7 @@ def test_python_allowlist_is_limited_to_configured_modules(
 def test_corrupt_review_ledger_reports_file_and_line(config: Config) -> None:
     ledger = ReviewLedger(config)
     subject = "JakubMifek/saturnin#corrupt"
-    ledger.record(
+    record_review(ledger,
         subject=subject,
         kind="pr",
         author="code-worker",
@@ -264,7 +351,7 @@ def test_review_ledger_recovers_from_unterminated_tail(
 ) -> None:
     ledger = ReviewLedger(config)
     subject = "JakubMifek/saturnin#interrupted"
-    ledger.record(
+    record_review(ledger,
         subject=subject,
         kind="pr",
         author="code-worker",
@@ -290,7 +377,7 @@ def test_review_ledger_recovers_from_unterminated_tail(
         original_replace(source, destination)
 
     monkeypatch.setattr("saturnin.jsonlines.os.replace", tracked_replace)
-    ledger.record(
+    record_review(ledger,
         subject=subject,
         kind="pr",
         author="code-worker",
@@ -306,8 +393,8 @@ def test_review_ledger_recovers_from_unterminated_tail(
 def test_review_record_validates_entry_before_append(config: Config) -> None:
     ledger = ReviewLedger(config)
 
-    with pytest.raises(ReviewError, match="zero_context.*boolean"):
-        ledger.record(
+    with pytest.raises(ReviewError, match="zero_context.*(boolean|wrong type)"):
+        record_review(ledger,
             subject="JakubMifek/saturnin#invalid-write",
             kind="pr",
             author="code-worker",
@@ -323,7 +410,7 @@ def test_review_record_validates_entry_before_append(config: Config) -> None:
 def test_review_ledger_preserves_complete_unterminated_record(config: Config) -> None:
     ledger = ReviewLedger(config)
     subject = "JakubMifek/saturnin#complete-tail"
-    first = ledger.record(
+    first = record_review(ledger,
         subject=subject,
         kind="pr",
         author="code-worker",
@@ -337,7 +424,7 @@ def test_review_ledger_preserves_complete_unterminated_record(config: Config) ->
         encoding="utf-8",
     )
 
-    ledger.record(
+    record_review(ledger,
         subject=subject,
         kind="pr",
         author="code-worker",
@@ -359,7 +446,7 @@ def test_review_ledger_rejects_terminated_malformed_records(
 ) -> None:
     ledger = ReviewLedger(config)
     subject = "JakubMifek/saturnin#malformed"
-    ledger.record(
+    record_review(ledger,
         subject=subject,
         kind="pr",
         author="code-worker",
@@ -373,7 +460,7 @@ def test_review_ledger_rejects_terminated_malformed_records(
     with pytest.raises(ReviewError, match=r"corrupt review ledger .* at line"):
         list(ledger)
     with pytest.raises(ReviewError, match=r"corrupt review ledger .* at line"):
-        ledger.record(
+        record_review(ledger,
             subject=subject,
             kind="pr",
             author="code-worker",
@@ -402,7 +489,7 @@ def test_review_ledger_rejects_invalid_record_values_before_gate(
 ) -> None:
     ledger = ReviewLedger(config)
     subject = "JakubMifek/saturnin#invalid-values"
-    record = ledger.record(
+    record = record_review(ledger,
         subject=subject,
         kind="pr",
         author="code-worker",
@@ -418,7 +505,7 @@ def test_review_ledger_rejects_invalid_record_values_before_gate(
     with pytest.raises(ReviewError, match=r"corrupt review ledger .* at line 1"):
         ledger.for_subject(subject, "pr")
     with pytest.raises(ReviewError, match=r"corrupt review ledger .* at line 1"):
-        ledger.record(
+        record_review(ledger,
             subject=subject,
             kind="pr",
             author="code-worker",
@@ -434,7 +521,7 @@ def test_review_ledger_rejects_invalid_record_shape(
 ) -> None:
     ledger = ReviewLedger(config)
     subject = "JakubMifek/saturnin#invalid-shape"
-    record = ledger.record(
+    record = record_review(ledger,
         subject=subject,
         kind="pr",
         author="code-worker",
@@ -459,7 +546,7 @@ def test_review_ledger_serializes_concurrent_records(config: Config) -> None:
     subject = "JakubMifek/saturnin#concurrent"
 
     def record(index: int) -> None:
-        ledger.record(
+        record_review(ledger,
             subject=subject,
             kind="pr",
             author="chief-of-staff",
@@ -481,7 +568,7 @@ def test_merge_in_managed_repo_is_never_autonomous(
 ) -> None:
     ledger = ReviewLedger(config)
     subject = f"{OTHER_REPO}#3"
-    ledger.record(
+    record_review(ledger,
         subject=subject,
         kind="pr",
         author="code-worker",
@@ -509,7 +596,7 @@ def test_issue_submission_requires_review_in_managed_repos(
         records=ledger.for_subject(subject, "issue"),
         issue_digest=digest,
     ).allowed
-    ledger.record(
+    record_review(ledger,
         subject=subject,
         kind="issue",
         author="researcher",
@@ -533,7 +620,7 @@ def test_issue_review_is_bound_to_the_reviewed_draft(
     managed_repo = "JakubMifek/saturnin-ops"
     reviewed = issue_content_digest("Original", "Reviewed body")
     changed = issue_content_digest("Original", "Changed body")
-    ledger.record(
+    record_review(ledger,
         subject=subject,
         kind="issue",
         author="researcher",

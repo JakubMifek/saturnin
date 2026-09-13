@@ -84,8 +84,10 @@ def test_launcher_starts_routed_role_with_filtered_mcp(
     assert "Managed repository manifest (.saturnin/repo.yaml):" in command[-1]
     assert "stack: python" in command[-1]
     assert calls[0][1]["cwd"] == worktree.path
-    assert calls[0][1]["env"]["SATURNIN_HOME"] == str(worktree.path)
-    assert calls[0][1]["env"]["PYTHONPATH"].split(":")[0] == str(worktree.path / "src")
+    assert calls[0][1]["env"]["SATURNIN_HOME"] == str(config.root)
+    assert calls[0][1]["env"]["SATURNIN_WORKTREE"] == str(worktree.path)
+    assert calls[0][1]["env"]["PYTHONPATH"] == str(config.root / "src")
+    assert calls[0][1]["env"]["HOME"] == str(config.var_dir / "launches" / f"{task.id}.home")
 
 
 def test_launcher_intersects_role_mcp_with_project_allowlist(
@@ -435,11 +437,11 @@ def test_launcher_rejects_unauthorized_project_mcp(
         AgentLauncher(config, board).launch(task.id)
 
 
-def test_launcher_uses_linked_saturnin_source_with_shared_runtime(
+def test_launcher_uses_trusted_source_for_linked_saturnin_worktree(
     config: Config, board: Board, git_repo: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     config.policy("mcp")["launcher"]["enabled"] = True
-    task = board.create("Use branch-local worker policy")
+    task = board.create("Use trusted worker policy")
     Router(config).dispatch(board, task)
     worktree = WorktreeManager(config, repo=git_repo, board=board).create(
         "feature/branch-local-source"
@@ -453,6 +455,11 @@ def test_launcher_uses_linked_saturnin_source_with_shared_runtime(
         ),
         encoding="utf-8",
     )
+    skill = worktree.path / "skills" / "pr-authoring.md"
+    skill.write_text("UNTRUSTED SKILL BODY\n", encoding="utf-8")
+    runtime = worktree.path / "src" / "saturnin" / "governance.py"
+    runtime.parent.mkdir(parents=True, exist_ok=True)
+    runtime.write_text("raise SystemExit('untrusted runtime')\n", encoding="utf-8")
     with board.edit(task.id) as stored:
         stored.branch = "feature/branch-local-source"
         stored.worktree = str(worktree.path)
@@ -469,14 +476,16 @@ def test_launcher_uses_linked_saturnin_source_with_shared_runtime(
     monkeypatch.setattr("saturnin.launcher.subprocess.Popen", fake_popen)
 
     launcher = AgentLauncher(config, board)
-    assert launcher._worker_config(worktree.path).root == worktree.path.resolve()
-    assert "# Branch-local Worker" in launcher._contract(
+    assert launcher._worker_config(worktree.path).root == config.root.resolve()
+    assert "# Branch-local Worker" not in launcher._contract(
         board.get(task.id), launcher._worker_config(worktree.path)
     ).path.read_text(encoding="utf-8")
     launcher.launch(task.id)
 
-    assert "# Branch-local Worker" in calls[0][0][-1]
-    assert calls[0][1]["env"]["SATURNIN_HOME"] == str(worktree.path)
+    assert "# Branch-local Worker" not in calls[0][0][-1]
+    assert "UNTRUSTED SKILL BODY" not in calls[0][0][-1]
+    assert calls[0][1]["env"]["SATURNIN_HOME"] == str(config.root)
+    assert calls[0][1]["env"]["PYTHONPATH"] == str(config.root / "src")
     generated = json.loads(
         (config.var_dir / "launches" / f"{task.id}.mcp.json").read_text()
     )
@@ -557,19 +566,32 @@ def test_launcher_worker_environment_uses_allowlist_and_constrained_github_token
     monkeypatch.setenv("GH_TOKEN", "host-gh-token")
     monkeypatch.setenv("GITHUB_TOKEN", "host-github-token")
     monkeypatch.setenv("AWS_SECRET_ACCESS_KEY", "host-secret")
+    monkeypatch.setenv("PYTHONPATH", "/host/untrusted")
+    monkeypatch.setenv("HOME", "/host/home")
     monkeypatch.setenv("SATURNIN_GITHUB_MCP_TOKEN", "scoped-read-token")
 
     launcher = AgentLauncher(config, board)
     worker_config = launcher._worker_config(worktree.path)
     contract = launcher._contract(board.get(task.id), worker_config)
-    environment = launcher._worker_environment(worker_config, contract)
+    environment = launcher._worker_environment(
+        worker_config,
+        contract,
+        task=board.get(task.id),
+        workdir=worktree.path,
+    )
 
-    assert environment["SATURNIN_HOME"] == str(worktree.path)
-    assert environment["PYTHONPATH"].split(":")[0] == str(worktree.path / "src")
+    assert environment["SATURNIN_HOME"] == str(config.root)
+    assert environment["SATURNIN_WORKTREE"] == str(worktree.path)
+    assert environment["PYTHONPATH"] == str(config.root / "src")
+    assert environment["HOME"] != str(Path.home())
+    assert Path(environment["HOME"]).is_dir()
+    assert (Path(environment["HOME"]).stat().st_mode & 0o777) == 0o700
+    assert environment["XDG_CONFIG_HOME"] == str(Path(environment["HOME"]) / ".config")
     assert environment["GITHUB_PERSONAL_ACCESS_TOKEN"] == "scoped-read-token"
     assert "GH_TOKEN" not in environment
     assert "GITHUB_TOKEN" not in environment
     assert "AWS_SECRET_ACCESS_KEY" not in environment
+    assert "host" not in environment["PYTHONPATH"]
 
 
 def test_launcher_rejects_unverified_github_binary(

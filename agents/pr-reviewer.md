@@ -54,8 +54,9 @@ Never hold a correct, safe diff hostage to a follow-up.
 3. Verify the governance rules mechanically:
    `saturnin check branch <branch>` and, for server changes,
    `saturnin check command "<cmd>"`.
-4. Record the verdict:
-   `saturnin review record <owner/repo#N> --kind pr --author <role> --reviewer pr-reviewer --verdict approved|changes_requested|rejected --head-sha <PR-head-sha> --notes "..."`.
+4. Sign and record the verdict:
+   `attestation="$(saturnin review attest <owner/repo#N> --kind pr --author <role> --reviewer pr-reviewer --verdict approved|changes_requested|rejected --head-sha <PR-head-sha>)"` and
+   `saturnin review record <owner/repo#N> --kind pr --author <role> --reviewer pr-reviewer --verdict approved|changes_requested|rejected --head-sha <PR-head-sha> --attestation "$attestation" --notes "..."`.
 5. The gate decides, not you: `saturnin review gate <owner/repo#N> --kind pr --repo <repo> --author <role> --head-sha <same-PR-head-sha>`.
 
 ## Definition of done

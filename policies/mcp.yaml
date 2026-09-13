@@ -56,11 +56,12 @@ launcher:
   command: copilot
   failure_grace_seconds: 1.0
   # Worker subprocesses get only these inherited environment keys. Host
-  # credentials (GH_TOKEN, GITHUB_TOKEN, cloud keys, etc.) are not passed
-  # through by default.
+  # credentials and host configuration (GH_TOKEN, GITHUB_TOKEN, HOME, cloud
+  # keys, PYTHONPATH, etc.) are not passed through by default; the launcher
+  # creates an isolated HOME/XDG tree and points Saturnin commands at the
+  # trusted runtime checkout.
   env_allowlist:
     - PATH
-    - HOME
     - LANG
     - LC_ALL
     - LC_CTYPE
@@ -69,8 +70,7 @@ launcher:
     - USER
     - LOGNAME
     - SHELL
-    - XDG_RUNTIME_DIR
-    - PYTHONPATH
+  approved_home_config: []
   # Optional source variable used to inject a constrained token for the
   # read-only GitHub MCP server when a role declares `mcp: [github]`.
   github_read_token_env: SATURNIN_GITHUB_MCP_TOKEN

@@ -113,8 +113,11 @@ else:
 PY
   )
   if [[ "$github_verdict" != "none" ]]; then
+    attestation="$(saturnin review attest "$subject" --kind pr --author "$author" \
+      --reviewer pr-reviewer --verdict "$github_verdict" --head-sha "$head_sha")"
     saturnin review record "$subject" --kind pr --author "$author" \
       --reviewer pr-reviewer --verdict "$github_verdict" --head-sha "$head_sha" \
+      --attestation "$attestation" \
       --notes "Imported from GitHub reviewer ${github_reviewer} for CI." >/dev/null
   fi
 else

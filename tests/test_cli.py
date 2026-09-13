@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import os
 import subprocess
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -14,7 +15,7 @@ from saturnin.checkpoints import Checkpoint, CheckpointStore
 from saturnin.cli import main
 from saturnin.discovery import InboundIssue, IssueDiscovery
 from saturnin.launcher import AgentLauncher
-from saturnin.review import issue_content_digest
+from saturnin.review import issue_content_digest, sign_review_attestation
 from saturnin.routing import Router
 from saturnin.worktrees import WorktreeManager
 
@@ -22,6 +23,20 @@ from saturnin.worktrees import WorktreeManager
 def run(capsys: pytest.CaptureFixture[str], *argv: str) -> tuple[int, str]:
     code = main(list(argv))
     return code, capsys.readouterr().out
+
+
+def review_attestation_args(**kwargs: str) -> tuple[str, str]:
+    attestation = sign_review_attestation(
+        key=os.environ["SATURNIN_REVIEW_ATTESTATION_KEY"],
+        subject=kwargs["subject"],
+        kind=kwargs["kind"],
+        author=kwargs["author"],
+        reviewer=kwargs["reviewer"],
+        verdict=kwargs["verdict"],
+        head_sha=kwargs.get("head_sha", ""),
+        issue_digest=kwargs.get("issue_digest", ""),
+    )
+    return ("--attestation", attestation)
 
 
 def test_doctor_is_healthy(home: Path, capsys: pytest.CaptureFixture[str]) -> None:
@@ -436,6 +451,14 @@ def test_review_gate_flow(home: Path, capsys: pytest.CaptureFixture[str]) -> Non
         "approved",
         "--head-sha",
         head_sha,
+        *review_attestation_args(
+            subject=subject,
+            kind="pr",
+            author="code-worker",
+            reviewer="pr-reviewer",
+            verdict="approved",
+            head_sha=head_sha,
+        ),
     )
     code, out = run(
         capsys,
@@ -478,6 +501,14 @@ def test_review_cli_resolves_omitted_pr_head(
         "pr-reviewer",
         "--verdict",
         "approved",
+        *review_attestation_args(
+            subject=subject,
+            kind="pr",
+            author="code-worker",
+            reviewer="pr-reviewer",
+            verdict="approved",
+            head_sha=head_sha,
+        ),
     )[0] == 0
     code, out = run(
         capsys,
@@ -564,6 +595,14 @@ def test_issue_review_gate_requires_matching_digest(
         "approved",
         "--issue-digest",
         digest,
+        *review_attestation_args(
+            subject=subject,
+            kind="issue",
+            author="researcher",
+            reviewer="issue-reviewer",
+            verdict="approved",
+            issue_digest=digest,
+        ),
     )
 
     code, out = run(
@@ -606,6 +645,14 @@ def test_review_merge_blocks_when_pr_head_changed_after_approval(
         "approved",
         "--head-sha",
         reviewed_head,
+        *review_attestation_args(
+            subject=subject,
+            kind="pr",
+            author="code-worker",
+            reviewer="pr-reviewer",
+            verdict="approved",
+            head_sha=reviewed_head,
+        ),
     )
     calls: list[list[str]] = []
 
@@ -653,6 +700,14 @@ def test_review_merge_uses_expected_head_precondition(
         "approved",
         "--head-sha",
         head_sha,
+        *review_attestation_args(
+            subject=subject,
+            kind="pr",
+            author="code-worker",
+            reviewer="pr-reviewer",
+            verdict="approved",
+            head_sha=head_sha,
+        ),
     )
     calls: list[list[str]] = []
 
@@ -707,6 +762,14 @@ def test_review_submit_issue_uses_reviewed_title_and_body_digest(
         "approved",
         "--issue-digest",
         digest,
+        *review_attestation_args(
+            subject=subject,
+            kind="issue",
+            author="researcher",
+            reviewer="issue-reviewer",
+            verdict="approved",
+            issue_digest=digest,
+        ),
     )
     calls: list[list[str]] = []
 
@@ -775,6 +838,14 @@ def test_review_submit_issue_blocks_when_reviewed_content_differs(
         "approved",
         "--issue-digest",
         reviewed_digest,
+        *review_attestation_args(
+            subject=subject,
+            kind="issue",
+            author="researcher",
+            reviewer="issue-reviewer",
+            verdict="approved",
+            issue_digest=reviewed_digest,
+        ),
     )
     monkeypatch.setattr("saturnin.cli.run_gh", lambda args: (_ for _ in ()).throw(AssertionError(args)))
 

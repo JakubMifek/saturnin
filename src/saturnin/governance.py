@@ -148,6 +148,8 @@ class Governance:
         reasons: list[str] = []
         author_lower = author.strip().lower()
         records = [r for r in records if r.author.strip().lower() == author_lower]
+        if self.review.get("attestation", {}).get("required", False):
+            records = [r for r in records if r.attestation_id and r.attestation_signature]
         # Only count approvals from designated reviewer roles for this kind.
         allowed = _allowed_reviewer_roles(kind, self.config) if kind else set()
         approvals = [r for r in records if r.verdict == "approved"]
@@ -532,6 +534,12 @@ class Governance:
             problems.append(
                 "PR review policy requires a non-empty list of GitHub reviewer logins"
             )
+        attestation = self.review.get("attestation", {})
+        if not attestation.get("required", False):
+            problems.append("review records must require signed attestations")
+        key_env = attestation.get("key_env")
+        if not isinstance(key_env, str) or not key_env.strip():
+            problems.append("review attestation policy requires a key_env")
         if self.policy.get("delegation", {}).get("ceo_may_execute", False):
             problems.append("CEO is allowed to execute work; delegation-first is violated")
         if self.config.server_scope.get("user", {}).get("allow_root", False):

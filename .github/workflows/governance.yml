@@ -86,4 +86,5 @@ jobs:
         if: steps.bootstrap.outputs.initial != 'true'
         env:
           GITHUB_TOKEN: ${{ github.token }}
+          SATURNIN_REVIEW_ATTESTATION_KEY: ${{ github.token }}
         run: automation/library/review_gate.sh pr "${{ github.event.pull_request.base.repo.full_name }}#${{ github.event.pull_request.number }}" "${{ github.event.pull_request.base.repo.full_name }}"

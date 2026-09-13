@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import re
 import subprocess
 import sys
@@ -37,7 +38,12 @@ from .governance import Governance
 from .improve import ImprovementLoop
 from .issues import IssueMirror, MirrorError, run_gh
 from .launcher import AgentLauncher, LauncherError, LaunchResult
-from .review import ReviewError, ReviewLedger, issue_content_digest
+from .review import (
+    ReviewError,
+    ReviewLedger,
+    issue_content_digest,
+    sign_review_attestation,
+)
 from .routing import Router, RoutingError
 from .worktrees import GitError, WorktreeManager
 
@@ -191,12 +197,33 @@ def build_parser() -> argparse.ArgumentParser:
     record.add_argument("--verdict", required=True)
     record.add_argument("--notes", default="")
     record.add_argument(
+        "--attestation",
+        help="signed reviewer attestation JSON, or @path containing it",
+    )
+    record.add_argument(
         "--with-context",
         action="store_true",
         help="reviewer had prior context (fails the zero-context gate)",
     )
     record.add_argument("--head-sha", default="", help="reviewed commit SHA for PR reviews")
     record.add_argument(
+        "--issue-digest",
+        default="",
+        help="reviewed title/body digest for issue reviews",
+    )
+    attest = review.add_parser("attest", help="sign a review verdict as the reviewer")
+    attest.add_argument("subject", help="e.g. owner/repo#12 or issue draft id")
+    attest.add_argument("--kind", choices=["pr", "issue"], required=True)
+    attest.add_argument("--author", required=True)
+    attest.add_argument("--reviewer", required=True)
+    attest.add_argument("--verdict", required=True)
+    attest.add_argument(
+        "--with-context",
+        action="store_true",
+        help="reviewer had prior context (fails the zero-context gate)",
+    )
+    attest.add_argument("--head-sha", default="", help="reviewed commit SHA for PR reviews")
+    attest.add_argument(
         "--issue-digest",
         default="",
         help="reviewed title/body digest for issue reviews",
@@ -447,6 +474,21 @@ def _parse_pr_subject(subject: str, *, repo: str | None = None) -> tuple[str, st
     ):
         raise ReviewError("PR subject must be owner/repo#number and match --repo")
     return subject_repo, number
+
+
+def _review_attestation_key(config: Config) -> str:
+    settings = config.governance.get("review", {}).get("attestation", {})
+    env_name = str(settings.get("key_env", "SATURNIN_REVIEW_ATTESTATION_KEY"))
+    key = os.environ.get(env_name, "")
+    if not key:
+        raise ReviewError(f"review attestation key is not configured in {env_name}")
+    return key
+
+
+def _read_attestation_arg(value: str) -> str:
+    if value.startswith("@"):
+        return Path(value[1:]).read_text(encoding="utf-8").strip()
+    return value
 
 
 def _prepare_project_route(config: Config, board: Board, task_id: str) -> Task:
@@ -1226,6 +1268,20 @@ def _run_checkpoint(args: argparse.Namespace, config: Config, board: Board, as_j
 
 def _run_review(args: argparse.Namespace, config: Config, as_json: bool) -> int:
     ledger = ReviewLedger(config)
+    if args.review_command == "attest":
+        attestation = sign_review_attestation(
+            key=_review_attestation_key(config),
+            subject=args.subject,
+            kind=args.kind,
+            author=args.author,
+            reviewer=args.reviewer,
+            verdict=args.verdict,
+            zero_context=not args.with_context,
+            head_sha=args.head_sha,
+            issue_digest=args.issue_digest,
+        )
+        _emit({"attestation": attestation}, as_json, attestation)
+        return 0
     if args.review_command == "record":
         head_sha = getattr(args, "head_sha", "")
         if args.kind == "pr" and not head_sha:
@@ -1233,6 +1289,7 @@ def _run_review(args: argparse.Namespace, config: Config, as_json: bool) -> int:
                 args.subject,
                 getattr(args, "repo", None),
             )
+        attestation = _read_attestation_arg(args.attestation) if args.attestation else ""
         record = ledger.record(
             subject=args.subject,
             kind=args.kind,
@@ -1243,6 +1300,7 @@ def _run_review(args: argparse.Namespace, config: Config, as_json: bool) -> int:
             head_sha=head_sha,
             issue_digest=getattr(args, "issue_digest", ""),
             notes=args.notes,
+            attestation=attestation,
         )
         _emit(
             record.to_dict(),

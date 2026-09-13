@@ -49,8 +49,11 @@ saturnin checkpoint save <task-id> --role code-worker \
 ## 5. Review before merge
 
 ```bash
+attestation="$(saturnin review attest JakubMifek/saturnin#12 --kind pr \
+  --author code-worker --reviewer pr-reviewer --verdict approved)"
 saturnin review record JakubMifek/saturnin#12 --kind pr \
-  --author code-worker --reviewer pr-reviewer --verdict approved
+  --author code-worker --reviewer pr-reviewer --verdict approved \
+  --attestation "$attestation"
 saturnin review gate JakubMifek/saturnin#12 --kind pr \
   --repo JakubMifek/saturnin --author code-worker
 # exit 0 = may merge

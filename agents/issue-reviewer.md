@@ -21,8 +21,9 @@ other people read.
    the tone right for a public repository? Does it leak secrets or private data?
 3. Compute the digest of the exact title/body under review:
    `python -c 'from saturnin.review import issue_content_digest; print(issue_content_digest("TITLE", "BODY"))'`.
-4. Record the verdict with that digest:
-   `saturnin review record <draft-id> --kind issue --author <role> --reviewer issue-reviewer --verdict ... --issue-digest <digest>`.
+4. Sign and record the verdict with that digest:
+   `attestation="$(saturnin review attest <draft-id> --kind issue --author <role> --reviewer issue-reviewer --verdict ... --issue-digest <digest>)"` and
+   `saturnin review record <draft-id> --kind issue --author <role> --reviewer issue-reviewer --verdict ... --issue-digest <digest> --attestation "$attestation"`.
 5. Submission is only allowed when the same digest is passed to the gate:
    `saturnin review gate <draft-id> --kind issue --repo <owner/repo> --author <role> --issue-digest <digest>` passes.
 
