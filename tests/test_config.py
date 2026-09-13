@@ -44,30 +44,37 @@ def test_find_root_preserves_saturnin_home_precedence(
     assert find_root(tmp_path) == explicit
 
 
-def test_ci_runs_on_default_branch_pushes_without_branch_gating_them() -> None:
+def test_ci_runs_untrusted_tests_only_for_push_and_pull_request() -> None:
     workflow = (REPO_ROOT / ".github/workflows/ci.yml").read_text(encoding="utf-8")
 
     assert "branches-ignore" not in workflow
-    assert "github.event_name == 'pull_request'" in workflow
+    assert "pull_request:" in workflow
+    assert "pull_request_target:" not in workflow
+    assert "review_gate.sh" not in workflow
 
 
 def test_ci_review_gate_does_not_claim_a_fixed_author_role() -> None:
-    workflow = (REPO_ROOT / ".github/workflows/ci.yml").read_text(encoding="utf-8")
+    workflow = (REPO_ROOT / ".github/workflows/governance.yml").read_text(
+        encoding="utf-8"
+    )
 
     gate_line = next(line for line in workflow.splitlines() if "review_gate.sh pr" in line)
     assert "code-worker" not in gate_line
     assert "github.event.pull_request.base.repo.full_name" in gate_line
 
 
-def test_ci_governance_uses_trusted_base_code() -> None:
-    workflow = (REPO_ROOT / ".github/workflows/ci.yml").read_text(encoding="utf-8")
+def test_ci_governance_uses_base_controlled_workflow_and_code() -> None:
+    workflow = (REPO_ROOT / ".github/workflows/governance.yml").read_text(
+        encoding="utf-8"
+    )
 
-    governance = workflow.split("  governance:", 1)[1]
-    assert "github.event.pull_request.base.sha" in governance
-    assert "mode=base" in governance
-    assert "mode=bootstrap" in governance
-    assert "TRUSTED_BOOTSTRAP_BASE_SHA" in governance
-    assert "actions/checkout" not in governance.split("Bootstrap initial governance", 1)[1]
+    assert "pull_request_target:" in workflow
+    assert "\n  pull_request:\n" not in workflow
+    assert "github.event.pull_request.base.sha" in workflow
+    assert "persist-credentials: false" in workflow
+    assert "pull_request.head.sha" not in workflow
+    assert "TRUSTED_BOOTSTRAP_BASE_SHA" not in workflow
+    assert "Bootstrap initial governance" not in workflow
 
 
 def test_ceo_instructions_require_backups_until_mirroring_is_enabled() -> None:

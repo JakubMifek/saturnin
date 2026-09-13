@@ -6,13 +6,10 @@ name: ci
 on:
   push:
   pull_request:
-  pull_request_review:
-    types: [submitted, dismissed]
   workflow_dispatch:
 
 permissions:
   contents: read
-  pull-requests: read
 
 jobs:
   test:
@@ -32,105 +29,3 @@ jobs:
         run: saturnin docs render --check
       - name: Shell syntax
         run: bash -n automation/library/*.sh scripts/*.sh
-
-  governance:
-    runs-on: ubuntu-latest
-    steps:
-      - name: Check out trusted governance code
-        uses: actions/checkout@v4
-        with:
-          ref: ${{ (github.event_name == 'pull_request' || github.event_name == 'pull_request_review') && github.event.pull_request.base.sha || github.sha }}
-      - name: Select trusted governance source
-        id: governance-source
-        env:
-          BASE_SHA: ${{ github.event.pull_request.base.sha }}
-          TRUSTED_BOOTSTRAP_BASE_SHA: 8c650822ab4b39613db67302c87e17f6f106c4ae
-        run: |
-          if [[ -f pyproject.toml && -x automation/library/review_gate.sh ]]; then
-            echo "mode=base" >> "$GITHUB_OUTPUT"
-          elif [[ "$BASE_SHA" == "$TRUSTED_BOOTSTRAP_BASE_SHA" ]]; then
-            echo "mode=bootstrap" >> "$GITHUB_OUTPUT"
-          else
-            echo "Base revision has no trusted Saturnin governance implementation." >&2
-            exit 2
-          fi
-      - uses: actions/setup-python@v5
-        with:
-          python-version: "3.12"
-      - name: Install base governance
-        if: steps.governance-source.outputs.mode == 'base'
-        run: python -m pip install -e ".[dev]"
-      - name: PR head must be a feature branch (rules 1 and 2)
-        if: (github.event_name == 'pull_request' || github.event_name == 'pull_request_review') && steps.governance-source.outputs.mode == 'base'
-        env:
-          HEAD_REF: ${{ github.event.pull_request.head.ref }}
-        run: saturnin check branch "$HEAD_REF"
-      - name: Independent review gate (rule 3)
-        if: (github.event_name == 'pull_request' || github.event_name == 'pull_request_review') && steps.governance-source.outputs.mode == 'base'
-        env:
-          GITHUB_TOKEN: ${{ github.token }}
-        run: automation/library/review_gate.sh pr "${{ github.event.pull_request.base.repo.full_name }}#${{ github.event.pull_request.number }}" "${{ github.event.pull_request.base.repo.full_name }}"
-      - name: Bootstrap initial governance
-        if: (github.event_name == 'pull_request' || github.event_name == 'pull_request_review') && steps.governance-source.outputs.mode == 'bootstrap'
-        env:
-          GITHUB_TOKEN: ${{ github.token }}
-          HEAD_REF: ${{ github.event.pull_request.head.ref }}
-          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
-          PR_AUTHOR: ${{ github.event.pull_request.user.login }}
-          PR_NUMBER: ${{ github.event.pull_request.number }}
-          REPOSITORY: ${{ github.event.pull_request.base.repo.full_name }}
-        run: |
-          python - <<'PY'
-          import json
-          import os
-          import re
-          import urllib.request
-
-          branch = os.environ["HEAD_REF"]
-          pattern = r"^(feature|fix|chore|docs|automation|experiment)/[a-z0-9._-]+$"
-          if not re.fullmatch(pattern, branch):
-              raise SystemExit(f"PR head is not an allowed feature branch: {branch}")
-
-          repo = os.environ["REPOSITORY"]
-          number = os.environ["PR_NUMBER"]
-          head_sha = os.environ["HEAD_SHA"]
-          author = os.environ["PR_AUTHOR"].casefold()
-          allowed_reviewer = "copilot-pull-request-reviewer[bot]"
-          token = os.environ["GITHUB_TOKEN"]
-          headers = {
-              "Accept": "application/vnd.github+json",
-              "Authorization": "token " + token,
-              "User-Agent": "saturnin-bootstrap-review-gate",
-          }
-          latest = {}
-          for page in range(1, 11):
-              request = urllib.request.Request(
-                  f"https://api.github.com/repos/{repo}/pulls/{number}/reviews"
-                  f"?per_page=100&page={page}",
-                  headers=headers,
-              )
-              with urllib.request.urlopen(request, timeout=30) as response:
-                  reviews = json.load(response)
-              if not reviews:
-                  break
-              for review in reviews:
-                  user = review.get("user") or {}
-                  login = str(user.get("login", "")).casefold()
-                  state = str(review.get("state", "")).casefold()
-                  if (
-                      review.get("commit_id") == head_sha
-                      and user.get("type") == "Bot"
-                      and login == allowed_reviewer
-                      and login != author
-                      and state
-                      in {"approved", "changes_requested", "rejected", "dismissed"}
-                  ):
-                      latest[login] = state
-
-          states = set(latest.values())
-          if states & {"changes_requested", "rejected", "dismissed"}:
-              raise SystemExit("Independent review has an outstanding blocking verdict.")
-          if "approved" not in states:
-              raise SystemExit("Current head has no independent Copilot approval.")
-          print("Initial governance bootstrap gate passed.")
-          PY

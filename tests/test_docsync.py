@@ -85,3 +85,33 @@ def test_audit_reports_malformed_generated_blocks(
     assert problem in errors[0]
     assert main(["--home", str(docs_home.root), "doctor"]) == 2
     assert problem in capsys.readouterr().out
+
+
+def test_audit_rejects_paired_markers_without_required_newlines(
+    docs_home: Config, capsys: pytest.CaptureFixture[str]
+) -> None:
+    path = docs_home.root / "docs" / "bad.md"
+    path.write_text(
+        "<!-- generated:rules -->stale<!-- /generated:rules -->",
+        encoding="utf-8",
+    )
+
+    errors = docsync.audit(docs_home)
+
+    assert len(errors) == 1
+    assert "required newline-delimited grammar" in errors[0]
+    assert main(["--home", str(docs_home.root), "doctor"]) == 2
+    assert "required newline-delimited grammar" in capsys.readouterr().out
+
+
+def test_audit_detects_malformed_marker_candidates(docs_home: Config) -> None:
+    path = docs_home.root / "docs" / "bad.md"
+    path.write_text(
+        "<!-- generated:rules-->\nstale\n<!-- /generated:rules -->",
+        encoding="utf-8",
+    )
+
+    errors = docsync.audit(docs_home)
+
+    assert any("malformed generated marker" in error for error in errors)
+    assert any("has no opening marker" in error for error in errors)

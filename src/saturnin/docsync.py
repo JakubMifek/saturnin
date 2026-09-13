@@ -22,10 +22,11 @@ from .config import Config, default_config
 
 MARKER = re.compile(
     r"(?P<open><!-- generated:(?P<name>[a-z-]+) -->\n)(?P<body>.*?)"
-    r"(?P<close><!-- /generated:(?P=name) -->)",
+    r"\n(?P<close><!-- /generated:(?P=name) -->)",
     re.DOTALL,
 )
 MARKER_TOKEN = re.compile(r"<!-- (?P<close>/?)generated:(?P<name>[a-z-]+) -->")
+MARKER_CANDIDATE = re.compile(r"<!--\s*/?generated:[a-z-]+")
 
 
 class GeneratedBlockError(ValueError):
@@ -110,8 +111,15 @@ def render_text(text: str, config: Config) -> str:
 
 def _marker_problems(text: str, path: Path) -> list[str]:
     problems: list[str] = []
-    opened: tuple[str, int] | None = None
-    for token in MARKER_TOKEN.finditer(text):
+    tokens = list(MARKER_TOKEN.finditer(text))
+    token_starts = {token.start() for token in tokens}
+    for candidate in MARKER_CANDIDATE.finditer(text):
+        if candidate.start() not in token_starts:
+            line = text.count("\n", 0, candidate.start()) + 1
+            problems.append(f"{path}:{line}: malformed generated marker")
+
+    opened: tuple[str, int, int] | None = None
+    for token in tokens:
         name = token.group("name")
         line = text.count("\n", 0, token.start()) + 1
         if not token.group("close"):
@@ -121,7 +129,7 @@ def _marker_problems(text: str, path: Path) -> list[str]:
                     f"{opened[0]!r} is closed"
                 )
             else:
-                opened = (name, line)
+                opened = (name, line, token.start())
         elif opened is None:
             problems.append(
                 f"{path}:{line}: generated block {name!r} has no opening marker"
@@ -132,6 +140,12 @@ def _marker_problems(text: str, path: Path) -> list[str]:
             )
             opened = None
         else:
+            block = text[opened[2] : token.end()]
+            if MARKER.fullmatch(block) is None:
+                problems.append(
+                    f"{path}:{opened[1]}: generated block {name!r} does not match "
+                    "the required newline-delimited grammar"
+                )
             opened = None
     if opened is not None:
         problems.append(
@@ -148,7 +162,7 @@ def documents(config: Config) -> list[Path]:
         if not root.is_dir():
             continue
         for path in sorted(root.rglob("*.md") if root.name == "docs" else root.glob("*.md")):
-            if MARKER_TOKEN.search(path.read_text(encoding="utf-8")):
+            if MARKER_CANDIDATE.search(path.read_text(encoding="utf-8")):
                 found.append(path)
     return found
 
