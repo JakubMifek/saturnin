@@ -27,13 +27,9 @@ problem is not the copy, it is the *unverified* copy.
 Every fact lives in exactly one policy file. Where a document repeats it, the
 repetition is **generated**, not typed:
 
-```markdown
-<!-- generated:NAME -->
-...regenerated from the policy; never edit by hand...
-<!-- /generated:NAME -->
-```
-
-(with `NAME` one of the generators below - the real markers are lowercase)
+An opening marker (`<!-- generated` + `:NAME -->`) and matching closing marker
+surround the policy-rendered content. `NAME` is one of the lowercase generators
+below.
 
 - `saturnin docs render` rewrites every generated block.
 - `saturnin docs render --check` exits 2 when a block is stale; `saturnin doctor`

@@ -214,9 +214,9 @@ def test_governed_push_uses_remote_repo_and_destination_branch(
         calls.append(args)
         if args[1:3] == ["symbolic-ref", "--quiet"]:
             return subprocess.CompletedProcess(args, 0, "feature/safe\n", "")
-        if args[1:3] == ["remote", "get-url"]:
+        if args[1:] == ["remote", "get-url", "--push", "--all", "origin"]:
             return subprocess.CompletedProcess(
-                args, 0, "git@github.com:JakubMifek/saturnin.git\n", ""
+                args, 0, "http://localhost:26831/JakubMifek/saturnin\n", ""
             )
         return subprocess.CompletedProcess(args, 0, "", "")
 
@@ -226,6 +226,7 @@ def test_governed_push_uses_remote_repo_and_destination_branch(
     assert calls[-1] == [
         "git",
         "push",
+        "--",
         "origin",
         "HEAD:refs/heads/feature/safe",
     ]
@@ -238,7 +239,7 @@ def test_governed_push_refuses_protected_branch_before_push(
 
     def fake_run(args, **kwargs):
         calls.append(args)
-        if args[1:3] == ["remote", "get-url"]:
+        if args[1:] == ["remote", "get-url", "--push", "--all", "origin"]:
             return subprocess.CompletedProcess(
                 args, 0, "https://github.com/JakubMifek/saturnin.git\n", ""
             )
@@ -250,6 +251,32 @@ def test_governed_push_refuses_protected_branch_before_push(
 
     assert code == 2
     assert "protected" in out
+    assert not any(call[1:2] == ["push"] for call in calls)
+
+
+def test_governed_push_authorizes_pushurl_not_fetch_url(
+    home: Path, capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    calls: list[list[str]] = []
+    fetch_url = "https://github.com/JakubMifek/saturnin.git"
+    push_url = "https://github.com/other/project.git"
+
+    def fake_run(args, **kwargs):
+        calls.append(args)
+        if args[1:] == ["remote", "get-url", "--push", "--all", "origin"]:
+            return subprocess.CompletedProcess(args, 0, push_url + "\n", "")
+        if args[1:] == ["remote", "get-url", "origin"]:
+            return subprocess.CompletedProcess(args, 0, fetch_url + "\n", "")
+        return subprocess.CompletedProcess(args, 0, "", "")
+
+    monkeypatch.setattr("saturnin.cli.subprocess.run", fake_run)
+
+    code, out = run(capsys, "push", "--branch", "feature/safe")
+
+    assert code == 2
+    assert "managed repos are not allowed" in out
+    assert ["git", "remote", "get-url", "--push", "--all", "origin"] in calls
+    assert ["git", "remote", "get-url", "origin"] not in calls
     assert not any(call[1:2] == ["push"] for call in calls)
 
 

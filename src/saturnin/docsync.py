@@ -21,12 +21,18 @@ from typing import Any, Callable
 from .config import Config, default_config
 
 MARKER = re.compile(
-    r"(?P<open><!-- generated:(?P<name>[a-z-]+) -->\n)(?P<body>.*?)"
-    r"\n(?P<close><!-- /generated:(?P=name) -->)",
-    re.DOTALL,
+    r"^(?P<open><!-- generated:(?P<name>[a-z-]+) -->)\n(?P<body>.*?)"
+    r"\n(?P<close><!-- /generated:(?P=name) -->)$",
+    re.DOTALL | re.MULTILINE,
 )
-MARKER_TOKEN = re.compile(r"<!-- (?P<close>/?)generated:(?P<name>[a-z-]+) -->")
-MARKER_CANDIDATE = re.compile(r"<!--\s*/?generated:[a-z-]+")
+MARKER_TOKEN = re.compile(
+    r"^<!-- (?P<close>/?)generated:(?P<name>[a-z-]+) -->$",
+    re.MULTILINE,
+)
+MARKER_CANDIDATE = re.compile(
+    r"<!--[ \t]*/?generated:[^\n]*(?:-->|$)",
+    re.IGNORECASE,
+)
 
 
 class GeneratedBlockError(ValueError):
@@ -104,7 +110,7 @@ def render_text(text: str, config: Config) -> str:
         generator = GENERATORS.get(name)
         if generator is None:
             raise KeyError(f"unknown generated block: {name}")
-        return match.group("open") + generator(config).rstrip() + "\n" + match.group("close")
+        return match.group("open") + "\n" + generator(config).rstrip() + "\n" + match.group("close")
 
     return MARKER.sub(replace, text)
 

@@ -8,6 +8,7 @@ stay in one place.
 from __future__ import annotations
 
 import argparse
+import ipaddress
 import json
 import re
 import subprocess
@@ -15,6 +16,7 @@ import sys
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Sequence
+from urllib.parse import urlsplit
 
 import yaml
 
@@ -620,12 +622,39 @@ def _git_output(root: Path, *args: str) -> str:
 
 
 def _github_repo_slug(remote_url: str) -> str | None:
-    match = re.fullmatch(
-        r"(?:https://github\.com/|ssh://git@github\.com/|git@github\.com:)"
-        r"(?P<slug>[^/\s]+/[^/\s]+?)(?:\.git)?/?",
-        remote_url.strip(),
+    remote_url = remote_url.strip()
+    scp = re.fullmatch(
+        r"git@github\.com:(?P<slug>[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+?)(?:\.git)?",
+        remote_url,
     )
-    return match.group("slug") if match else None
+    if scp:
+        return scp.group("slug")
+
+    try:
+        parsed = urlsplit(remote_url)
+        host = (parsed.hostname or "").casefold()
+    except ValueError:
+        return None
+    loopback = host == "localhost"
+    if not loopback:
+        try:
+            loopback = ipaddress.ip_address(host).is_loopback
+        except ValueError:
+            pass
+    if parsed.query or parsed.fragment:
+        return None
+    if host == "github.com":
+        if parsed.scheme not in {"https", "ssh"}:
+            return None
+    elif loopback:
+        if parsed.scheme not in {"http", "https"} or parsed.username or parsed.password:
+            return None
+    else:
+        return None
+    path = parsed.path.strip("/")
+    if path.endswith(".git"):
+        path = path[:-4]
+    return path if re.fullmatch(r"[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+", path) else None
 
 
 def main(argv: Sequence[str] | None = None) -> int:
@@ -702,23 +731,30 @@ def _run(args: argparse.Namespace, config: Config) -> int:  # noqa: C901 - flat 
         )
         return 0 if decision.allowed else 2
     if args.command == "push":
+        if not re.fullmatch(r"[A-Za-z0-9._-]+", args.remote):
+            raise RuntimeError(f"invalid git remote name: {args.remote!r}")
         branch = args.branch or _git_output(config.root, "symbolic-ref", "--quiet", "--short", "HEAD")
-        remote_url = _git_output(config.root, "remote", "get-url", args.remote)
-        repo = _github_repo_slug(remote_url)
-        if repo is None:
-            raise RuntimeError(
-                f"remote {args.remote!r} is not an identifiable github.com repository"
-            )
-        decision = Governance(config).push_allowed(repo=repo, branch=branch)
-        if not decision.allowed:
-            _emit(
-                {"allowed": False, "reasons": decision.reasons},
-                as_json,
-                "DENIED: " + "; ".join(decision.reasons),
-            )
-            return 2
+        push_urls = _git_output(
+            config.root, "remote", "get-url", "--push", "--all", args.remote
+        ).splitlines()
+        if not push_urls:
+            raise RuntimeError(f"remote {args.remote!r} has no push destination")
+        for remote_url in push_urls:
+            repo = _github_repo_slug(remote_url)
+            if repo is None:
+                raise RuntimeError(
+                    f"remote {args.remote!r} has an unrecognized push destination"
+                )
+            decision = Governance(config).push_allowed(repo=repo, branch=branch)
+            if not decision.allowed:
+                _emit(
+                    {"allowed": False, "reasons": decision.reasons},
+                    as_json,
+                    "DENIED: " + "; ".join(decision.reasons),
+                )
+                return 2
         result = subprocess.run(
-            ["git", "push", args.remote, f"HEAD:refs/heads/{branch}"],
+            ["git", "push", "--", args.remote, f"HEAD:refs/heads/{branch}"],
             cwd=config.root,
             check=False,
         )

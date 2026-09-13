@@ -99,9 +99,9 @@ def test_audit_rejects_paired_markers_without_required_newlines(
     errors = docsync.audit(docs_home)
 
     assert len(errors) == 1
-    assert "required newline-delimited grammar" in errors[0]
+    assert "malformed generated marker" in errors[0]
     assert main(["--home", str(docs_home.root), "doctor"]) == 2
-    assert "required newline-delimited grammar" in capsys.readouterr().out
+    assert "malformed generated marker" in capsys.readouterr().out
 
 
 def test_audit_detects_malformed_marker_candidates(docs_home: Config) -> None:
@@ -115,3 +115,22 @@ def test_audit_detects_malformed_marker_candidates(docs_home: Config) -> None:
 
     assert any("malformed generated marker" in error for error in errors)
     assert any("has no opening marker" in error for error in errors)
+
+
+@pytest.mark.parametrize(
+    "content",
+    [
+        "<!-- generated: -->\nstale\n<!-- /generated: -->",
+        "prefix <!-- generated:rules -->\nstale\n<!-- /generated:rules --> suffix",
+        "<!-- generated:RULES -->\nstale\n<!-- /generated:RULES -->",
+    ],
+)
+def test_audit_rejects_empty_nonlowercase_or_embedded_markers(
+    docs_home: Config, content: str
+) -> None:
+    (docs_home.root / "docs" / "bad.md").write_text(content, encoding="utf-8")
+
+    errors = docsync.audit(docs_home)
+
+    assert errors
+    assert all("malformed generated marker" in error for error in errors)
