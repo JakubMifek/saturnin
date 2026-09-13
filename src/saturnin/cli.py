@@ -634,6 +634,7 @@ def _github_repo_slug(
     try:
         parsed = urlsplit(remote_url)
         host = (parsed.hostname or "").casefold()
+        port = parsed.port
     except ValueError:
         return None
     if parsed.query or parsed.fragment:
@@ -641,7 +642,7 @@ def _github_repo_slug(
     if host == "github.com":
         if parsed.scheme not in {"https", "ssh"}:
             return None
-    elif f"{host}:{parsed.port}" in {value.casefold() for value in trusted_proxy_hosts}:
+    elif f"{host}:{port}" in {value.casefold() for value in trusted_proxy_hosts}:
         if parsed.scheme not in {"http", "https"} or parsed.username or parsed.password:
             return None
     else:

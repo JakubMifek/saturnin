@@ -269,10 +269,11 @@ def test_governed_push_rejects_unconfigured_loopback_proxy(
 
     monkeypatch.setattr("saturnin.cli.subprocess.run", fake_run)
 
-    code, out = run(capsys, "push", "--branch", "feature/safe")
+    code = main(["push", "--branch", "feature/safe"])
+    error = capsys.readouterr().err
 
     assert code == 1
-    assert "unrecognized push destination" in out
+    assert "unrecognized push destination" in error
     assert not any(call[1:2] == ["push"] for call in calls)
 
 
