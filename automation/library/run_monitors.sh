@@ -73,7 +73,9 @@ print(f"{pathlib.Path(path).name}-{hashlib.sha256(path.encode()).hexdigest()[:12
   results="${RESULTS_DIR}/${repo_key}.jsonl"
   if [[ -z "$repo_slug" ]]; then
     log "$app is not registered as a managed discovery source; refusing to create incidents"
-    exit_code=1
+    if (( exit_code == 0 )); then
+      exit_code=1
+    fi
     continue
   fi
 
@@ -97,15 +99,20 @@ print(monitor["name"], monitor["url"], monitor.get("expect_status", 200),
 import ipaddress, socket, sys
 from urllib.parse import urlsplit
 url = sys.argv[1]
-parts = urlsplit(url)
+try:
+    parts = urlsplit(url)
+    hostname = parts.hostname
+except ValueError as exc:
+    print(f"ERR\tinvalid URL: {exc}")
+    raise SystemExit
 if parts.scheme not in {"http", "https"}:
     print("ERR\tunsupported scheme")
-elif not parts.hostname:
+elif not hostname:
     print("ERR\tmissing hostname")
 elif parts.username or parts.password:
     print("ERR\tembedded credentials")
 else:
-    hostname = parts.hostname.lower()
+    hostname = hostname.lower()
     host = hostname.rstrip(".")
     if host in {"localhost", "localhost.localdomain"} or host.endswith(".localhost"):
         print("ERR\tlocal hostname")
@@ -123,10 +130,14 @@ else:
             direct = None
         if direct is not None and str(direct) != host:
             print("ERR\tnon-canonical numeric host")
+        elif direct is not None and not direct.is_global:
+            print(f"ERR\tnon-public address: {host}")
+        elif direct is not None:
+            print("OK")
         else:
             try:
                 infos = socket.getaddrinfo(host, port, type=socket.SOCK_STREAM)
-            except socket.gaierror as exc:
+            except (socket.gaierror, UnicodeError) as exc:
                 print(f"ERR\tcannot resolve hostname: {exc}")
                 raise SystemExit
             addresses = []
@@ -143,12 +154,13 @@ else:
                 print(f"ERR\tnon-public address: {blocked[0]}")
             else:
                 chosen = addresses[0]
-                resolved = f"[{chosen}]" if ":" in chosen else chosen
+                resolved = f"[{chosen}]" if ipaddress.ip_address(chosen).version == 6 else chosen
                 print(f"OK\t{host}:{port}:{resolved}")
 ' "$url")"
     IFS=$'\t' read -r url_status url_detail <<< "$url_check"
     if [[ "$url_status" != "OK" ]]; then
       log "$app/$name has unsupported monitor URL: $url"
+      exit_code=78
       continue
     fi
 

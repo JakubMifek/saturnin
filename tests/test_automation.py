@@ -19,6 +19,32 @@ def _register_monitor_repo(config: Config, repo, slug: str = "owner/managed-app"
     path.write_text(yaml.safe_dump(policy), encoding="utf-8")
 
 
+def _monitor_env_with_dns(
+    config: Config, fake_bin, hostname: str, address: str
+) -> dict[str, str]:
+    family = "AF_INET6" if ":" in address else "AF_INET"
+    socket_address = (
+        f"({address!r}, port, 0, 0)"
+        if family == "AF_INET6"
+        else f"({address!r}, port)"
+    )
+    (config.root / "sitecustomize.py").write_text(
+        "import socket\n"
+        "_getaddrinfo = socket.getaddrinfo\n"
+        "def getaddrinfo(host, port, *args, **kwargs):\n"
+        f"    if host == {hostname!r}:\n"
+        f"        return [(socket.{family}, socket.SOCK_STREAM, 6, '', {socket_address})]\n"
+        "    return _getaddrinfo(host, port, *args, **kwargs)\n"
+        "socket.getaddrinfo = getaddrinfo\n",
+        encoding="utf-8",
+    )
+    return {
+        **os.environ,
+        "PATH": f"{fake_bin}:{os.environ['PATH']}",
+        "PYTHONPATH": str(config.root),
+    }
+
+
 def test_registry_files_exist(config: Config) -> None:
     library = AutomationLibrary(config)
     assert library.list()
@@ -294,12 +320,12 @@ def test_monitors_validate_manifest_name_and_url_before_curl(config: Config) -> 
 
     result = subprocess.run(
         ["bash", str(config.root / "automation/library/run_monitors.sh"), str(repo)],
-        check=True,
         capture_output=True,
         text=True,
         env={**os.environ, "PATH": f"{fake_bin}:{os.environ['PATH']}"},
     )
 
+    assert result.returncode == 78
     assert "unsafe name" in result.stdout
     assert "unsupported monitor URL" in result.stdout
     assert not list((config.root / "var" / "monitors").glob("*escape*"))
@@ -308,6 +334,143 @@ def test_monitors_validate_manifest_name_and_url_before_curl(config: Config) -> 
         encoding="utf-8"
     )
     assert "-q -sS --noproxy '*'" in script
+
+
+def test_monitors_build_ipv4_resolve_entry(config: Config) -> None:
+    repo = config.root / "managed-app"
+    (repo / ".saturnin").mkdir(parents=True)
+    (repo / ".saturnin" / "repo.yaml").write_text(
+        "monitors:\n"
+        "  - name: ipv4\n"
+        "    url: https://ipv4.example/health\n",
+        encoding="utf-8",
+    )
+    _register_monitor_repo(config, repo)
+    args_log = config.root / "curl-args"
+    fake_bin = config.root / "fake-bin"
+    fake_bin.mkdir()
+    curl = fake_bin / "curl"
+    curl.write_text(
+        f"#!/bin/sh\nprintf '%s\\n' \"$@\" > {args_log}\nprintf 200\n",
+        encoding="utf-8",
+    )
+    curl.chmod(0o755)
+
+    result = subprocess.run(
+        ["bash", str(config.root / "automation/library/run_monitors.sh"), str(repo)],
+        capture_output=True,
+        text=True,
+        env=_monitor_env_with_dns(
+            config, fake_bin, "ipv4.example", "93.184.216.34"
+        ),
+    )
+
+    assert result.returncode == 0
+    assert "ipv4.example:443:93.184.216.34" in args_log.read_text(
+        encoding="utf-8"
+    ).splitlines()
+
+
+def test_monitors_bracket_ipv6_literals_in_resolve_entry(config: Config) -> None:
+    repo = config.root / "managed-app"
+    (repo / ".saturnin").mkdir(parents=True)
+    (repo / ".saturnin" / "repo.yaml").write_text(
+        "monitors:\n"
+        "  - name: ipv6\n"
+        "    url: https://ipv6.example/health\n",
+        encoding="utf-8",
+    )
+    _register_monitor_repo(config, repo)
+    args_log = config.root / "curl-args"
+    fake_bin = config.root / "fake-bin"
+    fake_bin.mkdir()
+    curl = fake_bin / "curl"
+    curl.write_text(
+        f"#!/bin/sh\nprintf '%s\\n' \"$@\" > {args_log}\nprintf 200\n",
+        encoding="utf-8",
+    )
+    curl.chmod(0o755)
+
+    result = subprocess.run(
+        ["bash", str(config.root / "automation/library/run_monitors.sh"), str(repo)],
+        capture_output=True,
+        text=True,
+        env=_monitor_env_with_dns(
+            config, fake_bin, "ipv6.example", "2606:4700:4700::1111"
+        ),
+    )
+
+    assert result.returncode == 0
+    assert "ipv6.example:443:[2606:4700:4700::1111]" in (
+        args_log.read_text(encoding="utf-8").splitlines()
+    )
+
+
+def test_monitors_return_configuration_error_for_invalid_only_manifest(
+    config: Config,
+) -> None:
+    repo = config.root / "managed-app"
+    (repo / ".saturnin").mkdir(parents=True)
+    (repo / ".saturnin" / "repo.yaml").write_text(
+        "monitors:\n"
+        "  - name: invalid\n"
+        "    url: file:///etc/passwd\n",
+        encoding="utf-8",
+    )
+    _register_monitor_repo(config, repo)
+    curl_marker = config.root / "curl-called"
+    fake_bin = config.root / "fake-bin"
+    fake_bin.mkdir()
+    curl = fake_bin / "curl"
+    curl.write_text(f"#!/bin/sh\nprintf called > {curl_marker}\n", encoding="utf-8")
+    curl.chmod(0o755)
+
+    result = subprocess.run(
+        ["bash", str(config.root / "automation/library/run_monitors.sh"), str(repo)],
+        capture_output=True,
+        text=True,
+        env={**os.environ, "PATH": f"{fake_bin}:{os.environ['PATH']}"},
+    )
+
+    assert result.returncode == 78
+    assert "unsupported monitor URL" in result.stdout
+    assert not curl_marker.exists()
+
+
+def test_monitors_continue_valid_entries_after_invalid_url(config: Config) -> None:
+    repo = config.root / "managed-app"
+    (repo / ".saturnin").mkdir(parents=True)
+    (repo / ".saturnin" / "repo.yaml").write_text(
+        "monitors:\n"
+        "  - name: invalid\n"
+        f"    url: https://{'a' * 64}.example/health\n"
+        "  - name: valid\n"
+        "    url: https://93.184.216.34/health\n",
+        encoding="utf-8",
+    )
+    _register_monitor_repo(config, repo)
+    args_log = config.root / "curl-args"
+    fake_bin = config.root / "fake-bin"
+    fake_bin.mkdir()
+    curl = fake_bin / "curl"
+    curl.write_text(
+        f"#!/bin/sh\nprintf '%s\\n' \"$@\" >> {args_log}\nprintf 200\n",
+        encoding="utf-8",
+    )
+    curl.chmod(0o755)
+
+    result = subprocess.run(
+        ["bash", str(config.root / "automation/library/run_monitors.sh"), str(repo)],
+        capture_output=True,
+        text=True,
+        env={**os.environ, "PATH": f"{fake_bin}:{os.environ['PATH']}"},
+    )
+
+    assert result.returncode == 78
+    assert "managed-app/valid ok (200)" in result.stdout
+    assert "https://93.184.216.34/health" in args_log.read_text(
+        encoding="utf-8"
+    ).splitlines()
 
 
 def test_result_poller_is_executable_for_systemd(config: Config) -> None:
