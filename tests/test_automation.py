@@ -73,7 +73,7 @@ def test_monitors_use_project_virtualenv_python(config: Config) -> None:
     (repo / ".saturnin" / "repo.yaml").write_text(
         "monitors:\n"
         "  - name: health\n"
-        "    url: https://example.test/health\n"
+        "    url: https://93.184.216.34/health\n"
         "    expect_status: 200\n",
         encoding="utf-8",
     )
@@ -121,7 +121,7 @@ def test_monitor_recovery_closes_recorded_incident_task(config: Config, board: B
     (repo / ".saturnin" / "repo.yaml").write_text(
         "monitors:\n"
         "  - name: health\n"
-        "    url: https://example.test/health\n"
+        "    url: https://93.184.216.34/health\n"
         "    expect_status: 200\n",
         encoding="utf-8",
     )
@@ -161,7 +161,7 @@ def test_monitor_recreates_missing_incident_marker_before_escalating(config: Con
     (repo / ".saturnin" / "repo.yaml").write_text(
         "monitors:\n"
         "  - name: health\n"
-        "    url: https://example.test/health\n"
+        "    url: https://93.184.216.34/health\n"
         "    expect_status: 200\n",
         encoding="utf-8",
     )
@@ -211,7 +211,7 @@ def test_monitor_replaces_terminal_incident_marker_before_escalating(config: Con
     (repo / ".saturnin" / "repo.yaml").write_text(
         "monitors:\n"
         "  - name: health\n"
-        "    url: https://example.test/health\n"
+        "    url: https://93.184.216.34/health\n"
         "    expect_status: 200\n",
         encoding="utf-8",
     )
@@ -263,7 +263,7 @@ def test_monitors_validate_manifest_name_and_url_before_curl(config: Config) -> 
     (repo / ".saturnin" / "repo.yaml").write_text(
         "monitors:\n"
         "  - name: ../escape\n"
-        "    url: https://example.test/health\n"
+        "    url: https://93.184.216.34/health\n"
         "  - name: option-url\n"
         "    url: --config=/tmp/curlrc\n"
         "  - name: loopback\n"
@@ -273,7 +273,7 @@ def test_monitors_validate_manifest_name_and_url_before_curl(config: Config) -> 
         "  - name: metadata\n"
         "    url: http://169.254.169.254/latest/meta-data/\n"
         "  - name: credentials\n"
-        "    url: http://user@example.test/health\n"
+        "    url: http://user@93.184.216.34/health\n"
         "  - name: missing-host\n"
         "    url: https:///health\n",
         encoding="utf-8",
@@ -307,7 +307,7 @@ def test_monitor_state_is_namespaced_by_repository_path(config: Config) -> None:
         (repo / ".saturnin" / "repo.yaml").write_text(
             "monitors:\n"
             "  - name: health\n"
-            "    url: https://example.test/health\n",
+            "    url: https://93.184.216.34/health\n",
             encoding="utf-8",
         )
         _register_monitor_repo(config, repo, f"owner/{repo.parent.name}-managed-app")
@@ -341,7 +341,7 @@ def test_monitors_fail_closed_for_an_unregistered_checkout(config: Config) -> No
     (repo / ".saturnin" / "repo.yaml").write_text(
         "monitors:\n"
         "  - name: health\n"
-        "    url: https://example.test/health\n",
+        "    url: https://93.184.216.34/health\n",
         encoding="utf-8",
     )
     fake_bin = config.root / "fake-bin"

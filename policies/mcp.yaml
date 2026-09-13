@@ -55,6 +55,7 @@ launcher:
   # launch is enabled per host once copilot/npx/uvx are installed.
   enabled: false
   command: copilot
+  failure_grace_seconds: 1.0
   args:
     - --autopilot
     - --no-ask-user

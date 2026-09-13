@@ -76,6 +76,9 @@ def test_ci_governance_uses_base_controlled_workflow_and_code() -> None:
     assert "TRUSTED_BOOTSTRAP_BASE_SHA" not in workflow
     assert "Detect initial governance bootstrap" in workflow
     assert "steps.bootstrap.outputs.initial != 'true'" in workflow
+    assert "Repository-native bootstrap approval" in workflow
+    assert "listReviews" in workflow
+    assert "review.user.login !== author" in workflow
 
 
 def test_public_task_template_matches_discovery_source_labels() -> None:

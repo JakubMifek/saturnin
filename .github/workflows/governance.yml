@@ -32,6 +32,31 @@ jobs:
           else
             echo "initial=false" >> "$GITHUB_OUTPUT"
           fi
+      - name: Repository-native bootstrap approval
+        if: steps.bootstrap.outputs.initial == 'true'
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const {owner, repo} = context.repo;
+            const pull_number = context.payload.pull_request.number;
+            const author = context.payload.pull_request.user.login;
+            const {data: reviews} = await github.rest.pulls.listReviews({
+              owner,
+              repo,
+              pull_number,
+              per_page: 100,
+            });
+            const latest = new Map();
+            for (const review of reviews) {
+              if (review.user.login !== author) {
+                latest.set(review.user.login, review.state);
+              }
+            }
+            if (![...latest.values()].includes("APPROVED")) {
+              core.setFailed(
+                "Initial governance bootstrap requires a repository-native approval from someone other than the PR author."
+              );
+            }
       - uses: actions/setup-python@v5
         if: steps.bootstrap.outputs.initial != 'true'
         with:

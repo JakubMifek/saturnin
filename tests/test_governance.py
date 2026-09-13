@@ -889,6 +889,8 @@ def test_git_write_bearing_options_are_write_targets(
         "git fetch origin main",
         "git pull origin main",
         "git push origin HEAD:main",
+        "git remote update",
+        "git remote show origin",
         "git clone --upload-pack=/bin/sh https://example.test/repo.git repo",
         "git push --receive-pack=/bin/sh origin HEAD",
     ],
@@ -899,7 +901,7 @@ def test_git_network_subcommands_require_governed_wrappers(
     decision = governance.check_server_command(command)
 
     assert not decision.allowed
-    assert "dedicated governed wrapper" in decision.reasons[0]
+    assert "governed wrapper" in decision.reasons[0]
 
 
 @pytest.mark.parametrize(

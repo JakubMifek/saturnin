@@ -743,6 +743,8 @@ def _git_targets(arguments: Sequence[str]) -> list[str]:
             f"unsupported git subcommand {subcommand!r}; executable dispatch is not allowed"
         )
     subcommand_arguments = arguments[subcommand_index + 1 :]
+    if subcommand == "remote":
+        _check_git_remote_subcommand(subcommand_arguments)
     targets.extend(_git_write_option_targets(subcommand, subcommand_arguments))
     operands = _positional_arguments(subcommand_arguments)
     if subcommand == "init" and operands:
@@ -750,6 +752,20 @@ def _git_targets(arguments: Sequence[str]) -> list[str]:
     elif subcommand == "worktree" and subcommand_arguments[:1] == ["add"]:
         targets.append(_git_worktree_add_target(subcommand_arguments[1:]))
     return targets
+
+
+def _check_git_remote_subcommand(arguments: Sequence[str]) -> None:
+    for argument in arguments:
+        if argument == "--":
+            break
+        if argument.startswith("-"):
+            continue
+        if argument not in {"get-url"}:
+            raise _WriteScopeError(
+                f"git remote {argument} is unsupported; network/config mutations "
+                "require a dedicated governed wrapper"
+            )
+        return
 
 
 def _git_write_option_targets(subcommand: str, arguments: Sequence[str]) -> list[str]:

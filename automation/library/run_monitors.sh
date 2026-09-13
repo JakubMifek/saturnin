@@ -93,46 +93,72 @@ print(monitor["name"], monitor["url"], monitor.get("expect_status", 200),
       log "$app monitor has unsafe name: $name"
       continue
     fi
-    url_problem="$("$PYTHON" -c '
-import ipaddress, sys
+    url_check="$("$PYTHON" -c '
+import ipaddress, socket, sys
 from urllib.parse import urlsplit
 url = sys.argv[1]
 parts = urlsplit(url)
 if parts.scheme not in {"http", "https"}:
-    print("unsupported scheme")
+    print("ERR\tunsupported scheme")
 elif not parts.hostname:
-    print("missing hostname")
+    print("ERR\tmissing hostname")
 elif parts.username or parts.password:
-    print("embedded credentials")
+    print("ERR\tembedded credentials")
 else:
     host = parts.hostname.rstrip(".").lower()
     if host in {"localhost", "localhost.localdomain"} or host.endswith(".localhost"):
-        print("local hostname")
+        print("ERR\tlocal hostname")
     else:
+        port = parts.port or (443 if parts.scheme == "https" else 80)
         try:
-            address = ipaddress.ip_address(host)
+            direct = ipaddress.ip_address(host)
         except ValueError:
-            print("")
+            direct = None
+        if direct is not None and str(direct) != host:
+            print("ERR\tnon-canonical numeric host")
         else:
-            if (
-                address.is_private
-                or address.is_loopback
-                or address.is_link_local
-                or address.is_reserved
-                or address.is_multicast
-                or address.is_unspecified
-            ):
-                print("non-public address")
+            try:
+                infos = socket.getaddrinfo(host, port, type=socket.SOCK_STREAM)
+            except socket.gaierror as exc:
+                print(f"ERR\tcannot resolve hostname: {exc}")
+                raise SystemExit
+            addresses = []
+            for info in infos:
+                address = info[4][0]
+                if address not in addresses:
+                    addresses.append(address)
+            blocked = []
+            for value in addresses:
+                address = ipaddress.ip_address(value)
+                if (
+                    address.is_private
+                    or address.is_loopback
+                    or address.is_link_local
+                    or address.is_reserved
+                    or address.is_multicast
+                    or address.is_unspecified
+                ):
+                    blocked.append(value)
+            if blocked:
+                print(f"ERR\tnon-public address: {blocked[0]}")
             else:
-                print("")
+                chosen = addresses[0]
+                resolved = f"[{chosen}]" if ":" in chosen else chosen
+                print(f"OK\t{host}:{port}:{resolved}")
 ' "$url")"
-    if [[ -n "$url_problem" ]]; then
+    IFS=$'\t' read -r url_status url_detail <<< "$url_check"
+    if [[ "$url_status" != "OK" ]]; then
       log "$app/$name has unsupported monitor URL: $url"
       continue
     fi
 
     started="$(date -Is)"
-    if ! code="$(curl -sS -o /dev/null -w '%{http_code}' --max-time "$timeout" -- "$url" 2>/dev/null)"; then
+    curl_args=(-sS -o /dev/null -w '%{http_code}' --max-time "$timeout")
+    if [[ -n "$url_detail" ]]; then
+      curl_args+=(--resolve "$url_detail")
+    fi
+    curl_args+=(-- "$url")
+    if ! code="$(curl "${curl_args[@]}" 2>/dev/null)"; then
       code=000
     fi
     if [[ "$code" == "$expect" ]]; then
