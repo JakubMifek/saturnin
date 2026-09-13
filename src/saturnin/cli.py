@@ -42,6 +42,7 @@ from .review import (
     ReviewError,
     ReviewLedger,
     issue_content_digest,
+    review_attestation_signing_key,
     sign_review_attestation,
 )
 from .routing import Router, RoutingError
@@ -476,13 +477,22 @@ def _parse_pr_subject(subject: str, *, repo: str | None = None) -> tuple[str, st
     return subject_repo, number
 
 
-def _review_attestation_key(config: Config) -> str:
+def _review_attestation_key(config: Config, reviewer: str) -> str:
     settings = config.governance.get("review", {}).get("attestation", {})
     env_name = str(settings.get("key_env", "SATURNIN_REVIEW_ATTESTATION_KEY"))
-    key = os.environ.get(env_name, "")
-    if not key:
-        raise ReviewError(f"review attestation key is not configured in {env_name}")
-    return key
+    role_env = str(settings.get("role_env", "SATURNIN_AGENT_ROLE"))
+    current_role = os.environ.get(role_env, "").strip().lower()
+    reviewer_name = reviewer.strip().lower()
+    if current_role and current_role != reviewer_name:
+        raise ReviewError(
+            f"{role_env}={current_role} may not sign as reviewer {reviewer_name}"
+        )
+    try:
+        return review_attestation_signing_key(config, reviewer_name)
+    except ReviewError as exc:
+        if f"not configured in {env_name}" in str(exc):
+            raise
+        raise ReviewError(f"review attestation key is not configured in {env_name}") from exc
 
 
 def _read_attestation_arg(value: str) -> str:
@@ -1270,7 +1280,7 @@ def _run_review(args: argparse.Namespace, config: Config, as_json: bool) -> int:
     ledger = ReviewLedger(config)
     if args.review_command == "attest":
         attestation = sign_review_attestation(
-            key=_review_attestation_key(config),
+            key=_review_attestation_key(config, args.reviewer),
             subject=args.subject,
             kind=args.kind,
             author=args.author,

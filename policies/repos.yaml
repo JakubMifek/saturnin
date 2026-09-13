@@ -13,8 +13,8 @@ repos:
     visibility: public
     autonomous_merge: true
 
-  # System of record for work. Every board task is mirrored here as an issue,
-  # so nothing is lost if the local var/ and board/ directories disappear.
+  # Target system of record after optional mirroring is enabled. Until then,
+  # the local board plus configured backups are authoritative.
   # Mirroring to this repo bypasses the issue-review gate (rule 5) by design:
   # it is an automated durability mechanism, not a human filing an issue.
   board:

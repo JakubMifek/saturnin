@@ -23,6 +23,7 @@ from .contracts import (
     project_agent_path,
 )
 from .mcp import MCPError, server_process, verify_github_binary
+from .review import role_scoped_review_attestation_key
 
 
 class LauncherError(RuntimeError):
@@ -275,8 +276,30 @@ class AgentLauncher:
         environment["XDG_DATA_HOME"] = str(home / ".local" / "share")
         environment["SATURNIN_HOME"] = str(trusted_config.root)
         environment["SATURNIN_WORKTREE"] = str(workdir)
+        attestation_settings = trusted_config.governance.get("review", {}).get(
+            "attestation", {}
+        )
+        key_env = str(attestation_settings.get("key_env", "SATURNIN_REVIEW_ATTESTATION_KEY"))
+        scope_env = str(
+            attestation_settings.get("key_scope_env", "SATURNIN_REVIEW_ATTESTATION_KEY_SCOPE")
+        )
+        role_env = str(attestation_settings.get("role_env", "SATURNIN_AGENT_ROLE"))
+        for protected_name in (key_env, scope_env, role_env):
+            environment.pop(protected_name, None)
+        environment[role_env] = contract.role
         source = str(config.root / "src")
         environment["PYTHONPATH"] = source
+        if contract.role in self._review_attestation_roles(trusted_config):
+            master_key = os.environ.get(key_env, "")
+            if not master_key:
+                raise LauncherError(
+                    f"reviewer role {contract.role!r} requires {key_env} in the launcher environment"
+                )
+            environment[key_env] = role_scoped_review_attestation_key(
+                master_key,
+                contract.role,
+            )
+            environment[scope_env] = "role"
         if "github" in contract.mcp:
             token_name = str(
                 self.policy.get("github_read_token_env", "SATURNIN_GITHUB_MCP_TOKEN")
@@ -285,6 +308,16 @@ class AgentLauncher:
             if token:
                 environment["GITHUB_PERSONAL_ACCESS_TOKEN"] = token
         return environment
+
+    @staticmethod
+    def _review_attestation_roles(config: Config) -> set[str]:
+        review = config.governance.get("review", {})
+        roles: set[str] = set()
+        for kind in ("pr", "issue"):
+            configured = review.get(kind, {}).get("allowed_reviewer_roles", [])
+            if isinstance(configured, list):
+                roles.update(str(role).strip().lower() for role in configured if str(role).strip())
+        return roles
 
     def _isolated_home(self, task_id: str) -> Path:
         root = self.dir / f"{task_id}.home"

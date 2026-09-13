@@ -11,6 +11,16 @@ if [[ "$(id -u)" -eq 0 ]]; then
 fi
 
 mkdir -p "$UNIT_DIR"
+mkdir -p "$SATURNIN_HOME/var/secrets"
+chmod 700 "$SATURNIN_HOME/var/secrets"
+if [[ ! -f "$SATURNIN_HOME/var/secrets/review-attestation.env" ]]; then
+  umask 077
+  python3 - <<'PY' > "$SATURNIN_HOME/var/secrets/review-attestation.env"
+import secrets
+
+print(f"SATURNIN_REVIEW_ATTESTATION_KEY={secrets.token_urlsafe(48)}")
+PY
+fi
 mapfile -t escaped_values < <(SATURNIN_HOME="$SATURNIN_HOME" python3 -c '
 import os
 value = os.environ["SATURNIN_HOME"]

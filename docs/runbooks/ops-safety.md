@@ -25,6 +25,19 @@ tail -n 50 var/logs/janitor.log
 
 Disable a misbehaving worker: `systemctl --user disable --now saturnin-<name>.timer`.
 
+## Review attestation key
+
+`scripts/bootstrap.sh` and `scripts/install_user_units.sh` create
+`var/secrets/review-attestation.env` if it is missing. Keep that file out of
+git, readable only by the Saturnin service user, and load it only into trusted
+supervisor processes. Worker launches derive a role-scoped signing key and pass
+it only to configured reviewer roles.
+
+To rotate the key, stop `saturnin-*` timers, move the old env file aside,
+re-run `scripts/bootstrap.sh`, and restart the timers. Existing ledger entries
+were signed with the old key, so close or re-record any pending reviews before
+rotation.
+
 ## Cleanup safety model
 
 The janitor is dry-run by default and refuses to remove:

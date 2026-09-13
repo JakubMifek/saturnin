@@ -72,7 +72,10 @@ review:
     # Review records are accepted only with an HMAC-signed attestation produced
     # by the reviewer execution, binding identity, subject, verdict and content.
     required: true
+    role_scoped: true
     key_env: SATURNIN_REVIEW_ATTESTATION_KEY
+    key_scope_env: SATURNIN_REVIEW_ATTESTATION_KEY_SCOPE
+    role_env: SATURNIN_AGENT_ROLE
 
 autonomy:
   # Rule 4: in this repository Saturnin may merge on its own once review passed.

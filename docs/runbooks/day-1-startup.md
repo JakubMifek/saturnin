@@ -13,6 +13,10 @@ source .venv/bin/activate
 ```
 
 `bootstrap.sh` is idempotent: run it again after every pull.
+It also creates `var/secrets/review-attestation.env` with mode `0600`; source
+that file only in the trusted Saturnin supervisor shell or user services. The
+launcher derives role-scoped signing keys from it and injects them only into
+`pr-reviewer` and `issue-reviewer` workers.
 
 ## 2. Verify the installation
 
@@ -49,20 +53,21 @@ saturnin checkpoint save <task-id> --role code-worker \
 ## 5. Review before merge
 
 ```bash
+HEAD_SHA="$(gh pr view 12 --repo JakubMifek/saturnin --json headRefOid --jq .headRefOid)"
 attestation="$(saturnin review attest JakubMifek/saturnin#12 --kind pr \
-  --author code-worker --reviewer pr-reviewer --verdict approved)"
+  --author code-worker --reviewer pr-reviewer --verdict approved \
+  --head-sha "$HEAD_SHA")"
 saturnin review record JakubMifek/saturnin#12 --kind pr \
   --author code-worker --reviewer pr-reviewer --verdict approved \
-  --attestation "$attestation"
+  --head-sha "$HEAD_SHA" --attestation "$attestation"
 saturnin review gate JakubMifek/saturnin#12 --kind pr \
-  --repo JakubMifek/saturnin --author code-worker
+  --repo JakubMifek/saturnin --author code-worker --head-sha "$HEAD_SHA"
 # exit 0 = may merge
 ```
 
-When `--head-sha` is omitted for PR reviews, Saturnin resolves the current
-GitHub PR head and binds both the recorded verdict and the gate to that commit.
-Do not substitute a local checkout SHA unless it has just been verified against
-the PR head.
+Resolve the PR head once and pass that identical SHA through attest, record and
+gate. Do not substitute a local checkout SHA unless it has just been verified
+against the PR head.
 
 For another repository: draft the issue, `--kind issue`, and let the
 issue-reviewer gate it before filing.

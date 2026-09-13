@@ -13,6 +13,7 @@ from saturnin.review import (
     ReviewLedger,
     ReviewError,
     issue_content_digest,
+    review_attestation_signing_key,
     sign_review_attestation,
 )
 
@@ -23,7 +24,7 @@ TEST_HEAD_SHA = "a" * 40
 
 def record_review(ledger: ReviewLedger, **kwargs):
     attestation = sign_review_attestation(
-        key=os.environ["SATURNIN_REVIEW_ATTESTATION_KEY"],
+        key=review_attestation_signing_key(ledger.config, kwargs["reviewer"]),
         subject=kwargs["subject"],
         kind=kwargs["kind"],
         author=kwargs["author"],
@@ -180,7 +181,7 @@ def test_review_record_requires_valid_signed_attestation(config: Config) -> None
     ledger = ReviewLedger(config)
     subject = "JakubMifek/saturnin#signed"
     attestation = sign_review_attestation(
-        key=os.environ["SATURNIN_REVIEW_ATTESTATION_KEY"],
+        key=review_attestation_signing_key(config, "pr-reviewer"),
         subject=subject,
         kind="pr",
         author="code-worker",
@@ -219,6 +220,32 @@ def test_review_record_requires_valid_signed_attestation(config: Config) -> None
             verdict="approved",
             head_sha=TEST_HEAD_SHA,
             attestation=attestation,
+        )
+
+
+def test_attestation_key_is_scoped_to_reviewer_role(config: Config) -> None:
+    ledger = ReviewLedger(config)
+    subject = "JakubMifek/saturnin#role-scoped"
+    pr_reviewer_key = review_attestation_signing_key(config, "pr-reviewer")
+    forged = sign_review_attestation(
+        key=pr_reviewer_key,
+        subject=subject,
+        kind="issue",
+        author="code-worker",
+        reviewer="issue-reviewer",
+        verdict="approved",
+        issue_digest="b" * 64,
+    )
+
+    with pytest.raises(ReviewError, match="signature does not match"):
+        ledger.record(
+            subject=subject,
+            kind="issue",
+            author="code-worker",
+            reviewer="issue-reviewer",
+            verdict="approved",
+            issue_digest="b" * 64,
+            attestation=forged,
         )
 
 

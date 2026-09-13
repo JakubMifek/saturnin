@@ -71,6 +71,9 @@ launcher:
     - LOGNAME
     - SHELL
   approved_home_config: []
+  # Reviewers receive a role-scoped attestation key derived by the trusted
+  # launcher from SATURNIN_REVIEW_ATTESTATION_KEY; authoring roles never receive
+  # either the master key or a signing key.
   # Optional source variable used to inject a constrained token for the
   # read-only GitHub MCP server when a role declares `mcp: [github]`.
   github_read_token_env: SATURNIN_GITHUB_MCP_TOKEN

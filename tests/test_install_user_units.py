@@ -59,6 +59,15 @@ def test_install_user_units_escapes_checkout_path(tmp_path: Path) -> None:
         )
         assert decode(working_directory) == str(saturnin_home)
         assert decode(environment) == str(saturnin_home)
+        assert (
+            f"EnvironmentFile=-{working_directory}/var/secrets/review-attestation.env"
+            in text
+        )
+    secret = saturnin_home / "var" / "secrets" / "review-attestation.env"
+    assert secret.read_text(encoding="utf-8").startswith(
+        "SATURNIN_REVIEW_ATTESTATION_KEY="
+    )
+    assert secret.stat().st_mode & 0o777 == 0o600
 
 
 def test_install_does_not_enable_unaccepted_mirror_timer(tmp_path: Path) -> None:

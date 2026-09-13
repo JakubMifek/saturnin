@@ -124,6 +124,7 @@ ATTESTED_FIELDS = (
     "head_sha",
     "issue_digest",
 )
+ROLE_SCOPED_KEY_CONTEXT = "saturnin-review-attestation"
 
 
 def slugify(subject: str) -> str:
@@ -185,12 +186,52 @@ def sign_review_attestation(
     return json.dumps(payload, sort_keys=True, separators=(",", ":"))
 
 
+def role_scoped_review_attestation_key(master_key: str, reviewer: str) -> str:
+    if not master_key:
+        raise ReviewError("review attestation signing key is not configured")
+    reviewer_name = reviewer.strip().lower()
+    if not reviewer_name:
+        raise ReviewError("reviewer role is required for a scoped attestation key")
+    return hmac.new(
+        master_key.encode("utf-8"),
+        f"{ROLE_SCOPED_KEY_CONTEXT}:{reviewer_name}".encode("utf-8"),
+        hashlib.sha256,
+    ).hexdigest()
+
+
 def _load_attestation_key(config: Config) -> str:
     settings = config.governance.get("review", {}).get("attestation", {})
     env_name = str(settings.get("key_env", "SATURNIN_REVIEW_ATTESTATION_KEY"))
     key = os.environ.get(env_name, "")
     if not key:
         raise ReviewError(f"review attestation key is not configured in {env_name}")
+    return key
+
+
+def review_attestation_signing_key(
+    config: Config,
+    reviewer: str,
+    *,
+    master_key: str | None = None,
+) -> str:
+    settings = config.governance.get("review", {}).get("attestation", {})
+    key = master_key if master_key is not None else _load_attestation_key(config)
+    scope_env = str(settings.get("key_scope_env", "SATURNIN_REVIEW_ATTESTATION_KEY_SCOPE"))
+    if os.environ.get(scope_env) == "role":
+        return key
+    if settings.get("role_scoped", True):
+        return role_scoped_review_attestation_key(key, reviewer)
+    return key
+
+
+def _verification_key(config: Config, reviewer: str) -> str:
+    settings = config.governance.get("review", {}).get("attestation", {})
+    key = _load_attestation_key(config)
+    scope_env = str(settings.get("key_scope_env", "SATURNIN_REVIEW_ATTESTATION_KEY_SCOPE"))
+    if os.environ.get(scope_env) == "role":
+        return key
+    if settings.get("role_scoped", True):
+        return role_scoped_review_attestation_key(key, reviewer)
     return key
 
 
@@ -213,7 +254,7 @@ def _verify_review_attestation(attestation: str, config: Config) -> dict[str, An
         if type(payload[field_name]) is not expected_type:
             raise ReviewError(f"review attestation field {field_name!r} has the wrong type")
     expected = hmac.new(
-        _load_attestation_key(config).encode("utf-8"),
+        _verification_key(config, str(payload["reviewer"])).encode("utf-8"),
         _canonical_attestation_payload(payload),
         hashlib.sha256,
     ).hexdigest()

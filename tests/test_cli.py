@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import json
-import os
 import subprocess
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -13,9 +12,14 @@ import yaml
 from saturnin.board import Board
 from saturnin.checkpoints import Checkpoint, CheckpointStore
 from saturnin.cli import main
+from saturnin.config import Config
 from saturnin.discovery import InboundIssue, IssueDiscovery
 from saturnin.launcher import AgentLauncher
-from saturnin.review import issue_content_digest, sign_review_attestation
+from saturnin.review import (
+    issue_content_digest,
+    review_attestation_signing_key,
+    sign_review_attestation,
+)
 from saturnin.routing import Router
 from saturnin.worktrees import WorktreeManager
 
@@ -27,7 +31,7 @@ def run(capsys: pytest.CaptureFixture[str], *argv: str) -> tuple[int, str]:
 
 def review_attestation_args(**kwargs: str) -> tuple[str, str]:
     attestation = sign_review_attestation(
-        key=os.environ["SATURNIN_REVIEW_ATTESTATION_KEY"],
+        key=review_attestation_signing_key(Config.load(), kwargs["reviewer"]),
         subject=kwargs["subject"],
         kind=kwargs["kind"],
         author=kwargs["author"],
@@ -525,6 +529,31 @@ def test_review_cli_resolves_omitted_pr_head(
 
     assert code == 0
     assert "ALLOWED" in out
+
+
+def test_review_attest_refuses_to_sign_for_another_role(
+    home: Path, capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("SATURNIN_AGENT_ROLE", "code-worker")
+
+    code, _ = run(
+        capsys,
+        "review",
+        "attest",
+        "JakubMifek/saturnin#forged",
+        "--kind",
+        "pr",
+        "--author",
+        "code-worker",
+        "--reviewer",
+        "pr-reviewer",
+        "--verdict",
+        "approved",
+        "--head-sha",
+        "d" * 40,
+    )
+
+    assert code == 1
 
 
 def test_dispatch_all_defers_one_launch_failure_and_continues(

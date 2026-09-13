@@ -6,5 +6,6 @@ Documentation=file://@SATURNIN_HOME@/docs/runbooks/checkpoint-handoff.md
 Type=oneshot
 WorkingDirectory=@SATURNIN_HOME@
 Environment=SATURNIN_HOME="@SATURNIN_HOME_ENV@"
+EnvironmentFile=-@SATURNIN_HOME@/var/secrets/review-attestation.env
 ExecStart=@SATURNIN_HOME@/automation/library/resume_checkpoints.sh
 Nice=10

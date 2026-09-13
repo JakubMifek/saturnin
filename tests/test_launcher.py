@@ -15,6 +15,7 @@ from saturnin.checkpoints import Checkpoint, CheckpointStore
 from saturnin.config import Config
 from saturnin.launcher import AgentLauncher, LauncherError
 from saturnin.mcp import MCPError
+from saturnin.review import ReviewLedger, sign_review_attestation
 from saturnin.routing import Router
 from saturnin.worktrees import WorktreeManager
 
@@ -569,6 +570,9 @@ def test_launcher_worker_environment_uses_allowlist_and_constrained_github_token
     monkeypatch.setenv("PYTHONPATH", "/host/untrusted")
     monkeypatch.setenv("HOME", "/host/home")
     monkeypatch.setenv("SATURNIN_GITHUB_MCP_TOKEN", "scoped-read-token")
+    config.policy("mcp")["launcher"]["env_allowlist"].append(
+        "SATURNIN_REVIEW_ATTESTATION_KEY"
+    )
 
     launcher = AgentLauncher(config, board)
     worker_config = launcher._worker_config(worktree.path)
@@ -590,8 +594,91 @@ def test_launcher_worker_environment_uses_allowlist_and_constrained_github_token
     assert environment["GITHUB_PERSONAL_ACCESS_TOKEN"] == "scoped-read-token"
     assert "GH_TOKEN" not in environment
     assert "GITHUB_TOKEN" not in environment
+    assert "SATURNIN_REVIEW_ATTESTATION_KEY" not in environment
+    assert environment["SATURNIN_AGENT_ROLE"] == contract.role
     assert "AWS_SECRET_ACCESS_KEY" not in environment
     assert "host" not in environment["PYTHONPATH"]
+
+
+def test_launcher_injects_role_scoped_attestation_key_only_for_reviewers(
+    config: Config, board: Board, git_repo: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    task = board.create("Review a pull request")
+    worktree = WorktreeManager(config, repo=git_repo, board=board).create(
+        "feature/reviewer-key"
+    )
+    with board.edit(task.id) as stored:
+        stored.state = "routed"
+        stored.role = "pr-reviewer"
+        stored.unit = "assurance"
+        stored.branch = "feature/reviewer-key"
+        stored.worktree = str(worktree.path)
+
+    launcher = AgentLauncher(config, board)
+    worker_config = launcher._worker_config(worktree.path)
+    contract = launcher._contract(board.get(task.id), worker_config)
+    environment = launcher._worker_environment(
+        worker_config,
+        contract,
+        task=board.get(task.id),
+        workdir=worktree.path,
+    )
+
+    role_key = environment["SATURNIN_REVIEW_ATTESTATION_KEY"]
+    assert role_key != "test-review-attestation-key"
+    assert environment["SATURNIN_REVIEW_ATTESTATION_KEY_SCOPE"] == "role"
+    assert environment["SATURNIN_AGENT_ROLE"] == "pr-reviewer"
+
+    attestation = sign_review_attestation(
+        key=role_key,
+        subject="JakubMifek/saturnin#reviewer-key",
+        kind="pr",
+        author="code-worker",
+        reviewer="pr-reviewer",
+        verdict="approved",
+        head_sha="c" * 40,
+    )
+    with monkeypatch.context() as scoped:
+        scoped.setenv("SATURNIN_REVIEW_ATTESTATION_KEY", role_key)
+        scoped.setenv("SATURNIN_REVIEW_ATTESTATION_KEY_SCOPE", "role")
+        ReviewLedger(config).record(
+            subject="JakubMifek/saturnin#reviewer-key",
+            kind="pr",
+            author="code-worker",
+            reviewer="pr-reviewer",
+            verdict="approved",
+            head_sha="c" * 40,
+            attestation=attestation,
+        )
+    assert ReviewLedger(config).for_subject("JakubMifek/saturnin#reviewer-key", "pr")
+
+
+def test_launcher_refuses_reviewer_without_attestation_key(
+    config: Config, board: Board, git_repo: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    task = board.create("Review without a signing key")
+    worktree = WorktreeManager(config, repo=git_repo, board=board).create(
+        "feature/no-reviewer-key"
+    )
+    with board.edit(task.id) as stored:
+        stored.state = "routed"
+        stored.role = "pr-reviewer"
+        stored.unit = "assurance"
+        stored.branch = "feature/no-reviewer-key"
+        stored.worktree = str(worktree.path)
+    monkeypatch.delenv("SATURNIN_REVIEW_ATTESTATION_KEY", raising=False)
+
+    launcher = AgentLauncher(config, board)
+    worker_config = launcher._worker_config(worktree.path)
+    contract = launcher._contract(board.get(task.id), worker_config)
+
+    with pytest.raises(LauncherError, match="requires SATURNIN_REVIEW_ATTESTATION_KEY"):
+        launcher._worker_environment(
+            worker_config,
+            contract,
+            task=board.get(task.id),
+            workdir=worktree.path,
+        )
 
 
 def test_launcher_rejects_unverified_github_binary(

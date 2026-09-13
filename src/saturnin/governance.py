@@ -540,6 +540,12 @@ class Governance:
         key_env = attestation.get("key_env")
         if not isinstance(key_env, str) or not key_env.strip():
             problems.append("review attestation policy requires a key_env")
+        if not attestation.get("role_scoped", False):
+            problems.append("review attestation keys must be role-scoped")
+        for name in ("key_scope_env", "role_env"):
+            value = attestation.get(name)
+            if not isinstance(value, str) or not value.strip():
+                problems.append(f"review attestation policy requires {name}")
         if self.policy.get("delegation", {}).get("ceo_may_execute", False):
             problems.append("CEO is allowed to execute work; delegation-first is violated")
         if self.config.server_scope.get("user", {}).get("allow_root", False):

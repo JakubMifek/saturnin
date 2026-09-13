@@ -33,7 +33,7 @@ Full walkthrough: [`docs/runbooks/day-1-startup.md`](docs/runbooks/day-1-startup
 | Optional GitHub issue mirror; durable copy once mirroring is enabled | `saturnin task sync --all --push` |
 | Ultra-fast dispatch (table lookup, no deliberation) | `saturnin dispatch <id> \| --all` |
 | Governance gates (branches, merges, issues, server) | `saturnin check branch\|command` |
-| Independent PR/issue review pipelines | `saturnin review attest\|record\|gate` |
+| Independent PR/issue review pipelines | `saturnin review attest\|record\|gate\|merge\|submit-issue` |
 | Checkpoints, handoff and delayed resume | `saturnin checkpoint save\|resume` |
 | Worktree lifecycle + safe stale cleanup | `saturnin worktree create\|list\|cleanup` |
 | Reusable automation library + repeat detection | `saturnin automation find\|list\|detect` |
