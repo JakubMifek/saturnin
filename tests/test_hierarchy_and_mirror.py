@@ -391,6 +391,15 @@ def test_doctor_flags_unmirrored_tasks(config: Config, board: Board, capsys) -> 
     assert "not mirrored" in capsys.readouterr().out
 
 
+def test_doctor_rejects_required_but_disabled_mirroring(
+    config: Config, capsys
+) -> None:
+    _set_issue_mirror(config, repos=False, mandatory=True)
+
+    assert main(["--home", str(config.root), "doctor"]) == 2
+    assert "governance requires task mirroring" in capsys.readouterr().out
+
+
 def test_managed_repo_contract(tmp_path, config: Config) -> None:
     repo = tmp_path / "project"
     (repo / ".saturnin").mkdir(parents=True)

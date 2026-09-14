@@ -178,11 +178,10 @@ class Governance:
         records = [r for r in records if r.author.strip().lower() == author_lower]
         if self.review.get("attestation", {}).get("required", False):
             records = [r for r in records if r.attestation_id and r.attestation_signature]
-        # Only count approvals from designated reviewer roles for this kind.
         allowed = _allowed_reviewer_roles(kind, self.config) if kind else set()
+        if kind:
+            records = [r for r in records if r.reviewer.strip().lower() in allowed]
         approvals = [r for r in records if r.verdict == "approved"]
-        if allowed:
-            approvals = [r for r in approvals if r.reviewer.strip().lower() in allowed]
         blocking = [
             r for r in records if r.verdict in ("changes_requested", "rejected", "dismissed")
         ]
@@ -540,6 +539,13 @@ class Governance:
             problems.append("PR review is not required")
         if self.review.get("pr", {}).get("author_may_review", False):
             problems.append("PR authors are allowed to review themselves")
+        if self.mirror_required() and not bool(
+            self.config.policy("repos").get("tracking", {}).get("mirror_tasks_as_issues", False)
+        ):
+            problems.append(
+                "governance requires task mirroring but repos policy disables "
+                "tracking.mirror_tasks_as_issues"
+            )
         for kind in ("pr", "issue"):
             reviewers = self.review.get(kind, {}).get("allowed_reviewer_roles", [])
             if not isinstance(reviewers, list) or not reviewers or not all(

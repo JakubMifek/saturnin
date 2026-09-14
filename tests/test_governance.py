@@ -144,6 +144,40 @@ def test_dismissed_review_blocks_merge(governance: Governance, config: Config) -
     assert "dismissed" in decision.reasons[0]
 
 
+def test_unauthorized_reviewer_cannot_veto_pr(
+    governance: Governance, config: Config
+) -> None:
+    ledger = ReviewLedger(config)
+    subject = "JakubMifek/saturnin#unauthorized-veto"
+    record_review(
+        ledger,
+        subject=subject,
+        kind="pr",
+        author="code-worker",
+        reviewer="pr-reviewer",
+        verdict="approved",
+        head_sha=TEST_HEAD_SHA,
+    )
+    record_review(
+        ledger,
+        subject=subject,
+        kind="pr",
+        author="code-worker",
+        reviewer="issue-reviewer",
+        verdict="changes_requested",
+        head_sha=TEST_HEAD_SHA,
+    )
+
+    decision = governance.merge_allowed(
+        repo=SELF_REPO,
+        author="code-worker",
+        records=ledger.for_subject(subject, "pr"),
+        head_sha=TEST_HEAD_SHA,
+    )
+
+    assert decision.allowed
+
+
 def test_reviewer_with_context_does_not_satisfy_gate(
     governance: Governance, config: Config
 ) -> None:
@@ -679,6 +713,42 @@ def test_issue_submission_requires_review_in_managed_repos(
         records=ledger.for_subject(subject, "issue"),
         issue_digest=digest,
     ).allowed
+
+
+def test_unauthorized_reviewer_cannot_veto_issue(
+    governance: Governance, config: Config
+) -> None:
+    ledger = ReviewLedger(config)
+    subject = "draft-unauthorized-veto"
+    managed_repo = "JakubMifek/saturnin-ops"
+    digest = issue_content_digest("Improve CI", "Add the missing gate.")
+    record_review(
+        ledger,
+        subject=subject,
+        kind="issue",
+        author="researcher",
+        reviewer="issue-reviewer",
+        verdict="approved",
+        issue_digest=digest,
+    )
+    record_review(
+        ledger,
+        subject=subject,
+        kind="issue",
+        author="researcher",
+        reviewer="pr-reviewer",
+        verdict="rejected",
+        issue_digest=digest,
+    )
+
+    decision = governance.issue_submission_allowed(
+        repo=managed_repo,
+        author="researcher",
+        records=ledger.for_subject(subject, "issue"),
+        issue_digest=digest,
+    )
+
+    assert decision.allowed
 
 
 def test_issue_review_is_bound_to_the_reviewed_draft(
@@ -1521,7 +1591,7 @@ def test_git_reflog_recovery_command_is_allowed(
 ) -> None:
     monkeypatch.setattr("os.getcwd", lambda: "/home/saturnin")
     assert governance.check_server_command(
-        "git reflog show --date=iso refs/heads/feature/recovery",
+        "git reflog show --all --date=iso",
     ).allowed
 
 

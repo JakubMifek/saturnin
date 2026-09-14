@@ -100,6 +100,26 @@ class WorktreeManager:
         self.policy = self.config.cleanup
         self._lifecycle_depth = 0
 
+    def audit(self) -> list[str]:
+        days = self.policy.get("safety", {}).get("keep_reflog_days")
+        if isinstance(days, bool) or not isinstance(days, int) or days < 1:
+            return ["cleanup safety.keep_reflog_days must be a positive integer"]
+        return []
+
+    def enforce_reflog_retention(self) -> None:
+        problems = self.audit()
+        if problems:
+            raise GitError(problems[0])
+        days = self.policy["safety"]["keep_reflog_days"]
+        expiry = f"{days} days ago"
+        for key, value in (
+            ("core.logAllRefUpdates", "true"),
+            ("gc.reflogExpire", expiry),
+            ("gc.reflogExpireUnreachable", expiry),
+            ("gc.pruneExpire", expiry),
+        ):
+            git(["config", "--local", key, value], self.repo)
+
     @contextmanager
     def lifecycle_lock(self) -> Iterator[None]:
         if self._lifecycle_depth:
@@ -297,6 +317,18 @@ class WorktreeManager:
         applied: list[Action] = []
         now = now or datetime.now(timezone.utc)
         with self.lifecycle_lock():
+            try:
+                self.enforce_reflog_retention()
+            except GitError as exc:
+                plan.errors.append(f"reflog retention: {exc}")
+                plan.skipped.extend(
+                    Action(action.kind, action.target, "reflog retention could not be enforced")
+                    for action in plan.actions
+                )
+                plan.actions = []
+                plan.applied = True
+                self.log_plan(plan)
+                return plan
             for action in plan.actions:
                 try:
                     skip_reason = self._execution_skip_reason(action, plan=plan, now=now)

@@ -4,6 +4,16 @@ set -Eeuo pipefail
 
 SATURNIN_HOME="${SATURNIN_HOME:-$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)}"
 UNIT_DIR="${XDG_CONFIG_HOME:-$HOME/.config}/systemd/user"
+ENABLED_TIMERS=(
+  saturnin-janitor.timer
+  saturnin-improve.timer
+  saturnin-poller.timer
+  saturnin-discovery.timer
+  saturnin-resume.timer
+)
+MANAGED_UNITS=()
+declare -A WAS_ENABLED=()
+declare -A WAS_ACTIVE=()
 
 if [[ "$(id -u)" -eq 0 ]]; then
   echo "Refusing to install units as root; Saturnin units are user scoped." >&2
@@ -27,6 +37,7 @@ cleanup() {
   rm -rf "$STAGE_DIR" "$BACKUP_DIR"
 }
 rollback() {
+  set +e
   for backup in "$BACKUP_DIR"/*; do
     [[ -e "$backup" ]] || continue
     name="$(basename "$backup")"
@@ -36,11 +47,34 @@ rollback() {
       mv -f "$backup" "$UNIT_DIR/$name"
     fi
   done
+  rm -f "$UNIT_DIR"/saturnin-*.tmp
+  systemctl --user daemon-reload
+  for unit in "${MANAGED_UNITS[@]}"; do
+    if [[ "${WAS_ENABLED[$unit]}" -eq 1 ]]; then
+      systemctl --user enable "$unit"
+    else
+      systemctl --user disable "$unit"
+    fi
+    if [[ "${WAS_ACTIVE[$unit]}" -eq 1 ]]; then
+      systemctl --user start "$unit"
+    else
+      systemctl --user stop "$unit"
+    fi
+  done
 }
-trap 'status=$?; if [[ "$installing" -eq 1 && "$status" -ne 0 ]]; then rollback; fi; cleanup' EXIT
+on_exit() {
+  status=$?
+  if [[ "$installing" -eq 1 && "$status" -ne 0 ]]; then
+    rollback
+  fi
+  cleanup
+  exit "$status"
+}
+trap on_exit EXIT
 
 for unit in "$SATURNIN_HOME"/systemd/saturnin-*; do
   name="$(basename "$unit")"
+  MANAGED_UNITS+=("$name")
   SATURNIN_HOME_ESCAPED="$SATURNIN_HOME" SATURNIN_HOME_ENV_ESCAPED="$SATURNIN_HOME" \
     TEMPLATE="$unit" DEST="$STAGE_DIR/$name" python3 -c '
 from pathlib import Path
@@ -59,6 +93,19 @@ Path(os.environ["DEST"]).write_text(
   fi
 done
 
+for unit in "${MANAGED_UNITS[@]}"; do
+  if systemctl --user is-enabled --quiet "$unit"; then
+    WAS_ENABLED["$unit"]=1
+  else
+    WAS_ENABLED["$unit"]=0
+  fi
+  if systemctl --user is-active --quiet "$unit"; then
+    WAS_ACTIVE["$unit"]=1
+  else
+    WAS_ACTIVE["$unit"]=0
+  fi
+done
+
 installing=1
 for staged in "$STAGE_DIR"/saturnin-*; do
   name="$(basename "$staged")"
@@ -73,10 +120,7 @@ for staged in "$STAGE_DIR"/saturnin-*; do
 done
 
 systemctl --user daemon-reload
-systemctl --user enable --now \
-  saturnin-janitor.timer saturnin-improve.timer \
-  saturnin-poller.timer saturnin-discovery.timer \
-  saturnin-resume.timer
+systemctl --user enable --now "${ENABLED_TIMERS[@]}"
 installing=0
 systemctl --user list-timers 'saturnin-*' || true
 

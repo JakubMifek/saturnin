@@ -175,6 +175,38 @@ def test_stale_worktree_is_planned_and_applied(
     assert "APPLY remove_worktree" in log
 
 
+def test_cleanup_enforces_configured_reflog_retention(
+    manager: WorktreeManager, git_repo: Path
+) -> None:
+    plan = manager.plan_cleanup()
+
+    manager.apply(plan)
+
+    assert (
+        git(["config", "--local", "--get", "core.logAllRefUpdates"], git_repo).strip()
+        == "true"
+    )
+    for key in ("gc.reflogExpire", "gc.reflogExpireUnreachable", "gc.pruneExpire"):
+        assert git(["config", "--local", "--get", key], git_repo).strip() == "90 days ago"
+    git(["reflog", "expire", "--dry-run", "--all"], git_repo)
+
+
+def test_invalid_reflog_retention_blocks_cleanup(
+    manager: WorktreeManager,
+) -> None:
+    manager.policy["safety"]["keep_reflog_days"] = 0
+    worktree = manager.create("feature/invalid-retention")
+    plan = manager.plan_cleanup(now=datetime.now(timezone.utc) + timedelta(days=30))
+
+    manager.apply(plan)
+
+    assert worktree.path.exists()
+    assert plan.actions == []
+    assert plan.errors == [
+        "reflog retention: cleanup safety.keep_reflog_days must be a positive integer"
+    ]
+
+
 def test_janitor_log_uses_shared_data_root_from_linked_source(
     manager: WorktreeManager,
 ) -> None:

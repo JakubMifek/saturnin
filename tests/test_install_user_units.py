@@ -109,7 +109,12 @@ def test_install_does_not_enable_unaccepted_mirror_timer(tmp_path: Path) -> None
         },
     )
 
-    assert "saturnin-mirror.timer" not in calls.read_text(encoding="utf-8")
+    enable_call = next(
+        call
+        for call in calls.read_text(encoding="utf-8").splitlines()
+        if call.startswith("--user enable --now")
+    )
+    assert "saturnin-mirror.timer" not in enable_call
 
 
 def test_install_stops_before_enable_when_verification_fails(tmp_path: Path) -> None:
@@ -185,11 +190,36 @@ def test_failed_enable_rolls_back_replaced_units(tmp_path: Path) -> None:
     shutil.copytree(REPO_ROOT / "systemd", saturnin_home / "systemd")
     fake_bin = tmp_path / "bin"
     fake_bin.mkdir()
+    calls = tmp_path / "systemctl-calls"
+    state = tmp_path / "systemctl-state"
+    enabled = state / "enabled"
+    active = state / "active"
+    enabled.mkdir(parents=True)
+    active.mkdir()
+    (enabled / "saturnin-janitor.timer").touch()
+    (active / "saturnin-improve.timer").touch()
+    (active / "saturnin-janitor.service").touch()
     (fake_bin / "id").write_text("#!/bin/sh\nprintf '1000\\n'\n", encoding="utf-8")
     (fake_bin / "systemd-analyze").write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
     (fake_bin / "systemctl").write_text(
         "#!/bin/sh\n"
-        "if [ \"$1\" = '--user' ] && [ \"$2\" = 'enable' ]; then exit 1; fi\n"
+        f"printf '%s\\n' \"$*\" >> '{calls}'\n"
+        f"state='{state}'\n"
+        "case \"$2\" in\n"
+        "  is-enabled) [ -e \"$state/enabled/$4\" ] || exit 1 ;;\n"
+        "  is-active) [ -e \"$state/active/$4\" ] || exit 1 ;;\n"
+        "  enable)\n"
+        "    if [ \"$3\" = '--now' ]; then\n"
+        "      shift 3\n"
+        "      for unit in \"$@\"; do touch \"$state/enabled/$unit\" \"$state/active/$unit\"; done\n"
+        "      exit 1\n"
+        "    fi\n"
+        "    touch \"$state/enabled/$3\"\n"
+        "    ;;\n"
+        "  disable) rm -f \"$state/enabled/$3\" ;;\n"
+        "  start) touch \"$state/active/$3\" ;;\n"
+        "  stop) rm -f \"$state/active/$3\" ;;\n"
+        "esac\n"
         "exit 0\n",
         encoding="utf-8",
     )
@@ -200,6 +230,12 @@ def test_failed_enable_rolls_back_replaced_units(tmp_path: Path) -> None:
     installed_dir.mkdir(parents=True)
     existing = installed_dir / "saturnin-janitor.service"
     existing.write_text("previous valid unit\n", encoding="utf-8")
+    previous_timers = {
+        "saturnin-janitor.timer": "previous enabled timer\n",
+        "saturnin-improve.timer": "previous active timer\n",
+    }
+    for name, content in previous_timers.items():
+        (installed_dir / name).write_text(content, encoding="utf-8")
 
     result = subprocess.run(
         ["bash", str(REPO_ROOT / "scripts/install_user_units.sh")],
@@ -216,3 +252,20 @@ def test_failed_enable_rolls_back_replaced_units(tmp_path: Path) -> None:
 
     assert result.returncode == 1
     assert existing.read_text(encoding="utf-8") == "previous valid unit\n"
+    installed = {path.name for path in installed_dir.glob("saturnin-*")}
+    assert installed == {"saturnin-janitor.service", *previous_timers}
+    for name, content in previous_timers.items():
+        assert (installed_dir / name).read_text(encoding="utf-8") == content
+    systemctl_calls = calls.read_text(encoding="utf-8").splitlines()
+    failed_enable = next(
+        index for index, call in enumerate(systemctl_calls) if call.startswith("--user enable --now")
+    )
+    assert systemctl_calls[failed_enable + 1] == "--user daemon-reload"
+    rollback_calls = systemctl_calls[failed_enable + 2 :]
+    assert "--user start saturnin-janitor.service" in rollback_calls
+    assert "--user disable saturnin-mirror.timer" in rollback_calls
+    assert {path.name for path in enabled.iterdir()} == {"saturnin-janitor.timer"}
+    assert {path.name for path in active.iterdir()} == {
+        "saturnin-improve.timer",
+        "saturnin-janitor.service",
+    }

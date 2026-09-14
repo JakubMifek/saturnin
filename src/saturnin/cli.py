@@ -1052,6 +1052,10 @@ def _run_doctor(config: Config, as_json: bool) -> int:
             lambda: Router(config).validate_policy(),
         ),
         (
+            config.policies / "cleanup.yaml",
+            lambda: WorktreeManager(config).audit(),
+        ),
+        (
             config.automation_dir / "registry.yaml",
             lambda: AutomationLibrary(config).audit(),
         ),

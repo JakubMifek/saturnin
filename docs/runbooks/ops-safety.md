@@ -60,13 +60,15 @@ saturnin worktree cleanup --apply    # execute the plan
 **A branch was deleted by mistake**
 
 ```bash
-saturnin check command "git reflog show --date=iso refs/heads/<branch>"
-git reflog show --date=iso refs/heads/<branch>   # find the last commit SHA
+saturnin check command "git reflog show --all --date=iso"
+git reflog show --all --date=iso        # find the last commit SHA
 git branch <branch> <sha>             # recreate it
 ```
 
-The reflog is kept for `keep_reflog_days` (90) - do not run `git gc --prune=now`
-while a recovery is in question.
+Before destructive cleanup, Saturnin sets repository-local reflog and unreachable
+object expiry from `keep_reflog_days` (90). A deleted branch no longer has a
+named reflog, so use `git reflog --all` and, if needed, `git fsck --unreachable`.
+Do not run `git gc --prune=now` while a recovery is in question.
 
 **A worktree directory disappeared but git still lists it**
 
