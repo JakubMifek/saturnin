@@ -1143,7 +1143,9 @@ def _run_task(args: argparse.Namespace, config: Config, board: Board, as_json: b
     if args.task_command == "sync":
         mirror = IssueMirror(config, board)
         if args.all:
-            targets = mirror.syncable()
+            # A pushed periodic sweep must reconcile remote issue state even
+            # when the rendered board payload itself has not changed.
+            targets = list(board) if args.push else mirror.syncable()
         elif args.task_id:
             targets = [board.get(args.task_id)]
         else:

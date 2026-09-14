@@ -1349,6 +1349,7 @@ def test_task_escalation_retry_reuses_issue_created_before_board_failure(
             return subprocess.CompletedProcess(args, 0, "", "")
         if args[1:3] == ["issue", "list"]:
             assert marker in args
+            assert args[args.index("--state") + 1] == "open"
             data = [{"url": created[0]}] if created else []
             return subprocess.CompletedProcess(args, 0, json.dumps(data), "")
         if args[1:3] == ["issue", "create"]:

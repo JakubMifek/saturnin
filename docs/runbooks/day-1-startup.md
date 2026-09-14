@@ -107,7 +107,7 @@ user's systemd manager remains active.
 | Every 5 min (timer) | `automation/library/result_poller.sh` | chief-of-staff |
 | Every 15 min (timer) | `automation/library/mirror_tasks.sh` | chief-of-staff |
 | Every 10 min (timer) | `automation/library/discover_issues.sh` | chief-of-staff |
-| Weekly | read `var/reports/`, groom `docs/improvement-backlog.md` | improver |
+| Weekly | read `var/reports/`, groom `policies/improvement.yaml` | improver |
 
 ## 8. When something is unclear
 

@@ -123,6 +123,31 @@ def test_syncable_revisits_parent_when_child_changes(config: Config, board: Boar
     assert parent.id in {task.id for task in IssueMirror(config, board).syncable()}
 
 
+def test_pushed_sync_all_revisits_unchanged_mirrors(
+    config: Config,
+    board: Board,
+    capsys: pytest.CaptureFixture[str],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    task = board.create("Remote state may drift")
+    with board.edit(task.id) as stored:
+        stored.issue = "https://github.com/example/repo/issues/9"
+    payload = IssueMirror(config, board).render(board.get(task.id))
+    with board.edit(task.id) as stored:
+        stored.issue_synced_digest = IssueMirror._payload_digest(payload)
+    visited: list[str] = []
+
+    def record_sync(self, tasks, *, push=False):
+        visited.extend(candidate.id for candidate in tasks)
+        return []
+
+    monkeypatch.setattr(IssueMirror, "sync_all", record_sync)
+
+    assert main(["--home", str(config.root), "task", "sync", "--all", "--push"]) == 0
+    assert visited == [task.id]
+    assert capsys.readouterr().out.strip() == "(nothing to mirror)"
+
+
 def test_existing_mirror_updates_content_and_reconciles_metadata_labels(
     config: Config, board: Board, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -150,7 +175,8 @@ def test_existing_mirror_updates_content_and_reconciles_metadata_labels(
                         {"name": "saturnin:state/intake"},
                         {"name": "saturnin:priority/P2"},
                         {"name": "keep-me"},
-                    ]
+                    ],
+                    "state": "OPEN",
                 }
             )
         return subprocess.CompletedProcess(args, 0, stdout, "")
@@ -304,6 +330,47 @@ def test_new_terminal_issue_is_closed(
     assert ["gh", "issue", "close", "https://github.com/example/repo/issues/3"] in calls
 
 
+@pytest.mark.parametrize(
+    ("task_state", "issue_state", "expected_command"),
+    [
+        ("in_progress", "CLOSED", "reopen"),
+        ("done", "OPEN", "close"),
+    ],
+)
+def test_existing_mirror_reconciles_issue_state_bidirectionally(
+    config: Config,
+    board: Board,
+    monkeypatch: pytest.MonkeyPatch,
+    task_state: str,
+    issue_state: str,
+    expected_command: str,
+) -> None:
+    task = board.create("State reconciliation")
+    issue = "https://github.com/example/repo/issues/10"
+    with board.edit(task.id) as stored:
+        stored.issue = issue
+        stored.state = task_state
+    calls: list[list[str]] = []
+    monkeypatch.setattr("saturnin.issues.shutil.which", lambda _: "/usr/bin/gh")
+
+    def fake_run(args, **kwargs):
+        calls.append(args)
+        if args[1:3] == ["label", "list"]:
+            return subprocess.CompletedProcess(args, 0, "[]", "")
+        if args[1:3] == ["issue", "view"]:
+            metadata = {"labels": [], "state": issue_state}
+            return subprocess.CompletedProcess(args, 0, json.dumps(metadata), "")
+        return subprocess.CompletedProcess(args, 0, "", "")
+
+    monkeypatch.setattr("saturnin.issues.subprocess.run", fake_run)
+
+    IssueMirror(config, board).sync(board.get(task.id), push=True)
+
+    assert ["gh", "issue", expected_command, issue] in calls
+    opposite = "close" if expected_command == "reopen" else "reopen"
+    assert ["gh", "issue", opposite, issue] not in calls
+
+
 def test_recovered_terminal_issue_is_updated_and_closed(
     config: Config, board: Board, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -321,7 +388,9 @@ def test_recovered_terminal_issue_is_updated_and_closed(
         if args[1:3] == ["issue", "list"]:
             return subprocess.CompletedProcess(args, 0, json.dumps([{"url": recovered}]), "")
         if args[1:3] == ["issue", "view"]:
-            return subprocess.CompletedProcess(args, 0, json.dumps({"labels": []}), "")
+            return subprocess.CompletedProcess(
+                args, 0, json.dumps({"labels": [], "state": "OPEN"}), ""
+            )
         return subprocess.CompletedProcess(args, 0, "", "")
 
     monkeypatch.setattr("saturnin.issues.subprocess.run", fake_run)

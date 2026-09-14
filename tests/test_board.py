@@ -21,6 +21,24 @@ def test_create_and_reload(board: Board) -> None:
     assert task.history[0]["event"] == "intake"
 
 
+def test_board_writes_use_durable_atomic_replace(
+    board: Board, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    writes: list[tuple[Path, str]] = []
+
+    def durable_write(path: Path, text: str) -> None:
+        writes.append((path, text))
+        path.write_text(text, encoding="utf-8")
+
+    monkeypatch.setattr("saturnin.board.atomic_replace_text", durable_write)
+
+    task = board.create("Power-loss-safe task")
+
+    assert len(writes) == 1
+    assert writes[0][0] == board.path_for(task.id)
+    assert '"title": "Power-loss-safe task"' in writes[0][1]
+
+
 def test_empty_title_rejected(board: Board) -> None:
     with pytest.raises(BoardError):
         board.create("   ")

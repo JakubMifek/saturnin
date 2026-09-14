@@ -7,7 +7,6 @@ they diff well, survive crashes and can be inspected without any tooling.
 from __future__ import annotations
 
 import json
-import os
 import re
 import secrets
 from contextlib import contextmanager
@@ -17,6 +16,7 @@ from pathlib import Path
 from typing import Any, Iterable, Iterator
 
 from .config import Config, default_config
+from .jsonlines import atomic_replace_text
 from .locking import file_lock
 
 KINDS = ("objective", "epic", "feature", "task", "pr-review", "issue-review",
@@ -149,9 +149,7 @@ class Board:
         return task
 
     def _write(self, path: Path, task: Task) -> None:
-        tmp = path.with_suffix(f".json.{os.getpid()}.tmp")
-        tmp.write_text(json.dumps(task.to_dict(), indent=2) + "\n", encoding="utf-8")
-        os.replace(tmp, path)
+        atomic_replace_text(path, json.dumps(task.to_dict(), indent=2) + "\n")
 
     @contextmanager
     def edit(self, task_id: str) -> Iterator[Task]:

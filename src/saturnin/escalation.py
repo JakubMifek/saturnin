@@ -106,7 +106,7 @@ def _find_issue_by_marker(repo: str, marker: str) -> str | None:
                 "--search",
                 marker,
                 "--state",
-                "all",
+                "open",
                 "--json",
                 "url",
                 "--limit",

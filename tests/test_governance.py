@@ -47,6 +47,31 @@ def test_policies_audit_clean(governance: Governance) -> None:
     assert governance.audit() == []
 
 
+def test_review_records_use_durable_atomic_replace(
+    config: Config, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    ledger = ReviewLedger(config)
+    writes: list[str] = []
+
+    def tracked_replace(path: Path, text: str) -> None:
+        writes.append(text)
+        path.write_text(text, encoding="utf-8")
+
+    monkeypatch.setattr("saturnin.review.atomic_replace_text", tracked_replace)
+    record_review(
+        ledger,
+        subject="JakubMifek/saturnin#durable-review",
+        kind="pr",
+        author="code-worker",
+        reviewer="pr-reviewer",
+        verdict="approved",
+        head_sha=TEST_HEAD_SHA,
+    )
+
+    assert len(writes) == 1
+    assert '"verdict": "approved"' in writes[0]
+
+
 @pytest.mark.parametrize(
     ("setting", "value", "problem"),
     [

@@ -220,7 +220,7 @@ class IssueMirror:
         return url
 
     def _update_issue(self, issue: str, payload: IssuePayload, *, terminal: bool) -> None:
-        current = self._issue_labels(issue)
+        current, state = self._issue_metadata(issue)
         stale = sorted(
             label
             for label in current
@@ -234,8 +234,10 @@ class IssueMirror:
             *_label_args(stale, option="--remove-label"),
         ]
         run_gh(args)
-        if terminal:
+        if terminal and state != "CLOSED":
             run_gh(["issue", "close", issue])
+        elif not terminal and state == "CLOSED":
+            run_gh(["issue", "reopen", issue])
 
     def _find_issue_by_marker(self, repo: str, marker: str) -> str | None:
         """Search for an existing issue containing the deterministic marker comment."""
@@ -251,13 +253,17 @@ class IssueMirror:
             pass
         return None
 
-    def _issue_labels(self, issue: str) -> set[str]:
-        output = run_gh(["issue", "view", issue, "--json", "labels"])
+    def _issue_metadata(self, issue: str) -> tuple[set[str], str]:
+        output = run_gh(["issue", "view", issue, "--json", "labels,state"])
         try:
             data = json.loads(output)
-            return {str(label["name"]) for label in data.get("labels", [])}
-        except (json.JSONDecodeError, KeyError, TypeError) as exc:
-            raise MirrorError("gh issue view returned invalid label data") from exc
+            labels = {str(label["name"]) for label in data.get("labels", [])}
+            state = str(data["state"]).upper()
+            if state not in {"OPEN", "CLOSED"}:
+                raise ValueError("unknown issue state")
+            return labels, state
+        except (json.JSONDecodeError, KeyError, TypeError, ValueError) as exc:
+            raise MirrorError("gh issue view returned invalid metadata") from exc
 
     def _is_metadata_label(self, label: str) -> bool:
         prefix = self.policy.get("repos", {}).get("board", {}).get(

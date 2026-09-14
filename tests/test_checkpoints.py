@@ -42,6 +42,25 @@ def test_latest_wins(config: Config, board: Board) -> None:
     assert [c.summary for c in store] == ["second"]
 
 
+def test_complete_checkpoint_append_uses_durable_atomic_replace(
+    config: Config, board: Board, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    task = board.create("Durable checkpoint")
+    store = CheckpointStore(config, board)
+    writes: list[str] = []
+
+    def tracked_replace(path: Path, text: str) -> None:
+        writes.append(text)
+        path.write_text(text, encoding="utf-8")
+
+    monkeypatch.setattr("saturnin.checkpoints.atomic_replace_text", tracked_replace)
+    store.save(Checkpoint(task_id=task.id, role="scribe", summary="safe", next_steps=["a"]))
+    store.save(Checkpoint(task_id=task.id, role="scribe", summary="safer", next_steps=["b"]))
+
+    assert len(writes) == 2
+    assert writes[-1].count("\n") == 2
+
+
 def test_incomplete_trailing_checkpoint_is_ignored(config: Config, board: Board) -> None:
     task = board.create("Interrupted checkpoint")
     store = CheckpointStore(config, board)
