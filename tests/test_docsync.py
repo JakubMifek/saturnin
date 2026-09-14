@@ -151,3 +151,18 @@ def test_documents_ignores_unrelated_generated_prose(docs_home: Config) -> None:
     )
 
     assert path not in docsync.documents(docs_home)
+
+
+def test_documented_pr_review_flow_records_attested_head() -> None:
+    runbook = (REPO_ROOT / "docs" / "runbooks" / "day-1-startup.md").read_text(
+        encoding="utf-8"
+    )
+    template = (REPO_ROOT / ".github" / "pull_request_template.md").read_text(
+        encoding="utf-8"
+    )
+
+    assert "HEAD_SHA=\"$(gh pr view" in runbook
+    assert "--head-sha \"$HEAD_SHA\")" in runbook
+    assert "--head-sha \"$HEAD_SHA\" --attestation \"$attestation\"" in runbook
+    assert "Review attestation created for that revision" in template
+    assert "--head-sha \"$HEAD_SHA\" --attestation \"$attestation\"" in template

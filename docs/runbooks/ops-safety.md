@@ -73,7 +73,7 @@ recovery is in question.
 **A worktree directory disappeared but git still lists it**
 
 ```bash
-git worktree prune
+saturnin worktree cleanup --apply
 ```
 
 **A worktree was removed with unfinished work**

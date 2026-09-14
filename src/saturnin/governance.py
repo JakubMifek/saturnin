@@ -951,12 +951,18 @@ def _git_targets(arguments: Sequence[str]) -> list[str]:
         )
     if subcommand == "remote":
         _check_git_remote_subcommand(subcommand_arguments)
+    worktree_subcommand_index: int | None = None
+    if subcommand == "worktree":
+        worktree_subcommand_index = _check_git_worktree_subcommand(subcommand_arguments)
     targets.extend(_git_write_option_targets(subcommand, subcommand_arguments))
     operands = _positional_arguments(subcommand_arguments)
     if subcommand == "init" and operands:
         targets.append(operands[-1])
-    elif subcommand == "worktree" and subcommand_arguments[:1] == ["add"]:
-        targets.append(_git_worktree_add_target(subcommand_arguments[1:]))
+    elif subcommand == "worktree" and worktree_subcommand_index is not None:
+        if subcommand_arguments[worktree_subcommand_index] == "add":
+            targets.append(
+                _git_worktree_add_target(subcommand_arguments[worktree_subcommand_index + 1 :])
+            )
     return targets
 
 
@@ -972,6 +978,26 @@ def _check_git_remote_subcommand(arguments: Sequence[str]) -> None:
                 "require a dedicated governed wrapper"
             )
         return
+
+
+def _check_git_worktree_subcommand(arguments: Sequence[str]) -> int:
+    global_options = {"-v", "--verbose", "--porcelain", "-z"}
+    for index, argument in enumerate(arguments):
+        if argument == "--":
+            break
+        if argument.startswith("-"):
+            if argument not in global_options:
+                raise _WriteScopeError(
+                    f"unsupported git worktree option {argument!r}; write scope is unknown"
+                )
+            continue
+        subcommand = argument
+        if subcommand in {"add", "list"}:
+            return index
+        raise _WriteScopeError(
+            f"git worktree {subcommand} is unsupported; use saturnin worktree lifecycle commands"
+        )
+    raise _WriteScopeError("git worktree requires a supported subcommand")
 
 
 def _check_apt_options(arguments: Sequence[str]) -> None:

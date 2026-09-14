@@ -1670,6 +1670,34 @@ def test_unsupported_git_worktree_add_forms_fail_closed(
 @pytest.mark.parametrize(
     "command",
     [
+        "git worktree remove --force /home/saturnin/worktrees/stale",
+        "git worktree remove --force /etc/stale",
+        "git worktree move /home/saturnin/worktrees/a /home/saturnin/worktrees/b",
+        "git worktree prune",
+        "git worktree repair /home/saturnin/worktrees/stale",
+    ],
+)
+def test_destructive_raw_git_worktree_commands_fail_closed(
+    governance: Governance, command: str
+) -> None:
+    decision = governance.check_server_command(command)
+
+    assert not decision.allowed
+    assert "saturnin worktree lifecycle commands" in decision.reasons[0]
+
+
+def test_git_worktree_add_target_is_checked_after_global_options(
+    governance: Governance,
+) -> None:
+    decision = governance.check_server_command("git worktree --verbose add /etc/stale")
+
+    assert not decision.allowed
+    assert "outside writable roots" in decision.reasons[0]
+
+
+@pytest.mark.parametrize(
+    "command",
+    [
         "rm -rf /home/saturnin/worktrees/stale",
         "touch /home/saturnin/status",
         "cp source /home/saturnin/worktrees/destination",
@@ -1691,7 +1719,7 @@ def test_filesystem_writes_within_writable_roots_are_allowed(
         'saturnin check command "git fsck --unreachable"',
         "git fsck --unreachable",
         f"git branch feature/recovered {'a' * 40}",
-        "git worktree prune",
+        "saturnin worktree cleanup --apply",
         "saturnin task move TASK_ID ready --actor chief-of-staff",
         "saturnin task attach TASK_ID --branch feature/recovered --actor chief-of-staff",
         "systemctl --user stop 'saturnin-*.timer'",

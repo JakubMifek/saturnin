@@ -600,6 +600,77 @@ def test_launcher_worker_environment_uses_allowlist_and_constrained_github_token
     assert "host" not in environment["PYTHONPATH"]
 
 
+def test_launcher_preserves_approved_config_path_under_isolated_home(
+    config: Config,
+    board: Board,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    real_home = tmp_path / "real-home"
+    gh_config = real_home / ".config" / "gh"
+    gh_config.mkdir(parents=True)
+    (gh_config / "hosts.yml").write_text("github.com: {}\n", encoding="utf-8")
+    monkeypatch.setenv("HOME", str(real_home))
+    config.policy("mcp")["launcher"]["approved_home_config"] = [str(gh_config)]
+
+    isolated = AgentLauncher(config, board)._isolated_home("nested-xdg")
+
+    assert (isolated / ".config" / "gh" / "hosts.yml").read_text(
+        encoding="utf-8"
+    ) == "github.com: {}\n"
+    assert not (isolated / "gh").exists()
+
+
+def test_launcher_supports_explicit_safe_approved_config_destination(
+    config: Config,
+    board: Board,
+) -> None:
+    source = config.root / "approved-gh-hosts.yml"
+    source.write_text("github.com: {}\n", encoding="utf-8")
+    config.policy("mcp")["launcher"]["approved_home_config"] = [
+        {"source": str(source), "destination": ".config/gh/hosts.yml"}
+    ]
+
+    isolated = AgentLauncher(config, board)._isolated_home("explicit-destination")
+
+    assert (isolated / ".config" / "gh" / "hosts.yml").read_text(
+        encoding="utf-8"
+    ) == "github.com: {}\n"
+
+
+@pytest.mark.parametrize("destination", ["../outside", "/tmp/outside"])
+def test_launcher_rejects_unsafe_approved_config_destinations(
+    config: Config,
+    board: Board,
+    destination: str,
+) -> None:
+    source = config.root / "approved-config"
+    source.write_text("ok\n", encoding="utf-8")
+    config.policy("mcp")["launcher"]["approved_home_config"] = [
+        {"source": str(source), "destination": destination}
+    ]
+
+    with pytest.raises(LauncherError, match="destination"):
+        AgentLauncher(config, board)._isolated_home("unsafe-destination")
+
+
+def test_launcher_rejects_approved_config_destination_collisions(
+    config: Config,
+    board: Board,
+) -> None:
+    first = config.root / "first-config"
+    second = config.root / "second-config"
+    first.write_text("one\n", encoding="utf-8")
+    second.write_text("two\n", encoding="utf-8")
+    config.policy("mcp")["launcher"]["approved_home_config"] = [
+        {"source": str(first), "destination": ".config/tool/config"},
+        {"source": str(second), "destination": ".config/tool/config"},
+    ]
+
+    with pytest.raises(LauncherError, match="duplicate approved_home_config destination"):
+        AgentLauncher(config, board)._isolated_home("duplicate-destination")
+
+
 def test_launcher_injects_role_scoped_attestation_key_only_for_reviewers(
     config: Config, board: Board, git_repo: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

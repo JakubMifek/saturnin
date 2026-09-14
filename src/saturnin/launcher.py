@@ -329,20 +329,62 @@ class AgentLauncher:
         ):
             path.mkdir(parents=True, exist_ok=True)
             path.chmod(0o700)
+        destinations: set[Path] = set()
         for entry in self.policy.get("approved_home_config", []) or []:
-            source = Path(str(entry)).expanduser()
-            if not source.is_absolute():
-                raise LauncherError("approved_home_config entries must be absolute paths")
+            source, destination = self._approved_home_copy_paths(entry, root)
             if not source.exists():
                 continue
-            destination = root / source.name
+            if destination in destinations:
+                raise LauncherError(f"duplicate approved_home_config destination: {destination}")
+            destinations.add(destination)
+            destination.parent.mkdir(parents=True, exist_ok=True)
             if source.is_dir():
                 if destination.exists():
+                    if not destination.is_dir():
+                        raise LauncherError(
+                            f"approved_home_config destination collides with a file: {destination}"
+                        )
                     shutil.rmtree(destination)
                 shutil.copytree(source, destination, symlinks=False)
             else:
+                if destination.is_dir():
+                    raise LauncherError(
+                        f"approved_home_config destination collides with a directory: {destination}"
+                    )
                 shutil.copy2(source, destination)
         return root
+
+    @staticmethod
+    def _approved_home_copy_paths(entry: Any, isolated_home: Path) -> tuple[Path, Path]:
+        if isinstance(entry, dict):
+            source_value = entry.get("source")
+            destination_value = entry.get("destination", entry.get("dest"))
+            if not isinstance(source_value, str) or not source_value.strip():
+                raise LauncherError("approved_home_config mapping entries require source")
+        else:
+            source_value = str(entry)
+            destination_value = None
+        source = Path(source_value).expanduser()
+        if not source.is_absolute():
+            raise LauncherError("approved_home_config entries must be absolute paths")
+        if destination_value is None:
+            home = Path.home().resolve(strict=False)
+            resolved_source = source.resolve(strict=False)
+            try:
+                relative_destination = resolved_source.relative_to(home)
+            except ValueError:
+                relative_destination = Path(resolved_source.name)
+        else:
+            relative_destination = Path(str(destination_value)).expanduser()
+            if relative_destination.is_absolute():
+                raise LauncherError("approved_home_config destinations must be relative paths")
+        if ".." in relative_destination.parts or not relative_destination.parts:
+            raise LauncherError("approved_home_config destination must stay inside isolated HOME")
+        destination = (isolated_home / relative_destination).resolve(strict=False)
+        isolated = isolated_home.resolve(strict=False)
+        if destination == isolated or not destination.is_relative_to(isolated):
+            raise LauncherError("approved_home_config destination must stay inside isolated HOME")
+        return source, destination
 
     def _worker_env_allowlist(self) -> tuple[str, ...]:
         configured = self.policy.get("env_allowlist")
