@@ -105,7 +105,6 @@ for unit in "${MANAGED_UNITS[@]}"; do
   fi
 done
 
-installing=1
 for staged in "$STAGE_DIR"/saturnin-*; do
   name="$(basename "$staged")"
   if [[ -e "$UNIT_DIR/$name" || -L "$UNIT_DIR/$name" ]]; then
@@ -113,6 +112,11 @@ for staged in "$STAGE_DIR"/saturnin-*; do
   else
     : > "$BACKUP_DIR/$name.missing"
   fi
+done
+
+installing=1
+for staged in "$STAGE_DIR"/saturnin-*; do
+  name="$(basename "$staged")"
   install -m 0644 "$staged" "$UNIT_DIR/$name.tmp"
   mv -f "$UNIT_DIR/$name.tmp" "$UNIT_DIR/$name"
   echo "installed $UNIT_DIR/$name"

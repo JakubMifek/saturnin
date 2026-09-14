@@ -34,6 +34,9 @@ filesystem:
     - /usr/sbin
     - /usr/local/bin
     - /usr/local/sbin
+  # The supported bootstrap installs this one project runtime executable.
+  # It is resolved only against the canonical main checkout, never a worker worktree.
+  trusted_runtime_executable: .venv/bin/saturnin
   writable_roots:
     - /home/saturnin
     - /home/saturnin/worktrees

@@ -83,6 +83,7 @@ _GIT_SAFE_SUBCOMMANDS = frozenset(
         "checkout",
         "commit",
         "diff",
+        "fsck",
         "init",
         "log",
         "merge",
@@ -359,6 +360,7 @@ class Governance:
             executable,
             binary,
             self.config.server_scope,
+            runtime_root=self.config.data_root,
         )
         if not executable_decision.allowed:
             return executable_decision
@@ -588,7 +590,9 @@ class Governance:
         if server_scope.get("user", {}).get("allow_root", False):
             problems.append("server scope allows root")
         try:
-            _trusted_executable_roots(server_scope.get("filesystem", {}))
+            filesystem = server_scope.get("filesystem", {})
+            _trusted_executable_roots(filesystem)
+            _trusted_runtime_executable(filesystem, self.config.data_root)
         except ValueError as error:
             problems.append(f"{self.config.policies / 'server_scope.yaml'}: {error}")
         if self.delegation.get("ceo_may_wait_for_workers", False):
@@ -682,6 +686,8 @@ def _check_executable_location(
     executable: str,
     binary: str,
     scope: dict[str, Any],
+    *,
+    runtime_root: Path,
 ) -> Decision:
     filesystem = scope.get("filesystem", {})
     classified = (
@@ -718,6 +724,25 @@ def _check_executable_location(
         return Decision.deny(
             f"classified executable {executable!r} does not resolve to an existing file"
         )
+    if binary == "saturnin":
+        try:
+            runtime_executable = _trusted_runtime_executable(filesystem, runtime_root)
+        except ValueError as error:
+            return Decision.deny(f"invalid trusted runtime executable policy: {error}")
+        if selected == runtime_executable:
+            try:
+                resolved_runtime = selected.resolve(strict=True)
+            except (OSError, RuntimeError, ValueError):
+                return Decision.deny(
+                    f"trusted runtime executable {str(selected)!r} does not exist"
+                )
+            if resolved_runtime != selected:
+                return Decision.deny("trusted runtime executable must not be a symlink")
+            if not resolved_runtime.is_file() or not os.access(resolved_runtime, os.X_OK):
+                return Decision.deny(
+                    f"trusted runtime executable {str(selected)!r} must be an executable file"
+                )
+            return Decision.ok(f"executable {str(selected)!r} is the trusted Saturnin runtime")
     if _containing_root(selected, configured_roots) is None:
         return Decision.deny(
             f"executable {str(selected)!r} is outside trusted system executable roots"
@@ -776,6 +801,18 @@ def _trusted_executable_roots(
                 f"(invalid entry at index {index}: {value!r})"
             ) from error
     return roots
+
+
+def _trusted_runtime_executable(filesystem: dict[str, Any], runtime_root: Path) -> Path:
+    value = filesystem.get("trusted_runtime_executable")
+    if not isinstance(value, str) or not value.strip():
+        raise ValueError("filesystem.trusted_runtime_executable must be a nonempty relative path")
+    relative = Path(value)
+    if relative.is_absolute() or ".." in relative.parts or relative.name != "saturnin":
+        raise ValueError(
+            "filesystem.trusted_runtime_executable must be a relative path to a saturnin binary"
+        )
+    return Path(os.path.abspath(runtime_root / relative))
 
 
 def _check_filesystem_targets(targets: Sequence[str], filesystem: dict[str, Any]) -> Decision:
@@ -897,8 +934,13 @@ def _git_targets(arguments: Sequence[str]) -> list[str]:
     if subcommand_index is None:
         return targets
     subcommand = arguments[subcommand_index]
+    subcommand_arguments = arguments[subcommand_index + 1 :]
     if subcommand == "config":
         raise _WriteScopeError("git config is unsupported; configuration can define shell aliases")
+    if subcommand == "fsck" and subcommand_arguments != ["--unreachable"]:
+        raise _WriteScopeError(
+            "git fsck is limited to the read-only '--unreachable' recovery scan"
+        )
     if subcommand in _GIT_NETWORK_SUBCOMMANDS:
         raise _WriteScopeError(
             f"git {subcommand} is unsupported here; use a dedicated governed wrapper"
@@ -907,7 +949,6 @@ def _git_targets(arguments: Sequence[str]) -> list[str]:
         raise _WriteScopeError(
             f"unsupported git subcommand {subcommand!r}; executable dispatch is not allowed"
         )
-    subcommand_arguments = arguments[subcommand_index + 1 :]
     if subcommand == "remote":
         _check_git_remote_subcommand(subcommand_arguments)
     targets.extend(_git_write_option_targets(subcommand, subcommand_arguments))

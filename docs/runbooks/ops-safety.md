@@ -79,8 +79,15 @@ git worktree prune
 **A worktree was removed with unfinished work**
 
 Commits remain on their branch after worktree removal; use `git reflog --all`
-for recent ref movements. Uncommitted changes are gone, which is why the
-janitor never touches a dirty worktree.
+for recent ref movements. If the commit is no longer referenced by any reflog:
+
+```bash
+saturnin check command "git fsck --unreachable"
+git fsck --unreachable
+```
+
+Uncommitted changes are gone, which is why the janitor never touches a dirty
+worktree.
 
 **The board looks wrong**
 

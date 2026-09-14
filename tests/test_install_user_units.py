@@ -307,3 +307,77 @@ def test_failed_enable_rolls_back_replaced_units(tmp_path: Path) -> None:
     assert {path.name for path in enabled.iterdir()} == {"saturnin-resume.timer"}
     assert {path.name for path in active.iterdir()} == {"saturnin-janitor.service"}
     assert {path.name for path in wants.iterdir()} == {"saturnin-resume.timer"}
+
+
+def test_early_install_failure_preserves_all_later_unit_entries(tmp_path: Path) -> None:
+    saturnin_home = tmp_path / "checkout"
+    shutil.copytree(REPO_ROOT / "systemd", saturnin_home / "systemd")
+    fake_bin = tmp_path / "bin"
+    fake_bin.mkdir()
+    config_home = tmp_path / "config"
+    installed_dir = config_home / "systemd" / "user"
+    installed_dir.mkdir(parents=True)
+    install_count = tmp_path / "install-count"
+
+    linked_target = tmp_path / "linked-resume.timer"
+    linked_target.write_text("linked\n", encoding="utf-8")
+    entries = {
+        "saturnin-resume.timer": str(linked_target),
+        "saturnin-poller.timer": "/dev/null",
+        "saturnin-mirror.timer": str(tmp_path / "missing-mirror.timer"),
+    }
+    for name, target in entries.items():
+        (installed_dir / name).symlink_to(target)
+    previous = installed_dir / "saturnin-discovery.service"
+    previous.write_text("previous discovery service\n", encoding="utf-8")
+
+    (fake_bin / "id").write_text("#!/bin/sh\nprintf '1000\\n'\n", encoding="utf-8")
+    (fake_bin / "systemd-analyze").write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+    (fake_bin / "install").write_text(
+        "#!/bin/sh\n"
+        f"count_file='{install_count}'\n"
+        "count=0\n"
+        "[ ! -e \"$count_file\" ] || count=$(cat \"$count_file\")\n"
+        "count=$((count + 1))\n"
+        "printf '%s\\n' \"$count\" > \"$count_file\"\n"
+        "[ \"$count\" -ne 2 ] || exit 1\n"
+        "exec /usr/bin/install \"$@\"\n",
+        encoding="utf-8",
+    )
+    (fake_bin / "systemctl").write_text(
+        "#!/bin/sh\n"
+        f"unit_dir='{installed_dir}'\n"
+        "case \"$2\" in\n"
+        "  is-enabled)\n"
+        "    [ ! -L \"$unit_dir/$3\" ] || { printf 'linked\\n'; exit 0; }\n"
+        "    printf 'disabled\\n'; exit 1\n"
+        "    ;;\n"
+        "  is-active) exit 1 ;;\n"
+        "  disable) [ ! -L \"$unit_dir/$3\" ] || rm -f \"$unit_dir/$3\" ;;\n"
+        "esac\n"
+        "exit 0\n",
+        encoding="utf-8",
+    )
+    for command in ("id", "install", "systemctl", "systemd-analyze"):
+        (fake_bin / command).chmod(0o755)
+
+    result = subprocess.run(
+        ["bash", str(REPO_ROOT / "scripts/install_user_units.sh")],
+        check=False,
+        capture_output=True,
+        text=True,
+        env={
+            **os.environ,
+            "PATH": f"{fake_bin}:{os.environ['PATH']}",
+            "SATURNIN_HOME": str(saturnin_home),
+            "XDG_CONFIG_HOME": str(config_home),
+        },
+    )
+
+    assert result.returncode == 1
+    assert install_count.read_text(encoding="utf-8").strip() == "2"
+    assert previous.read_text(encoding="utf-8") == "previous discovery service\n"
+    for name, target in entries.items():
+        entry = installed_dir / name
+        assert entry.is_symlink()
+        assert os.readlink(entry) == target

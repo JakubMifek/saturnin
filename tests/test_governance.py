@@ -843,6 +843,76 @@ def test_in_scope_server_commands(governance: Governance, command: str) -> None:
     assert governance.check_server_command(command).allowed
 
 
+def test_bootstrap_runtime_saturnin_executable_is_trusted(
+    governance: Governance,
+    config: Config,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    runtime = config.data_root / ".venv" / "bin"
+    runtime.mkdir(parents=True)
+    executable = runtime / "saturnin"
+    executable.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+    executable.chmod(0o755)
+    monkeypatch.setenv("PATH", f"{runtime}:{os.environ['PATH']}")
+
+    assert governance.check_server_command("saturnin doctor").allowed
+    assert governance.check_server_command(f"{executable} doctor").allowed
+
+
+def test_worktree_saturnin_executable_cannot_spoof_trusted_runtime(
+    governance: Governance,
+    config: Config,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    runtime = config.data_root / ".venv" / "bin"
+    runtime.mkdir(parents=True)
+    trusted = runtime / "saturnin"
+    trusted.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+    trusted.chmod(0o755)
+    worktree_bin = config.root / "var" / "worktrees" / "spoof" / ".venv" / "bin"
+    worktree_bin.mkdir(parents=True)
+    spoof = worktree_bin / "saturnin"
+    spoof.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+    spoof.chmod(0o755)
+    monkeypatch.setenv("PATH", f"{worktree_bin}:{runtime}:{os.environ['PATH']}")
+
+    decision = governance.check_server_command("saturnin doctor")
+
+    assert not decision.allowed
+    assert str(spoof) in decision.reasons[0]
+
+
+def test_trusted_runtime_executable_must_not_be_a_symlink(
+    governance: Governance,
+    config: Config,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    runtime = config.data_root / ".venv" / "bin"
+    runtime.mkdir(parents=True)
+    outside = config.root / "spoofed-saturnin"
+    outside.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+    outside.chmod(0o755)
+    (runtime / "saturnin").symlink_to(outside)
+    monkeypatch.setenv("PATH", f"{runtime}:{os.environ['PATH']}")
+
+    decision = governance.check_server_command("saturnin doctor")
+
+    assert not decision.allowed
+    assert "must not be a symlink" in decision.reasons[0]
+
+
+@pytest.mark.parametrize(
+    "runtime",
+    [None, "", "/opt/saturnin", "../bin/saturnin", ".venv/bin/not-saturnin"],
+)
+def test_audit_rejects_invalid_trusted_runtime_executable(
+    config: Config, runtime: object
+) -> None:
+    config.server_scope["filesystem"]["trusted_runtime_executable"] = runtime
+
+    assert any("trusted_runtime_executable" in problem for problem in Governance(config).audit())
+
+
 @pytest.mark.parametrize("binary", ["git", "systemctl", "rm", "env"])
 def test_path_resolved_classified_executables_must_come_from_trusted_roots(
     governance: Governance,
@@ -1592,6 +1662,8 @@ def test_filesystem_writes_within_writable_roots_are_allowed(
         'saturnin check command "git reflog show --all --date=iso"',
         "git reflog show --all --date=iso",
         "git reflog --all",
+        'saturnin check command "git fsck --unreachable"',
+        "git fsck --unreachable",
         f"git branch feature/recovered {'a' * 40}",
         "git worktree prune",
         "saturnin task move TASK_ID ready --actor chief-of-staff",
@@ -1609,15 +1681,43 @@ def test_documented_recovery_commands_are_allowed(
 ) -> None:
     trusted = config.root / "trusted-recovery-bin"
     trusted.mkdir()
-    for binary in ("git", "saturnin", "systemctl"):
+    for binary in ("git", "systemctl"):
         executable = trusted / binary
         executable.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
         executable.chmod(0o755)
+    runtime = config.data_root / ".venv" / "bin"
+    runtime.mkdir(parents=True)
+    executable = runtime / "saturnin"
+    executable.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+    executable.chmod(0o755)
     config.server_scope["filesystem"]["trusted_executable_roots"] = [str(trusted)]
-    monkeypatch.setenv("PATH", str(trusted))
+    monkeypatch.setenv("PATH", f"{trusted}:{runtime}")
     monkeypatch.setattr("os.getcwd", lambda: "/home/saturnin")
 
     assert governance.check_server_command(command).allowed
+
+
+@pytest.mark.parametrize(
+    "command",
+    [
+        "git fsck",
+        "git fsck --lost-found",
+        "git fsck --unreachable --lost-found",
+        "git fsck --no-reflogs --unreachable",
+        "git fsck --unreachable HEAD",
+    ],
+)
+def test_git_fsck_rejects_undocumented_or_mutating_variants(
+    governance: Governance,
+    monkeypatch: pytest.MonkeyPatch,
+    command: str,
+) -> None:
+    monkeypatch.setattr("os.getcwd", lambda: "/home/saturnin")
+
+    decision = governance.check_server_command(command)
+
+    assert not decision.allowed
+    assert "limited to the read-only" in decision.reasons[0]
 
 
 @pytest.mark.parametrize("binary", ["cp", "install", "ln", "mv", "rsync"])
