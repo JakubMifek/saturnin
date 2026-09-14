@@ -393,9 +393,8 @@ class ReviewLedger:
                     atomic_replace_text(path, repaired + serialized)
                     return entry
                 self._reject_replayed_attestation(path, attestation_id, raw)
-            else:
-                raw = ""
-            atomic_replace_text(path, raw + serialized)
+            with path.open("a", encoding="utf-8") as handle:
+                handle.write(serialized)
         return entry
 
     def for_subject(self, subject: str, kind: str) -> list[ReviewRecord]:

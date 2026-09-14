@@ -39,6 +39,24 @@ def test_board_writes_use_durable_atomic_replace(
     assert '"title": "Power-loss-safe task"' in writes[0][1]
 
 
+def test_failed_atomic_replace_preserves_authoritative_task(
+    board: Board, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    task = board.create("Original task")
+
+    def fail_replace(source: Path, destination: Path) -> None:
+        raise OSError("simulated power loss before rename")
+
+    monkeypatch.setattr("saturnin.jsonlines.os.replace", fail_replace)
+
+    with pytest.raises(OSError, match="simulated power loss"):
+        with board.edit(task.id) as stored:
+            stored.title = "Uncommitted task"
+
+    assert board.get(task.id).title == "Original task"
+    assert list(board.config.tasks_dir.glob(".*.tmp")) == []
+
+
 def test_empty_title_rejected(board: Board) -> None:
     with pytest.raises(BoardError):
         board.create("   ")

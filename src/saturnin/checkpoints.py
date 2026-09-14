@@ -109,10 +109,9 @@ class CheckpointStore:
                 except JSONLinesError as exc:
                     raise CheckpointError(f"corrupt checkpoint store {exc}") from exc
                 if repaired != raw:
-                    raw = repaired
-            else:
-                raw = ""
-            atomic_replace_text(path, raw + json.dumps(checkpoint.to_dict()) + "\n")
+                    atomic_replace_text(path, repaired)
+            with path.open("a", encoding="utf-8") as handle:
+                handle.write(json.dumps(checkpoint.to_dict()) + "\n")
             try:
                 with self.board.edit(checkpoint.task_id) as task:
                     task.checkpoint = checkpoint.created_at
