@@ -114,6 +114,28 @@ def test_doctor_reports_document_read_errors_with_the_path(
     )
 
 
+def test_doctor_config_load_error_uses_expected_policy_path(
+    home: Path,
+    capsys: pytest.CaptureFixture[str],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    expected = home / "policies" / "governance.yaml"
+    expected.write_text("git: [\n", encoding="utf-8")
+
+    def load_malformed_config(*args, **kwargs):
+        return yaml.safe_load(expected.read_text(encoding="utf-8"))
+
+    monkeypatch.setattr("saturnin.cli.Config.load", load_malformed_config)
+
+    code = main(["--home", str(home), "--json", "doctor"])
+    captured = capsys.readouterr()
+    payload = json.loads(captured.out)
+
+    assert code == 2
+    assert payload["problems"][0].startswith(f"{expected}:")
+    assert "Traceback" not in captured.out + captured.err
+
+
 def test_task_intake_and_dispatch(home: Path, capsys: pytest.CaptureFixture[str]) -> None:
     code, out = run(
         capsys, "--json", "task", "add", "Fix the failing deploy", "--dispatch"

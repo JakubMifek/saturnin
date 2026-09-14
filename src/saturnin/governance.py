@@ -694,7 +694,11 @@ def _check_executable_location(
     else:
         found = shutil.which(executable)
         if found is None:
-            return Decision.ok("unresolved executable has no path to trust")
+            if binary in _SHELL_RESERVED | _DYNAMIC_COMMANDS | {"command", "exec"}:
+                return Decision.ok("shell syntax is classified without an executable path")
+            return Decision.deny(
+                f"classified executable {executable!r} could not be resolved from PATH"
+            )
         resolved = _resolve_command_path(found)
 
     trusted_roots = _policy_roots(filesystem.get("trusted_executable_roots", []))

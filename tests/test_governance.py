@@ -808,6 +808,22 @@ def test_path_qualified_allowlisted_executable_is_not_classified_by_basename(
     assert "outside trusted system executable roots" in decision.reasons[0]
 
 
+@pytest.mark.parametrize("binary", ["git", "systemctl", "saturnin"])
+def test_unresolvable_classified_executables_fail_closed(
+    governance: Governance,
+    monkeypatch: pytest.MonkeyPatch,
+    binary: str,
+) -> None:
+    monkeypatch.setattr("saturnin.governance.shutil.which", lambda _: None)
+
+    decision = governance.check_server_command(f"{binary} status")
+
+    assert not decision.allowed
+    assert f"classified executable {binary!r} could not be resolved from PATH" in (
+        decision.reasons[0]
+    )
+
+
 def test_curl_output_flags_are_parsed() -> None:
     assert _curl_targets([
         "-q",
@@ -1194,7 +1210,7 @@ def test_shell_assignments_cannot_change_policy_home(
         ("cp --target-directory /opt source", "outside writable roots"),
         ("curl -q --output /opt/response.txt https://example.test/ok", "outside writable roots"),
         ("sed -i s/foo/bar/ /opt/status", "outside writable roots"),
-        ("saturnin --home /tmp task add x", "outside writable roots"),
+        ("/usr/local/bin/saturnin --home /tmp task add x", "outside writable roots"),
         ("python3 -m saturnin --home /tmp task add x", "outside writable roots"),
         ("git -C /tmp init", "outside writable roots"),
         ("git --git-dir=/tmp/repo.git status", "outside writable roots"),

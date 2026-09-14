@@ -25,7 +25,7 @@ from . import telemetry
 from .automation import AutomationLibrary
 from .board import CONTAINER_KINDS, TRANSITIONS, Board, BoardError, Task
 from .checkpoints import Checkpoint, CheckpointStore
-from .config import Config
+from .config import Config, find_root
 from .contracts import (
     FRONT_MATTER,
     audit as audit_contracts,
@@ -749,7 +749,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         return _run(args, config)
     except Exception as exc:
         if args.command == "doctor":
-            fallback = Path(args.home) if args.home else Path.cwd()
+            fallback = _doctor_config_path(args)
             problem = _doctor_exception(fallback, exc)
             _emit(
                 {"healthy": False, "problems": [problem]},
@@ -771,6 +771,17 @@ def main(argv: Sequence[str] | None = None) -> int:
             raise
         print(f"saturnin: {exc}", file=sys.stderr)
         return 1
+
+
+def _doctor_config_path(args: argparse.Namespace) -> Path:
+    if args.home:
+        root = Path(args.home).expanduser().resolve(strict=False)
+    else:
+        try:
+            root = find_root()
+        except OSError:
+            root = Path.cwd().resolve(strict=False)
+    return root / "policies" / "governance.yaml"
 
 
 def _run(args: argparse.Namespace, config: Config) -> int:  # noqa: C901 - flat command table
