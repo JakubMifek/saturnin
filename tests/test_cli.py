@@ -51,6 +51,24 @@ def test_doctor_is_healthy(home: Path, capsys: pytest.CaptureFixture[str]) -> No
     assert "in order" in out
 
 
+def test_cli_home_argument_overrides_saturnin_home_env(
+    home: Path,
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    explicit = tmp_path / "explicit-home"
+    explicit.mkdir()
+    monkeypatch.setenv("SATURNIN_HOME", str(home))
+    before = {task.name for task in (home / "board" / "tasks").glob("*.json")}
+
+    code, _ = run(capsys, "--home", str(explicit), "task", "add", "Use explicit home")
+
+    assert code == 0
+    assert any((explicit / "board" / "tasks").glob("*.json"))
+    assert {task.name for task in (home / "board" / "tasks").glob("*.json")} == before
+
+
 def test_doctor_reports_discovery_label_pairing_problem(
     home: Path, capsys: pytest.CaptureFixture[str]
 ) -> None:

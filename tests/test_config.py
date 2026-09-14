@@ -77,7 +77,9 @@ def test_ci_governance_uses_base_controlled_workflow_and_code() -> None:
     assert "Detect initial governance bootstrap" in workflow
     assert "steps.bootstrap.outputs.initial != 'true'" in workflow
     assert "Repository-native bootstrap approval" in workflow
+    assert "github.paginate(" in workflow
     assert "listReviews" in workflow
+    assert "const {data: reviews}" not in workflow
     assert "bootstrapReviewer = \"copilot-pull-request-reviewer[bot]\"" in workflow
     assert "review.user.type === \"Bot\"" in workflow
     assert "review.user.login === bootstrapReviewer" in workflow

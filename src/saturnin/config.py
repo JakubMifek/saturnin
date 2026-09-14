@@ -112,7 +112,9 @@ class Config:
 
     @classmethod
     def load(cls, root: Path | str | None = None) -> "Config":
-        return cls(find_root(Path(root) if root else None))
+        if root is not None:
+            return cls(Path(root).expanduser().resolve())
+        return cls(find_root())
 
     def policy(self, name: str) -> dict[str, Any]:
         """Load a policy file once per configuration instance."""
