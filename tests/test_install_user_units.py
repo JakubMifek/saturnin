@@ -9,6 +9,19 @@ from pathlib import Path
 REPO_ROOT = Path(__file__).resolve().parents[1]
 
 
+def _filesystem_topology(root: Path) -> list[tuple[str, str, str | bytes]]:
+    entries: list[tuple[str, str, str | bytes]] = []
+    for path in sorted(root.rglob("*")):
+        relative = str(path.relative_to(root))
+        if path.is_symlink():
+            entries.append(("symlink", relative, os.readlink(path)))
+        elif path.is_dir():
+            entries.append(("directory", relative, ""))
+        else:
+            entries.append(("file", relative, path.read_bytes()))
+    return entries
+
+
 def test_install_user_units_rejects_unsupported_checkout_path(tmp_path: Path) -> None:
     saturnin_home = tmp_path / "checkout with spaces"
     shutil.copytree(REPO_ROOT / "systemd", saturnin_home / "systemd")
@@ -195,13 +208,10 @@ def test_failed_enable_rolls_back_replaced_units(tmp_path: Path) -> None:
     installed_dir = config_home / "systemd" / "user"
     installed_dir.mkdir(parents=True)
     state = tmp_path / "systemctl-state"
-    enabled = state / "enabled"
     active = state / "active"
     wants = installed_dir / "default.target.wants"
-    enabled.mkdir(parents=True)
-    active.mkdir()
+    active.mkdir(parents=True)
     wants.mkdir()
-    (enabled / "saturnin-resume.timer").touch()
     (active / "saturnin-janitor.service").touch()
     (fake_bin / "id").write_text("#!/bin/sh\nprintf '1000\\n'\n", encoding="utf-8")
     (fake_bin / "systemd-analyze").write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
@@ -211,32 +221,18 @@ def test_failed_enable_rolls_back_replaced_units(tmp_path: Path) -> None:
         f"state='{state}'\n"
         f"unit_dir='{installed_dir}'\n"
         "case \"$2\" in\n"
-        "  is-enabled)\n"
-        "    unit=\"$3\"\n"
-        "    if [ -e \"$state/enabled/$unit\" ]; then printf 'enabled\\n'; exit 0; fi\n"
-        "    if [ -L \"$unit_dir/$unit\" ]; then\n"
-        "      [ \"$(readlink \"$unit_dir/$unit\")\" = '/dev/null' ]"
-        " && printf 'masked\\n' && exit 1\n"
-        "      printf 'linked\\n'; exit 0\n"
-        "    fi\n"
-        "    printf 'disabled\\n'; exit 1\n"
-        "    ;;\n"
         "  is-active) [ -e \"$state/active/$4\" ] || exit 1 ;;\n"
         "  enable)\n"
         "    if [ \"$3\" = '--now' ]; then\n"
         "      shift 3\n"
+        "      mkdir -p \"$unit_dir/timers.target.wants\"\n"
         "      for unit in \"$@\"; do\n"
-        "        touch \"$state/enabled/$unit\" \"$state/active/$unit\"\n"
-        "        ln -sf \"../$unit\" \"$unit_dir/default.target.wants/$unit\"\n"
+        "        touch \"$state/active/$unit\"\n"
+        "        ln -sf \"../$unit\" \"$unit_dir/timers.target.wants/$unit\"\n"
         "      done\n"
         "      exit 1\n"
         "    fi\n"
-        "    touch \"$state/enabled/$3\"\n"
         "    ln -sf \"../$3\" \"$unit_dir/default.target.wants/$3\"\n"
-        "    ;;\n"
-        "  disable)\n"
-        "    rm -f \"$state/enabled/$3\" \"$unit_dir/default.target.wants/$3\"\n"
-        "    [ ! -L \"$unit_dir/$3\" ] || rm -f \"$unit_dir/$3\"\n"
         "    ;;\n"
         "  start) touch \"$state/active/$3\" ;;\n"
         "  stop) rm -f \"$state/active/$3\" ;;\n"
@@ -259,6 +255,10 @@ def test_failed_enable_rolls_back_replaced_units(tmp_path: Path) -> None:
     enabled_timer = installed_dir / "saturnin-resume.timer"
     enabled_timer.write_text("previous enabled timer\n", encoding="utf-8")
     (wants / "saturnin-resume.timer").symlink_to("../saturnin-resume.timer")
+    static_wants = installed_dir / "custom.target.wants"
+    static_wants.mkdir()
+    (static_wants / "saturnin-janitor.service").symlink_to("../saturnin-janitor.service")
+    previous_topology = _filesystem_topology(installed_dir)
 
     result = subprocess.run(
         ["bash", str(REPO_ROOT / "scripts/install_user_units.sh")],
@@ -274,6 +274,7 @@ def test_failed_enable_rolls_back_replaced_units(tmp_path: Path) -> None:
     )
 
     assert result.returncode == 1
+    assert _filesystem_topology(installed_dir) == previous_topology
     assert existing.read_text(encoding="utf-8") == "previous valid unit\n"
     installed = {path.name for path in installed_dir.glob("saturnin-*")}
     assert installed == {
@@ -297,16 +298,16 @@ def test_failed_enable_rolls_back_replaced_units(tmp_path: Path) -> None:
     rollback_calls = systemctl_calls[failed_enable + 1 :]
     daemon_reload = rollback_calls.index("--user daemon-reload")
     assert all(
-        call.startswith(("--user stop ", "--user disable "))
+        call.startswith("--user stop ")
         for call in rollback_calls[:daemon_reload]
     )
-    assert not any(
-        call.startswith("--user disable ") for call in rollback_calls[daemon_reload + 1 :]
-    )
-    assert "--user start saturnin-janitor.service" in rollback_calls
-    assert {path.name for path in enabled.iterdir()} == {"saturnin-resume.timer"}
+    assert "--user stop saturnin-janitor.service" not in rollback_calls
+    assert not any(call.startswith("--user disable ") for call in rollback_calls)
+    assert not any(call.startswith("--user start ") for call in rollback_calls)
     assert {path.name for path in active.iterdir()} == {"saturnin-janitor.service"}
     assert {path.name for path in wants.iterdir()} == {"saturnin-resume.timer"}
+    assert {path.name for path in static_wants.iterdir()} == {"saturnin-janitor.service"}
+    assert not (installed_dir / "timers.target.wants").exists()
 
 
 def test_early_install_failure_preserves_all_later_unit_entries(tmp_path: Path) -> None:
@@ -330,6 +331,7 @@ def test_early_install_failure_preserves_all_later_unit_entries(tmp_path: Path) 
         (installed_dir / name).symlink_to(target)
     previous = installed_dir / "saturnin-discovery.service"
     previous.write_text("previous discovery service\n", encoding="utf-8")
+    previous_topology = _filesystem_topology(installed_dir)
 
     (fake_bin / "id").write_text("#!/bin/sh\nprintf '1000\\n'\n", encoding="utf-8")
     (fake_bin / "systemd-analyze").write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
@@ -348,12 +350,7 @@ def test_early_install_failure_preserves_all_later_unit_entries(tmp_path: Path) 
         "#!/bin/sh\n"
         f"unit_dir='{installed_dir}'\n"
         "case \"$2\" in\n"
-        "  is-enabled)\n"
-        "    [ ! -L \"$unit_dir/$3\" ] || { printf 'linked\\n'; exit 0; }\n"
-        "    printf 'disabled\\n'; exit 1\n"
-        "    ;;\n"
         "  is-active) exit 1 ;;\n"
-        "  disable) [ ! -L \"$unit_dir/$3\" ] || rm -f \"$unit_dir/$3\" ;;\n"
         "esac\n"
         "exit 0\n",
         encoding="utf-8",
@@ -376,6 +373,7 @@ def test_early_install_failure_preserves_all_later_unit_entries(tmp_path: Path) 
 
     assert result.returncode == 1
     assert install_count.read_text(encoding="utf-8").strip() == "2"
+    assert _filesystem_topology(installed_dir) == previous_topology
     assert previous.read_text(encoding="utf-8") == "previous discovery service\n"
     for name, target in entries.items():
         entry = installed_dir / name

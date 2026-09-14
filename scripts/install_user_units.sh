@@ -12,7 +12,6 @@ ENABLED_TIMERS=(
   saturnin-resume.timer
 )
 MANAGED_UNITS=()
-declare -A ENABLE_STATE=()
 declare -A WAS_ACTIVE=()
 
 if [[ "$(id -u)" -eq 0 ]]; then
@@ -39,26 +38,30 @@ cleanup() {
 rollback() {
   set +e
   for unit in "${MANAGED_UNITS[@]}"; do
-    systemctl --user stop "$unit"
-    systemctl --user disable "$unit"
-  done
-  for backup in "$BACKUP_DIR"/*; do
-    [[ -e "$backup" || -L "$backup" ]] || continue
-    name="$(basename "$backup")"
-    if [[ "$name" == *.missing ]]; then
-      rm -f "$UNIT_DIR/${name%.missing}"
-    else
-      mv -f "$backup" "$UNIT_DIR/$name"
+    if [[ "${WAS_ACTIVE[$unit]}" -eq 0 ]]; then
+      systemctl --user stop "$unit"
     fi
   done
+  for unit in "${MANAGED_UNITS[@]}"; do
+    while IFS= read -r -d '' entry; do
+      rm -f "$entry"
+    done < <(find "$UNIT_DIR" -mindepth 1 -name "$unit" -print0)
+  done
   rm -f "$UNIT_DIR"/saturnin-*.tmp
+  cp -a "$BACKUP_DIR/tree/." "$UNIT_DIR/"
+  while IFS= read -r -d '' directory; do
+    relative="${directory#"$UNIT_DIR"/}"
+    if [[ ! -d "$BACKUP_DIR/dirs/$relative" ]]; then
+      rmdir "$directory" 2>/dev/null || true
+    fi
+  done < <(find "$UNIT_DIR" -mindepth 1 -depth -type d -print0)
   systemctl --user daemon-reload
   for unit in "${MANAGED_UNITS[@]}"; do
-    case "${ENABLE_STATE[$unit]}" in
-      enabled) systemctl --user enable "$unit" ;;
-      enabled-runtime) systemctl --user enable --runtime "$unit" ;;
-    esac
-    if [[ "${WAS_ACTIVE[$unit]}" -eq 1 ]]; then
+    definition="$UNIT_DIR/$unit"
+    if [[ "${WAS_ACTIVE[$unit]}" -eq 1 ]] \
+      && ! systemctl --user is-active --quiet "$unit" \
+      && [[ -e "$definition" ]] \
+      && [[ ! -L "$definition" || "$(readlink "$definition")" != "/dev/null" ]]; then
       systemctl --user start "$unit"
     fi
   done
@@ -95,9 +98,6 @@ Path(os.environ["DEST"]).write_text(
 done
 
 for unit in "${MANAGED_UNITS[@]}"; do
-  state=""
-  if state="$(systemctl --user is-enabled "$unit" 2>/dev/null)"; then :; fi
-  ENABLE_STATE["$unit"]="$state"
   if systemctl --user is-active --quiet "$unit"; then
     WAS_ACTIVE["$unit"]=1
   else
@@ -105,13 +105,18 @@ for unit in "${MANAGED_UNITS[@]}"; do
   fi
 done
 
+mkdir -p "$BACKUP_DIR/tree" "$BACKUP_DIR/dirs"
+while IFS= read -r -d '' directory; do
+  relative="${directory#"$UNIT_DIR"/}"
+  mkdir -p "$BACKUP_DIR/dirs/$relative"
+done < <(find "$UNIT_DIR" -mindepth 1 -type d -print0)
 for staged in "$STAGE_DIR"/saturnin-*; do
   name="$(basename "$staged")"
-  if [[ -e "$UNIT_DIR/$name" || -L "$UNIT_DIR/$name" ]]; then
-    cp -a "$UNIT_DIR/$name" "$BACKUP_DIR/$name"
-  else
-    : > "$BACKUP_DIR/$name.missing"
-  fi
+  while IFS= read -r -d '' entry; do
+    relative="${entry#"$UNIT_DIR"/}"
+    mkdir -p "$BACKUP_DIR/tree/$(dirname "$relative")"
+    cp -a "$entry" "$BACKUP_DIR/tree/$relative"
+  done < <(find "$UNIT_DIR" -mindepth 1 -name "$name" -print0)
 done
 
 installing=1
