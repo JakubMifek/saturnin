@@ -78,9 +78,9 @@ git worktree prune
 
 **A worktree was removed with unfinished work**
 
-The commits still exist if they were committed: `git reflog` on the branch, or
-`git fsck --lost-found` for dangling commits. Uncommitted changes are gone -
-which is why the janitor never touches a dirty worktree.
+Commits remain on their branch after worktree removal; use `git reflog --all`
+for recent ref movements. Uncommitted changes are gone, which is why the
+janitor never touches a dirty worktree.
 
 **The board looks wrong**
 
@@ -94,19 +94,21 @@ process exits.
 
 By default mirroring is disabled (`tracking.mirror_tasks_as_issues: false`), so
 the primary recovery path is your own backups of `board/` and `var/`. Restore
-those first, then reinstall with `scripts/bootstrap.sh`.
+those first, then follow the
+[day-1 startup runbook](day-1-startup.md) from a trusted administrator shell.
 
 If optional mirroring is enabled for your installation, you can also rebuild
 from the private board repository issues
-([ADR-0001](../adr/0001-system-of-record.md)): list open tasks with
-`gh issue list --repo <board-repo> --label "saturnin:state/in_progress"` and
-the sibling state labels. Anything that was never mirrored is lost.
+([ADR-0001](../adr/0001-system-of-record.md)): inspect open tasks and their
+sibling state labels in the configured board repository. Anything that was
+never mirrored is lost.
 
 **Everything is on fire**
 
 1. `systemctl --user stop 'saturnin-*.timer'` - stop the schedulers.
 2. `saturnin task list --open` - see what is in flight.
-3. Escalate with `saturnin escalate ... --urgency critical --push`.
+3. Escalate with
+   `saturnin escalate "Recovery requires human intervention" --urgency critical --push`.
 4. Nothing merges while the gates are unavailable; that is the intended failure
    mode.
 

@@ -1586,13 +1586,38 @@ def test_filesystem_writes_within_writable_roots_are_allowed(
     assert governance.check_server_command(command).allowed
 
 
-def test_git_reflog_recovery_command_is_allowed(
-    governance: Governance, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    monkeypatch.setattr("os.getcwd", lambda: "/home/saturnin")
-    assert governance.check_server_command(
+@pytest.mark.parametrize(
+    "command",
+    [
+        'saturnin check command "git reflog show --all --date=iso"',
         "git reflog show --all --date=iso",
-    ).allowed
+        "git reflog --all",
+        f"git branch feature/recovered {'a' * 40}",
+        "git worktree prune",
+        "saturnin task move TASK_ID ready --actor chief-of-staff",
+        "saturnin task attach TASK_ID --branch feature/recovered --actor chief-of-staff",
+        "systemctl --user stop 'saturnin-*.timer'",
+        "saturnin task list --open",
+        'saturnin escalate "Recovery requires human intervention" --urgency critical --push',
+    ],
+)
+def test_documented_recovery_commands_are_allowed(
+    governance: Governance,
+    config: Config,
+    monkeypatch: pytest.MonkeyPatch,
+    command: str,
+) -> None:
+    trusted = config.root / "trusted-recovery-bin"
+    trusted.mkdir()
+    for binary in ("git", "saturnin", "systemctl"):
+        executable = trusted / binary
+        executable.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+        executable.chmod(0o755)
+    config.server_scope["filesystem"]["trusted_executable_roots"] = [str(trusted)]
+    monkeypatch.setenv("PATH", str(trusted))
+    monkeypatch.setattr("os.getcwd", lambda: "/home/saturnin")
+
+    assert governance.check_server_command(command).allowed
 
 
 @pytest.mark.parametrize("binary", ["cp", "install", "ln", "mv", "rsync"])

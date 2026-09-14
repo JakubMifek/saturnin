@@ -191,13 +191,17 @@ def test_failed_enable_rolls_back_replaced_units(tmp_path: Path) -> None:
     fake_bin = tmp_path / "bin"
     fake_bin.mkdir()
     calls = tmp_path / "systemctl-calls"
+    config_home = tmp_path / "config"
+    installed_dir = config_home / "systemd" / "user"
+    installed_dir.mkdir(parents=True)
     state = tmp_path / "systemctl-state"
     enabled = state / "enabled"
     active = state / "active"
+    wants = installed_dir / "default.target.wants"
     enabled.mkdir(parents=True)
     active.mkdir()
-    (enabled / "saturnin-janitor.timer").touch()
-    (active / "saturnin-improve.timer").touch()
+    wants.mkdir()
+    (enabled / "saturnin-resume.timer").touch()
     (active / "saturnin-janitor.service").touch()
     (fake_bin / "id").write_text("#!/bin/sh\nprintf '1000\\n'\n", encoding="utf-8")
     (fake_bin / "systemd-analyze").write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
@@ -205,18 +209,35 @@ def test_failed_enable_rolls_back_replaced_units(tmp_path: Path) -> None:
         "#!/bin/sh\n"
         f"printf '%s\\n' \"$*\" >> '{calls}'\n"
         f"state='{state}'\n"
+        f"unit_dir='{installed_dir}'\n"
         "case \"$2\" in\n"
-        "  is-enabled) [ -e \"$state/enabled/$4\" ] || exit 1 ;;\n"
+        "  is-enabled)\n"
+        "    unit=\"$3\"\n"
+        "    if [ -e \"$state/enabled/$unit\" ]; then printf 'enabled\\n'; exit 0; fi\n"
+        "    if [ -L \"$unit_dir/$unit\" ]; then\n"
+        "      [ \"$(readlink \"$unit_dir/$unit\")\" = '/dev/null' ]"
+        " && printf 'masked\\n' && exit 1\n"
+        "      printf 'linked\\n'; exit 0\n"
+        "    fi\n"
+        "    printf 'disabled\\n'; exit 1\n"
+        "    ;;\n"
         "  is-active) [ -e \"$state/active/$4\" ] || exit 1 ;;\n"
         "  enable)\n"
         "    if [ \"$3\" = '--now' ]; then\n"
         "      shift 3\n"
-        "      for unit in \"$@\"; do touch \"$state/enabled/$unit\" \"$state/active/$unit\"; done\n"
+        "      for unit in \"$@\"; do\n"
+        "        touch \"$state/enabled/$unit\" \"$state/active/$unit\"\n"
+        "        ln -sf \"../$unit\" \"$unit_dir/default.target.wants/$unit\"\n"
+        "      done\n"
         "      exit 1\n"
         "    fi\n"
         "    touch \"$state/enabled/$3\"\n"
+        "    ln -sf \"../$3\" \"$unit_dir/default.target.wants/$3\"\n"
         "    ;;\n"
-        "  disable) rm -f \"$state/enabled/$3\" ;;\n"
+        "  disable)\n"
+        "    rm -f \"$state/enabled/$3\" \"$unit_dir/default.target.wants/$3\"\n"
+        "    [ ! -L \"$unit_dir/$3\" ] || rm -f \"$unit_dir/$3\"\n"
+        "    ;;\n"
         "  start) touch \"$state/active/$3\" ;;\n"
         "  stop) rm -f \"$state/active/$3\" ;;\n"
         "esac\n"
@@ -225,9 +246,6 @@ def test_failed_enable_rolls_back_replaced_units(tmp_path: Path) -> None:
     )
     for command in ("id", "systemctl", "systemd-analyze"):
         (fake_bin / command).chmod(0o755)
-    config_home = tmp_path / "config"
-    installed_dir = config_home / "systemd" / "user"
-    installed_dir.mkdir(parents=True)
     existing = installed_dir / "saturnin-janitor.service"
     existing.write_text("previous valid unit\n", encoding="utf-8")
     linked_target = tmp_path / "linked-janitor.timer"
@@ -236,6 +254,11 @@ def test_failed_enable_rolls_back_replaced_units(tmp_path: Path) -> None:
     linked_timer.symlink_to(linked_target)
     masked_timer = installed_dir / "saturnin-improve.timer"
     masked_timer.symlink_to("/dev/null")
+    dangling_timer = installed_dir / "saturnin-poller.timer"
+    dangling_timer.symlink_to(tmp_path / "missing-poller.timer")
+    enabled_timer = installed_dir / "saturnin-resume.timer"
+    enabled_timer.write_text("previous enabled timer\n", encoding="utf-8")
+    (wants / "saturnin-resume.timer").symlink_to("../saturnin-resume.timer")
 
     result = subprocess.run(
         ["bash", str(REPO_ROOT / "scripts/install_user_units.sh")],
@@ -257,21 +280,30 @@ def test_failed_enable_rolls_back_replaced_units(tmp_path: Path) -> None:
         "saturnin-janitor.service",
         "saturnin-janitor.timer",
         "saturnin-improve.timer",
+        "saturnin-poller.timer",
+        "saturnin-resume.timer",
     }
     assert linked_timer.is_symlink()
     assert os.readlink(linked_timer) == str(linked_target)
     assert masked_timer.is_symlink()
     assert os.readlink(masked_timer) == "/dev/null"
+    assert dangling_timer.is_symlink()
+    assert os.readlink(dangling_timer) == str(tmp_path / "missing-poller.timer")
+    assert enabled_timer.read_text(encoding="utf-8") == "previous enabled timer\n"
     systemctl_calls = calls.read_text(encoding="utf-8").splitlines()
     failed_enable = next(
         index for index, call in enumerate(systemctl_calls) if call.startswith("--user enable --now")
     )
-    assert systemctl_calls[failed_enable + 1] == "--user daemon-reload"
-    rollback_calls = systemctl_calls[failed_enable + 2 :]
+    rollback_calls = systemctl_calls[failed_enable + 1 :]
+    daemon_reload = rollback_calls.index("--user daemon-reload")
+    assert all(
+        call.startswith(("--user stop ", "--user disable "))
+        for call in rollback_calls[:daemon_reload]
+    )
+    assert not any(
+        call.startswith("--user disable ") for call in rollback_calls[daemon_reload + 1 :]
+    )
     assert "--user start saturnin-janitor.service" in rollback_calls
-    assert "--user disable saturnin-mirror.timer" in rollback_calls
-    assert {path.name for path in enabled.iterdir()} == {"saturnin-janitor.timer"}
-    assert {path.name for path in active.iterdir()} == {
-        "saturnin-improve.timer",
-        "saturnin-janitor.service",
-    }
+    assert {path.name for path in enabled.iterdir()} == {"saturnin-resume.timer"}
+    assert {path.name for path in active.iterdir()} == {"saturnin-janitor.service"}
+    assert {path.name for path in wants.iterdir()} == {"saturnin-resume.timer"}

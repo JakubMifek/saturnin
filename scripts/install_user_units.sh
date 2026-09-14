@@ -12,7 +12,7 @@ ENABLED_TIMERS=(
   saturnin-resume.timer
 )
 MANAGED_UNITS=()
-declare -A WAS_ENABLED=()
+declare -A ENABLE_STATE=()
 declare -A WAS_ACTIVE=()
 
 if [[ "$(id -u)" -eq 0 ]]; then
@@ -38,8 +38,12 @@ cleanup() {
 }
 rollback() {
   set +e
+  for unit in "${MANAGED_UNITS[@]}"; do
+    systemctl --user stop "$unit"
+    systemctl --user disable "$unit"
+  done
   for backup in "$BACKUP_DIR"/*; do
-    [[ -e "$backup" ]] || continue
+    [[ -e "$backup" || -L "$backup" ]] || continue
     name="$(basename "$backup")"
     if [[ "$name" == *.missing ]]; then
       rm -f "$UNIT_DIR/${name%.missing}"
@@ -50,15 +54,12 @@ rollback() {
   rm -f "$UNIT_DIR"/saturnin-*.tmp
   systemctl --user daemon-reload
   for unit in "${MANAGED_UNITS[@]}"; do
-    if [[ "${WAS_ENABLED[$unit]}" -eq 1 ]]; then
-      systemctl --user enable "$unit"
-    else
-      systemctl --user disable "$unit"
-    fi
+    case "${ENABLE_STATE[$unit]}" in
+      enabled) systemctl --user enable "$unit" ;;
+      enabled-runtime) systemctl --user enable --runtime "$unit" ;;
+    esac
     if [[ "${WAS_ACTIVE[$unit]}" -eq 1 ]]; then
       systemctl --user start "$unit"
-    else
-      systemctl --user stop "$unit"
     fi
   done
 }
@@ -94,11 +95,9 @@ Path(os.environ["DEST"]).write_text(
 done
 
 for unit in "${MANAGED_UNITS[@]}"; do
-  if systemctl --user is-enabled --quiet "$unit"; then
-    WAS_ENABLED["$unit"]=1
-  else
-    WAS_ENABLED["$unit"]=0
-  fi
+  state=""
+  if state="$(systemctl --user is-enabled "$unit" 2>/dev/null)"; then :; fi
+  ENABLE_STATE["$unit"]="$state"
   if systemctl --user is-active --quiet "$unit"; then
     WAS_ACTIVE["$unit"]=1
   else
