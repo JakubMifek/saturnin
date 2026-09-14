@@ -25,7 +25,7 @@ from . import telemetry
 from .automation import AutomationLibrary
 from .board import CONTAINER_KINDS, TRANSITIONS, Board, BoardError, Task
 from .checkpoints import Checkpoint, CheckpointStore
-from .config import Config, find_root
+from .config import Config, find_root, load_yaml
 from .contracts import (
     FRONT_MATTER,
     audit as audit_contracts,
@@ -973,7 +973,7 @@ def _doctor_exception(fallback: Path, error: Exception) -> str:
     )
     detail = str(error).strip() or error.__class__.__name__
     path_text = str(path)
-    return detail if path_text in detail else f"{path_text}: {detail}"
+    return detail if detail.startswith(f"{path_text}:") else f"{path_text}: {detail}"
 
 
 def _doctor_check(path: Path, check: Any) -> list[str]:
@@ -991,6 +991,9 @@ def _run_doctor(config: Config, as_json: bool) -> int:
         nonlocal board
         board = Board(config)
         return []
+
+    for path in sorted(config.policies.glob("*.yaml")):
+        problems += _doctor_check(path, lambda path=path: _audit_policy_file(path))
 
     problems += _doctor_check(config.tasks_dir, construct_board)
     checks = [
@@ -1033,6 +1036,11 @@ def _run_doctor(config: Config, as_json: bool) -> int:
         "\n".join(problems) if problems else "Everything is in order, sir.",
     )
     return 0 if not problems else 2
+
+
+def _audit_policy_file(path: Path) -> list[str]:
+    load_yaml(path)
+    return []
 
 
 def _run_task(args: argparse.Namespace, config: Config, board: Board, as_json: bool) -> int:

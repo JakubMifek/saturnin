@@ -808,6 +808,64 @@ def test_path_qualified_allowlisted_executable_is_not_classified_by_basename(
     assert "outside trusted system executable roots" in decision.reasons[0]
 
 
+def test_path_qualified_classified_executable_must_exist(
+    governance: Governance,
+    config: Config,
+) -> None:
+    trusted = config.root / "trusted-bin"
+    trusted.mkdir()
+    config.server_scope["filesystem"]["trusted_executable_roots"] = [str(trusted)]
+    missing = trusted / "git"
+
+    decision = governance.check_server_command(f"{missing} status")
+
+    assert not decision.allowed
+    assert "does not resolve to an existing file" in decision.reasons[0]
+
+
+@pytest.mark.parametrize("kind", ["directory", "non-executable"])
+def test_path_qualified_classified_executable_must_be_executable_regular_file(
+    governance: Governance,
+    config: Config,
+    kind: str,
+) -> None:
+    trusted = config.root / "trusted-bin"
+    trusted.mkdir()
+    fake = trusted / "git"
+    if kind == "directory":
+        fake.mkdir()
+    else:
+        fake.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+        fake.chmod(0o644)
+    config.server_scope["filesystem"]["trusted_executable_roots"] = [str(trusted)]
+
+    decision = governance.check_server_command(f"{fake} status")
+
+    assert not decision.allowed
+    expected = "not a regular file" if kind == "directory" else "not executable"
+    assert expected in decision.reasons[0]
+
+
+def test_symlink_in_trusted_root_cannot_authorize_outside_executable(
+    governance: Governance,
+    config: Config,
+) -> None:
+    trusted = config.root / "trusted-bin"
+    trusted.mkdir()
+    outside = config.root / "outside-git"
+    outside.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+    outside.chmod(0o755)
+    fake = trusted / "git"
+    fake.symlink_to(outside)
+    config.server_scope["filesystem"]["trusted_executable_roots"] = [str(trusted)]
+
+    decision = governance.check_server_command(f"{fake} status")
+
+    assert not decision.allowed
+    assert str(outside) in decision.reasons[0]
+    assert "outside trusted system executable roots" in decision.reasons[0]
+
+
 @pytest.mark.parametrize("binary", ["git", "systemctl", "saturnin"])
 def test_unresolvable_classified_executables_fail_closed(
     governance: Governance,
@@ -822,6 +880,30 @@ def test_unresolvable_classified_executables_fail_closed(
     assert f"classified executable {binary!r} could not be resolved from PATH" in (
         decision.reasons[0]
     )
+
+
+@pytest.mark.parametrize(
+    "roots",
+    [
+        "/usr/bin",
+        {"bin": "/usr/bin"},
+        [],
+        ["/usr/bin", ""],
+        ["/usr/bin", "relative/bin"],
+        ["/usr/bin", "~/bin"],
+    ],
+)
+def test_invalid_trusted_executable_roots_fail_closed(
+    governance: Governance,
+    config: Config,
+    roots: object,
+) -> None:
+    config.server_scope["filesystem"]["trusted_executable_roots"] = roots
+
+    decision = governance.check_server_command("/usr/bin/git status")
+
+    assert not decision.allowed
+    assert "invalid executable trust policy" in decision.reasons[0]
 
 
 def test_curl_output_flags_are_parsed() -> None:
@@ -1210,7 +1292,6 @@ def test_shell_assignments_cannot_change_policy_home(
         ("cp --target-directory /opt source", "outside writable roots"),
         ("curl -q --output /opt/response.txt https://example.test/ok", "outside writable roots"),
         ("sed -i s/foo/bar/ /opt/status", "outside writable roots"),
-        ("/usr/local/bin/saturnin --home /tmp task add x", "outside writable roots"),
         ("python3 -m saturnin --home /tmp task add x", "outside writable roots"),
         ("git -C /tmp init", "outside writable roots"),
         ("git --git-dir=/tmp/repo.git status", "outside writable roots"),

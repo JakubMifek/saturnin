@@ -136,6 +136,95 @@ def test_doctor_config_load_error_uses_expected_policy_path(
     assert "Traceback" not in captured.out + captured.err
 
 
+@pytest.mark.parametrize(
+    "policy_name",
+    [
+        "cleanup.yaml",
+        "governance.yaml",
+        "improvement.yaml",
+        "mcp.yaml",
+        "repos.yaml",
+        "routing.yaml",
+        "server_scope.yaml",
+    ],
+)
+def test_doctor_independently_parses_every_policy(
+    home: Path,
+    capsys: pytest.CaptureFixture[str],
+    policy_name: str,
+) -> None:
+    expected = home / "policies" / policy_name
+    expected.write_text("broken: [\n", encoding="utf-8")
+
+    code = main(["--home", str(home), "--json", "doctor"])
+    captured = capsys.readouterr()
+    payload = json.loads(captured.out)
+
+    assert code == 2
+    assert any(problem.startswith(f"{expected}:") for problem in payload["problems"])
+    assert "Traceback" not in captured.out + captured.err
+
+
+def test_doctor_reports_unreadable_cleanup_policy(
+    home: Path,
+    capsys: pytest.CaptureFixture[str],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    expected = home / "policies" / "cleanup.yaml"
+    original = Path.open
+
+    def fail_cleanup(path: Path, *args, **kwargs):
+        if path == expected:
+            raise OSError(errno.EACCES, "permission denied", str(path))
+        return original(path, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "open", fail_cleanup)
+
+    code = main(["--home", str(home), "--json", "doctor"])
+    captured = capsys.readouterr()
+    payload = json.loads(captured.out)
+
+    assert code == 2
+    assert any(
+        problem.startswith(f"{expected}:") and "permission denied" in problem
+        for problem in payload["problems"]
+    )
+    assert "Traceback" not in captured.out + captured.err
+
+
+@pytest.mark.parametrize(
+    "roots",
+    [
+        "/usr/bin",
+        [],
+        ["/usr/bin", ""],
+        ["/usr/bin", "relative/bin"],
+        ["/usr/bin", "~/bin"],
+    ],
+)
+def test_doctor_rejects_invalid_trusted_executable_roots(
+    home: Path,
+    capsys: pytest.CaptureFixture[str],
+    roots: object,
+) -> None:
+    expected = home / "policies" / "server_scope.yaml"
+    policy = yaml.safe_load(expected.read_text(encoding="utf-8"))
+    policy["filesystem"]["trusted_executable_roots"] = roots
+    expected.write_text(yaml.safe_dump(policy), encoding="utf-8")
+
+    code = main(["--home", str(home), "--json", "doctor"])
+    captured = capsys.readouterr()
+    payload = json.loads(captured.out)
+
+    assert code == 2
+    assert any(
+        problem.startswith(f"{expected}:")
+        and "filesystem.trusted_executable_roots" in problem
+        for problem in payload["problems"]
+    )
+    assert "Traceback" not in captured.out + captured.err
+
+
 def test_task_intake_and_dispatch(home: Path, capsys: pytest.CaptureFixture[str]) -> None:
     code, out = run(
         capsys, "--json", "task", "add", "Fix the failing deploy", "--dispatch"

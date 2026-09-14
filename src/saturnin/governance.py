@@ -584,8 +584,13 @@ class Governance:
                 problems.append(f"review attestation policy requires {name}")
         if self.policy.get("delegation", {}).get("ceo_may_execute", False):
             problems.append("CEO is allowed to execute work; delegation-first is violated")
-        if self.config.server_scope.get("user", {}).get("allow_root", False):
+        server_scope = self.config.server_scope
+        if server_scope.get("user", {}).get("allow_root", False):
             problems.append("server scope allows root")
+        try:
+            _trusted_executable_roots(server_scope.get("filesystem", {}))
+        except ValueError as error:
+            problems.append(f"{self.config.policies / 'server_scope.yaml'}: {error}")
         if self.delegation.get("ceo_may_wait_for_workers", False):
             problems.append("CEO is allowed to wait for workers; dispatch must be non-blocking")
         if not self.result_contracts:
@@ -690,7 +695,7 @@ def _check_executable_location(
         return Decision.ok("executable does not receive basename-specific privileges")
 
     if "/" in executable:
-        resolved = _resolve_command_path(executable)
+        candidate = Path(executable).expanduser()
     else:
         found = shutil.which(executable)
         if found is None:
@@ -699,14 +704,59 @@ def _check_executable_location(
             return Decision.deny(
                 f"classified executable {executable!r} could not be resolved from PATH"
             )
-        resolved = _resolve_command_path(found)
+        candidate = Path(found)
 
-    trusted_roots = _policy_roots(filesystem.get("trusted_executable_roots", []))
+    try:
+        resolved = candidate.resolve(strict=True)
+    except (OSError, RuntimeError, ValueError):
+        return Decision.deny(
+            f"classified executable {executable!r} does not resolve to an existing file"
+        )
+    if not resolved.is_file():
+        return Decision.deny(
+            f"classified executable {str(resolved)!r} is not a regular file"
+        )
+    if not os.access(resolved, os.X_OK):
+        return Decision.deny(
+            f"classified executable {str(resolved)!r} is not executable"
+        )
+
+    try:
+        trusted_roots = _trusted_executable_roots(filesystem)
+    except ValueError as error:
+        return Decision.deny(f"invalid executable trust policy: {error}")
     if _containing_root(resolved, trusted_roots) is None:
         return Decision.deny(
             f"executable {str(resolved)!r} is outside trusted system executable roots"
         )
     return Decision.ok(f"executable {str(resolved)!r} is under a trusted system root")
+
+
+def _trusted_executable_roots(filesystem: dict[str, Any]) -> list[Path]:
+    values = filesystem.get("trusted_executable_roots")
+    if not isinstance(values, list) or not values:
+        raise ValueError("filesystem.trusted_executable_roots must be a non-empty list")
+    roots: list[Path] = []
+    for index, value in enumerate(values):
+        if not isinstance(value, str) or not value.strip():
+            raise ValueError(
+                "filesystem.trusted_executable_roots entries must be nonempty strings "
+                f"(invalid entry at index {index})"
+            )
+        path = Path(value)
+        if not path.is_absolute():
+            raise ValueError(
+                "filesystem.trusted_executable_roots entries must be absolute paths "
+                f"(invalid entry at index {index}: {value!r})"
+            )
+        try:
+            roots.append(path.resolve(strict=False))
+        except (OSError, RuntimeError, ValueError) as error:
+            raise ValueError(
+                "filesystem.trusted_executable_roots entry cannot be resolved "
+                f"(invalid entry at index {index}: {value!r})"
+            ) from error
+    return roots
 
 
 def _check_filesystem_targets(targets: Sequence[str], filesystem: dict[str, Any]) -> Decision:
