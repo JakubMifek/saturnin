@@ -67,8 +67,8 @@ git branch <branch> <sha>             # recreate it
 
 Before destructive cleanup, Saturnin sets repository-local reflog and unreachable
 object expiry from `keep_reflog_days` (90). A deleted branch no longer has a
-named reflog, so use `git reflog --all` and, if needed, `git fsck --unreachable`.
-Do not run `git gc --prune=now` while a recovery is in question.
+named reflog, so use `git reflog --all`. Do not run `git gc --prune=now` while a
+recovery is in question.
 
 **A worktree directory disappeared but git still lists it**
 

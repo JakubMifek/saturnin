@@ -230,12 +230,12 @@ def test_failed_enable_rolls_back_replaced_units(tmp_path: Path) -> None:
     installed_dir.mkdir(parents=True)
     existing = installed_dir / "saturnin-janitor.service"
     existing.write_text("previous valid unit\n", encoding="utf-8")
-    previous_timers = {
-        "saturnin-janitor.timer": "previous enabled timer\n",
-        "saturnin-improve.timer": "previous active timer\n",
-    }
-    for name, content in previous_timers.items():
-        (installed_dir / name).write_text(content, encoding="utf-8")
+    linked_target = tmp_path / "linked-janitor.timer"
+    linked_target.write_text("previous linked timer\n", encoding="utf-8")
+    linked_timer = installed_dir / "saturnin-janitor.timer"
+    linked_timer.symlink_to(linked_target)
+    masked_timer = installed_dir / "saturnin-improve.timer"
+    masked_timer.symlink_to("/dev/null")
 
     result = subprocess.run(
         ["bash", str(REPO_ROOT / "scripts/install_user_units.sh")],
@@ -253,9 +253,15 @@ def test_failed_enable_rolls_back_replaced_units(tmp_path: Path) -> None:
     assert result.returncode == 1
     assert existing.read_text(encoding="utf-8") == "previous valid unit\n"
     installed = {path.name for path in installed_dir.glob("saturnin-*")}
-    assert installed == {"saturnin-janitor.service", *previous_timers}
-    for name, content in previous_timers.items():
-        assert (installed_dir / name).read_text(encoding="utf-8") == content
+    assert installed == {
+        "saturnin-janitor.service",
+        "saturnin-janitor.timer",
+        "saturnin-improve.timer",
+    }
+    assert linked_timer.is_symlink()
+    assert os.readlink(linked_timer) == str(linked_target)
+    assert masked_timer.is_symlink()
+    assert os.readlink(masked_timer) == "/dev/null"
     systemctl_calls = calls.read_text(encoding="utf-8").splitlines()
     failed_enable = next(
         index for index, call in enumerate(systemctl_calls) if call.startswith("--user enable --now")

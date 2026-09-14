@@ -109,8 +109,8 @@ done
 installing=1
 for staged in "$STAGE_DIR"/saturnin-*; do
   name="$(basename "$staged")"
-  if [[ -e "$UNIT_DIR/$name" ]]; then
-    cp -p "$UNIT_DIR/$name" "$BACKUP_DIR/$name"
+  if [[ -e "$UNIT_DIR/$name" || -L "$UNIT_DIR/$name" ]]; then
+    cp -a "$UNIT_DIR/$name" "$BACKUP_DIR/$name"
   else
     : > "$BACKUP_DIR/$name.missing"
   fi
