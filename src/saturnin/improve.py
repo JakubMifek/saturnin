@@ -8,6 +8,7 @@ change still goes through the normal review pipeline.
 from __future__ import annotations
 
 import json
+import os
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
@@ -222,6 +223,21 @@ class ImprovementLoop:
         report_dir = self.config.shared_path(report_dir)
         report_dir.mkdir(parents=True, exist_ok=True)
         stamp = (now or datetime.now(timezone.utc)).strftime("%Y%m%dT%H%M%S")
-        path = report_dir / f"improvement-{stamp}.json"
-        path.write_text(json.dumps(report.to_dict(), indent=2) + "\n", encoding="utf-8")
-        return path
+        text = json.dumps(report.to_dict(), indent=2) + "\n"
+        for index in range(1000):
+            suffix = "" if index == 0 else f"-{index}"
+            path = report_dir / f"improvement-{stamp}{suffix}.json"
+            try:
+                with path.open("x", encoding="utf-8") as handle:
+                    handle.write(text)
+                    handle.flush()
+                    os.fsync(handle.fileno())
+                directory = os.open(report_dir, os.O_RDONLY | os.O_DIRECTORY)
+                try:
+                    os.fsync(directory)
+                finally:
+                    os.close(directory)
+                return path
+            except FileExistsError:
+                continue
+        raise FileExistsError(f"could not allocate unique improvement report for {stamp}")

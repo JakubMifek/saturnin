@@ -33,6 +33,20 @@ def atomic_replace_text(path: Path, text: str) -> None:
         temporary.unlink(missing_ok=True)
 
 
+def durable_append_text(path: Path, text: str) -> None:
+    existed = path.exists()
+    with path.open("a", encoding="utf-8") as handle:
+        handle.write(text)
+        handle.flush()
+        os.fsync(handle.fileno())
+    if not existed:
+        directory = os.open(path.parent, os.O_RDONLY | os.O_DIRECTORY)
+        try:
+            os.fsync(directory)
+        finally:
+            os.close(directory)
+
+
 def objects(
     text: str,
     path: Path,

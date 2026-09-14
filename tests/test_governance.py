@@ -10,6 +10,7 @@ import pytest
 
 from saturnin.config import Config
 from saturnin.governance import Governance, _curl_targets, _git_targets
+from saturnin.jsonlines import durable_append_text
 from saturnin.review import (
     ReviewLedger,
     ReviewError,
@@ -664,6 +665,31 @@ def test_review_ledger_serializes_concurrent_records(config: Config) -> None:
         list(pool.map(record, range(32)))
 
     assert len(list(ledger)) == 32
+
+
+def test_review_ledger_normal_append_uses_durable_append(
+    config: Config, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    ledger = ReviewLedger(config)
+    appended: list[Path] = []
+
+    def tracked_append(path: Path, text: str) -> None:
+        durable_append_text(path, text)
+        appended.append(path)
+
+    monkeypatch.setattr("saturnin.review.durable_append_text", tracked_append)
+
+    record_review(
+        ledger,
+        subject="JakubMifek/saturnin#durable-append",
+        kind="pr",
+        author="code-worker",
+        reviewer="pr-reviewer",
+        verdict="approved",
+        head_sha=TEST_HEAD_SHA,
+    )
+
+    assert appended == [next(ledger.dir.glob("*.jsonl"))]
 
 
 def test_merge_in_managed_repo_is_never_autonomous(

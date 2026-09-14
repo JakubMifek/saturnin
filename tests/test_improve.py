@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timedelta, timezone
 
 from saturnin import telemetry
@@ -119,6 +120,34 @@ def test_report_path_uses_shared_data_root_from_linked_source(
     path = ImprovementLoop(config, board).write_report(ImprovementReport(metrics={}))
 
     assert path.parent == config.var_dir / "reports"
+
+
+def test_report_path_is_unique_for_same_timestamp(config: Config, board: Board) -> None:
+    loop = ImprovementLoop(config, board)
+    now = datetime(2026, 9, 14, 4, 17, 0, tzinfo=timezone.utc)
+
+    first = loop.write_report(ImprovementReport(metrics={"run": 1}), now=now)
+    second = loop.write_report(ImprovementReport(metrics={"run": 2}), now=now)
+
+    assert first.name == "improvement-20260914T041700.json"
+    assert second.name == "improvement-20260914T041700-1.json"
+    assert first.read_text(encoding="utf-8") != second.read_text(encoding="utf-8")
+
+
+def test_report_path_is_collision_safe_for_concurrent_runs(
+    config: Config, board: Board
+) -> None:
+    loop = ImprovementLoop(config, board)
+    now = datetime(2026, 9, 14, 4, 17, 0, tzinfo=timezone.utc)
+
+    def write(index: int):
+        return loop.write_report(ImprovementReport(metrics={"run": index}), now=now)
+
+    with ThreadPoolExecutor(max_workers=8) as pool:
+        paths = list(pool.map(write, range(16)))
+
+    assert len(set(paths)) == 16
+    assert len(list((config.root / "var" / "reports").glob("improvement-*.json"))) == 16
 
 
 def test_dynamic_finding_can_recur_after_completion(config: Config, board: Board) -> None:

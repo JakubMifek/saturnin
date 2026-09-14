@@ -1,7 +1,9 @@
 from __future__ import annotations
 from contextlib import contextmanager
 from datetime import datetime, timezone
+import os
 from pathlib import Path
+import stat
 from typing import Iterator
 
 import pytest
@@ -9,6 +11,7 @@ import pytest
 from saturnin.board import Board
 from saturnin.checkpoints import Checkpoint, CheckpointError, CheckpointStore
 from saturnin.config import Config
+from saturnin.jsonlines import durable_append_text
 
 
 def test_save_and_resume(config: Config, board: Board) -> None:
@@ -161,6 +164,68 @@ def test_save_uses_locked_board_edit(
     stored = board.get(task.id)
     assert stored.body == "updated by another squad"
     assert stored.history[-1]["event"] == "checkpoint"
+
+
+def test_checkpoint_append_is_durable_before_board_reference(
+    config: Config, board: Board, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    task = board.create("Crash ordering")
+    store = CheckpointStore(config, board)
+    append_finished = False
+    original_append = durable_append_text
+    original_edit = board.edit
+
+    def tracked_append(path: Path, text: str) -> None:
+        nonlocal append_finished
+        original_append(path, text)
+        append_finished = True
+
+    @contextmanager
+    def checked_edit(task_id: str) -> Iterator[object]:
+        assert append_finished
+        with original_edit(task_id) as current:
+            yield current
+
+    monkeypatch.setattr("saturnin.checkpoints.durable_append_text", tracked_append)
+    monkeypatch.setattr(board, "edit", checked_edit)
+
+    store.save(Checkpoint(task_id=task.id, role="scribe", summary="saved", next_steps=["go"]))
+
+
+def test_durable_append_syncs_new_file_and_directory(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    calls: list[bool] = []
+    original_fsync = os.fsync
+
+    def tracked_fsync(fd: int) -> None:
+        calls.append(stat.S_ISDIR(os.fstat(fd).st_mode))
+        original_fsync(fd)
+
+    monkeypatch.setattr("saturnin.jsonlines.os.fsync", tracked_fsync)
+
+    durable_append_text(tmp_path / "events.jsonl", "{}\n")
+
+    assert calls == [False, True]
+
+
+def test_durable_append_syncs_existing_file_without_directory(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    path = tmp_path / "events.jsonl"
+    path.write_text("{}\n", encoding="utf-8")
+    calls: list[bool] = []
+    original_fsync = os.fsync
+
+    def tracked_fsync(fd: int) -> None:
+        calls.append(stat.S_ISDIR(os.fstat(fd).st_mode))
+        original_fsync(fd)
+
+    monkeypatch.setattr("saturnin.jsonlines.os.fsync", tracked_fsync)
+
+    durable_append_text(path, "{}\n")
+
+    assert calls == [False]
 
 
 def test_checkpoint_store_locks_jsonl_access(
