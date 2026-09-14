@@ -16,6 +16,12 @@ import yaml
 ENV_ROOT = "SATURNIN_HOME"
 
 
+class ConfigError(ValueError):
+    def __init__(self, path: Path, message: str) -> None:
+        self.filename = str(path)
+        super().__init__(message)
+
+
 def find_root(start: Path | None = None) -> Path:
     """Return the Saturnin home directory.
 
@@ -69,7 +75,7 @@ def load_yaml(path: Path) -> dict[str, Any]:
     with path.open("r", encoding="utf-8") as handle:
         data = yaml.safe_load(handle) or {}
     if not isinstance(data, dict):
-        raise ValueError(f"policy file {path} must contain a mapping")
+        raise ConfigError(path, f"policy file {path} must contain a mapping")
     return data
 
 

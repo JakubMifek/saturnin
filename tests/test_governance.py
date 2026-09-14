@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import os
+import shutil
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
@@ -863,6 +864,46 @@ def test_symlink_in_trusted_root_cannot_authorize_outside_executable(
 
     assert not decision.allowed
     assert str(outside) in decision.reasons[0]
+    assert "outside trusted system executable roots" in decision.reasons[0]
+
+
+@pytest.mark.parametrize("path_qualified", [False, True])
+def test_executable_selected_outside_trusted_roots_cannot_gain_a_trusted_basename(
+    governance: Governance,
+    config: Config,
+    monkeypatch: pytest.MonkeyPatch,
+    path_qualified: bool,
+) -> None:
+    fake_bin = config.root / "fake-bin"
+    fake_bin.mkdir()
+    fake = fake_bin / "git"
+    system_git = shutil.which("git")
+    assert system_git is not None
+    fake.symlink_to(Path(system_git).resolve())
+    monkeypatch.setenv("PATH", f"{fake_bin}:{os.environ['PATH']}")
+    executable = str(fake) if path_qualified else "git"
+
+    decision = governance.check_server_command(f"{executable} status")
+
+    assert not decision.allowed
+    assert str(fake) in decision.reasons[0]
+    assert "outside trusted system executable roots" in decision.reasons[0]
+
+
+@pytest.mark.parametrize("binary", ["sudo", "su", "doas", "pkexec"])
+def test_path_qualified_privilege_tools_are_location_checked_before_basename_denial(
+    governance: Governance,
+    config: Config,
+    binary: str,
+) -> None:
+    fake = config.root / binary
+    fake.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+    fake.chmod(0o755)
+
+    decision = governance.check_server_command(f"{fake} true")
+
+    assert not decision.allowed
+    assert str(fake) in decision.reasons[0]
     assert "outside trusted system executable roots" in decision.reasons[0]
 
 

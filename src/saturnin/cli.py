@@ -774,13 +774,13 @@ def main(argv: Sequence[str] | None = None) -> int:
 
 
 def _doctor_config_path(args: argparse.Namespace) -> Path:
-    if args.home:
-        root = Path(args.home).expanduser().resolve(strict=False)
-    else:
-        try:
+    try:
+        if args.home:
+            root = Path(args.home).expanduser().resolve(strict=False)
+        else:
             root = find_root()
-        except OSError:
-            root = Path.cwd().resolve(strict=False)
+    except (OSError, RuntimeError):
+        root = Path(args.home).expanduser() if args.home else Path.cwd()
     return root / "policies" / "governance.yaml"
 
 
@@ -992,8 +992,24 @@ def _run_doctor(config: Config, as_json: bool) -> int:
         board = Board(config)
         return []
 
-    for path in sorted(config.policies.glob("*.yaml")):
-        problems += _doctor_check(path, lambda path=path: _audit_policy_file(path))
+    policy_names = {
+        "cleanup.yaml",
+        "governance.yaml",
+        "improvement.yaml",
+        "mcp.yaml",
+        "repos.yaml",
+        "routing.yaml",
+        "server_scope.yaml",
+    }
+    configuration_paths = {
+        *(config.policies / name for name in policy_names),
+        *config.policies.glob("*.yaml"),
+        config.automation_dir / "registry.yaml",
+    }
+    for path in sorted(configuration_paths):
+        problems += _doctor_check(
+            path, lambda path=path: _audit_configuration_file(path)
+        )
 
     problems += _doctor_check(config.tasks_dir, construct_board)
     checks = [
@@ -1038,7 +1054,9 @@ def _run_doctor(config: Config, as_json: bool) -> int:
     return 0 if not problems else 2
 
 
-def _audit_policy_file(path: Path) -> list[str]:
+def _audit_configuration_file(path: Path) -> list[str]:
+    if not path.is_file():
+        raise FileNotFoundError("required configuration file does not exist")
     load_yaml(path)
     return []
 

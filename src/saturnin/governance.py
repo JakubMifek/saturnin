@@ -336,18 +336,6 @@ class Governance:
         user = scope.get("user", {})
         if not user.get("allow_root", False) and os.geteuid() == 0:
             return Decision.deny("server commands may not run as root")
-        forbidden_binaries = user.get("forbidden_prefixes", [])
-        for part in parts:
-            try:
-                candidates = shlex.split(part)
-            except ValueError:
-                continue
-            for candidate in candidates:
-                candidate_binary = candidate.rsplit("/", 1)[-1]
-                if candidate_binary in forbidden_binaries:
-                    return Decision.deny(
-                        f"privilege escalation via {candidate_binary!r} is not allowed"
-                    )
         return self._check_scoped_command(
             parts, dedicated_service=dedicated_service, depth=0
         )
@@ -375,6 +363,12 @@ class Governance:
         )
         if not executable_decision.allowed:
             return executable_decision
+        if binary in self.config.server_scope.get("user", {}).get(
+            "forbidden_prefixes", []
+        ):
+            return Decision.deny(
+                f"privilege escalation via {binary!r} is not allowed"
+            )
         if binary in _SHELL_RESERVED or binary in _DYNAMIC_COMMANDS:
             return Decision.deny(f"shell keyword {binary!r} is not allowed")
         if binary in _SHELL_BINARIES:
@@ -707,7 +701,24 @@ def _check_executable_location(
         candidate = Path(found)
 
     try:
-        resolved = candidate.resolve(strict=True)
+        configured_roots = _trusted_executable_roots(filesystem, resolve=False)
+        trusted_roots = _trusted_executable_roots(filesystem)
+    except ValueError as error:
+        return Decision.deny(f"invalid executable trust policy: {error}")
+
+    try:
+        selected = Path(os.path.abspath(candidate))
+    except (OSError, RuntimeError, ValueError):
+        return Decision.deny(
+            f"classified executable {executable!r} does not resolve to an existing file"
+        )
+    if _containing_root(selected, configured_roots) is None:
+        return Decision.deny(
+            f"executable {str(selected)!r} is outside trusted system executable roots"
+        )
+
+    try:
+        resolved = selected.resolve(strict=True)
     except (OSError, RuntimeError, ValueError):
         return Decision.deny(
             f"classified executable {executable!r} does not resolve to an existing file"
@@ -721,10 +732,6 @@ def _check_executable_location(
             f"classified executable {str(resolved)!r} is not executable"
         )
 
-    try:
-        trusted_roots = _trusted_executable_roots(filesystem)
-    except ValueError as error:
-        return Decision.deny(f"invalid executable trust policy: {error}")
     if _containing_root(resolved, trusted_roots) is None:
         return Decision.deny(
             f"executable {str(resolved)!r} is outside trusted system executable roots"
@@ -732,7 +739,9 @@ def _check_executable_location(
     return Decision.ok(f"executable {str(resolved)!r} is under a trusted system root")
 
 
-def _trusted_executable_roots(filesystem: dict[str, Any]) -> list[Path]:
+def _trusted_executable_roots(
+    filesystem: dict[str, Any], *, resolve: bool = True
+) -> list[Path]:
     values = filesystem.get("trusted_executable_roots")
     if not isinstance(values, list) or not values:
         raise ValueError("filesystem.trusted_executable_roots must be a non-empty list")
@@ -750,7 +759,11 @@ def _trusted_executable_roots(filesystem: dict[str, Any]) -> list[Path]:
                 f"(invalid entry at index {index}: {value!r})"
             )
         try:
-            roots.append(path.resolve(strict=False))
+            roots.append(
+                path.resolve(strict=False)
+                if resolve
+                else Path(os.path.abspath(path))
+            )
         except (OSError, RuntimeError, ValueError) as error:
             raise ValueError(
                 "filesystem.trusted_executable_roots entry cannot be resolved "

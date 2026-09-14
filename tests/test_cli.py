@@ -165,6 +165,28 @@ def test_doctor_independently_parses_every_policy(
     assert "Traceback" not in captured.out + captured.err
 
 
+def test_doctor_attributes_non_mapping_policy_errors_to_the_originating_path(
+    home: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    expected = home / "policies" / "server_scope.yaml"
+    expected.write_text("- not\n- a\n- mapping\n", encoding="utf-8")
+
+    code = main(["--home", str(home), "--json", "doctor"])
+    captured = capsys.readouterr()
+    payload = json.loads(captured.out)
+    matching = [
+        problem
+        for problem in payload["problems"]
+        if f"policy file {expected} must contain a mapping" in problem
+    ]
+
+    assert code == 2
+    assert matching
+    assert all(problem.startswith(f"{expected}:") for problem in matching)
+    assert "Traceback" not in captured.out + captured.err
+
+
 def test_doctor_reports_unreadable_cleanup_policy(
     home: Path,
     capsys: pytest.CaptureFixture[str],
@@ -187,6 +209,67 @@ def test_doctor_reports_unreadable_cleanup_policy(
     assert code == 2
     assert any(
         problem.startswith(f"{expected}:") and "permission denied" in problem
+        for problem in payload["problems"]
+    )
+    assert "Traceback" not in captured.out + captured.err
+
+
+@pytest.mark.parametrize(
+    ("relative_path", "expected_detail"),
+    [
+        ("automation/registry.yaml", "automation/registry.yaml"),
+        ("agents/code-worker.md", "agents/code-worker.md"),
+    ],
+)
+def test_doctor_reports_unreadable_configuration_and_front_matter(
+    home: Path,
+    capsys: pytest.CaptureFixture[str],
+    monkeypatch: pytest.MonkeyPatch,
+    relative_path: str,
+    expected_detail: str,
+) -> None:
+    target = home / relative_path
+    original = Path.read_text
+
+    def fail_target(path: Path, *args, **kwargs):
+        if path == target:
+            raise OSError(errno.EACCES, "permission denied", str(path))
+        return original(path, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "read_text", fail_target)
+
+    code = main(["--home", str(home), "--json", "doctor"])
+    captured = capsys.readouterr()
+    payload = json.loads(captured.out)
+
+    assert code == 2
+    assert any(
+        expected_detail in problem and "permission denied" in problem
+        for problem in payload["problems"]
+    )
+    assert "Traceback" not in captured.out + captured.err
+
+
+@pytest.mark.parametrize(
+    "relative_path",
+    ["policies/cleanup.yaml", "automation/registry.yaml"],
+)
+def test_doctor_reports_missing_configuration_files(
+    home: Path,
+    capsys: pytest.CaptureFixture[str],
+    relative_path: str,
+) -> None:
+    target = home / relative_path
+    target.unlink()
+
+    code = main(["--home", str(home), "--json", "doctor"])
+    captured = capsys.readouterr()
+    payload = json.loads(captured.out)
+
+    assert code == 2
+    assert any(
+        problem.startswith(f"{target}:")
+        and "required configuration file does not exist" in problem
         for problem in payload["problems"]
     )
     assert "Traceback" not in captured.out + captured.err
