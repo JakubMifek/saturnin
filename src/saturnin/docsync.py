@@ -164,14 +164,21 @@ def _marker_problems(text: str, path: Path) -> list[str]:
 
 def documents(config: Config) -> list[Path]:
     """Every tracked markdown file that contains a generated marker."""
+    return [
+        path
+        for path in _document_candidates(config)
+        if MARKER_CANDIDATE.search(path.read_text(encoding="utf-8"))
+    ]
+
+
+def _document_candidates(config: Config) -> list[Path]:
     roots = [config.root, config.root / "docs", config.root / "agents", config.root / ".github"]
     found: list[Path] = []
     for root in roots:
         if not root.is_dir():
             continue
         for path in sorted(root.rglob("*.md") if root.name == "docs" else root.glob("*.md")):
-            if MARKER_CANDIDATE.search(path.read_text(encoding="utf-8")):
-                found.append(path)
+            found.append(path)
     return found
 
 
@@ -195,17 +202,33 @@ def render(config: Config | None = None, *, write: bool = True) -> list[Path]:
 def audit(config: Config | None = None) -> list[str]:
     config = config or default_config()
     problems: list[str] = []
-    for path in documents(config):
+    readable_documents: list[tuple[Path, str]] = []
+    for path in _document_candidates(config):
+        relative = path.relative_to(config.root)
+        try:
+            text = path.read_text(encoding="utf-8")
+        except (OSError, UnicodeError) as error:
+            detail = error.strerror if isinstance(error, OSError) else str(error)
+            problems.append(f"{relative}: cannot read documentation: {detail}")
+            continue
+        if MARKER_CANDIDATE.search(text):
+            readable_documents.append((path, text))
+
+    for path, text in readable_documents:
         problems.extend(
             _marker_problems(
-                path.read_text(encoding="utf-8"),
+                text,
                 path.relative_to(config.root),
             )
         )
     if problems:
         return problems
     try:
-        stale = render(config, write=False)
+        stale = [
+            path
+            for path, text in readable_documents
+            if render_text(text, config) != text
+        ]
     except (GeneratedBlockError, KeyError) as error:
         return [str(error).strip("'")]
     if not stale:

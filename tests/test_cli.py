@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import errno
 import json
 import subprocess
 from datetime import datetime, timedelta, timezone
@@ -61,6 +62,56 @@ def test_doctor_reports_discovery_label_pairing_problem(
     payload = json.loads(out)
     assert code == 2
     assert any("must require saturnin:trusted" in problem for problem in payload["problems"])
+
+
+def test_doctor_reports_all_malformed_yaml_and_front_matter(
+    home: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    (home / "policies" / "governance.yaml").write_text("git: [\n", encoding="utf-8")
+    (home / "automation" / "registry.yaml").write_text(
+        "automations: [\n",
+        encoding="utf-8",
+    )
+    (home / "agents" / "code-worker.md").write_text(
+        "---\nrole: [\n---\n",
+        encoding="utf-8",
+    )
+
+    code, out = run(capsys, "--json", "doctor")
+    payload = json.loads(out)
+
+    assert code == 2
+    assert any("policies/governance.yaml" in problem for problem in payload["problems"])
+    assert any("automation/registry.yaml" in problem for problem in payload["problems"])
+    assert any("agents/code-worker.md" in problem for problem in payload["problems"])
+
+
+def test_doctor_reports_document_read_errors_with_the_path(
+    home: Path,
+    capsys: pytest.CaptureFixture[str],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    target = home / "docs" / "operating-model.md"
+    target.parent.mkdir()
+    target.write_text("<!-- generated:rules -->\nold\n<!-- /generated:rules -->\n")
+    original = Path.read_text
+
+    def fail_one(path: Path, *args, **kwargs):
+        if path == target:
+            raise OSError(errno.EACCES, "permission denied", str(path))
+        return original(path, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "read_text", fail_one)
+
+    code, out = run(capsys, "--json", "doctor")
+    payload = json.loads(out)
+
+    assert code == 2
+    assert any(
+        "docs/operating-model.md" in problem and "permission denied" in problem
+        for problem in payload["problems"]
+    )
 
 
 def test_task_intake_and_dispatch(home: Path, capsys: pytest.CaptureFixture[str]) -> None:

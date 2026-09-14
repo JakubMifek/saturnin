@@ -25,6 +25,15 @@ services:
   allowed_schedulers: [systemd-user-timer]
 
 filesystem:
+  # Basename-specific command rules only apply to executables resolved from
+  # administrator-controlled system locations.
+  trusted_executable_roots:
+    - /bin
+    - /sbin
+    - /usr/bin
+    - /usr/sbin
+    - /usr/local/bin
+    - /usr/local/sbin
   writable_roots:
     - /home/saturnin
     - /home/saturnin/worktrees

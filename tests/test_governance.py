@@ -772,6 +772,42 @@ def test_in_scope_server_commands(governance: Governance, command: str) -> None:
     assert governance.check_server_command(command).allowed
 
 
+@pytest.mark.parametrize("binary", ["git", "systemctl", "rm", "env"])
+def test_path_resolved_classified_executables_must_come_from_trusted_roots(
+    governance: Governance,
+    config: Config,
+    monkeypatch: pytest.MonkeyPatch,
+    binary: str,
+) -> None:
+    fake_bin = config.root / "fake-bin"
+    fake_bin.mkdir(exist_ok=True)
+    fake = fake_bin / binary
+    fake.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+    fake.chmod(0o755)
+    monkeypatch.setenv("PATH", f"{fake_bin}:{os.environ['PATH']}")
+
+    decision = governance.check_server_command(f"{binary} status")
+
+    assert not decision.allowed
+    assert str(fake) in decision.reasons[0]
+    assert "outside trusted system executable roots" in decision.reasons[0]
+
+
+def test_path_qualified_allowlisted_executable_is_not_classified_by_basename(
+    governance: Governance,
+    config: Config,
+) -> None:
+    fake = config.root / "git"
+    fake.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+    fake.chmod(0o755)
+
+    decision = governance.check_server_command(f"{fake} status")
+
+    assert not decision.allowed
+    assert str(fake) in decision.reasons[0]
+    assert "outside trusted system executable roots" in decision.reasons[0]
+
+
 def test_curl_output_flags_are_parsed() -> None:
     assert _curl_targets([
         "-q",

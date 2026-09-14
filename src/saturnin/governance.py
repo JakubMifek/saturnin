@@ -10,6 +10,7 @@ from __future__ import annotations
 import os
 import re
 import shlex
+import shutil
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Iterable, Sequence
@@ -49,6 +50,32 @@ _ALL_OPERANDS_WRITABLE = {
     "unlink",
 }
 _DESTINATION_WRITABLE = {"cp", "install", "ln", "mv", "rsync"}
+_SPECIAL_EXECUTABLES = (
+    _WRAPPERS
+    | _SHELL_RESERVED
+    | _DYNAMIC_COMMANDS
+    | _SHELL_BINARIES
+    | _MULTICALL_BINARIES
+    | _ALL_OPERANDS_WRITABLE
+    | _DESTINATION_WRITABLE
+    | {
+        "curl",
+        "dd",
+        "find",
+        "gh",
+        "git",
+        "journalctl",
+        "node",
+        "perl",
+        "python",
+        "python3",
+        "ruby",
+        "saturnin",
+        "sed",
+        "systemctl",
+        "xargs",
+    }
+)
 _GIT_SAFE_SUBCOMMANDS = frozenset(
     {
         "add",
@@ -339,7 +366,15 @@ class Governance:
             return Decision.deny("wrapper contains no command")
         if _ASSIGNMENT.fullmatch(parts[0]):
             return Decision.deny("environment variable assignments are not allowed")
-        binary = parts[0].rsplit("/", 1)[-1]
+        executable = parts[0]
+        binary = Path(executable).name
+        executable_decision = _check_executable_location(
+            executable,
+            binary,
+            self.config.server_scope,
+        )
+        if not executable_decision.allowed:
+            return executable_decision
         if binary in _SHELL_RESERVED or binary in _DYNAMIC_COMMANDS:
             return Decision.deny(f"shell keyword {binary!r} is not allowed")
         if binary in _SHELL_BINARIES:
@@ -636,6 +671,38 @@ def _check_filesystem_scope(
         return Decision.ok("command has no explicit filesystem write target")
 
     return _check_filesystem_targets(targets, filesystem)
+
+
+def _check_executable_location(
+    executable: str,
+    binary: str,
+    scope: dict[str, Any],
+) -> Decision:
+    filesystem = scope.get("filesystem", {})
+    classified = (
+        binary in _SPECIAL_EXECUTABLES
+        or binary in set(filesystem.get("executable_allowlist", []))
+        or binary in set(scope.get("user", {}).get("forbidden_prefixes", []))
+        or binary == "apt"
+        or binary.startswith("apt-")
+    )
+    if not classified:
+        return Decision.ok("executable does not receive basename-specific privileges")
+
+    if "/" in executable:
+        resolved = _resolve_command_path(executable)
+    else:
+        found = shutil.which(executable)
+        if found is None:
+            return Decision.ok("unresolved executable has no path to trust")
+        resolved = _resolve_command_path(found)
+
+    trusted_roots = _policy_roots(filesystem.get("trusted_executable_roots", []))
+    if _containing_root(resolved, trusted_roots) is None:
+        return Decision.deny(
+            f"executable {str(resolved)!r} is outside trusted system executable roots"
+        )
+    return Decision.ok(f"executable {str(resolved)!r} is under a trusted system root")
 
 
 def _check_filesystem_targets(targets: Sequence[str], filesystem: dict[str, Any]) -> Decision:

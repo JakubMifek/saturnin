@@ -743,25 +743,41 @@ def _github_repo_slug(
 def main(argv: Sequence[str] | None = None) -> int:
     parser = build_parser()
     args = parser.parse_args(argv)
-    config = _config(args)
-    config.ensure_dirs()
     try:
+        config = _config(args)
+        config.ensure_dirs()
         return _run(args, config)
-    except (
-        BoardError,
-        RoutingError,
-        GitError,
-        MirrorError,
-        docsync.GeneratedBlockError,
-        RuntimeError,
-    ) as exc:
+    except Exception as exc:
+        if args.command == "doctor":
+            fallback = Path(args.home) if args.home else Path.cwd()
+            problem = _doctor_exception(fallback, exc)
+            _emit(
+                {"healthy": False, "problems": [problem]},
+                args.json,
+                problem,
+            )
+            return 2
+        if not isinstance(
+            exc,
+            (
+                BoardError,
+                RoutingError,
+                GitError,
+                MirrorError,
+                docsync.GeneratedBlockError,
+                RuntimeError,
+            ),
+        ):
+            raise
         print(f"saturnin: {exc}", file=sys.stderr)
         return 1
 
 
 def _run(args: argparse.Namespace, config: Config) -> int:  # noqa: C901 - flat command table
-    board = Board(config)
     as_json = args.json
+    if args.command == "doctor":
+        return _run_doctor(config, as_json)
+    board = Board(config)
 
     if args.command == "task":
         return _run_task(args, config, board, as_json)
@@ -929,24 +945,83 @@ def _run(args: argparse.Namespace, config: Config) -> int:  # noqa: C901 - flat 
             ),
         )
         return 0
-    if args.command == "doctor":
-        problems = (
-            Governance(config).audit()
-            + Router(config).validate_policy()
-            + AutomationLibrary(config).audit()
-            + IssueDiscovery(config, board).audit()
-            + audit_contracts(config)
-            + docsync.audit(config)
-            + _mirror_audit(config, board)
-        )
-        _emit(
-            {"healthy": not problems, "problems": problems},
-            as_json,
-            "\n".join(problems) if problems else "Everything is in order, sir.",
-        )
-        return 0 if not problems else 2
     parser_error = f"unknown command {args.command}"  # pragma: no cover - argparse guards
     raise RuntimeError(parser_error)  # pragma: no cover
+
+
+def _doctor_exception(fallback: Path, error: Exception) -> str:
+    filename = getattr(error, "filename", None)
+    mark = getattr(error, "problem_mark", None)
+    marked_name = getattr(mark, "name", "")
+    path = (
+        Path(filename)
+        if filename
+        else Path(marked_name)
+        if marked_name and not marked_name.startswith("<")
+        else fallback
+    )
+    detail = str(error).strip() or error.__class__.__name__
+    path_text = str(path)
+    return detail if path_text in detail else f"{path_text}: {detail}"
+
+
+def _doctor_check(path: Path, check: Any) -> list[str]:
+    try:
+        return list(check())
+    except Exception as error:
+        return [_doctor_exception(path, error)]
+
+
+def _run_doctor(config: Config, as_json: bool) -> int:
+    problems: list[str] = []
+    board: Board | None = None
+
+    def construct_board() -> list[str]:
+        nonlocal board
+        board = Board(config)
+        return []
+
+    problems += _doctor_check(config.tasks_dir, construct_board)
+    checks = [
+        (
+            config.policies / "governance.yaml",
+            lambda: Governance(config).audit(),
+        ),
+        (
+            config.policies / "routing.yaml",
+            lambda: Router(config).validate_policy(),
+        ),
+        (
+            config.automation_dir / "registry.yaml",
+            lambda: AutomationLibrary(config).audit(),
+        ),
+        (
+            config.policies / "repos.yaml",
+            lambda: IssueDiscovery(config, board).audit(),
+        ),
+        (
+            config.root / "agents",
+            lambda: audit_contracts(config),
+        ),
+        (
+            config.root / "docs",
+            lambda: docsync.audit(config),
+        ),
+    ]
+    for path, check in checks:
+        problems += _doctor_check(path, check)
+    if board is not None:
+        problems += _doctor_check(
+            config.policies / "repos.yaml",
+            lambda: _mirror_audit(config, board),
+        )
+
+    _emit(
+        {"healthy": not problems, "problems": problems},
+        as_json,
+        "\n".join(problems) if problems else "Everything is in order, sir.",
+    )
+    return 0 if not problems else 2
 
 
 def _run_task(args: argparse.Namespace, config: Config, board: Board, as_json: bool) -> int:

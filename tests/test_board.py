@@ -1,8 +1,15 @@
 from __future__ import annotations
 
+import os
+import subprocess
+import sys
+import time
+from pathlib import Path
+
 import pytest
 
 from saturnin.board import Board, BoardError
+from saturnin.config import Config
 
 
 def test_create_and_reload(board: Board) -> None:
@@ -125,3 +132,59 @@ def test_signature_extracts_words_from_punctuated_tokens(board: Board) -> None:
     spaced = board.create("clean worktree branch for e 2 e")
     assert punctuated.signature == spaced.signature
     assert "café" in board.create("Réparer café/db").signature
+
+
+def test_concurrent_processes_do_not_overwrite_colliding_task_ids(
+    board: Board,
+    config: Config,
+) -> None:
+    ready = config.root / "creator-ready"
+    ready.mkdir()
+    start = config.root / "start-creators"
+    child = """
+import os
+import sys
+import time
+import saturnin.board as board_module
+from saturnin.board import Board
+from saturnin.config import Config
+
+root, suffix, title = sys.argv[1:]
+ids = iter(("T-20000101-c0ffee", f"T-20000101-{suffix}"))
+board_module.new_task_id = lambda now=None: next(ids)
+original_write = Board._write
+def delayed_write(self, path, task):
+    time.sleep(0.25)
+    original_write(self, path, task)
+Board._write = delayed_write
+open(os.path.join(root, "creator-ready", suffix), "w").close()
+while not os.path.exists(os.path.join(root, "start-creators")):
+    time.sleep(0.01)
+Board(Config.load(root)).create(title)
+"""
+    env = {
+        **os.environ,
+        "PYTHONPATH": str(Path(__file__).resolve().parents[1] / "src"),
+        "SATURNIN_HOME": str(config.root),
+    }
+    processes = [
+        subprocess.Popen(
+            [sys.executable, "-c", child, str(config.root), suffix, title],
+            env=env,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+        )
+        for suffix, title in (("aaaaaa", "first creator"), ("bbbbbb", "second creator"))
+    ]
+    deadline = time.monotonic() + 5
+    while len(list(ready.iterdir())) < 2 and time.monotonic() < deadline:
+        time.sleep(0.01)
+    assert len(list(ready.iterdir())) == 2
+    start.touch()
+    results = [process.communicate(timeout=10) for process in processes]
+
+    assert [process.returncode for process in processes] == [0, 0], results
+    tasks = list(board)
+    assert {task.title for task in tasks} == {"first creator", "second creator"}
+    assert len({task.id for task in tasks}) == 2

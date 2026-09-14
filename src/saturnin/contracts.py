@@ -90,21 +90,48 @@ def load_contracts(config: Config | None = None) -> list[AgentContract]:
     config = config or default_config()
     contracts: list[AgentContract] = []
     for path in sorted((config.root / "agents").glob("*.md")):
-        match = FRONT_MATTER.match(path.read_text(encoding="utf-8"))
-        if not match:
-            continue
-        data = yaml.safe_load(match.group(1)) or {}
-        if not isinstance(data, dict) or "role" not in data:
-            continue
-        contracts.append(AgentContract(role=str(data["role"]), path=path, front_matter=data))
+        contract = _load_contract(path)
+        if contract is not None:
+            contracts.append(contract)
     return contracts
+
+
+def _load_contract(path: Path) -> AgentContract | None:
+    text = path.read_text(encoding="utf-8")
+    match = FRONT_MATTER.match(text)
+    if not match:
+        if text.startswith("---"):
+            raise ValueError("malformed YAML front matter")
+        return None
+    data = yaml.safe_load(match.group(1)) or {}
+    if not isinstance(data, dict):
+        raise ValueError("YAML front matter must contain a mapping")
+    if "role" not in data:
+        raise ValueError("YAML front matter has no role")
+    return AgentContract(role=str(data["role"]), path=path, front_matter=data)
+
+
+def _contract_load_problem(path: Path, error: Exception, config: Config) -> str:
+    relative = path.relative_to(config.root)
+    if isinstance(error, OSError):
+        detail = error.strerror or str(error)
+        return f"{relative}: cannot read agent contract: {detail}"
+    return f"{relative}: invalid agent contract front matter: {error}"
 
 
 def audit(config: Config | None = None) -> list[str]:
     """Return every disagreement between contracts, routing and MCP policy."""
     config = config or default_config()
     problems: list[str] = []
-    loaded_contracts = load_contracts(config)
+    loaded_contracts: list[AgentContract] = []
+    for path in sorted((config.root / "agents").glob("*.md")):
+        try:
+            contract = _load_contract(path)
+        except (OSError, UnicodeError, ValueError, yaml.YAMLError) as error:
+            problems.append(_contract_load_problem(path, error, config))
+            continue
+        if contract is not None:
+            loaded_contracts.append(contract)
     role_to_paths: dict[str, list[Path]] = {}
     for contract in loaded_contracts:
         role_to_paths.setdefault(contract.role, []).append(contract.path)

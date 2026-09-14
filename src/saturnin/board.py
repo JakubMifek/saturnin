@@ -193,16 +193,17 @@ class Board:
         parent: str | None = None,
         source: str = "cli",
     ) -> Task:
-        return self._create(
-            title,
-            kind=kind,
-            body=body,
-            labels=labels,
-            repo=repo,
-            priority=priority,
-            parent=parent,
-            source=source,
-        )
+        with file_lock(self.config.tasks_dir / ".board"):
+            return self._create(
+                title,
+                kind=kind,
+                body=body,
+                labels=labels,
+                repo=repo,
+                priority=priority,
+                parent=parent,
+                source=source,
+            )
 
     def create_if_labels_absent(
         self,
