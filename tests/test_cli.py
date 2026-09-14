@@ -3,6 +3,7 @@ from __future__ import annotations
 import errno
 import json
 import subprocess
+import threading
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from types import SimpleNamespace
@@ -10,9 +11,9 @@ from types import SimpleNamespace
 import pytest
 import yaml
 
-from saturnin.board import Board
+from saturnin.board import Board, BoardError
 from saturnin.checkpoints import Checkpoint, CheckpointStore
-from saturnin.cli import main
+from saturnin.cli import _submit_task_escalation, main
 from saturnin.config import Config
 from saturnin.discovery import InboundIssue, IssueDiscovery
 from saturnin.launcher import AgentLauncher
@@ -1330,6 +1331,105 @@ def test_escalation_push_failure_is_reported(
 
     assert main(["escalate", "Need help", "--push"]) == 1
     assert "authentication failed" in capsys.readouterr().err
+
+
+def test_task_escalation_retry_reuses_issue_created_before_board_failure(
+    home: Path, capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    task = Board().create("Need human decision")
+    Board().transition(task, "routed")
+    created: list[str] = []
+    marker = f"saturnin:escalation:{task.id}"
+    monkeypatch.setattr("saturnin.issues.shutil.which", lambda _: "/usr/bin/gh")
+
+    def fake_run(args, **kwargs):
+        if args[1:3] == ["label", "list"]:
+            return subprocess.CompletedProcess(args, 0, "[]", "")
+        if args[1:3] == ["label", "create"]:
+            return subprocess.CompletedProcess(args, 0, "", "")
+        if args[1:3] == ["issue", "list"]:
+            assert marker in args
+            data = [{"url": created[0]}] if created else []
+            return subprocess.CompletedProcess(args, 0, json.dumps(data), "")
+        if args[1:3] == ["issue", "create"]:
+            created.append("https://github.com/JakubMifek/saturnin-ops/issues/44")
+            return subprocess.CompletedProcess(args, 0, created[-1] + "\n", "")
+        raise AssertionError(args)
+
+    monkeypatch.setattr("saturnin.issues.subprocess.run", fake_run)
+    original_apply = Board._apply_transition
+    failed = False
+
+    def fail_first_transition(task, state, *, actor, note):
+        nonlocal failed
+        if not failed:
+            failed = True
+            raise BoardError("simulated interrupted board write")
+        return original_apply(task, state, actor=actor, note=note)
+
+    monkeypatch.setattr(Board, "_apply_transition", staticmethod(fail_first_transition))
+
+    assert run(capsys, "escalate", "Need help", "--push", "--task", task.id)[0] == 1
+    code, out = run(capsys, "--json", "escalate", "Need help", "--push", "--task", task.id)
+
+    assert code == 0
+    assert json.loads(out)["url"] == created[0]
+    assert len(created) == 1
+    assert Board().get(task.id).state == "blocked"
+
+
+def test_task_escalation_lock_prevents_duplicate_concurrent_submission(
+    config: Config, board: Board, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    task = board.create("Need one escalation issue")
+    board.transition(task, "routed")
+    started = threading.Event()
+    release = threading.Event()
+    submitted: list[str] = []
+    results: list[str] = []
+    errors: list[BaseException] = []
+
+    def fake_submit(**kwargs):
+        submitted.append(kwargs["task_id"])
+        started.set()
+        assert release.wait(5)
+        return "https://github.com/JakubMifek/saturnin-ops/issues/45"
+
+    monkeypatch.setattr("saturnin.cli.escalation_mod.submit", fake_submit)
+
+    def worker() -> None:
+        try:
+            results.append(
+                _submit_task_escalation(
+                    config=config,
+                    board=board,
+                    task_id=task.id,
+                    title="Need help",
+                    body="body",
+                    actor="chief-of-staff",
+                )
+            )
+        except BaseException as exc:  # pragma: no cover - asserted below
+            errors.append(exc)
+
+    first = threading.Thread(target=worker)
+    second = threading.Thread(target=worker)
+    first.start()
+    assert started.wait(5)
+    second.start()
+    release.set()
+    first.join(5)
+    second.join(5)
+
+    assert not first.is_alive()
+    assert not second.is_alive()
+    assert errors == []
+    assert submitted == [task.id]
+    assert results == [
+        "https://github.com/JakubMifek/saturnin-ops/issues/45",
+        "https://github.com/JakubMifek/saturnin-ops/issues/45",
+    ]
+    assert board.get(task.id).state == "blocked"
 
 
 def test_automation_and_improve(home: Path, capsys: pytest.CaptureFixture[str]) -> None:

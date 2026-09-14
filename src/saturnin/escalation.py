@@ -6,6 +6,7 @@ issue body with a checklist, an urgency and explicit unblock criteria.
 
 from __future__ import annotations
 
+import json
 from typing import Iterable
 
 from .config import Config, default_config
@@ -35,6 +36,7 @@ def render(
         f"**Urgency:** {urgency}",
     ]
     if task_id:
+        lines += ["", f"<!-- saturnin:escalation:{task_id} -->"]
         lines.append(f"**Board task:** {task_id}")
     lines += [
         "",
@@ -56,13 +58,27 @@ def validate(body: str, *, urgency: str, config: Config | None = None) -> Decisi
     return Governance(config or default_config()).check_escalation(body, urgency=urgency)
 
 
-def submit(*, title: str, body: str, config: Config | None = None) -> str:
+def submit(
+    *,
+    title: str,
+    body: str,
+    config: Config | None = None,
+    task_id: str | None = None,
+) -> str:
     config = config or default_config()
     mirror = IssueMirror(config)
     repo = mirror.board_repo
     label = config.governance.get("escalation", {}).get("label")
     if not label:
         raise MirrorError("governance escalation policy defines no issue label")
+    marker = f"saturnin:escalation:{task_id}" if task_id else ""
+    if marker:
+        existing = _find_issue_by_marker(repo, marker)
+        if existing:
+            return existing
+        comment = f"<!-- {marker} -->"
+        if comment not in body:
+            body = f"{comment}\n\n{body}"
     ensure_labels(repo, [str(label)])
     output = run_gh(
         [
@@ -77,3 +93,29 @@ def submit(*, title: str, body: str, config: Config | None = None) -> str:
     if not url:
         raise MirrorError("gh issue create returned no URL")
     return url
+
+
+def _find_issue_by_marker(repo: str, marker: str) -> str | None:
+    try:
+        output = run_gh(
+            [
+                "issue",
+                "list",
+                "--repo",
+                repo,
+                "--search",
+                marker,
+                "--state",
+                "all",
+                "--json",
+                "url",
+                "--limit",
+                "1",
+            ]
+        )
+        data = json.loads(output or "[]")
+        if data:
+            return str(data[0]["url"])
+    except (json.JSONDecodeError, KeyError, TypeError):
+        pass
+    return None

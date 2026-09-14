@@ -10,7 +10,6 @@ if [[ "$(id -u)" -eq 0 ]]; then
   exit 1
 fi
 
-mkdir -p "$UNIT_DIR"
 if [[ ! "$SATURNIN_HOME" =~ ^[A-Za-z0-9/._-]+$ ]]; then
   cat >&2 <<'ERR'
 SATURNIN_HOME contains characters that cannot be rendered safely for all
@@ -19,10 +18,31 @@ Use a checkout path containing only [A-Za-z0-9/._-].
 ERR
   exit 1
 fi
+
+mkdir -p "$UNIT_DIR"
+STAGE_DIR="$(mktemp -d "${TMPDIR:-/tmp}/saturnin-units.XXXXXX")"
+BACKUP_DIR="$(mktemp -d "${TMPDIR:-/tmp}/saturnin-units-backup.XXXXXX")"
+installing=0
+cleanup() {
+  rm -rf "$STAGE_DIR" "$BACKUP_DIR"
+}
+rollback() {
+  for backup in "$BACKUP_DIR"/*; do
+    [[ -e "$backup" ]] || continue
+    name="$(basename "$backup")"
+    if [[ "$name" == *.missing ]]; then
+      rm -f "$UNIT_DIR/${name%.missing}"
+    else
+      mv -f "$backup" "$UNIT_DIR/$name"
+    fi
+  done
+}
+trap 'status=$?; if [[ "$installing" -eq 1 && "$status" -ne 0 ]]; then rollback; fi; cleanup' EXIT
+
 for unit in "$SATURNIN_HOME"/systemd/saturnin-*; do
   name="$(basename "$unit")"
   SATURNIN_HOME_ESCAPED="$SATURNIN_HOME" SATURNIN_HOME_ENV_ESCAPED="$SATURNIN_HOME" \
-    TEMPLATE="$unit" DEST="$UNIT_DIR/$name" python3 -c '
+    TEMPLATE="$unit" DEST="$STAGE_DIR/$name" python3 -c '
 from pathlib import Path
 import os
 template = Path(os.environ["TEMPLATE"]).read_text()
@@ -32,11 +52,23 @@ Path(os.environ["DEST"]).write_text(
 )
 '
   if command -v systemd-analyze >/dev/null 2>&1; then
-    if ! systemd-analyze --user verify "$UNIT_DIR/$name"; then
+    if ! systemd-analyze --user verify "$STAGE_DIR/$name"; then
       echo "systemd-analyze verify failed for $name; refusing to enable invalid units" >&2
       exit 1
     fi
   fi
+done
+
+installing=1
+for staged in "$STAGE_DIR"/saturnin-*; do
+  name="$(basename "$staged")"
+  if [[ -e "$UNIT_DIR/$name" ]]; then
+    cp -p "$UNIT_DIR/$name" "$BACKUP_DIR/$name"
+  else
+    : > "$BACKUP_DIR/$name.missing"
+  fi
+  install -m 0644 "$staged" "$UNIT_DIR/$name.tmp"
+  mv -f "$UNIT_DIR/$name.tmp" "$UNIT_DIR/$name"
   echo "installed $UNIT_DIR/$name"
 done
 
@@ -45,6 +77,7 @@ systemctl --user enable --now \
   saturnin-janitor.timer saturnin-improve.timer \
   saturnin-poller.timer saturnin-discovery.timer \
   saturnin-resume.timer
+installing=0
 systemctl --user list-timers 'saturnin-*' || true
 
 cat <<'MSG'

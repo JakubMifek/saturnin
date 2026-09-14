@@ -38,6 +38,7 @@ from .governance import Governance
 from .improve import ImprovementLoop
 from .issues import IssueMirror, MirrorError, run_gh
 from .launcher import AgentLauncher, LauncherError, LaunchResult
+from .locking import file_lock
 from .review import (
     ReviewError,
     ReviewLedger,
@@ -784,6 +785,45 @@ def _doctor_config_path(args: argparse.Namespace) -> Path:
     return root / "policies" / "governance.yaml"
 
 
+def _task_escalation_reference(task: Task) -> str:
+    for entry in reversed(task.history):
+        note = str(entry.get("note", ""))
+        if note.startswith("escalated:"):
+            return note.removeprefix("escalated:").strip()
+    return ""
+
+
+def _submit_task_escalation(
+    *,
+    config: Config,
+    board: Board,
+    task_id: str,
+    title: str,
+    body: str,
+    actor: str,
+) -> str:
+    board.path_for(task_id)
+    lock_path = config.var_dir / "locks" / f"escalation-{task_id}"
+    with file_lock(lock_path):
+        with board.edit(task_id) as task:
+            existing = _task_escalation_reference(task)
+            if task.state == "blocked" and existing:
+                return existing
+            if task.state not in ("routed", "in_progress", "review"):
+                raise BoardError(
+                    f"task {task_id} cannot be blocked from state {task.state}; "
+                    "escalation was not submitted"
+                )
+            url = escalation_mod.submit(
+                title=title,
+                body=body,
+                config=config,
+                task_id=task_id,
+            )
+            Board._apply_transition(task, "blocked", actor=actor, note=f"escalated: {url}")
+            return url
+
+
 def _run(args: argparse.Namespace, config: Config) -> int:  # noqa: C901 - flat command table
     as_json = args.json
     if args.command == "doctor":
@@ -876,13 +916,6 @@ def _run(args: argparse.Namespace, config: Config) -> int:  # noqa: C901 - flat 
         )
         return result.returncode
     if args.command == "escalate":
-        if args.push and args.task:
-            task = board.get(args.task)
-            if task.state not in ("routed", "in_progress", "review"):
-                raise BoardError(
-                    f"task {args.task} cannot be blocked from state {task.state}; "
-                    "escalation was not submitted"
-                )
         body = escalation_mod.render(
             title=args.title,
             context=args.context,
@@ -896,29 +929,26 @@ def _run(args: argparse.Namespace, config: Config) -> int:  # noqa: C901 - flat 
         if not decision.allowed:
             print("; ".join(decision.reasons), file=sys.stderr)
             return 2
-        url = (
-            escalation_mod.submit(title=args.title, body=body, config=config)
-            if args.push
-            else None
-        )
-        if url and args.task:
-            escalation_actor = getattr(args, "actor", "chief-of-staff")
-            task_update_error = None
-            try:
-                board.transition_id(args.task, "blocked", actor=escalation_actor, note=f"escalated: {url}")
-            except BoardError as exc:
-                task_update_error = f"escalation submitted but task {args.task} not blocked: {exc}"
+        if args.push and args.task:
+            url = _submit_task_escalation(
+                config=config,
+                board=board,
+                task_id=args.task,
+                title=args.title,
+                body=body,
+                actor=getattr(args, "actor", "chief-of-staff"),
+            )
+        elif args.push:
+            url = escalation_mod.submit(title=args.title, body=body, config=config)
         else:
-            task_update_error = None
+            url = None
         payload = {"body": body, "url": url}
-        if task_update_error:
-            payload["task_update_error"] = task_update_error
         _emit(
             payload,
             as_json,
-            ((url or body) + (f"\n{task_update_error}" if task_update_error else "")),
+            url or body,
         )
-        return 2 if task_update_error else 0
+        return 0
     if args.command == "docs":
         stale = docsync.render(config, write=not args.check)
         names = [str(p.relative_to(config.root)) for p in stale]

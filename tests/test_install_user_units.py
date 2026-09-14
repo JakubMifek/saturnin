@@ -143,3 +143,76 @@ def test_install_stops_before_enable_when_verification_fails(tmp_path: Path) -> 
     assert result.returncode == 1
     assert "refusing to enable invalid units" in result.stderr
     assert not calls.exists()
+    installed_dir = tmp_path / "config" / "systemd" / "user"
+    assert not any(installed_dir.glob("saturnin-*"))
+
+
+def test_failed_verification_preserves_existing_unit_installation(tmp_path: Path) -> None:
+    saturnin_home = tmp_path / "checkout"
+    shutil.copytree(REPO_ROOT / "systemd", saturnin_home / "systemd")
+    fake_bin = tmp_path / "bin"
+    fake_bin.mkdir()
+    (fake_bin / "id").write_text("#!/bin/sh\nprintf '1000\\n'\n", encoding="utf-8")
+    (fake_bin / "systemd-analyze").write_text("#!/bin/sh\nexit 1\n", encoding="utf-8")
+    (fake_bin / "systemctl").write_text("#!/bin/sh\nexit 99\n", encoding="utf-8")
+    for command in ("id", "systemctl", "systemd-analyze"):
+        (fake_bin / command).chmod(0o755)
+    config_home = tmp_path / "config"
+    installed_dir = config_home / "systemd" / "user"
+    installed_dir.mkdir(parents=True)
+    existing = installed_dir / "saturnin-janitor.service"
+    existing.write_text("previous valid unit\n", encoding="utf-8")
+
+    result = subprocess.run(
+        ["bash", str(REPO_ROOT / "scripts/install_user_units.sh")],
+        check=False,
+        capture_output=True,
+        text=True,
+        env={
+            **os.environ,
+            "PATH": f"{fake_bin}:{os.environ['PATH']}",
+            "SATURNIN_HOME": str(saturnin_home),
+            "XDG_CONFIG_HOME": str(config_home),
+        },
+    )
+
+    assert result.returncode == 1
+    assert existing.read_text(encoding="utf-8") == "previous valid unit\n"
+
+
+def test_failed_enable_rolls_back_replaced_units(tmp_path: Path) -> None:
+    saturnin_home = tmp_path / "checkout"
+    shutil.copytree(REPO_ROOT / "systemd", saturnin_home / "systemd")
+    fake_bin = tmp_path / "bin"
+    fake_bin.mkdir()
+    (fake_bin / "id").write_text("#!/bin/sh\nprintf '1000\\n'\n", encoding="utf-8")
+    (fake_bin / "systemd-analyze").write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+    (fake_bin / "systemctl").write_text(
+        "#!/bin/sh\n"
+        "if [ \"$1\" = '--user' ] && [ \"$2\" = 'enable' ]; then exit 1; fi\n"
+        "exit 0\n",
+        encoding="utf-8",
+    )
+    for command in ("id", "systemctl", "systemd-analyze"):
+        (fake_bin / command).chmod(0o755)
+    config_home = tmp_path / "config"
+    installed_dir = config_home / "systemd" / "user"
+    installed_dir.mkdir(parents=True)
+    existing = installed_dir / "saturnin-janitor.service"
+    existing.write_text("previous valid unit\n", encoding="utf-8")
+
+    result = subprocess.run(
+        ["bash", str(REPO_ROOT / "scripts/install_user_units.sh")],
+        check=False,
+        capture_output=True,
+        text=True,
+        env={
+            **os.environ,
+            "PATH": f"{fake_bin}:{os.environ['PATH']}",
+            "SATURNIN_HOME": str(saturnin_home),
+            "XDG_CONFIG_HOME": str(config_home),
+        },
+    )
+
+    assert result.returncode == 1
+    assert existing.read_text(encoding="utf-8") == "previous valid unit\n"

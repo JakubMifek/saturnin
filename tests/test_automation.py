@@ -246,6 +246,50 @@ def test_monitor_recovery_clears_stale_markers_for_terminal_incident_task(
     assert "task move T-terminal cancelled" not in calls
 
 
+def test_result_poller_archives_review_task_without_regressing_to_blocked(
+    config: Config,
+) -> None:
+    pollers = config.var_dir / "pollers"
+    pollers.mkdir(parents=True)
+    probe = pollers / "T-review.sh"
+    probe.write_text("#!/usr/bin/env bash\nexit 1\n", encoding="utf-8")
+    probe.chmod(0o755)
+    escalated = pollers / "T-review.escalated"
+    escalated.write_text("https://github.com/JakubMifek/saturnin-ops/issues/9\n", encoding="utf-8")
+    args_log = config.root / "saturnin-args"
+    saturnin = config.root / ".venv" / "bin" / "saturnin"
+    saturnin.parent.mkdir(parents=True)
+    saturnin.write_text(
+        "#!/bin/sh\n"
+        f"printf '%s\\n' \"$*\" >> {args_log}\n"
+        "if [ \"$1\" = '--json' ] && [ \"$2\" = 'task' ] && [ \"$3\" = 'show' ]; then\n"
+        "  printf '%s\\n' '{\"state\":\"review\"}'\n"
+        "elif [ \"$1\" = '--json' ] && [ \"$2\" = 'escalate' ]; then\n"
+        "  exit 99\n"
+        "elif [ \"$1\" = 'task' ] && [ \"$2\" = 'move' ]; then\n"
+        "  exit 99\n"
+        "fi\n",
+        encoding="utf-8",
+    )
+    saturnin.chmod(0o755)
+
+    subprocess.run(
+        ["bash", str(config.root / "automation/library/result_poller.sh")],
+        check=True,
+        capture_output=True,
+        text=True,
+        env={**os.environ, "PATH": os.environ["PATH"]},
+    )
+
+    assert not probe.exists()
+    assert (pollers / "T-review.sh.done").exists()
+    assert not escalated.exists()
+    calls = args_log.read_text(encoding="utf-8")
+    assert "--json task show T-review" in calls
+    assert "escalate Poller failed" not in calls
+    assert "task move T-review blocked" not in calls
+
+
 def test_monitor_recreates_missing_incident_marker_before_escalating(config: Config) -> None:
     repo = config.root / "managed-app"
     (repo / ".saturnin").mkdir(parents=True)
