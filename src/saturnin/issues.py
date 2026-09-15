@@ -25,6 +25,24 @@ class MirrorError(RuntimeError):
     """Raised when a task cannot be mirrored."""
 
 
+def issue_search_url(output: str) -> str | None:
+    try:
+        data = json.loads(output)
+        if not isinstance(data, list):
+            raise TypeError("expected a list")
+        if not data:
+            return None
+        first = data[0]
+        if not isinstance(first, dict):
+            raise TypeError("expected an issue object")
+        url = first.get("url")
+        if not isinstance(url, str) or not url.strip():
+            raise TypeError("expected a non-empty issue URL")
+        return url.strip()
+    except (json.JSONDecodeError, TypeError) as exc:
+        raise MirrorError("gh issue list returned invalid JSON or shape") from exc
+
+
 @dataclass
 class IssuePayload:
     repo: str
@@ -241,17 +259,11 @@ class IssueMirror:
 
     def _find_issue_by_marker(self, repo: str, marker: str) -> str | None:
         """Search for an existing issue containing the deterministic marker comment."""
-        try:
-            out = run_gh([
-                "issue", "list", "--repo", repo, "--search", marker,
-                "--state", "all", "--json", "url", "--limit", "1",
-            ])
-            data = json.loads(out or "[]")
-            if data:
-                return str(data[0]["url"])
-        except (json.JSONDecodeError, KeyError, TypeError):
-            pass
-        return None
+        out = run_gh([
+            "issue", "list", "--repo", repo, "--search", marker,
+            "--state", "all", "--json", "url", "--limit", "1",
+        ])
+        return issue_search_url(out)
 
     def _issue_metadata(self, issue: str) -> tuple[set[str], str]:
         output = run_gh(["issue", "view", issue, "--json", "labels,state"])

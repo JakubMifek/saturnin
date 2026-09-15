@@ -10,6 +10,7 @@ import yaml
 from saturnin.board import Board, BoardError
 from saturnin.cli import check_managed_repo, main
 from saturnin.config import Config
+from saturnin.escalation import submit
 from saturnin.governance import Governance
 from saturnin.issues import IssueMirror, MirrorError, run_gh
 
@@ -252,6 +253,8 @@ def test_labels_are_provisioned_before_create(
         calls.append(args)
         if args[1:3] == ["label", "list"]:
             stdout = json.dumps([{"name": "dynamic"}])
+        elif args[1:3] == ["issue", "list"]:
+            stdout = "[]"
         elif args[1:3] == ["issue", "create"]:
             stdout = "https://github.com/JakubMifek/saturnin-ops/issues/2\n"
         else:
@@ -318,6 +321,8 @@ def test_new_terminal_issue_is_closed(
     def fake_run(args, **kwargs):
         calls.append(args)
         if args[1:3] == ["label", "list"]:
+            return subprocess.CompletedProcess(args, 0, "[]", "")
+        if args[1:3] == ["issue", "list"]:
             return subprocess.CompletedProcess(args, 0, "[]", "")
         if args[1:3] == ["issue", "create"]:
             return subprocess.CompletedProcess(
@@ -425,6 +430,46 @@ def test_marker_lookup_failure_stops_issue_creation(
     with pytest.raises(MirrorError, match="search unavailable"):
         IssueMirror(config, board).sync(task, push=True)
     assert not any(call[1:3] == ["issue", "create"] for call in calls)
+
+
+@pytest.mark.parametrize("output", ["not-json", "{}", "[{}]", ""])
+def test_malformed_marker_lookup_stops_issue_creation(
+    config: Config, board: Board, monkeypatch: pytest.MonkeyPatch, output: str
+) -> None:
+    task = board.create("Fresh")
+    calls: list[list[str]] = []
+    monkeypatch.setattr("saturnin.issues.shutil.which", lambda _: "/usr/bin/gh")
+
+    def fake_run(args, **kwargs):
+        calls.append(args)
+        if args[1:3] == ["label", "list"]:
+            return subprocess.CompletedProcess(args, 0, "[]", "")
+        if args[1:3] == ["issue", "list"]:
+            return subprocess.CompletedProcess(args, 0, output, "")
+        return subprocess.CompletedProcess(args, 0, "", "")
+
+    monkeypatch.setattr("saturnin.issues.subprocess.run", fake_run)
+
+    with pytest.raises(MirrorError, match="invalid JSON or shape"):
+        IssueMirror(config, board).sync(task, push=True)
+    assert not any(call[1:3] == ["issue", "create"] for call in calls)
+
+
+@pytest.mark.parametrize("output", ["not-json", "{}", "[{}]", ""])
+def test_malformed_escalation_lookup_stops_issue_creation(
+    config: Config, monkeypatch: pytest.MonkeyPatch, output: str
+) -> None:
+    calls: list[list[str]] = []
+
+    def fake_run(args):
+        calls.append(args)
+        return output
+
+    monkeypatch.setattr("saturnin.escalation.run_gh", fake_run)
+
+    with pytest.raises(MirrorError, match="invalid JSON or shape"):
+        submit(title="Need help", body="Context", config=config, task_id="T-retry")
+    assert not any(call[:2] == ["issue", "create"] for call in calls)
 
 
 def test_missing_gh_error_applies_to_all_integrations(

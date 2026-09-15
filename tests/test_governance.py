@@ -818,6 +818,60 @@ def test_issue_in_own_repo_needs_no_review(governance: Governance) -> None:
     ).allowed
 
 
+def test_github_repository_matching_is_case_insensitive(
+    governance: Governance, config: Config
+) -> None:
+    ledger = ReviewLedger(config)
+    subject = f"{SELF_REPO}#case"
+    record_review(
+        ledger,
+        subject=subject,
+        kind="pr",
+        author="code-worker",
+        reviewer="pr-reviewer",
+        verdict="approved",
+        head_sha=TEST_HEAD_SHA,
+    )
+    records = ledger.for_subject(subject, "pr")
+
+    assert governance.merge_allowed(
+        repo=SELF_REPO.lower(),
+        author="code-worker",
+        records=records,
+        head_sha=TEST_HEAD_SHA,
+    ).allowed
+    assert governance.issue_submission_allowed(
+        repo=SELF_REPO.upper(), author="researcher", records=[]
+    ).allowed
+    assert governance.push_allowed(
+        repo=SELF_REPO.swapcase(), branch="feature/case"
+    ).allowed
+
+
+def test_managed_repository_issue_matching_is_case_insensitive(
+    governance: Governance, config: Config
+) -> None:
+    ledger = ReviewLedger(config)
+    subject = "draft-case-insensitive-repo"
+    digest = issue_content_digest("Improve CI", "Add the missing gate.")
+    record_review(
+        ledger,
+        subject=subject,
+        kind="issue",
+        author="researcher",
+        reviewer="issue-reviewer",
+        verdict="approved",
+        issue_digest=digest,
+    )
+
+    assert governance.issue_submission_allowed(
+        repo="jakubmifek/SATURNIN-OPS",
+        author="researcher",
+        records=ledger.for_subject(subject, "issue"),
+        issue_digest=digest,
+    ).allowed
+
+
 def test_push_rules(governance: Governance) -> None:
     assert governance.push_allowed(repo=SELF_REPO, branch="feature/x").allowed
     assert not governance.push_allowed(repo=SELF_REPO, branch="main").allowed

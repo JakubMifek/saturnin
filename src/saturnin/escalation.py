@@ -6,12 +6,11 @@ issue body with a checklist, an urgency and explicit unblock criteria.
 
 from __future__ import annotations
 
-import json
 from typing import Iterable
 
 from .config import Config, default_config
 from .governance import Decision, Governance
-from .issues import IssueMirror, MirrorError, ensure_labels, run_gh
+from .issues import IssueMirror, MirrorError, ensure_labels, issue_search_url, run_gh
 
 
 def render(
@@ -96,26 +95,20 @@ def submit(
 
 
 def _find_issue_by_marker(repo: str, marker: str) -> str | None:
-    try:
-        output = run_gh(
-            [
-                "issue",
-                "list",
-                "--repo",
-                repo,
-                "--search",
-                marker,
-                "--state",
-                "open",
-                "--json",
-                "url",
-                "--limit",
-                "1",
-            ]
-        )
-        data = json.loads(output or "[]")
-        if data:
-            return str(data[0]["url"])
-    except (json.JSONDecodeError, KeyError, TypeError):
-        pass
-    return None
+    output = run_gh(
+        [
+            "issue",
+            "list",
+            "--repo",
+            repo,
+            "--search",
+            marker,
+            "--state",
+            "open",
+            "--json",
+            "url",
+            "--limit",
+            "1",
+        ]
+    )
+    return issue_search_url(output)

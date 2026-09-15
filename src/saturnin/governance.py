@@ -76,6 +76,12 @@ _SPECIAL_EXECUTABLES = (
         "xargs",
     }
 )
+
+
+def _repo_slug_key(repo: object) -> str:
+    return str(repo or "").strip().casefold()
+
+
 _GIT_SAFE_SUBCOMMANDS = frozenset(
     {
         "add",
@@ -231,7 +237,7 @@ class Governance:
             reasons = list(decision.reasons)
         else:  # pragma: no cover - defensive
             reasons = ["pr review not required by policy"]
-        if repo == self.autonomy.get("self_repo"):
+        if _repo_slug_key(repo) == _repo_slug_key(self.autonomy.get("self_repo")):
             if not self.autonomy.get("self_repo_autonomous_merge", False):
                 return Decision.deny(f"{repo}: autonomous merge disabled by policy")
             reasons.append(f"{repo}: autonomous merge allowed after review")
@@ -251,20 +257,21 @@ class Governance:
         """Rule 5: issues for managed repos need an independent issue review."""
         records = [r for r in records if r.kind == "issue"]
         managed = {
-            repo_entry.get("slug")
+            _repo_slug_key(repo_entry.get("slug"))
             for repo_entry in self.config.policy("repos").get("repos", {}).values()
             if isinstance(repo_entry, dict) and repo_entry.get("slug")
         }
-        managed.add(self.autonomy.get("self_repo"))
+        managed.add(_repo_slug_key(self.autonomy.get("self_repo")))
         # Discovery sources are also managed project repositories.
         discovery = self.config.policy("repos").get("discovery", {})
         for source in discovery.get("sources", []) or []:
             slug = source.get("slug") if isinstance(source, dict) else source
             if slug:
-                managed.add(str(slug))
-        if repo not in managed:
+                managed.add(_repo_slug_key(slug))
+        repo_key = _repo_slug_key(repo)
+        if repo_key not in managed:
             return Decision.deny(f"{repo}: issue creation is only allowed in managed repositories")
-        if repo == self.autonomy.get("self_repo"):
+        if repo_key == _repo_slug_key(self.autonomy.get("self_repo")):
             return Decision.ok(f"{repo}: own repository, issue may be filed directly")
         if not self.autonomy.get("external_repos_allow_issue_creation", True):
             return Decision.deny(f"{repo}: issue creation is disabled by policy")
@@ -288,7 +295,9 @@ class Governance:
         branch_check = self.check_branch(branch)
         if not branch_check.allowed:
             return branch_check
-        if repo != self.autonomy.get("self_repo") and not self.autonomy.get(
+        if _repo_slug_key(repo) != _repo_slug_key(
+            self.autonomy.get("self_repo")
+        ) and not self.autonomy.get(
             "external_repos_allow_direct_push", False
         ):
             return Decision.deny(f"{repo}: direct pushes to managed repos are not allowed")
