@@ -25,7 +25,7 @@ from . import telemetry
 from .automation import AutomationLibrary
 from .board import CONTAINER_KINDS, TRANSITIONS, Board, BoardError, Task
 from .checkpoints import Checkpoint, CheckpointStore
-from .config import Config, find_root, load_yaml
+from .config import Config, ConfigError, find_root, load_yaml
 from .contracts import (
     FRONT_MATTER,
     audit as audit_contracts,
@@ -766,6 +766,8 @@ def main(argv: Sequence[str] | None = None) -> int:
                 GitError,
                 MirrorError,
                 docsync.GeneratedBlockError,
+                ConfigError,
+                yaml.YAMLError,
                 RuntimeError,
             ),
         ):

@@ -186,3 +186,5 @@ def test_bootstrap_installs_server_before_doctor() -> None:
     assert bootstrap.index("python -m saturnin.mcp install github") < bootstrap.index(
         "saturnin doctor"
     )
+    assert "Configured companion repositories:" in bootstrap
+    assert "gh repo create" in bootstrap

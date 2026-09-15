@@ -13,6 +13,8 @@ source .venv/bin/activate
 ```
 
 `bootstrap.sh` is idempotent: run it again after every pull.
+It now prints companion repositories from `policies/repos.yaml` and, when `gh`
+is available, tells you which ones still need `gh repo create`.
 Provision `SATURNIN_REVIEW_ATTESTATION_KEY` only in the trusted supervisor
 environment (for example CI secrets or a dedicated supervisor shell profile),
 never in the repository checkout or worker-authored scripts. The launcher
@@ -85,6 +87,8 @@ systemctl --user list-timers 'saturnin-*'
 - `saturnin-improve.timer` - hourly measure/detect/dispatch cycle.
 - `saturnin-poller.timer` - every five minutes, collects results for tasks whose
   answer cannot report back on its own, so nobody ever waits (rule 8).
+- `saturnin-resume.timer` - every minute, resumes tasks when delayed checkpoints
+  become due.
 - `saturnin-mirror.timer` - optional until ADR-0002 is accepted; when enabled,
   mirrors open tasks as GitHub issues so the board survives this machine.
 - `saturnin-discovery.timer` - every ten minutes, adopts labelled issues raised
@@ -104,6 +108,7 @@ user's systemd manager remains active.
 | On every request | `saturnin task add ... --dispatch --no-launch` | CEO |
 | Hourly (timer) | `automation/library/improvement_cycle.sh` | improver |
 | Daily (timer) | `automation/library/cleanup_worktrees.sh` | janitor |
+| Every 1 min (timer) | `automation/library/resume_due_checkpoints.sh` | chief-of-staff |
 | Every 5 min (timer) | `automation/library/result_poller.sh` | chief-of-staff |
 | Every 15 min (timer) | `automation/library/mirror_tasks.sh` | chief-of-staff |
 | Every 10 min (timer) | `automation/library/discover_issues.sh` | chief-of-staff |

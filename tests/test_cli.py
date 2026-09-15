@@ -106,6 +106,19 @@ def test_doctor_reports_all_malformed_yaml_and_front_matter(
     assert any("agents/code-worker.md" in problem for problem in payload["problems"])
 
 
+def test_check_branch_reports_malformed_policy_without_traceback(
+    home: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    (home / "policies" / "governance.yaml").write_text("git: [\n", encoding="utf-8")
+
+    code = main(["--home", str(home), "check", "branch", "feature/test"])
+    captured = capsys.readouterr()
+
+    assert code == 1
+    assert "saturnin:" in captured.err
+    assert "Traceback" not in captured.err
+
+
 def test_doctor_reports_document_read_errors_with_the_path(
     home: Path,
     capsys: pytest.CaptureFixture[str],
