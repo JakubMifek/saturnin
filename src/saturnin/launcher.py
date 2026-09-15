@@ -12,7 +12,7 @@ from typing import Any
 
 from yaml import YAMLError
 
-from .board import Board, Task, utcnow
+from .board import Board, BoardError, Task, utcnow
 from .checkpoints import Checkpoint, CheckpointStore
 from .config import Config, default_config, load_yaml
 from .contracts import (
@@ -191,6 +191,49 @@ class AgentLauncher:
             log=str(log_path),
             mcp_config=str(mcp_path),
         )
+
+    def reconcile_exited_launches(self) -> list[str]:
+        resumed: list[str] = []
+        for metadata_path in sorted(self.dir.glob("*.json")):
+            try:
+                metadata = json.loads(metadata_path.read_text(encoding="utf-8"))
+            except (OSError, json.JSONDecodeError):
+                continue
+            task_id = str(metadata.get("task_id", "")).strip()
+            pid = metadata.get("pid")
+            if not task_id or not isinstance(pid, int):
+                continue
+            if self._pid_is_running(pid):
+                continue
+            reason = f"agent exited after launch with pid {pid}"
+            try:
+                with self.board.edit(task_id) as task:
+                    if task.state == "in_progress":
+                        task.state = "routed"
+                        task.launch_deferred_at = utcnow()
+                        task.launch_deferred_reason = reason
+                        task.log("agent:launch_failed", actor="launcher", reason=reason)
+                        task.log("state:routed", actor="launcher", note=reason)
+                        resumed.append(task.id)
+            except BoardError:
+                pass
+            try:
+                metadata_path.unlink()
+            except OSError:
+                pass
+        return resumed
+
+    @staticmethod
+    def _pid_is_running(pid: int) -> bool:
+        if pid <= 0:
+            return False
+        try:
+            os.kill(pid, 0)
+        except ProcessLookupError:
+            return False
+        except PermissionError:
+            return True
+        return True
 
     def _immediate_exit_status(self, process: subprocess.Popen[bytes]) -> int | None:
         wait = getattr(process, "wait", None)

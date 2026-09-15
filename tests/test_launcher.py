@@ -10,7 +10,7 @@ from types import SimpleNamespace
 import pytest
 import yaml
 
-from saturnin.board import Board
+from saturnin.board import Board, utcnow
 from saturnin.checkpoints import Checkpoint, CheckpointStore
 from saturnin.config import Config
 from saturnin.launcher import AgentLauncher, LauncherError
@@ -495,6 +495,40 @@ def test_launcher_uses_trusted_source_for_linked_saturnin_worktree(
         "--read-only",
     ]
     assert (config.var_dir / "launches" / f"{task.id}.json").is_file()
+
+
+def test_reconcile_exited_launch_requeues_task(
+    config: Config, board: Board, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    task = board.create("Recover exited launch")
+    Router(config).dispatch(board, task)
+    board.transition(board.get(task.id), "in_progress")
+    launch_file = config.var_dir / "launches" / f"{task.id}.json"
+    launch_file.parent.mkdir(parents=True, exist_ok=True)
+    launch_file.write_text(
+        json.dumps(
+            {
+                "task_id": task.id,
+                "role": "code-worker",
+                "pid": 4242,
+                "started_at": utcnow(),
+                "cwd": str(config.root),
+                "mcp_config": str(config.root / ".mcp.json"),
+                "log": str(config.var_dir / "launches" / f"{task.id}.log"),
+            }
+        ),
+        encoding="utf-8",
+    )
+    launcher = AgentLauncher(config, board)
+    monkeypatch.setattr(launcher, "_pid_is_running", lambda pid: False)
+
+    reconciled = launcher.reconcile_exited_launches()
+
+    restored = board.get(task.id)
+    assert reconciled == [task.id]
+    assert restored.state == "routed"
+    assert restored.launch_deferred_reason == "agent exited after launch with pid 4242"
+    assert not launch_file.exists()
 
 
 def test_launcher_keeps_engine_source_for_managed_repository(

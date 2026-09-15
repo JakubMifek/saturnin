@@ -1221,6 +1221,9 @@ def _run_discover(args: argparse.Namespace, config: Config, board: Board, as_jso
 
 def _run_dispatch(args: argparse.Namespace, config: Config, board: Board, as_json: bool) -> int:
     router = Router(config)
+    launcher = AgentLauncher(config, board)
+    if args.all and launcher.enabled:
+        launcher.reconcile_exited_launches()
     if args.all:
         targets = [
             task
@@ -1238,51 +1241,66 @@ def _run_dispatch(args: argparse.Namespace, config: Config, board: Board, as_jso
         return 1
     results = []
     for task in targets:
-        local_roles, project_lead, project_squad = _project_routing_context(task, config)
-        squad = args.squad or project_squad
-        if squad:
-            router.validate_dispatch_squad(squad, local_roles)
-        if task.state == "routed":
-            route = router.resolve(
-                task,
-                additional_roles=local_roles,
-                lead_role=project_lead,
-            )
-            if not args.dry_run:
-                task = _prepare_project_route(config, board, task.id)
-        else:
-            route = (
-                router.resolve(
+        try:
+            local_roles, project_lead, project_squad = _project_routing_context(task, config)
+            squad = args.squad or project_squad
+            if squad:
+                router.validate_dispatch_squad(squad, local_roles)
+            if task.state == "routed":
+                route = router.resolve(
                     task,
                     additional_roles=local_roles,
                     lead_role=project_lead,
                 )
-                if args.dry_run
-                else router.dispatch(
-                    board,
-                    task,
-                    squad=squad or None,
-                    additional_roles=local_roles,
-                    lead_role=project_lead,
-                )
-            )
-        results.append({"task": task.id, "role": route.role, "rule": route.rule,
-                        "priority": route.priority, "escalate": route.escalate,
-                        "squad": list(squad or route.squad),
-                        "result_contract": route.result_contract})
-        if not args.dry_run and not args.no_launch:
-            launched = _provision_and_launch(config, board, task.id)
-            if launched:
-                results[-1]["launch"] = launched.to_dict()
+                if not args.dry_run:
+                    task = _prepare_project_route(config, board, task.id)
             else:
-                deferred = board.get(task.id)
-                if deferred.launch_deferred_reason:
-                    results[-1]["launch_deferred"] = deferred.launch_deferred_reason
+                route = (
+                    router.resolve(
+                        task,
+                        additional_roles=local_roles,
+                        lead_role=project_lead,
+                    )
+                    if args.dry_run
+                    else router.dispatch(
+                        board,
+                        task,
+                        squad=squad or None,
+                        additional_roles=local_roles,
+                        lead_role=project_lead,
+                    )
+                )
+            results.append({"task": task.id, "role": route.role, "rule": route.rule,
+                            "priority": route.priority, "escalate": route.escalate,
+                            "squad": list(squad or route.squad),
+                            "result_contract": route.result_contract})
+            if not args.dry_run and not args.no_launch:
+                launched = _provision_and_launch(config, board, task.id)
+                if launched:
+                    results[-1]["launch"] = launched.to_dict()
+                else:
+                    deferred = board.get(task.id)
+                    if deferred.launch_deferred_reason:
+                        results[-1]["launch_deferred"] = deferred.launch_deferred_reason
+        except RuntimeError as exc:
+            if not args.all:
+                raise
+            if not args.dry_run:
+                _defer_launch(board, task.id, f"dispatch failed: {exc}")
+                deferred_reason = board.get(task.id).launch_deferred_reason
+            else:
+                deferred_reason = None
+            result = {"task": task.id, "error": str(exc)}
+            if deferred_reason:
+                result["launch_deferred"] = deferred_reason
+            results.append(result)
     _emit(
         results,
         as_json,
         "\n".join(
-            f"{r['task']} -> {r['role']} ({r['priority']}, rule={r['rule']}, "
+            f"{r['task']} deferred: {r['error']}"
+            if "error" in r
+            else f"{r['task']} -> {r['role']} ({r['priority']}, rule={r['rule']}, "
             f"results via {r['result_contract']})"
             for r in results
         )

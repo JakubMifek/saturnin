@@ -895,6 +895,31 @@ def test_invalid_project_manifest_is_reported_as_a_routing_error(
     assert "invalid managed repository manifest" in capsys.readouterr().err
 
 
+def test_dispatch_all_defers_manifest_error_and_continues(
+    config: Config, board: Board, capsys: pytest.CaptureFixture[str]
+) -> None:
+    malformed = board.create("Malformed project")
+    healthy = board.create("Healthy project")
+    worktree = config.root / "malformed-project-all"
+    (worktree / ".saturnin").mkdir(parents=True)
+    (worktree / ".saturnin" / "repo.yaml").write_text("squad: [\n", encoding="utf-8")
+    with board.edit(malformed.id) as stored:
+        stored.worktree = str(worktree)
+
+    code, out = run(capsys, "--json", "dispatch", "--all")
+
+    payload = json.loads(out)
+    assert code == 0
+    assert payload[0]["task"] == malformed.id
+    assert "invalid managed repository manifest" in payload[0]["error"]
+    assert (
+        "dispatch failed: invalid managed repository manifest"
+        in board.get(malformed.id).launch_deferred_reason
+    )
+    assert payload[1]["task"] == healthy.id
+    assert board.get(healthy.id).state == "routed"
+
+
 def test_issue_review_gate_requires_matching_digest(
     home: Path, capsys: pytest.CaptureFixture[str]
 ) -> None:
