@@ -108,7 +108,7 @@ user's systemd manager remains active.
 | On every request | `saturnin task add ... --dispatch --no-launch` | CEO |
 | Hourly (timer) | `automation/library/improvement_cycle.sh` | improver |
 | Daily (timer) | `automation/library/cleanup_worktrees.sh` | janitor |
-| Every 1 min (timer) | `automation/library/resume_due_checkpoints.sh` | chief-of-staff |
+| Every 1 min (timer) | `automation/library/resume_checkpoints.sh` | chief-of-staff |
 | Every 5 min (timer) | `automation/library/result_poller.sh` | chief-of-staff |
 | Every 15 min (timer) | `automation/library/mirror_tasks.sh` | chief-of-staff |
 | Every 10 min (timer) | `automation/library/discover_issues.sh` | chief-of-staff |
