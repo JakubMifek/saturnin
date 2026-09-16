@@ -36,8 +36,8 @@ Every dispatch names how the result will arrive:
 The `poller` contract is the important one: when nothing in our control will
 report back (a long external build, a third-party deployment, someone else's
 review), Saturnin does not watch it. It dispatches a worker to *write the
-poller* - a small script in `var/pollers/<task-id>.sh` that exits 0 when done,
-2 when pending - and the `saturnin-poller` timer runs
+poller* - a JSON status file in `var/pollers/<task-id>.json` that says
+`complete`, `pending` or `failed` - and the `saturnin-poller` timer runs
 `automation/library/result_poller.sh` every five minutes, moving the task to
 `review` or `blocked` on the worker's behalf.
 

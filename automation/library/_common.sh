@@ -8,13 +8,12 @@ export SATURNIN_HOME
 log() { printf '%s [%s] %s\n' "$(date -Is)" "${SCRIPT_NAME:-automation}" "$*"; }
 
 saturnin() {
-  if [[ -x "${SATURNIN_HOME}/.venv/bin/saturnin" ]]; then
-    "${SATURNIN_HOME}/.venv/bin/saturnin" "$@"
-  elif command -v saturnin >/dev/null 2>&1; then
-    command saturnin "$@"
-  else
-    PYTHONPATH="${SATURNIN_HOME}/src:${PYTHONPATH:-}" python3 -m saturnin "$@"
+  local trusted="${SATURNIN_HOME}/.venv/bin/saturnin"
+  if [[ ! -x "$trusted" ]]; then
+    log "trusted saturnin executable missing: $trusted"
+    return 127
   fi
+  "$trusted" "$@"
 }
 
 saturnin_python() {

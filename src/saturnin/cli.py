@@ -1411,6 +1411,8 @@ def _run_checkpoint(args: argparse.Namespace, config: Config, board: Board, as_j
         else:
             router = Router(config)
             launcher = AgentLauncher(config, board)
+            launcher.reconcile_exited_launches()
+            due = store.due()
             payload = []
             had_errors = False
             if not launcher.enabled:
@@ -1422,6 +1424,14 @@ def _run_checkpoint(args: argparse.Namespace, config: Config, board: Board, as_j
                 for checkpoint in due:
                     try:
                         task = board.get(checkpoint.task_id)
+                        if task.state == "in_progress":
+                            payload.append(
+                                {
+                                    "task_id": checkpoint.task_id,
+                                    "active": True,
+                                }
+                            )
+                            continue
                         if task.state in ("intake", "blocked"):
                             router.dispatch(board, task, actor="checkpoint-sweeper")
                         launched = launcher.launch(

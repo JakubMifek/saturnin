@@ -27,8 +27,9 @@ the CEO, stop and dispatch instead.
      sweep (`saturnin task list --open`).
    - `pr-gate` - the answer is a review verdict
      (`saturnin review gate <repo#N> ...`).
-   - `poller` - nothing in our control will report back, so a *worker* builds
-     the poller that watches for the signal and re-triggers Saturnin
+   - `poller` - nothing in our control will report back, so a *worker* writes
+     the declarative poller status file that represents the signal and
+     re-triggers Saturnin
      (`automation/library/result_poller.sh`, `saturnin-poller` timer). Building
      the poller is itself dispatched work, never yours.
    - `escalation` - a human owns it; the escalation issue is the tracker.

@@ -1,16 +1,19 @@
 from __future__ import annotations
 
 import hashlib
+import fcntl
 import os
 import subprocess
 import sys
-import time
+from pathlib import Path
 
 import pytest
 import yaml
 from saturnin.automation import AutomationLibrary
 from saturnin.board import Board
 from saturnin.config import Config
+
+REPO_ROOT = Path(__file__).resolve().parents[1]
 
 
 def _register_monitor_repo(config: Config, repo, slug: str = "owner/managed-app") -> None:
@@ -174,6 +177,14 @@ def test_monitor_recovery_closes_recorded_incident_task(config: Config, board: B
     curl = fake_bin / "curl"
     curl.write_text("#!/bin/sh\nprintf 200\n", encoding="utf-8")
     curl.chmod(0o755)
+    saturnin = config.root / ".venv" / "bin" / "saturnin"
+    saturnin.parent.mkdir(parents=True)
+    saturnin.write_text(
+        "#!/bin/sh\n"
+        f"PYTHONPATH={REPO_ROOT / 'src'}:${{PYTHONPATH:-}} exec {sys.executable} -m saturnin \"$@\"\n",
+        encoding="utf-8",
+    )
+    saturnin.chmod(0o755)
 
     subprocess.run(
         ["bash", str(config.root / "automation/library/run_monitors.sh"), str(repo)],
@@ -218,7 +229,8 @@ def test_monitor_recovery_clears_stale_markers_for_terminal_incident_task(
     curl = fake_bin / "curl"
     curl.write_text("#!/bin/sh\nprintf 200\n", encoding="utf-8")
     curl.chmod(0o755)
-    saturnin = fake_bin / "saturnin"
+    saturnin = config.root / ".venv" / "bin" / "saturnin"
+    saturnin.parent.mkdir(parents=True)
     saturnin.write_text(
         "#!/bin/sh\n"
         f"printf '%s\\n' \"$*\" >> {args_log}\n"
@@ -251,9 +263,8 @@ def test_result_poller_archives_review_task_without_regressing_to_blocked(
 ) -> None:
     pollers = config.var_dir / "pollers"
     pollers.mkdir(parents=True)
-    probe = pollers / "T-review.sh"
-    probe.write_text("#!/usr/bin/env bash\nexit 1\n", encoding="utf-8")
-    probe.chmod(0o755)
+    probe = pollers / "T-review.json"
+    probe.write_text('{"status": "failed"}\n', encoding="utf-8")
     escalated = pollers / "T-review.escalated"
     escalated.write_text("https://github.com/JakubMifek/saturnin-ops/issues/9\n", encoding="utf-8")
     args_log = config.root / "saturnin-args"
@@ -282,7 +293,7 @@ def test_result_poller_archives_review_task_without_regressing_to_blocked(
     )
 
     assert not probe.exists()
-    assert (pollers / "T-review.sh.done").exists()
+    assert (pollers / "T-review.json.done").exists()
     assert not escalated.exists()
     calls = args_log.read_text(encoding="utf-8")
     assert "--json task show T-review" in calls
@@ -654,44 +665,32 @@ def test_monitors_fail_closed_for_an_unregistered_checkout(config: Config) -> No
 def test_result_poller_serializes_overlapping_runs(config: Config) -> None:
     pollers = config.var_dir / "pollers"
     pollers.mkdir(parents=True)
-    run_marker = config.root / "probe-runs"
-    probe = pollers / "T-concurrent.sh"
-    probe.write_text(
-        f"#!/bin/bash\nprintf x >> {run_marker}\nsleep 0.4\nexit 2\n",
-        encoding="utf-8",
-    )
+    (pollers / "T-concurrent.json").write_text('{"status": "pending"}\n', encoding="utf-8")
+    lock_path = pollers / ".result-poller"
     script = config.root / "automation" / "library" / "result_poller.sh"
     env = {**os.environ, "SATURNIN_HOME": str(config.root)}
-    first = subprocess.Popen(
-        ["bash", str(script)],
-        stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE,
-        text=True,
-        env=env,
-    )
-    for _ in range(100):
-        if run_marker.exists():
-            break
-        time.sleep(0.01)
-    second = subprocess.run(
-        ["bash", str(script)],
-        check=True,
-        capture_output=True,
-        text=True,
-        env=env,
-    )
-    first_stdout, first_stderr = first.communicate(timeout=5)
 
-    assert first.returncode == 0, first_stderr or first_stdout
+    with lock_path.open("w") as lock:
+        fcntl.flock(lock, fcntl.LOCK_EX)
+        second = subprocess.run(
+            ["bash", str(script)],
+            check=True,
+            capture_output=True,
+            text=True,
+            env=env,
+        )
+
     assert "another result-poller run is active" in second.stdout
-    assert run_marker.read_text(encoding="utf-8") == "x"
 
 
 def test_result_poller_persists_escalation_reference(config: Config) -> None:
     pollers = config.var_dir / "pollers"
     pollers.mkdir(parents=True)
     task_id = "T-persist"
-    (pollers / f"{task_id}.sh").write_text("#!/bin/bash\nexit 1\n", encoding="utf-8")
+    (pollers / f"{task_id}.json").write_text(
+        '{"status": "failed", "message": "external failure"}\n',
+        encoding="utf-8",
+    )
     args_log = config.root / "saturnin-args"
     fake_saturin = config.root / ".venv" / "bin" / "saturnin"
     fake_saturin.parent.mkdir(parents=True)
@@ -725,7 +724,10 @@ def test_result_poller_reuses_escalation_reference_when_reblocking(config: Confi
     pollers = config.var_dir / "pollers"
     pollers.mkdir(parents=True)
     task_id = "T-retry"
-    (pollers / f"{task_id}.sh").write_text("#!/bin/bash\nexit 1\n", encoding="utf-8")
+    (pollers / f"{task_id}.json").write_text(
+        '{"status": "failed", "message": "still failing"}\n',
+        encoding="utf-8",
+    )
     (pollers / f"{task_id}.escalated").write_text(
         "https://example.test/issues/42\n", encoding="utf-8"
     )
@@ -765,10 +767,8 @@ def test_result_poller_archives_terminal_tasks_before_probe_execution(config: Co
     pollers = config.var_dir / "pollers"
     pollers.mkdir(parents=True)
     task_id = "T-done"
-    run_marker = config.root / "probe-ran"
-    probe = pollers / f"{task_id}.sh"
-    probe.write_text(f"#!/bin/bash\nprintf ran > {run_marker}\n", encoding="utf-8")
-    probe.chmod(0o755)
+    probe = pollers / f"{task_id}.json"
+    probe.write_text('{"status": "complete"}\n', encoding="utf-8")
     (pollers / f"{task_id}.escalated").write_text(
         "https://example.test/issues/42\n", encoding="utf-8"
     )
@@ -791,10 +791,62 @@ def test_result_poller_archives_terminal_tasks_before_probe_execution(config: Co
         env={**os.environ, "SATURNIN_HOME": str(config.root)},
     )
 
+    assert not probe.exists()
+    assert (pollers / f"{task_id}.json.done").exists()
+    assert not (pollers / f"{task_id}.escalated").exists()
+
+
+def test_result_poller_rejects_legacy_shell_probes_without_running(config: Config) -> None:
+    pollers = config.var_dir / "pollers"
+    pollers.mkdir(parents=True)
+    run_marker = config.root / "probe-ran"
+    probe = pollers / "T-legacy.sh"
+    probe.write_text(f"#!/bin/bash\nprintf ran > {run_marker}\n", encoding="utf-8")
+    probe.chmod(0o755)
+
+    result = subprocess.run(
+        ["bash", str(config.root / "automation/library/result_poller.sh")],
+        capture_output=True,
+        text=True,
+        env={**os.environ, "SATURNIN_HOME": str(config.root)},
+    )
+
+    assert result.returncode == 1
+    assert "rejecting legacy executable poller" in result.stdout
     assert not run_marker.exists()
     assert not probe.exists()
-    assert (pollers / f"{task_id}.sh.done").exists()
-    assert not (pollers / f"{task_id}.escalated").exists()
+    assert (pollers / "T-legacy.sh.rejected").exists()
+
+
+def test_common_saturnin_fails_closed_without_trusted_runtime(
+    config: Config,
+    tmp_path,
+) -> None:
+    fake_bin = tmp_path / "bin"
+    fake_bin.mkdir()
+    marker = tmp_path / "path-saturnin-ran"
+    path_saturnin = fake_bin / "saturnin"
+    path_saturnin.write_text(f"#!/bin/sh\nprintf ran > {marker}\n", encoding="utf-8")
+    path_saturnin.chmod(0o755)
+
+    result = subprocess.run(
+        [
+            "bash",
+            "-c",
+            f"source {config.root / 'automation/library/_common.sh'}; saturnin doctor",
+        ],
+        capture_output=True,
+        text=True,
+        env={
+            **os.environ,
+            "SATURNIN_HOME": str(config.root),
+            "PATH": f"{fake_bin}:{os.environ['PATH']}",
+        },
+    )
+
+    assert result.returncode == 127
+    assert "trusted saturnin executable missing" in result.stdout
+    assert not marker.exists()
 
 
 def test_review_gate_rejects_pr_subject_for_another_repo(config: Config) -> None:
@@ -817,10 +869,9 @@ def test_review_gate_rejects_pr_subject_for_another_repo(config: Config) -> None
 
 
 def test_review_gate_passes_issue_digest_to_gate(config: Config) -> None:
-    fake_bin = config.root / "fake-bin"
-    fake_bin.mkdir()
     args_log = config.root / "saturnin-args"
-    saturnin = fake_bin / "saturnin"
+    saturnin = config.root / ".venv" / "bin" / "saturnin"
+    saturnin.parent.mkdir(parents=True)
     saturnin.write_text(
         f"#!/bin/sh\nprintf '%s\\n' \"$@\" > {args_log}\n",
         encoding="utf-8",
@@ -840,7 +891,7 @@ def test_review_gate_passes_issue_digest_to_gate(config: Config) -> None:
         check=True,
         capture_output=True,
         text=True,
-        env={**os.environ, "PATH": f"{fake_bin}:{os.environ['PATH']}"},
+        env={**os.environ, "SATURNIN_HOME": str(config.root)},
     )
 
     args = args_log.read_text(encoding="utf-8").splitlines()

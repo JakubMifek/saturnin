@@ -920,6 +920,46 @@ def test_dispatch_all_defers_manifest_error_and_continues(
     assert board.get(healthy.id).state == "routed"
 
 
+def test_checkpoint_sweep_reconciles_and_skips_active_in_progress_task(
+    config: Config,
+    board: Board,
+    capsys: pytest.CaptureFixture[str],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    task = board.create("Resume later")
+    checkpoint = CheckpointStore(config, board).save(
+        Checkpoint(
+            task_id=task.id,
+            role="code-worker",
+            summary="paused",
+            next_steps=["continue"],
+            resume_after="2026-09-11T19:00:00+00:00",
+        )
+    )
+    with board.edit(task.id) as stored:
+        stored.state = "in_progress"
+        stored.checkpoint = checkpoint.created_at
+    calls: list[str] = []
+    monkeypatch.setattr(AgentLauncher, "enabled", property(lambda self: True))
+    monkeypatch.setattr(
+        AgentLauncher,
+        "reconcile_exited_launches",
+        lambda self: calls.append("reconcile") or [],
+    )
+
+    def launch(self, task_id, **kwargs):
+        calls.append("launch")
+        raise AssertionError("active checkpoint task should not launch")
+
+    monkeypatch.setattr(AgentLauncher, "launch", launch)
+
+    code, out = run(capsys, "--json", "checkpoint", "sweep")
+
+    assert code == 0
+    assert calls == ["reconcile"]
+    assert json.loads(out) == [{"task_id": task.id, "active": True}]
+
+
 def test_issue_review_gate_requires_matching_digest(
     home: Path, capsys: pytest.CaptureFixture[str]
 ) -> None:

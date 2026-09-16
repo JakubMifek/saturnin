@@ -6,9 +6,9 @@
 # Instead of blocking the CEO, this script - scheduled by the saturnin-poller
 # timer - checks the agreed signal and pushes the answer onto the board.
 #
-# Each poller is one file in var/pollers/<task-id>.sh, written by a worker
-# (never by the CEO). It exits 0 when the awaited thing is done, 2 when it is
-# still pending, anything else on error.
+# Each poller is one declarative file in var/pollers/<task-id>.json, written by
+# a worker (never by the CEO). It contains a validated status: complete,
+# pending or failed. Worker-authored shell is never executed by this timer.
 set -Eeuo pipefail
 SCRIPT_NAME=result-poller
 source "$(dirname "${BASH_SOURCE[0]}")/_common.sh"
@@ -17,8 +17,16 @@ POLLERS_DIR="${SATURNIN_HOME}/var/pollers"
 mkdir -p "$POLLERS_DIR"
 
 shopt -s nullglob
-probes=("$POLLERS_DIR"/*.sh)
+legacy_probes=("$POLLERS_DIR"/*.sh)
+probes=("$POLLERS_DIR"/*.json)
 if (( ${#probes[@]} == 0 )); then
+  for legacy_probe in "${legacy_probes[@]}"; do
+    log "$(basename "$legacy_probe" .sh): rejecting legacy executable poller"
+    mv "$legacy_probe" "$legacy_probe.rejected"
+  done
+  if (( ${#legacy_probes[@]} > 0 )); then
+    exit 1
+  fi
   log "no pollers registered; nothing to watch"
   exit 0
 fi
@@ -35,8 +43,44 @@ task_state() {
     | python3 -c 'import json,sys; print(json.load(sys.stdin).get("state",""))' 2>/dev/null || true
 }
 
+probe_status() {
+  python3 - "$1" "$2" <<'PY'
+import json
+import sys
+from pathlib import Path
+
+path = Path(sys.argv[1])
+task_id = sys.argv[2]
+try:
+    payload = json.loads(path.read_text(encoding="utf-8"))
+except (OSError, json.JSONDecodeError) as exc:
+    print(f"invalid poller probe: {exc}")
+    sys.exit(1)
+if not isinstance(payload, dict):
+    print("invalid poller probe: expected JSON object")
+    sys.exit(1)
+declared_task = str(payload.get("task_id", task_id))
+if declared_task != task_id:
+    print(f"invalid poller probe: task_id {declared_task!r} does not match {task_id!r}")
+    sys.exit(1)
+status = str(payload.get("status", "")).strip().lower()
+message = str(payload.get("message", status or "invalid poller status"))
+if status == "complete":
+    print(message)
+    sys.exit(0)
+if status == "pending":
+    print(message)
+    sys.exit(2)
+if status == "failed":
+    print(message)
+    sys.exit(1)
+print(f"invalid poller status: {status!r}")
+sys.exit(1)
+PY
+}
+
 for probe in "${probes[@]}"; do
-  task_id="$(basename "$probe" .sh)"
+  task_id="$(basename "$probe" .json)"
   current_state="$(task_state "$task_id")"
   if [[ "$current_state" == "review" || "$current_state" == "done" || "$current_state" == "cancelled" ]]; then
     log "$task_id: task is $current_state; archiving stale probe"
@@ -45,12 +89,7 @@ for probe in "${probes[@]}"; do
     continue
   fi
   status=0
-  output="$(timeout 300 bash "$probe" 2>&1)" || status=$?
-  if [[ "$status" -eq 124 ]]; then
-    # timeout(1) returns 124 when the child is killed.
-    output="probe timed out after 300 seconds"
-    status=1
-  fi
+  output="$(probe_status "$probe" "$task_id" 2>&1)" || status=$?
   case "$status" in
     0)
       log "$task_id: signal received - handing back to the board"
@@ -102,7 +141,7 @@ for probe in "${probes[@]}"; do
         escalation_json=""
         if ! escalation_json="$(saturnin --json escalate "Poller failed for task $task_id" \
           --context "$note" \
-          --item "Check the poller probe at var/pollers/${task_id}.sh" \
+          --item "Check the poller probe at var/pollers/${task_id}.json" \
           --item "Confirm whether the awaited signal still applies" \
           --urgency high \
           --task "$task_id" \
