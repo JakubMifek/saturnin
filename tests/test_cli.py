@@ -594,6 +594,36 @@ def test_dry_run_dispatch_rejects_an_invalid_squad(
     assert Board().get(task["id"]).state == "intake"
 
 
+def test_dispatch_squad_override_survives_project_preparation(
+    home: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    worktree = home / "var" / "worktrees" / "override"
+    (worktree / ".saturnin").mkdir(parents=True)
+    (worktree / ".saturnin" / "repo.yaml").write_text(
+        "project: Widget\nsquad: [code-worker, scribe]\n",
+        encoding="utf-8",
+    )
+    task = json.loads(
+        run(capsys, "--json", "task", "add", "Implement a widget", "--dispatch")[1]
+    )
+    with Board().edit(task["id"]) as stored:
+        stored.worktree = str(worktree)
+
+    code, out = run(
+        capsys,
+        "--json",
+        "dispatch",
+        task["id"],
+        "--no-launch",
+        "--squad",
+        "pr-reviewer",
+    )
+
+    assert code == 0
+    assert json.loads(out)[0]["squad"] == ["pr-reviewer"]
+    assert Board().get(task["id"]).squad == ["pr-reviewer"]
+
+
 def test_branch_and_command_checks(home: Path, capsys: pytest.CaptureFixture[str]) -> None:
     assert run(capsys, "check", "branch", "feature/x")[0] == 0
     assert run(capsys, "check", "branch", "main")[0] == 2
@@ -1167,9 +1197,13 @@ def test_review_submit_issue_uses_reviewed_title_and_body_digest(
 
     def fake_run_gh(args: list[str]) -> str:
         calls.append(args)
+        if args[:2] == ["issue", "list"]:
+            return "[]"
         if args[:2] == ["issue", "create"]:
             assert args[args.index("--title") + 1] == title
-            assert args[args.index("--body") + 1] == body
+            created_body = args[args.index("--body") + 1]
+            assert body in created_body
+            assert "saturnin:review-issue:" in created_body
             return "https://github.com/JakubMifek/saturnin-ops/issues/77\n"
         raise AssertionError(f"unexpected gh call: {args}")
 
@@ -1194,20 +1228,91 @@ def test_review_submit_issue_uses_reviewed_title_and_body_digest(
 
     assert code == 0
     assert out.strip().endswith("/issues/77")
-    assert calls == [
-        [
-            "issue",
-            "create",
-            "--repo",
-            "JakubMifek/saturnin-ops",
-            "--title",
-            title,
-            "--body",
-            body,
-            "--label",
-            "incident",
-        ]
+    assert calls[0][:5] == [
+        "issue",
+        "list",
+        "--repo",
+        "JakubMifek/saturnin-ops",
+        "--search",
     ]
+    assert calls[0][5].startswith("saturnin:review-issue:")
+    assert calls[0][-6:] == ["--state", "all", "--json", "url", "--limit", "1"]
+    assert calls[1][:5] == [
+        "issue",
+        "create",
+        "--repo",
+        "JakubMifek/saturnin-ops",
+        "--title",
+    ]
+    assert calls[1][5] == title
+    assert calls[1][-2:] == ["--label", "incident"]
+
+
+def test_review_submit_issue_reuses_existing_marker(
+    home: Path, capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    subject = "managed-issue-draft"
+    title = "Need safer rollout guardrails"
+    body = "Gate deployments on verified backup snapshots."
+    repo = "JakubMifek/saturnin-ops"
+    digest = issue_content_digest(title, body)
+    run(
+        capsys,
+        "review",
+        "record",
+        subject,
+        "--kind",
+        "issue",
+        "--repo",
+        repo,
+        "--author",
+        "researcher",
+        "--reviewer",
+        "issue-reviewer",
+        "--verdict",
+        "approved",
+        "--issue-digest",
+        digest,
+        *review_attestation_args(
+            subject=subject,
+            kind="issue",
+            author="researcher",
+            reviewer="issue-reviewer",
+            verdict="approved",
+            issue_digest=digest,
+            repo=repo,
+        ),
+    )
+    calls: list[list[str]] = []
+
+    def fake_run_gh(args: list[str]) -> str:
+        calls.append(args)
+        if args[:2] == ["issue", "list"]:
+            return '[{"url": "https://github.com/JakubMifek/saturnin-ops/issues/77"}]'
+        if args[:2] == ["issue", "create"]:
+            raise AssertionError("duplicate issue created")
+        raise AssertionError(f"unexpected gh call: {args}")
+
+    monkeypatch.setattr("saturnin.cli.run_gh", fake_run_gh)
+
+    code, out = run(
+        capsys,
+        "review",
+        "submit-issue",
+        subject,
+        "--repo",
+        repo,
+        "--author",
+        "researcher",
+        "--title",
+        title,
+        "--body",
+        body,
+    )
+
+    assert code == 0
+    assert out.strip().endswith("/issues/77")
+    assert len(calls) == 1
 
 
 def test_review_submit_issue_blocks_when_reviewed_content_differs(

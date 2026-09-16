@@ -47,7 +47,7 @@ print(json.dumps([login for login in logins if isinstance(login, str) and login]
   github_headers=(-H "Accept: application/vnd.github+json")
   [[ -z "${GITHUB_TOKEN:-${GH_TOKEN:-}}" ]] || \
     github_headers+=(-H "Authorization: token ${GITHUB_TOKEN:-${GH_TOKEN:-}}")
-  pr_json="$(curl --fail --silent --show-error --location --max-time 30 \
+  pr_json="$(curl -q --fail --silent --show-error --location --max-time 30 \
     "${github_headers[@]}" "https://api.github.com/repos/${repo}/pulls/${pr_number}")"
   head_sha="$(saturnin_python -c 'import json, sys; print(json.load(sys.stdin)["head"]["sha"])' <<<"$pr_json")"
   [[ -n "$head_sha" ]] || { echo "GitHub PR response contained no head SHA" >&2; exit 2; }

@@ -1,8 +1,7 @@
 name: governance
 
-# This workflow is loaded from the default branch. The first governance-bearing
-# PR requires repository-native approval; once merged, PR code cannot replace
-# this gate or any code it executes.
+# This workflow is loaded from the default branch. It only protects PRs after
+# the trusted governance runtime has already been seeded there.
 
 on:
   pull_request_target:
@@ -23,70 +22,22 @@ jobs:
         with:
           ref: ${{ github.event.pull_request.base.sha }}
           persist-credentials: false
-      - name: Detect initial governance bootstrap
-        id: bootstrap
+      - name: Require seeded base governance runtime
         run: |
           if [ ! -f pyproject.toml ] || [ ! -x automation/library/review_gate.sh ]; then
-            echo "initial=true" >> "$GITHUB_OUTPUT"
-            echo "::notice::Base branch has no Saturnin governance runtime; repository-native required reviews are the trusted bootstrap gate for this first scaffold PR."
-          else
-            echo "initial=false" >> "$GITHUB_OUTPUT"
+            echo "::error::Base branch has no trusted Saturnin governance runtime; seed this workflow/runtime on the default branch or enforce the first scaffold approval outside this PR."
+            exit 1
           fi
-      - name: Repository-native bootstrap approval
-        if: steps.bootstrap.outputs.initial == 'true'
-        uses: actions/github-script@v7
-        with:
-          script: |
-            const bootstrapReviewer = "copilot-pull-request-reviewer[bot]";
-            const {owner, repo} = context.repo;
-            const pull_number = context.payload.pull_request.number;
-            const author = context.payload.pull_request.user.login;
-            const head = context.payload.pull_request.head.sha;
-            const reviews = await github.paginate(
-              github.rest.pulls.listReviews,
-              {
-                owner,
-                repo,
-                pull_number,
-                per_page: 100,
-              }
-            );
-            const latest = new Map();
-            for (const review of reviews) {
-              if (
-                review.user.login !== author &&
-                review.user.type === "Bot" &&
-                review.user.login === bootstrapReviewer
-              ) {
-                latest.set(review.user.login, {
-                  state: review.state,
-                  commit_id: review.commit_id,
-                });
-              }
-            }
-            if (
-              ![...latest.values()].some(
-                (review) => review.state === "APPROVED" && review.commit_id === head
-              )
-            ) {
-              core.setFailed(
-                "Initial governance bootstrap requires a current-head approval from copilot-pull-request-reviewer[bot]."
-              );
-            }
       - uses: actions/setup-python@v5
-        if: steps.bootstrap.outputs.initial != 'true'
         with:
           python-version: "3.12"
       - name: Install trusted base governance
-        if: steps.bootstrap.outputs.initial != 'true'
         run: python -m pip install -e ".[dev]"
       - name: PR head must be a feature branch (rules 1 and 2)
-        if: steps.bootstrap.outputs.initial != 'true'
         env:
           HEAD_REF: ${{ github.event.pull_request.head.ref }}
         run: saturnin check branch "$HEAD_REF"
       - name: Independent review gate (rule 3)
-        if: steps.bootstrap.outputs.initial != 'true'
         env:
           GITHUB_TOKEN: ${{ github.token }}
           SATURNIN_REVIEW_ATTESTATION_KEY: ${{ github.token }}

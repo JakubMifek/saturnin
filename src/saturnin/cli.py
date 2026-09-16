@@ -8,6 +8,7 @@ stay in one place.
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import os
 import re
@@ -36,7 +37,7 @@ from .discovery import DiscoveryError, IssueDiscovery
 from . import docsync
 from .governance import Governance
 from .improve import ImprovementLoop
-from .issues import IssueMirror, MirrorError, run_gh
+from .issues import IssueMirror, MirrorError, issue_search_url, run_gh
 from .launcher import AgentLauncher, LauncherError, LaunchResult
 from .locking import file_lock
 from .review import (
@@ -512,15 +513,21 @@ def _read_attestation_arg(value: str) -> str:
     return value
 
 
-def _prepare_project_route(config: Config, board: Board, task_id: str) -> Task:
+def _prepare_project_route(
+    config: Config,
+    board: Board,
+    task_id: str,
+    *,
+    squad_override: Sequence[str] | None = None,
+) -> Task:
     task = board.get(task_id)
     local_roles, lead, project_squad = _project_routing_context(task, config)
-    if not lead and not project_squad:
+    if not lead and not project_squad and squad_override is None:
         return task
     router = Router(config)
     route = router.resolve(task, additional_roles=local_roles, lead_role=lead)
-    squad = list(project_squad or route.squad)
-    if lead and lead not in squad:
+    squad = list(squad_override or project_squad or route.squad)
+    if squad_override is None and lead and lead not in squad:
         squad.insert(0, lead)
     router.validate_dispatch_squad(squad, local_roles)
     with board.edit(task_id) as stored:
@@ -538,6 +545,35 @@ def _prepare_project_route(config: Config, board: Board, task_id: str) -> Task:
             squad=",".join(squad),
         )
     return board.get(task_id)
+
+
+def _governed_issue_marker(subject: str, repo: str, issue_digest: str) -> str:
+    seed = json.dumps(
+        {"digest": issue_digest, "repo": repo.casefold(), "subject": subject},
+        sort_keys=True,
+        separators=(",", ":"),
+    )
+    return f"saturnin:review-issue:{hashlib.sha256(seed.encode('utf-8')).hexdigest()}"
+
+
+def _find_governed_issue(repo: str, marker: str) -> str | None:
+    output = run_gh(
+        [
+            "issue",
+            "list",
+            "--repo",
+            repo,
+            "--search",
+            marker,
+            "--state",
+            "all",
+            "--json",
+            "url",
+            "--limit",
+            "1",
+        ]
+    )
+    return issue_search_url(output)
 
 
 def _defer_launch(board: Board, task_id: str, reason: str) -> None:
@@ -574,7 +610,11 @@ def _configured_repo_checkout(config: Config, repo: str | None) -> tuple[Path | 
 
 
 def _provision_and_launch(
-    config: Config, board: Board, task_id: str
+    config: Config,
+    board: Board,
+    task_id: str,
+    *,
+    squad_override: Sequence[str] | None = None,
 ) -> LaunchResult | None:
     launcher = AgentLauncher(config, board)
     if not launcher.enabled:
@@ -609,7 +649,7 @@ def _provision_and_launch(
             if worktree is not None:
                 manager.rollback_create(worktree)
             raise
-    _prepare_project_route(config, board, task.id)
+    _prepare_project_route(config, board, task.id, squad_override=squad_override)
     try:
         return launcher.launch(task.id)
     except LauncherError as exc:
@@ -1263,7 +1303,12 @@ def _run_dispatch(args: argparse.Namespace, config: Config, board: Board, as_jso
                     lead_role=project_lead,
                 )
                 if not args.dry_run:
-                    task = _prepare_project_route(config, board, task.id)
+                    task = _prepare_project_route(
+                        config,
+                        board,
+                        task.id,
+                        squad_override=args.squad or None,
+                    )
             else:
                 route = (
                     router.resolve(
@@ -1285,7 +1330,12 @@ def _run_dispatch(args: argparse.Namespace, config: Config, board: Board, as_jso
                             "squad": list(squad or route.squad),
                             "result_contract": route.result_contract})
             if not args.dry_run and not args.no_launch:
-                launched = _provision_and_launch(config, board, task.id)
+                launched = _provision_and_launch(
+                    config,
+                    board,
+                    task.id,
+                    squad_override=args.squad or None,
+                )
                 if launched:
                     results[-1]["launch"] = launched.to_dict()
                 else:
@@ -1574,23 +1624,31 @@ def _run_review(args: argparse.Namespace, config: Config, as_json: bool) -> int:
                 "BLOCKED: " + "; ".join(decision.reasons),
             )
             return 2
-        create_args = [
-            "issue",
-            "create",
-            "--repo",
-            args.repo,
-            "--title",
-            args.title,
-            "--body",
-            args.body,
-        ]
-        for label in args.label:
-            create_args.extend(["--label", label])
+        marker = _governed_issue_marker(args.subject, args.repo, digest)
+        marker_comment = f"<!-- {marker} -->"
+        body = args.body if marker_comment in args.body else f"{marker_comment}\n\n{args.body}"
+        lock_id = hashlib.sha256(marker.encode("utf-8")).hexdigest()
+        submission_lock = config.var_dir / "locks" / f"governed-issue-{lock_id}"
         try:
-            output = run_gh(create_args)
+            with file_lock(submission_lock):
+                url = _find_governed_issue(args.repo, marker)
+                if not url:
+                    create_args = [
+                        "issue",
+                        "create",
+                        "--repo",
+                        args.repo,
+                        "--title",
+                        args.title,
+                        "--body",
+                        body,
+                    ]
+                    for label in args.label:
+                        create_args.extend(["--label", label])
+                    output = run_gh(create_args)
+                    url = output.strip().splitlines()[-1].strip() if output.strip() else ""
         except MirrorError as exc:
             raise ReviewError(f"governed issue submission failed for {args.subject}: {exc}") from exc
-        url = output.strip().splitlines()[-1].strip() if output.strip() else ""
         if not url:
             raise ReviewError("governed issue submission returned no issue URL")
         _emit(

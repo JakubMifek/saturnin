@@ -74,16 +74,11 @@ def test_ci_governance_uses_base_controlled_workflow_and_code() -> None:
     assert "persist-credentials: false" in workflow
     assert "ref: ${{ github.event.pull_request.head.sha }}" not in workflow
     assert "TRUSTED_BOOTSTRAP_BASE_SHA" not in workflow
-    assert "Detect initial governance bootstrap" in workflow
-    assert "steps.bootstrap.outputs.initial != 'true'" in workflow
-    assert "Repository-native bootstrap approval" in workflow
-    assert "github.paginate(" in workflow
-    assert "listReviews" in workflow
-    assert "const {data: reviews}" not in workflow
-    assert "bootstrapReviewer = \"copilot-pull-request-reviewer[bot]\"" in workflow
-    assert "review.user.type === \"Bot\"" in workflow
-    assert "review.user.login === bootstrapReviewer" in workflow
-    assert "review.commit_id === head" in workflow
+    assert "Require seeded base governance runtime" in workflow
+    assert "seed this workflow/runtime on the default branch" in workflow
+    assert "Repository-native bootstrap approval" not in workflow
+    assert "github.paginate(" not in workflow
+    assert "listReviews" not in workflow
 
 
 def test_public_task_template_matches_discovery_source_labels() -> None:
