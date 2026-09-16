@@ -11,9 +11,9 @@ Make the independent-review requirement mechanical instead of aspirational.
   either `saturnin review gate <subject> --kind pr ... --head-sha <sha>` or
   `saturnin review merge <subject> --repo <repo> --author <role>`.
 - Issue: compute `issue_content_digest(title, body)` and pass it to both
-  `saturnin review attest <subject> --kind issue ... --issue-digest <digest>`
+  `saturnin review attest <subject> --kind issue --repo <repo> ... --issue-digest <digest>`
   and
-  `saturnin review record <subject> --kind issue ... --issue-digest <digest> --attestation "$attestation"`
+  `saturnin review record <subject> --kind issue --repo <repo> ... --issue-digest <digest> --attestation "$attestation"`
   and either `saturnin review gate <subject> --kind issue ... --issue-digest <digest>`
   or `saturnin review submit-issue <subject> --repo <repo> --author <role> --title ... --body ...`.
 

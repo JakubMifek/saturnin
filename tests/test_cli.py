@@ -41,6 +41,7 @@ def review_attestation_args(**kwargs: str) -> tuple[str, str]:
         verdict=kwargs["verdict"],
         head_sha=kwargs.get("head_sha", ""),
         issue_digest=kwargs.get("issue_digest", ""),
+        destination_repo=kwargs.get("repo", ""),
     )
     return ("--attestation", attestation)
 
@@ -972,6 +973,8 @@ def test_issue_review_gate_requires_matching_digest(
         subject,
         "--kind",
         "issue",
+        "--repo",
+        "JakubMifek/saturnin-ops",
         "--author",
         "researcher",
         "--reviewer",
@@ -987,6 +990,7 @@ def test_issue_review_gate_requires_matching_digest(
             reviewer="issue-reviewer",
             verdict="approved",
             issue_digest=digest,
+            repo="JakubMifek/saturnin-ops",
         ),
     )
 
@@ -1139,6 +1143,8 @@ def test_review_submit_issue_uses_reviewed_title_and_body_digest(
         subject,
         "--kind",
         "issue",
+        "--repo",
+        "JakubMifek/saturnin-ops",
         "--author",
         "researcher",
         "--reviewer",
@@ -1154,6 +1160,7 @@ def test_review_submit_issue_uses_reviewed_title_and_body_digest(
             reviewer="issue-reviewer",
             verdict="approved",
             issue_digest=digest,
+            repo="JakubMifek/saturnin-ops",
         ),
     )
     calls: list[list[str]] = []
@@ -1215,6 +1222,8 @@ def test_review_submit_issue_blocks_when_reviewed_content_differs(
         subject,
         "--kind",
         "issue",
+        "--repo",
+        "JakubMifek/saturnin-ops",
         "--author",
         "researcher",
         "--reviewer",
@@ -1230,6 +1239,7 @@ def test_review_submit_issue_blocks_when_reviewed_content_differs(
             reviewer="issue-reviewer",
             verdict="approved",
             issue_digest=reviewed_digest,
+            repo="JakubMifek/saturnin-ops",
         ),
     )
     monkeypatch.setattr("saturnin.cli.run_gh", lambda args: (_ for _ in ()).throw(AssertionError(args)))

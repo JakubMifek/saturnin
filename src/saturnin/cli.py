@@ -209,6 +209,11 @@ def build_parser() -> argparse.ArgumentParser:
     )
     record.add_argument("--head-sha", default="", help="reviewed commit SHA for PR reviews")
     record.add_argument(
+        "--repo",
+        default="",
+        help="destination owner/repository slug (required for issue reviews)",
+    )
+    record.add_argument(
         "--issue-digest",
         default="",
         help="reviewed title/body digest for issue reviews",
@@ -225,6 +230,11 @@ def build_parser() -> argparse.ArgumentParser:
         help="reviewer had prior context (fails the zero-context gate)",
     )
     attest.add_argument("--head-sha", default="", help="reviewed commit SHA for PR reviews")
+    attest.add_argument(
+        "--repo",
+        default="",
+        help="destination owner/repository slug (required for issue reviews)",
+    )
     attest.add_argument(
         "--issue-digest",
         default="",
@@ -1468,6 +1478,7 @@ def _run_review(args: argparse.Namespace, config: Config, as_json: bool) -> int:
             zero_context=not args.with_context,
             head_sha=args.head_sha,
             issue_digest=args.issue_digest,
+            destination_repo=args.repo,
         )
         _emit({"attestation": attestation}, as_json, attestation)
         return 0
@@ -1476,7 +1487,7 @@ def _run_review(args: argparse.Namespace, config: Config, as_json: bool) -> int:
         if args.kind == "pr" and not head_sha:
             head_sha = _current_pr_head(
                 args.subject,
-                getattr(args, "repo", None),
+                getattr(args, "repo", None) or None,
             )
         attestation = _read_attestation_arg(args.attestation) if args.attestation else ""
         record = ledger.record(
@@ -1488,6 +1499,7 @@ def _run_review(args: argparse.Namespace, config: Config, as_json: bool) -> int:
             zero_context=not args.with_context,
             head_sha=head_sha,
             issue_digest=getattr(args, "issue_digest", ""),
+            destination_repo=getattr(args, "repo", ""),
             notes=args.notes,
             attestation=attestation,
         )

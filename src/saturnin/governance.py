@@ -282,11 +282,16 @@ class Governance:
             return Decision.deny(
                 "issue_digest is required: approvals must be verified against the current draft"
             )
-        records = [r for r in records if r.issue_digest == issue_digest.strip()]
+        records = [
+            r
+            for r in records
+            if r.issue_digest == issue_digest.strip() and r.destination_repo == repo_key
+        ]
         if not records:
             return Decision.deny(
-                "no issue review records match the current issue-content digest; "
-                "the draft may have changed after review"
+                "no issue review records match the current issue-content digest and "
+                f"destination repository ({repo_key}); the draft or destination may "
+                "have changed after review"
             )
         settings.setdefault("min_approvals", 1)
         return self._review_gate(records, author, settings, "issue review", kind="issue")

@@ -25,6 +25,10 @@ TEST_HEAD_SHA = "a" * 40
 
 
 def record_review(ledger: ReviewLedger, **kwargs):
+    destination_repo = kwargs.pop(
+        "destination_repo",
+        "JakubMifek/saturnin-ops" if kwargs["kind"] == "issue" else "",
+    )
     attestation = sign_review_attestation(
         key=review_attestation_signing_key(ledger.config, kwargs["reviewer"]),
         subject=kwargs["subject"],
@@ -35,8 +39,13 @@ def record_review(ledger: ReviewLedger, **kwargs):
         zero_context=kwargs.get("zero_context", True),
         head_sha=kwargs.get("head_sha", ""),
         issue_digest=kwargs.get("issue_digest", ""),
+        destination_repo=destination_repo,
     )
-    return ledger.record(attestation=attestation, **kwargs)
+    return ledger.record(
+        attestation=attestation,
+        destination_repo=destination_repo,
+        **kwargs,
+    )
 
 
 @pytest.fixture()
@@ -271,6 +280,7 @@ def test_attestation_key_is_scoped_to_reviewer_role(config: Config) -> None:
         reviewer="issue-reviewer",
         verdict="approved",
         issue_digest="b" * 64,
+        destination_repo="JakubMifek/saturnin-ops",
     )
 
     with pytest.raises(ReviewError, match="signature does not match"):
@@ -281,6 +291,7 @@ def test_attestation_key_is_scoped_to_reviewer_role(config: Config) -> None:
             reviewer="issue-reviewer",
             verdict="approved",
             issue_digest="b" * 64,
+            destination_repo="JakubMifek/saturnin-ops",
             attestation=forged,
         )
 
@@ -810,6 +821,40 @@ def test_issue_review_is_bound_to_the_reviewed_draft(
     assert "issue_digest is required" in missing.reasons[0]
     assert not changed_decision.allowed
     assert "current issue-content digest" in changed_decision.reasons[0]
+
+
+def test_issue_review_is_bound_to_normalized_destination_repository(
+    governance: Governance, config: Config
+) -> None:
+    ledger = ReviewLedger(config)
+    subject = "draft-destination-bound"
+    digest = issue_content_digest("Improve CI", "Add the missing gate.")
+    record = record_review(
+        ledger,
+        subject=subject,
+        kind="issue",
+        author="researcher",
+        reviewer="issue-reviewer",
+        verdict="approved",
+        issue_digest=digest,
+        destination_repo=" JakubMifek/SATURNIN-OPS ",
+    )
+
+    assert record.destination_repo == "jakubmifek/saturnin-ops"
+    assert governance.issue_submission_allowed(
+        repo="JAKUBMIFEK/SATURNIN-OPS",
+        author="researcher",
+        records=ledger.for_subject(subject, "issue"),
+        issue_digest=digest,
+    ).allowed
+    wrong_destination = governance.issue_submission_allowed(
+        repo="JakubMifek/saturnin-notes",
+        author="researcher",
+        records=ledger.for_subject(subject, "issue"),
+        issue_digest=digest,
+    )
+    assert not wrong_destination.allowed
+    assert "destination repository" in wrong_destination.reasons[0]
 
 
 def test_issue_in_own_repo_needs_no_review(governance: Governance) -> None:

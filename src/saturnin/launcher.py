@@ -22,6 +22,7 @@ from .contracts import (
     mcp_authorization_problem,
     project_agent_path,
 )
+from .jsonlines import atomic_replace_text
 from .mcp import MCPError, server_process, verify_github_binary
 from .review import role_scoped_review_attestation_key
 
@@ -66,6 +67,14 @@ class AgentLauncher:
         if not self.enabled:
             return None
         task = self.board.get(task_id)
+        metadata_path = self.dir / f"{task.id}.json"
+        if metadata_path.exists():
+            self.reconcile_exited_launches()
+            if metadata_path.exists():
+                raise LauncherError(
+                    f"task {task.id} already has an active or unrecoverable launch"
+                )
+            task = self.board.get(task_id)
         checkpoint = CheckpointStore(self.config, self.board).latest(task.id)
         executable = str(self.policy.get("command", "copilot"))
         if shutil.which(executable) is None:
@@ -75,115 +84,160 @@ class AgentLauncher:
         launch_error: LauncherError | None = None
         process: subprocess.Popen[bytes] | None = None
         workdir: Path | None = None
-        with self.board.edit(task.id) as stored:
-            previous_state = stored.state
-            previous_checkpoint_resumed_at = stored.checkpoint_resumed_at
-            if stored.state == "in_progress" and resumed_checkpoint:
-                if stored.checkpoint_resumed_at == resumed_checkpoint:
-                    raise LauncherError(
-                        f"checkpoint {resumed_checkpoint} already resumed for task {stored.id}"
-                    )
-            elif stored.state != "routed":
-                raise LauncherError(f"task {stored.id} cannot launch from state {stored.state}")
-            if stored.state == "routed":
-                stored.state = "in_progress"
-            if resumed_checkpoint:
-                stored.checkpoint_resumed_at = resumed_checkpoint
-            stored.log(
-                "agent:claim",
-                actor="launcher",
-                previous_state=previous_state,
-                resumed_checkpoint=resumed_checkpoint,
-            )
-            claimed = Task.from_dict(stored.to_dict())
-            try:
-                workdir = self._validated_workdir(claimed)
-                worker_config = self._worker_config(workdir)
-                contract = self._contract(claimed, worker_config)
-                mcp_path = self._write_mcp_config(
-                    claimed,
-                    contract,
-                    config=worker_config,
-                    worktree_scope=workdir,
-                )
-                prompt = self._prompt(
-                    claimed,
-                    contract,
-                    config=worker_config,
-                    checkpoint=checkpoint,
-                )
-                args = [
-                    str(value).format(mcp_config=str(mcp_path), prompt=prompt, task_id=claimed.id)
-                    for value in self.policy.get(
-                        "args",
-                        [
-                            "--autopilot",
-                            "--no-ask-user",
-                            "--additional-mcp-config",
-                            "{mcp_config}",
-                            "-p",
-                            "{prompt}",
-                        ],
-                    )
-                ]
-                with log_path.open("ab") as output:
-                    process = subprocess.Popen(
-                        [executable, *args],
-                        cwd=workdir,
-                        env=self._worker_environment(
-                            worker_config,
-                            contract,
-                            task=claimed,
-                            workdir=workdir,
-                        ),
-                        stdin=subprocess.DEVNULL,
-                        stdout=output,
-                        stderr=subprocess.STDOUT,
-                        start_new_session=True,
-                    )
-                    immediate_status = self._immediate_exit_status(process)
-                    if immediate_status is not None:
+        metadata_attempted = False
+        failure_cleanup_problem: str | None = None
+        previous_state = task.state
+        previous_checkpoint_resumed_at = task.checkpoint_resumed_at
+        previous_launch_deferred_at = task.launch_deferred_at
+        previous_launch_deferred_reason = task.launch_deferred_reason
+        try:
+            with self.board.edit(task.id) as stored:
+                previous_state = stored.state
+                previous_checkpoint_resumed_at = stored.checkpoint_resumed_at
+                previous_launch_deferred_at = stored.launch_deferred_at
+                previous_launch_deferred_reason = stored.launch_deferred_reason
+                if stored.state == "in_progress" and resumed_checkpoint:
+                    if stored.checkpoint_resumed_at == resumed_checkpoint:
                         raise LauncherError(
-                            "agent launcher exited immediately with "
-                            f"status {immediate_status}; see {log_path}"
+                            f"checkpoint {resumed_checkpoint} already resumed for task {stored.id}"
                         )
-            except (LauncherError, MCPError, OSError) as exc:
-                if previous_state in ("routed", "in_progress"):
-                    stored.state = previous_state
-                stored.checkpoint_resumed_at = previous_checkpoint_resumed_at
-                stored.log("agent:launch_failed", actor="launcher", reason=str(exc))
-                launch_error = LauncherError(f"agent launcher failed for task {task.id}: {exc}")
-            else:
-                stored.launch_deferred_at = None
-                stored.launch_deferred_reason = None
+                elif stored.state != "routed":
+                    raise LauncherError(
+                        f"task {stored.id} cannot launch from state {stored.state}"
+                    )
+                if stored.state == "routed":
+                    stored.state = "in_progress"
+                if resumed_checkpoint:
+                    stored.checkpoint_resumed_at = resumed_checkpoint
                 stored.log(
-                    "agent:launched",
+                    "agent:claim",
                     actor="launcher",
-                    role=contract.role,
-                    pid=process.pid,
+                    previous_state=previous_state,
+                    resumed_checkpoint=resumed_checkpoint,
                 )
-                stored.log(
-                    "state:in_progress",
-                    actor=stored.role or "launcher",
-                    note=f"agent pid={process.pid}",
-                )
-                task = Task.from_dict(stored.to_dict())
+                claimed = Task.from_dict(stored.to_dict())
+                try:
+                    workdir = self._validated_workdir(claimed)
+                    worker_config = self._worker_config(workdir)
+                    contract = self._contract(claimed, worker_config)
+                    mcp_path = self._write_mcp_config(
+                        claimed,
+                        contract,
+                        config=worker_config,
+                        worktree_scope=workdir,
+                    )
+                    prompt = self._prompt(
+                        claimed,
+                        contract,
+                        config=worker_config,
+                        checkpoint=checkpoint,
+                    )
+                    args = [
+                        str(value).format(
+                            mcp_config=str(mcp_path), prompt=prompt, task_id=claimed.id
+                        )
+                        for value in self.policy.get(
+                            "args",
+                            [
+                                "--autopilot",
+                                "--no-ask-user",
+                                "--additional-mcp-config",
+                                "{mcp_config}",
+                                "-p",
+                                "{prompt}",
+                            ],
+                        )
+                    ]
+                    with log_path.open("ab") as output:
+                        process = subprocess.Popen(
+                            [executable, *args],
+                            cwd=workdir,
+                            env=self._worker_environment(
+                                worker_config,
+                                contract,
+                                task=claimed,
+                                workdir=workdir,
+                            ),
+                            stdin=subprocess.DEVNULL,
+                            stdout=output,
+                            stderr=subprocess.STDOUT,
+                            start_new_session=True,
+                        )
+                        immediate_status = self._immediate_exit_status(process)
+                        if immediate_status is not None:
+                            raise LauncherError(
+                                "agent launcher exited immediately with "
+                                f"status {immediate_status}; see {log_path}"
+                            )
+                    metadata = {
+                        "task_id": claimed.id,
+                        "role": contract.role,
+                        "pid": process.pid,
+                        "started_at": utcnow(),
+                        "cwd": str(workdir),
+                        "mcp_config": str(mcp_path),
+                        "log": str(log_path),
+                        "resumed_checkpoint": resumed_checkpoint,
+                    }
+                    metadata_attempted = True
+                    atomic_replace_text(
+                        metadata_path, json.dumps(metadata, indent=2) + "\n"
+                    )
+                except (LauncherError, MCPError, OSError) as exc:
+                    failure_cleanup_problem = self._terminate_process(process)
+                    if previous_state in ("routed", "in_progress"):
+                        stored.state = previous_state
+                    stored.checkpoint_resumed_at = previous_checkpoint_resumed_at
+                    reason = str(exc)
+                    if failure_cleanup_problem:
+                        reason = f"{reason}; {failure_cleanup_problem}"
+                    stored.log("agent:launch_failed", actor="launcher", reason=reason)
+                    launch_error = LauncherError(
+                        f"agent launcher failed for task {task.id}: {reason}"
+                    )
+                else:
+                    stored.launch_deferred_at = None
+                    stored.launch_deferred_reason = None
+                    stored.log(
+                        "agent:launched",
+                        actor="launcher",
+                        role=contract.role,
+                        pid=process.pid,
+                    )
+                    stored.log(
+                        "state:in_progress",
+                        actor=stored.role or "launcher",
+                        note=f"agent pid={process.pid}",
+                    )
+                    task = Task.from_dict(stored.to_dict())
+        except OSError as exc:
+            termination_problem = self._terminate_process(process)
+            reason = f"could not persist launch state: {exc}"
+            if termination_problem:
+                reason = f"{reason}; {termination_problem}"
+            restored = self._restore_launch_claim(
+                task.id,
+                previous_state=previous_state,
+                previous_checkpoint_resumed_at=previous_checkpoint_resumed_at,
+                previous_launch_deferred_at=previous_launch_deferred_at,
+                previous_launch_deferred_reason=previous_launch_deferred_reason,
+                reason=reason,
+            )
+            if not restored:
+                reason = f"{reason}; launch-state rollback remains pending"
+            elif not termination_problem and metadata_attempted:
+                removal_problem = self._remove_launch_metadata(metadata_path)
+                if removal_problem:
+                    reason = f"{reason}; {removal_problem}"
+            raise LauncherError(f"agent launcher failed for task {task.id}: {reason}") from exc
         if launch_error is not None:
+            if not failure_cleanup_problem and metadata_attempted:
+                removal_problem = self._remove_launch_metadata(metadata_path)
+                if removal_problem:
+                    raise LauncherError(f"{launch_error}; {removal_problem}") from launch_error
             raise launch_error
         if process is None or workdir is None or mcp_path is None:  # pragma: no cover
             raise LauncherError(f"agent launcher failed for task {task.id}")
-        metadata = {
-            "task_id": task.id,
-            "role": contract.role,
-            "pid": process.pid,
-            "started_at": utcnow(),
-            "cwd": str(workdir),
-            "mcp_config": str(mcp_path),
-            "log": str(log_path),
-        }
-        (self.dir / f"{task.id}.json").write_text(
-            json.dumps(metadata, indent=2) + "\n", encoding="utf-8"
-        )
         return LaunchResult(
             task_id=task.id,
             role=contract.role,
@@ -204,6 +258,35 @@ class AgentLauncher:
             if not task_id or not isinstance(pid, int):
                 continue
             if self._pid_is_running(pid):
+                resumed_checkpoint = metadata.get("resumed_checkpoint")
+                try:
+                    with self.board.edit(task_id) as task:
+                        recovered = False
+                        if task.state == "routed":
+                            task.state = "in_progress"
+                            task.launch_deferred_at = None
+                            task.launch_deferred_reason = None
+                            recovered = True
+                        if (
+                            isinstance(resumed_checkpoint, str)
+                            and resumed_checkpoint
+                            and task.checkpoint_resumed_at != resumed_checkpoint
+                        ):
+                            task.checkpoint_resumed_at = resumed_checkpoint
+                            recovered = True
+                        if recovered:
+                            task.log(
+                                "agent:launch_recovered",
+                                actor="launcher",
+                                pid=pid,
+                            )
+                            task.log(
+                                "state:in_progress",
+                                actor=task.role or "launcher",
+                                note=f"recovered agent pid={pid}",
+                            )
+                except (BoardError, OSError):
+                    pass
                 continue
             reason = f"agent exited after launch with pid {pid}"
             try:
@@ -215,6 +298,8 @@ class AgentLauncher:
                         task.log("agent:launch_failed", actor="launcher", reason=reason)
                         task.log("state:routed", actor="launcher", note=reason)
                         resumed.append(task.id)
+            except OSError:
+                continue
             except BoardError:
                 pass
             try:
@@ -222,6 +307,63 @@ class AgentLauncher:
             except OSError:
                 pass
         return resumed
+
+    @staticmethod
+    def _remove_launch_metadata(metadata_path: Path) -> str | None:
+        try:
+            metadata_path.unlink(missing_ok=True)
+        except OSError as exc:
+            return f"could not remove launch metadata: {exc}"
+        return None
+
+    def _terminate_process(self, process: subprocess.Popen[bytes] | None) -> str | None:
+        if process is None:
+            return None
+        try:
+            process.terminate()
+        except ProcessLookupError:
+            return None
+        except (AttributeError, OSError) as exc:
+            return f"could not terminate spawned agent pid {process.pid}: {exc}"
+        wait = getattr(process, "wait", None)
+        if wait is None:
+            return None
+        try:
+            wait(timeout=float(self.policy.get("termination_grace_seconds", 5)))
+            return None
+        except subprocess.TimeoutExpired:
+            pass
+        try:
+            process.kill()
+            wait(timeout=float(self.policy.get("termination_grace_seconds", 5)))
+        except ProcessLookupError:
+            return None
+        except (AttributeError, OSError, subprocess.TimeoutExpired) as exc:
+            return f"could not terminate spawned agent pid {process.pid}: {exc}"
+        return None
+
+    def _restore_launch_claim(
+        self,
+        task_id: str,
+        *,
+        previous_state: str,
+        previous_checkpoint_resumed_at: str | None,
+        previous_launch_deferred_at: str | None,
+        previous_launch_deferred_reason: str | None,
+        reason: str,
+    ) -> bool:
+        try:
+            with self.board.edit(task_id) as task:
+                if task.state not in ("routed", "in_progress"):
+                    return True
+                task.state = previous_state
+                task.checkpoint_resumed_at = previous_checkpoint_resumed_at
+                task.launch_deferred_at = previous_launch_deferred_at
+                task.launch_deferred_reason = previous_launch_deferred_reason
+                task.log("agent:launch_failed", actor="launcher", reason=reason)
+        except (BoardError, OSError):
+            return False
+        return True
 
     @staticmethod
     def _pid_is_running(pid: int) -> bool:

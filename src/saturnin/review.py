@@ -32,6 +32,7 @@ VERDICTS = ("approved", "changes_requested", "rejected", "dismissed")
 KINDS = ("pr", "issue")
 _HEX_SHA_RE = re.compile(r"[0-9a-fA-F]{40}")
 _ISSUE_DIGEST_RE = re.compile(r"[0-9a-fA-F]{64}")
+_REPOSITORY_SLUG_RE = re.compile(r"[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+")
 
 
 class ReviewError(RuntimeError):
@@ -48,6 +49,7 @@ class ReviewRecord:
     zero_context: bool = True
     head_sha: str = ""
     issue_digest: str = ""
+    destination_repo: str = ""
     notes: str = ""
     attestation_id: str = ""
     attestation_signature: str = ""
@@ -78,6 +80,7 @@ class ReviewRecord:
             "verdict",
             "head_sha",
             "issue_digest",
+            "destination_repo",
             "notes",
             "attestation_id",
             "attestation_signature",
@@ -104,6 +107,16 @@ class ReviewRecord:
             raise ValueError("PR review record requires head_sha")
         if data["kind"] == "issue" and not digest:
             raise ValueError("issue review record requires issue_digest")
+        destination_repo = data["destination_repo"]
+        if destination_repo:
+            if not _REPOSITORY_SLUG_RE.fullmatch(destination_repo):
+                raise ValueError(
+                    "review record destination_repo must be an owner/repository slug"
+                )
+            if destination_repo != normalize_repository_slug(destination_repo):
+                raise ValueError("review record destination_repo must be normalized")
+        if data["kind"] == "issue" and not destination_repo:
+            raise ValueError("issue review record requires destination_repo")
         if bool(data["attestation_id"]) != bool(data["attestation_signature"]):
             raise ValueError("review record attestation id and signature must be paired")
         try:
@@ -124,6 +137,7 @@ ATTESTED_FIELDS = (
     "zero_context",
     "head_sha",
     "issue_digest",
+    "destination_repo",
 )
 ROLE_SCOPED_KEY_CONTEXT = "saturnin-review-attestation"
 
@@ -145,6 +159,13 @@ def issue_content_digest(title: str, body: str) -> str:
     return hashlib.sha256(payload.encode("utf-8")).hexdigest()
 
 
+def normalize_repository_slug(repo: str) -> str:
+    slug = repo.strip()
+    if not _REPOSITORY_SLUG_RE.fullmatch(slug):
+        raise ValueError("repository must be an owner/repository slug")
+    return slug.casefold()
+
+
 def _canonical_attestation_payload(payload: dict[str, Any]) -> bytes:
     covered = {field: payload[field] for field in ATTESTED_FIELDS}
     covered["attestation_id"] = payload["attestation_id"]
@@ -162,11 +183,20 @@ def sign_review_attestation(
     zero_context: bool = True,
     head_sha: str = "",
     issue_digest: str = "",
+    destination_repo: str = "",
     attestation_id: str | None = None,
 ) -> str:
     """Return a signed review attestation for the exact reviewed subject."""
     if not key:
         raise ReviewError("review attestation signing key is not configured")
+    try:
+        normalized_destination = (
+            normalize_repository_slug(destination_repo) if destination_repo else ""
+        )
+    except ValueError as exc:
+        raise ReviewError(f"invalid destination repository: {exc}") from exc
+    if kind == "issue" and not normalized_destination:
+        raise ReviewError("issue review attestations require a destination repository")
     payload: dict[str, Any] = {
         "subject": subject,
         "kind": kind,
@@ -176,6 +206,7 @@ def sign_review_attestation(
         "zero_context": zero_context,
         "head_sha": head_sha.strip(),
         "issue_digest": issue_digest.strip(),
+        "destination_repo": normalized_destination,
         "attestation_id": attestation_id or secrets.token_hex(16),
     }
     signature = hmac.new(
@@ -305,6 +336,7 @@ class ReviewLedger:
         zero_context: bool = True,
         head_sha: str = "",
         issue_digest: str = "",
+        destination_repo: str = "",
         notes: str = "",
         attestation: str = "",
     ) -> ReviewRecord:
@@ -316,6 +348,12 @@ class ReviewLedger:
             raise ReviewError(f"unknown verdict: {verdict}")
         head = head_sha.strip()
         digest = issue_digest.strip()
+        try:
+            destination = (
+                normalize_repository_slug(destination_repo) if destination_repo else ""
+            )
+        except ValueError as exc:
+            raise ReviewError(f"invalid destination repository: {exc}") from exc
         if kind == "pr" and not head:
             raise ReviewError(
                 "PR reviews require --head-sha (pass the same SHA to review record and review gate)"
@@ -326,6 +364,8 @@ class ReviewLedger:
             raise ReviewError("issue reviews require the reviewed issue-content digest")
         if kind == "issue" and not _ISSUE_DIGEST_RE.fullmatch(digest):
             raise ReviewError("issue reviews require a 64-character SHA-256 issue-content digest")
+        if kind == "issue" and not destination:
+            raise ReviewError("issue reviews require the destination repository")
         if reviewer.strip().lower() == author.strip().lower():
             raise ReviewError("a review must be written by somebody other than the author")
         roles = self.config.routing.get("roles", {})
@@ -350,6 +390,7 @@ class ReviewLedger:
                 "zero_context": zero_context,
                 "head_sha": head,
                 "issue_digest": digest,
+                "destination_repo": destination,
             }
             for field_name, supplied_value in supplied.items():
                 if payload[field_name] != supplied_value:
@@ -367,6 +408,7 @@ class ReviewLedger:
             zero_context=zero_context,
             head_sha=head,
             issue_digest=digest,
+            destination_repo=destination,
             notes=notes,
             attestation_id=attestation_id,
             attestation_signature=attestation_signature,

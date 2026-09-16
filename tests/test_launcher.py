@@ -373,6 +373,117 @@ def test_launcher_rolls_back_claim_when_spawn_fails(
     assert not any(entry["event"] == "state:in_progress" for entry in stored.history)
 
 
+def test_launcher_terminates_and_rolls_back_when_metadata_persistence_fails(
+    config: Config, board: Board, git_repo: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    config.policy("mcp")["launcher"]["enabled"] = True
+    task = board.create("Persist launch recovery metadata")
+    Router(config).dispatch(board, task)
+    worktree = WorktreeManager(config, repo=git_repo, board=board).create(
+        "feature/metadata-failure"
+    )
+    with board.edit(task.id) as stored:
+        stored.branch = "feature/metadata-failure"
+        stored.worktree = str(worktree.path)
+    monkeypatch.setattr("saturnin.launcher.shutil.which", lambda _: "/usr/bin/copilot")
+    real_popen = subprocess.Popen
+
+    class RunningProcess:
+        pid = 4242
+        terminated = False
+
+        def wait(self, timeout=None):
+            if not self.terminated:
+                raise subprocess.TimeoutExpired("copilot", timeout)
+            return 0
+
+        def terminate(self):
+            self.terminated = True
+
+    process = RunningProcess()
+    monkeypatch.setattr(
+        "saturnin.launcher.subprocess.Popen",
+        lambda command, **kwargs: (
+            real_popen(command, **kwargs) if command[0] == "git" else process
+        ),
+    )
+
+    def fail_after_replace(path: Path, text: str) -> None:
+        path.write_text(text, encoding="utf-8")
+        raise OSError("metadata fsync failed")
+
+    monkeypatch.setattr("saturnin.launcher.atomic_replace_text", fail_after_replace)
+
+    with pytest.raises(LauncherError, match="metadata fsync failed"):
+        AgentLauncher(config, board).launch(task.id, resumed_checkpoint="checkpoint-1")
+
+    stored = board.get(task.id)
+    assert process.terminated
+    assert stored.state == "routed"
+    assert stored.checkpoint_resumed_at is None
+    assert stored.history[-1]["event"] == "agent:launch_failed"
+    assert not (config.var_dir / "launches" / f"{task.id}.json").exists()
+
+
+def test_launcher_terminates_and_restores_partial_board_persistence(
+    config: Config, board: Board, git_repo: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    config.policy("mcp")["launcher"]["enabled"] = True
+    task = board.create("Recover partially persisted launch")
+    Router(config).dispatch(board, task)
+    worktree = WorktreeManager(config, repo=git_repo, board=board).create(
+        "feature/board-persistence-failure"
+    )
+    with board.edit(task.id) as stored:
+        stored.branch = "feature/board-persistence-failure"
+        stored.worktree = str(worktree.path)
+    monkeypatch.setattr("saturnin.launcher.shutil.which", lambda _: "/usr/bin/copilot")
+    real_popen = subprocess.Popen
+
+    class RunningProcess:
+        pid = 4242
+        terminated = False
+
+        def wait(self, timeout=None):
+            if not self.terminated:
+                raise subprocess.TimeoutExpired("copilot", timeout)
+            return 0
+
+        def terminate(self):
+            self.terminated = True
+
+    process = RunningProcess()
+    monkeypatch.setattr(
+        "saturnin.launcher.subprocess.Popen",
+        lambda command, **kwargs: (
+            real_popen(command, **kwargs) if command[0] == "git" else process
+        ),
+    )
+    original_write = board._write
+    failed = False
+
+    def fail_after_board_replace(path: Path, stored) -> None:
+        nonlocal failed
+        original_write(path, stored)
+        if not failed and any(
+            entry["event"] == "agent:launched" for entry in stored.history
+        ):
+            failed = True
+            raise OSError("board directory fsync failed")
+
+    monkeypatch.setattr(board, "_write", fail_after_board_replace)
+
+    with pytest.raises(LauncherError, match="board directory fsync failed"):
+        AgentLauncher(config, board).launch(task.id, resumed_checkpoint="checkpoint-1")
+
+    stored = board.get(task.id)
+    assert process.terminated
+    assert stored.state == "routed"
+    assert stored.checkpoint_resumed_at is None
+    assert stored.history[-1]["event"] == "agent:launch_failed"
+    assert not (config.var_dir / "launches" / f"{task.id}.json").exists()
+
+
 def test_launcher_rolls_back_claim_when_child_exits_immediately(
     config: Config, board: Board, git_repo: Path, monkeypatch
 ) -> None:
@@ -529,6 +640,43 @@ def test_reconcile_exited_launch_requeues_task(
     assert restored.state == "routed"
     assert restored.launch_deferred_reason == "agent exited after launch with pid 4242"
     assert not launch_file.exists()
+
+
+def test_reconcile_recovers_running_launch_with_partial_board_state(
+    config: Config, board: Board, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    config.policy("mcp")["launcher"]["enabled"] = True
+    task = board.create("Recover running launch")
+    Router(config).dispatch(board, task)
+    launch_file = config.var_dir / "launches" / f"{task.id}.json"
+    launch_file.parent.mkdir(parents=True, exist_ok=True)
+    launch_file.write_text(
+        json.dumps(
+            {
+                "task_id": task.id,
+                "role": "code-worker",
+                "pid": 4242,
+                "started_at": utcnow(),
+                "cwd": str(config.root),
+                "mcp_config": str(config.root / ".mcp.json"),
+                "log": str(config.var_dir / "launches" / f"{task.id}.log"),
+                "resumed_checkpoint": "checkpoint-1",
+            }
+        ),
+        encoding="utf-8",
+    )
+    launcher = AgentLauncher(config, board)
+    monkeypatch.setattr(launcher, "_pid_is_running", lambda pid: True)
+
+    assert launcher.reconcile_exited_launches() == []
+
+    restored = board.get(task.id)
+    assert restored.state == "in_progress"
+    assert restored.checkpoint_resumed_at == "checkpoint-1"
+    assert restored.history[-2]["event"] == "agent:launch_recovered"
+    assert launch_file.exists()
+    with pytest.raises(LauncherError, match="already has an active"):
+        launcher.launch(task.id)
 
 
 def test_launcher_keeps_engine_source_for_managed_repository(
