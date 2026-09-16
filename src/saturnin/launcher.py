@@ -169,10 +169,16 @@ class AgentLauncher:
                                 "agent launcher exited immediately with "
                                 f"status {immediate_status}; see {log_path}"
                             )
+                        process_start_time = self._process_start_time(process.pid)
+                        if process_start_time is None:
+                            raise LauncherError(
+                                f"could not read process identity for agent pid {process.pid}"
+                            )
                     metadata = {
                         "task_id": claimed.id,
                         "role": contract.role,
                         "pid": process.pid,
+                        "process_start_time_ticks": process_start_time,
                         "started_at": utcnow(),
                         "cwd": str(workdir),
                         "mcp_config": str(mcp_path),
@@ -257,7 +263,12 @@ class AgentLauncher:
             pid = metadata.get("pid")
             if not task_id or not isinstance(pid, int):
                 continue
-            if self._pid_is_running(pid):
+            process_start_time = metadata.get("process_start_time_ticks")
+            if (
+                isinstance(process_start_time, int)
+                and not isinstance(process_start_time, bool)
+                and self._process_start_time(pid) == process_start_time
+            ):
                 resumed_checkpoint = metadata.get("resumed_checkpoint")
                 try:
                     with self.board.edit(task_id) as task:
@@ -288,7 +299,7 @@ class AgentLauncher:
                 except (BoardError, OSError):
                     pass
                 continue
-            reason = f"agent exited after launch with pid {pid}"
+            reason = f"agent process exited or identity changed after launch with pid {pid}"
             try:
                 with self.board.edit(task_id) as task:
                     if task.state == "in_progress":
@@ -366,16 +377,26 @@ class AgentLauncher:
         return True
 
     @staticmethod
-    def _pid_is_running(pid: int) -> bool:
+    def _process_start_time(pid: int) -> int | None:
         if pid <= 0:
-            return False
+            return None
         try:
-            os.kill(pid, 0)
-        except ProcessLookupError:
-            return False
-        except PermissionError:
-            return True
-        return True
+            stat = Path(f"/proc/{pid}/stat").read_text(encoding="utf-8")
+        except (OSError, UnicodeError):
+            return None
+        prefix, separator, suffix = stat.rpartition(")")
+        fields = suffix.split()
+        if (
+            not separator
+            or not prefix.startswith(f"{pid} (")
+            or len(fields) < 20
+        ):
+            return None
+        try:
+            start_time = int(fields[19])
+        except ValueError:
+            return None
+        return start_time if start_time >= 0 else None
 
     def _immediate_exit_status(self, process: subprocess.Popen[bytes]) -> int | None:
         wait = getattr(process, "wait", None)

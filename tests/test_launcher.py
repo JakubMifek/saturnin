@@ -20,11 +20,19 @@ from saturnin.routing import Router
 from saturnin.worktrees import WorktreeManager
 
 
+_REAL_PROCESS_START_TIME = AgentLauncher._process_start_time
+
+
 @pytest.fixture(autouse=True)
 def verified_github_mcp(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(
         "saturnin.launcher.verify_github_binary",
         lambda config: config.var_dir / "bin" / "github-mcp-server",
+    )
+    monkeypatch.setattr(
+        AgentLauncher,
+        "_process_start_time",
+        staticmethod(lambda pid: 123456),
     )
 
 
@@ -89,6 +97,10 @@ def test_launcher_starts_routed_role_with_filtered_mcp(
     assert calls[0][1]["env"]["SATURNIN_WORKTREE"] == str(worktree.path)
     assert calls[0][1]["env"]["PYTHONPATH"] == str(config.root / "src")
     assert calls[0][1]["env"]["HOME"] == str(config.var_dir / "launches" / f"{task.id}.home")
+    metadata = json.loads(
+        (config.var_dir / "launches" / f"{task.id}.json").read_text()
+    )
+    assert metadata["process_start_time_ticks"] == 123456
 
 
 def test_launcher_intersects_role_mcp_with_project_allowlist(
@@ -622,6 +634,7 @@ def test_reconcile_exited_launch_requeues_task(
                 "task_id": task.id,
                 "role": "code-worker",
                 "pid": 4242,
+                "process_start_time_ticks": 123456,
                 "started_at": utcnow(),
                 "cwd": str(config.root),
                 "mcp_config": str(config.root / ".mcp.json"),
@@ -631,14 +644,16 @@ def test_reconcile_exited_launch_requeues_task(
         encoding="utf-8",
     )
     launcher = AgentLauncher(config, board)
-    monkeypatch.setattr(launcher, "_pid_is_running", lambda pid: False)
+    monkeypatch.setattr(launcher, "_process_start_time", lambda pid: None)
 
     reconciled = launcher.reconcile_exited_launches()
 
     restored = board.get(task.id)
     assert reconciled == [task.id]
     assert restored.state == "routed"
-    assert restored.launch_deferred_reason == "agent exited after launch with pid 4242"
+    assert restored.launch_deferred_reason == (
+        "agent process exited or identity changed after launch with pid 4242"
+    )
     assert not launch_file.exists()
 
 
@@ -656,6 +671,7 @@ def test_reconcile_recovers_running_launch_with_partial_board_state(
                 "task_id": task.id,
                 "role": "code-worker",
                 "pid": 4242,
+                "process_start_time_ticks": 123456,
                 "started_at": utcnow(),
                 "cwd": str(config.root),
                 "mcp_config": str(config.root / ".mcp.json"),
@@ -666,7 +682,6 @@ def test_reconcile_recovers_running_launch_with_partial_board_state(
         encoding="utf-8",
     )
     launcher = AgentLauncher(config, board)
-    monkeypatch.setattr(launcher, "_pid_is_running", lambda pid: True)
 
     assert launcher.reconcile_exited_launches() == []
 
@@ -677,6 +692,61 @@ def test_reconcile_recovers_running_launch_with_partial_board_state(
     assert launch_file.exists()
     with pytest.raises(LauncherError, match="already has an active"):
         launcher.launch(task.id)
+
+
+def test_reconcile_requeues_when_pid_belongs_to_different_process(
+    config: Config, board: Board, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    task = board.create("Recover reused pid")
+    Router(config).dispatch(board, task)
+    board.transition(board.get(task.id), "in_progress")
+    launch_file = config.var_dir / "launches" / f"{task.id}.json"
+    launch_file.parent.mkdir(parents=True, exist_ok=True)
+    launch_file.write_text(
+        json.dumps(
+            {
+                "task_id": task.id,
+                "role": "code-worker",
+                "pid": 4242,
+                "process_start_time_ticks": 111111,
+                "started_at": utcnow(),
+            }
+        ),
+        encoding="utf-8",
+    )
+    launcher = AgentLauncher(config, board)
+    monkeypatch.setattr(launcher, "_process_start_time", lambda pid: 222222)
+
+    assert launcher.reconcile_exited_launches() == [task.id]
+
+    assert board.get(task.id).state == "routed"
+    assert not launch_file.exists()
+
+
+@pytest.mark.parametrize(
+    "proc_stat",
+    [
+        "malformed",
+        "4242 (worker) S " + " ".join(["1"] * 18 + ["not-a-number"]),
+    ],
+)
+def test_process_start_time_rejects_malformed_proc_stat(
+    monkeypatch: pytest.MonkeyPatch, proc_stat: str
+) -> None:
+    monkeypatch.setattr(Path, "read_text", lambda self, **kwargs: proc_stat)
+
+    assert _REAL_PROCESS_START_TIME(4242) is None
+
+
+def test_process_start_time_handles_inaccessible_proc(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    def deny_read(self, **kwargs):
+        raise PermissionError
+
+    monkeypatch.setattr(Path, "read_text", deny_read)
+
+    assert _REAL_PROCESS_START_TIME(4242) is None
 
 
 def test_launcher_keeps_engine_source_for_managed_repository(
