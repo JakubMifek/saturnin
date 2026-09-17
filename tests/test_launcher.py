@@ -19,6 +19,7 @@ from saturnin.mcp import MCPError
 from saturnin.review import ReviewLedger, sign_review_attestation
 from saturnin.routing import Router
 from saturnin.worktrees import WorktreeManager
+from saturnin.worker_callbacks import CALLBACKS_FILE
 
 
 _REAL_PROCESS_START_TIME = AgentLauncher._process_start_time
@@ -246,6 +247,62 @@ def test_worker_command_uses_mandatory_os_sandbox(
     assert str(credential) not in command
     assert git_environment["GIT_DIR"].startswith(str(home))
     assert command[-3:] == ["--", "/usr/bin/copilot", "--autopilot"]
+
+
+def test_reconcile_applies_worker_callbacks_before_requeue(
+    config: Config,
+    board: Board,
+) -> None:
+    task = board.create("Replay worker callbacks")
+    Router(config).dispatch(board, task)
+    board.transition_id(task.id, "in_progress", actor="launcher")
+    launcher = AgentLauncher(config, board)
+    callback_dir = launcher._isolated_home(task.id) / ".saturnin-callbacks"
+    callback_dir.mkdir(parents=True)
+    callbacks = [
+        {
+            "type": "checkpoint_save",
+            "task_id": task.id,
+            "role": "code-worker",
+            "summary": "paused",
+            "next_steps": ["resume"],
+            "blockers": [],
+            "artifacts": [],
+            "branch": "feature/callback",
+            "worktree": "/tmp/worktree",
+            "resume_after": (datetime.now(timezone.utc) + timedelta(hours=1)).isoformat(),
+        },
+        {
+            "type": "task_move",
+            "task_id": task.id,
+            "state": "review",
+            "actor": "code-worker",
+            "note": "ready",
+        },
+    ]
+    (callback_dir / CALLBACKS_FILE).write_text(
+        "".join(json.dumps(record) + "\n" for record in callbacks),
+        encoding="utf-8",
+    )
+    metadata_path = launcher.dir / f"{task.id}.json"
+    metadata_path.write_text(
+        json.dumps(
+            {
+                "task_id": task.id,
+                "pid": 123,
+                "process_start_time_ticks": 999,
+                "callback_dir": str(callback_dir),
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    assert launcher.reconcile_exited_launches() == []
+
+    assert board.get(task.id).state == "review"
+    assert CheckpointStore(config, board).latest(task.id).summary == "paused"
+    assert not metadata_path.exists()
+    assert not (callback_dir / CALLBACKS_FILE).exists()
 
 
 def test_isolated_git_metadata_supports_commit_without_changing_shared_refs(

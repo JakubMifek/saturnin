@@ -28,6 +28,11 @@ from .governance import Governance, github_repo_slug
 from .jsonlines import PRIVATE_FILE_MODE, atomic_replace_text
 from .mcp import MCPError, server_process, verify_github_binary
 from .review import role_scoped_review_attestation_key
+from .worker_callbacks import (
+    ENV_CALLBACK_DIR,
+    ENV_CALLBACK_TASK_ID,
+    apply_queued,
+)
 
 
 class LauncherError(RuntimeError):
@@ -209,6 +214,7 @@ class AgentLauncher:
                         "mcp_config": str(mcp_path),
                         "log": str(log_path),
                         "resumed_checkpoint": resumed_checkpoint,
+                        "callback_dir": environment.get(ENV_CALLBACK_DIR),
                     }
                     metadata_attempted = True
                     atomic_replace_text(
@@ -325,6 +331,17 @@ class AgentLauncher:
                     pass
                 continue
             reason = f"agent process exited or identity changed after launch with pid {pid}"
+            try:
+                apply_queued(
+                    self.config,
+                    self.board,
+                    task_id=task_id,
+                    callback_dir=metadata.get("callback_dir")
+                    if isinstance(metadata.get("callback_dir"), str)
+                    else None,
+                )
+            except (OSError, TypeError, ValueError, RuntimeError) as exc:
+                reason = f"{reason}; worker callbacks failed: {exc}"
             try:
                 with self.board.edit(task_id) as task:
                     if task.state == "in_progress":
@@ -790,6 +807,8 @@ class AgentLauncher:
         environment["XDG_DATA_HOME"] = str(home / ".local" / "share")
         environment["SATURNIN_HOME"] = str(trusted_config.root)
         environment["SATURNIN_WORKTREE"] = str(workdir)
+        environment[ENV_CALLBACK_TASK_ID] = task.id
+        environment[ENV_CALLBACK_DIR] = str(home / ".saturnin-callbacks")
         attestation_settings = trusted_config.governance.get("review", {}).get(
             "attestation", {}
         )

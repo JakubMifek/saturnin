@@ -24,6 +24,11 @@ from saturnin.review import (
 )
 from saturnin.routing import Router
 from saturnin.worktrees import CleanupPlan, WorktreeManager
+from saturnin.worker_callbacks import (
+    CALLBACKS_FILE,
+    ENV_CALLBACK_DIR,
+    ENV_CALLBACK_TASK_ID,
+)
 
 
 def run(capsys: pytest.CaptureFixture[str], *argv: str) -> tuple[int, str]:
@@ -708,6 +713,8 @@ def test_governed_push_refuses_protected_branch_before_push(
 
     def fake_run(args, **kwargs):
         calls.append(args)
+        if args[1:3] == ["symbolic-ref", "--quiet"]:
+            return subprocess.CompletedProcess(args, 0, "main\n", "")
         if args[1:] == ["remote", "get-url", "--push", "--all", "origin"]:
             return subprocess.CompletedProcess(
                 args, 0, "https://github.com/JakubMifek/saturnin.git\n", ""
@@ -723,6 +730,27 @@ def test_governed_push_refuses_protected_branch_before_push(
     assert not any(call[1:2] == ["push"] for call in calls)
 
 
+def test_governed_push_refuses_destination_that_is_not_current_branch(
+    home: Path, capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    calls: list[list[str]] = []
+
+    def fake_run(args, **kwargs):
+        calls.append(args)
+        if args[1:3] == ["symbolic-ref", "--quiet"]:
+            return subprocess.CompletedProcess(args, 0, "main\n", "")
+        return subprocess.CompletedProcess(args, 0, "", "")
+
+    monkeypatch.setattr("saturnin.cli.subprocess.run", fake_run)
+
+    code, out = run(capsys, "push", "--branch", "feature/safe")
+
+    assert code == 2
+    assert "does not match current branch" in out
+    assert not any(call[1:2] == ["remote"] for call in calls)
+    assert not any(call[1:2] == ["push"] for call in calls)
+
+
 def test_governed_push_rejects_unconfigured_loopback_proxy(
     home: Path, capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -730,6 +758,8 @@ def test_governed_push_rejects_unconfigured_loopback_proxy(
 
     def fake_run(args, **kwargs):
         calls.append(args)
+        if args[1:3] == ["symbolic-ref", "--quiet"]:
+            return subprocess.CompletedProcess(args, 0, "feature/safe\n", "")
         if args[1:] == ["remote", "get-url", "--push", "--all", "origin"]:
             return subprocess.CompletedProcess(
                 args, 0, "http://127.0.0.1:26831/JakubMifek/saturnin\n", ""
@@ -755,6 +785,8 @@ def test_governed_push_authorizes_pushurl_not_fetch_url(
 
     def fake_run(args, **kwargs):
         calls.append(args)
+        if args[1:3] == ["symbolic-ref", "--quiet"]:
+            return subprocess.CompletedProcess(args, 0, "feature/safe\n", "")
         if args[1:] == ["remote", "get-url", "--push", "--all", "origin"]:
             return subprocess.CompletedProcess(args, 0, push_url + "\n", "")
         if args[1:] == ["remote", "get-url", "origin"]:
@@ -770,6 +802,59 @@ def test_governed_push_authorizes_pushurl_not_fetch_url(
     assert ["git", "remote", "get-url", "--push", "--all", "origin"] in calls
     assert ["git", "remote", "get-url", "origin"] not in calls
     assert not any(call[1:2] == ["push"] for call in calls)
+
+
+def test_sandboxed_worker_task_move_is_queued_without_board_access(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    callback_dir = tmp_path / "callbacks"
+    monkeypatch.setenv(ENV_CALLBACK_DIR, str(callback_dir))
+    monkeypatch.setenv(ENV_CALLBACK_TASK_ID, "T-callback")
+
+    code, out = run(
+        capsys,
+        "task",
+        "move",
+        "T-callback",
+        "review",
+        "--actor",
+        "code-worker",
+        "--note",
+        "ready",
+    )
+
+    assert code == 0
+    assert "queued worker callback" in out
+    records = [
+        json.loads(line)
+        for line in (callback_dir / CALLBACKS_FILE)
+        .read_text(encoding="utf-8")
+        .splitlines()
+    ]
+    assert records == [
+        {
+            "actor": "code-worker",
+            "note": "ready",
+            "state": "review",
+            "task_id": "T-callback",
+            "type": "task_move",
+        }
+    ]
+
+
+def test_sandboxed_worker_callback_rejects_other_task(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    callback_dir = tmp_path / "callbacks"
+    monkeypatch.setenv(ENV_CALLBACK_DIR, str(callback_dir))
+    monkeypatch.setenv(ENV_CALLBACK_TASK_ID, "T-allowed")
+
+    code = main(["task", "move", "T-other", "review"])
+    error = capsys.readouterr().err
+
+    assert code == 1
+    assert "worker may only update its own task" in error
+    assert not (callback_dir / CALLBACKS_FILE).exists()
 
 
 def test_review_gate_flow(home: Path, capsys: pytest.CaptureFixture[str]) -> None:

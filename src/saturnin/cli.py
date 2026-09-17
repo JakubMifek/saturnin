@@ -48,6 +48,7 @@ from .review import (
 )
 from .routing import Router, RoutingError
 from .worktrees import CleanupPlan, GitError, WorktreeManager
+from .worker_callbacks import queue_from_args
 
 
 def _emit(data: Any, as_json: bool, text: str | None = None) -> None:
@@ -787,6 +788,14 @@ def main(argv: Sequence[str] | None = None) -> int:
     parser = build_parser()
     args = parser.parse_args(argv)
     try:
+        queued_callback = queue_from_args(args)
+        if queued_callback is not None:
+            _emit(
+                queued_callback,
+                args.json,
+                f"queued worker callback: {queued_callback['type']} {queued_callback['task_id']}",
+            )
+            return 0
         config = _config(args)
         config.ensure_dirs()
         return _run(args, config)
@@ -929,7 +938,24 @@ def _run(args: argparse.Namespace, config: Config) -> int:  # noqa: C901 - flat 
     if args.command == "push":
         if not re.fullmatch(r"[A-Za-z0-9._-]+", args.remote):
             raise RuntimeError(f"invalid git remote name: {args.remote!r}")
-        branch = args.branch or _git_output(config.root, "symbolic-ref", "--quiet", "--short", "HEAD")
+        current_branch = _git_output(
+            config.root, "symbolic-ref", "--quiet", "--short", "HEAD"
+        )
+        branch = args.branch or current_branch
+        if branch != current_branch:
+            reason = (
+                f"destination branch {branch!r} does not match "
+                f"current branch {current_branch!r}"
+            )
+            _emit(
+                {
+                    "allowed": False,
+                    "reasons": [reason],
+                },
+                as_json,
+                f"DENIED: {reason}",
+            )
+            return 2
         push_urls = _git_output(
             config.root, "remote", "get-url", "--push", "--all", args.remote
         ).splitlines()
