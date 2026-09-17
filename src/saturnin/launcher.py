@@ -24,6 +24,7 @@ from .contracts import (
     mcp_authorization_problem,
     project_agent_path,
 )
+from .governance import Governance, github_repo_slug
 from .jsonlines import PRIVATE_FILE_MODE, atomic_replace_text
 from .mcp import MCPError, server_process, verify_github_binary
 from .review import role_scoped_review_attestation_key
@@ -633,6 +634,29 @@ class AgentLauncher:
                 f"{task.branch}\n",
                 mode=PRIVATE_FILE_MODE,
             )
+        push_urls = self._validated_push_urls(task, workdir)
+        self._git_output(
+            ["--git-dir", str(git_dir), "config", "--unset-all", "remote.origin.url"],
+            required=False,
+        )
+        self._git_output(
+            ["--git-dir", str(git_dir), "config", "--unset-all", "remote.origin.pushurl"],
+            required=False,
+        )
+        self._git_output(
+            ["--git-dir", str(git_dir), "config", "remote.origin.url", push_urls[0]]
+        )
+        for push_url in push_urls:
+            self._git_output(
+                [
+                    "--git-dir",
+                    str(git_dir),
+                    "config",
+                    "--add",
+                    "remote.origin.pushurl",
+                    push_url,
+                ]
+            )
         return (
             {
                 "GIT_DIR": str(git_dir),
@@ -642,6 +666,32 @@ class AgentLauncher:
             },
             objects,
         )
+
+    def _validated_push_urls(self, task: Task, workdir: Path) -> list[str]:
+        output = self._git_output(
+            ["remote", "get-url", "--push", "--all", "origin"],
+            cwd=workdir,
+            required=False,
+        )
+        push_urls = [url.strip() for url in output.splitlines() if url.strip()]
+        if not push_urls:
+            raise LauncherError("Git remote 'origin' has no push destination")
+        trusted_config = self._trusted_config(self.config)
+        trusted_proxy_hosts = trusted_config.governance.get("git", {}).get(
+            "trusted_github_proxy_hosts", []
+        )
+        governance = Governance(trusted_config)
+        for push_url in push_urls:
+            repo = github_repo_slug(
+                push_url,
+                trusted_proxy_hosts=trusted_proxy_hosts,
+            )
+            if repo is None:
+                raise LauncherError("Git remote 'origin' has an unrecognized push destination")
+            decision = governance.push_allowed(repo=repo, branch=str(task.branch))
+            if not decision.allowed:
+                raise LauncherError("; ".join(decision.reasons))
+        return push_urls
 
     @staticmethod
     def _git_output(

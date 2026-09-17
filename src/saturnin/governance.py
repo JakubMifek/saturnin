@@ -82,6 +82,43 @@ def _repo_slug_key(repo: object) -> str:
     return str(repo or "").strip().casefold()
 
 
+def github_repo_slug(
+    remote_url: str, *, trusted_proxy_hosts: Sequence[str] = ()
+) -> str | None:
+    remote_url = remote_url.strip()
+    scp = re.fullmatch(
+        r"git@github\.com:(?P<slug>[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+?)(?:\.git)?",
+        remote_url,
+    )
+    if scp:
+        return scp.group("slug")
+
+    try:
+        parsed = urlsplit(remote_url)
+        host = (parsed.hostname or "").casefold()
+        port = parsed.port
+    except ValueError:
+        return None
+    if parsed.query or parsed.fragment or parsed.password:
+        return None
+    if host == "github.com":
+        if parsed.scheme == "https" and parsed.username:
+            return None
+        if parsed.scheme == "ssh" and parsed.username not in {None, "git"}:
+            return None
+        if parsed.scheme not in {"https", "ssh"}:
+            return None
+    elif f"{host}:{port}" in {value.casefold() for value in trusted_proxy_hosts}:
+        if parsed.scheme not in {"http", "https"} or parsed.username:
+            return None
+    else:
+        return None
+    path = parsed.path.strip("/")
+    if path.endswith(".git"):
+        path = path[:-4]
+    return path if re.fullmatch(r"[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+", path) else None
+
+
 _GIT_SAFE_SUBCOMMANDS = frozenset(
     {
         "add",

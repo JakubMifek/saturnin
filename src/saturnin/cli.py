@@ -17,7 +17,6 @@ import sys
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Sequence
-from urllib.parse import urlsplit
 
 import yaml
 
@@ -35,7 +34,7 @@ from .contracts import (
 )
 from .discovery import DiscoveryError, IssueDiscovery
 from . import docsync
-from .governance import Governance
+from .governance import Governance, github_repo_slug
 from .improve import ImprovementLoop
 from .issues import IssueMirror, MirrorError, issue_search_url, run_gh
 from .launcher import AgentLauncher, LauncherError, LaunchResult
@@ -784,39 +783,6 @@ def _git_output(root: Path, *args: str) -> str:
     return result.stdout.strip()
 
 
-def _github_repo_slug(
-    remote_url: str, *, trusted_proxy_hosts: Sequence[str] = ()
-) -> str | None:
-    remote_url = remote_url.strip()
-    scp = re.fullmatch(
-        r"git@github\.com:(?P<slug>[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+?)(?:\.git)?",
-        remote_url,
-    )
-    if scp:
-        return scp.group("slug")
-
-    try:
-        parsed = urlsplit(remote_url)
-        host = (parsed.hostname or "").casefold()
-        port = parsed.port
-    except ValueError:
-        return None
-    if parsed.query or parsed.fragment:
-        return None
-    if host == "github.com":
-        if parsed.scheme not in {"https", "ssh"}:
-            return None
-    elif f"{host}:{port}" in {value.casefold() for value in trusted_proxy_hosts}:
-        if parsed.scheme not in {"http", "https"} or parsed.username or parsed.password:
-            return None
-    else:
-        return None
-    path = parsed.path.strip("/")
-    if path.endswith(".git"):
-        path = path[:-4]
-    return path if re.fullmatch(r"[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+", path) else None
-
-
 def main(argv: Sequence[str] | None = None) -> int:
     parser = build_parser()
     args = parser.parse_args(argv)
@@ -973,7 +939,7 @@ def _run(args: argparse.Namespace, config: Config) -> int:  # noqa: C901 - flat 
             "trusted_github_proxy_hosts", []
         )
         for remote_url in push_urls:
-            repo = _github_repo_slug(
+            repo = github_repo_slug(
                 remote_url,
                 trusted_proxy_hosts=trusted_proxy_hosts,
             )

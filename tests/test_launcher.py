@@ -263,6 +263,11 @@ def test_isolated_git_metadata_supports_commit_without_changing_shared_refs(
     task = board.get(task.id)
     launcher = AgentLauncher(config, board)
     home = launcher._isolated_home(task.id)
+    subprocess.run(
+        ["git", "config", "credential.helper", "!host-secret-helper"],
+        cwd=git_repo,
+        check=True,
+    )
     environment, objects = launcher._isolated_git_environment(
         task,
         worktree.path,
@@ -308,7 +313,30 @@ def test_isolated_git_metadata_supports_commit_without_changing_shared_refs(
         text=True,
         check=True,
     ).stdout.strip()
+    isolated_remote = subprocess.run(
+        ["git", "remote", "get-url", "--push", "--all", "origin"],
+        cwd=worktree.path,
+        env=process_environment,
+        capture_output=True,
+        text=True,
+        check=True,
+    ).stdout.splitlines()
+    isolated_remote_config = subprocess.run(
+        ["git", "config", "--get-regexp", r"^remote\.origin\."],
+        cwd=worktree.path,
+        env=process_environment,
+        capture_output=True,
+        text=True,
+        check=True,
+    ).stdout.splitlines()
     assert private_head != shared_branch_before
+    assert isolated_remote == [
+        "http://localhost:26831/JakubMifek/saturnin"
+    ]
+    assert isolated_remote_config == [
+        "remote.origin.url http://localhost:26831/JakubMifek/saturnin",
+        "remote.origin.pushurl http://localhost:26831/JakubMifek/saturnin",
+    ]
     assert subprocess.run(
         ["git", "rev-parse", task.branch],
         cwd=git_repo,
@@ -326,6 +354,50 @@ def test_isolated_git_metadata_supports_commit_without_changing_shared_refs(
     assert Path(environment["GIT_DIR"]).is_relative_to(home)
     assert Path(environment["GIT_DIR"]).stat().st_mode & 0o777 == 0o700
     assert objects == (git_repo / ".git" / "objects").resolve()
+    assert subprocess.run(
+        ["git", "config", "--get", "credential.helper"],
+        cwd=worktree.path,
+        env=process_environment,
+        capture_output=True,
+        check=False,
+    ).returncode == 1
+
+
+@pytest.mark.parametrize(
+    ("remote_url", "message"),
+    [
+        ("file:///home/runner/repository", "unrecognized"),
+        ("https://token@github.com/JakubMifek/saturnin.git", "unrecognized"),
+        ("https://github.com/other/project.git", "direct pushes"),
+    ],
+)
+def test_isolated_git_rejects_untrusted_push_destinations(
+    config: Config,
+    board: Board,
+    git_repo: Path,
+    remote_url: str,
+    message: str,
+) -> None:
+    task = board.create("Reject unsafe push destination")
+    worktree = WorktreeManager(config, repo=git_repo, board=board).create(
+        "feature/reject-push-url"
+    )
+    with board.edit(task.id) as stored:
+        stored.branch = "feature/reject-push-url"
+        stored.worktree = str(worktree.path)
+    subprocess.run(
+        ["git", "remote", "set-url", "--push", "origin", remote_url],
+        cwd=git_repo,
+        check=True,
+    )
+    launcher = AgentLauncher(config, board)
+
+    with pytest.raises(LauncherError, match=message):
+        launcher._isolated_git_environment(
+            board.get(task.id),
+            worktree.path,
+            launcher._isolated_home(task.id),
+        )
 
 
 def test_launcher_fails_closed_without_worker_sandbox(
@@ -1019,6 +1091,17 @@ def test_launcher_keeps_engine_source_for_managed_repository(
         check=True,
     )
     subprocess.run(["git", "config", "user.name", "Managed"], cwd=primary, check=True)
+    subprocess.run(
+        [
+            "git",
+            "remote",
+            "add",
+            "origin",
+            "http://localhost:26831/JakubMifek/saturnin",
+        ],
+        cwd=primary,
+        check=True,
+    )
     (primary / "README.md").write_text("managed\n", encoding="utf-8")
     subprocess.run(["git", "add", "."], cwd=primary, check=True)
     subprocess.run(["git", "commit", "-m", "initial"], cwd=primary, check=True)

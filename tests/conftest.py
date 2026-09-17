@@ -62,4 +62,13 @@ def git_repo(config: Config) -> Path:
     (root / "README.md").write_text("test repo\n", encoding="utf-8")
     git(["add", "."], root)
     git(["commit", "-m", "initial"], root)
+    git(
+        [
+            "remote",
+            "add",
+            "origin",
+            "http://localhost:26831/JakubMifek/saturnin",
+        ],
+        root,
+    )
     return root
