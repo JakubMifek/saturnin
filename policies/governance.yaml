@@ -74,6 +74,7 @@ review:
     required: true
     role_scoped: true
     key_env: SATURNIN_REVIEW_ATTESTATION_KEY
+    previous_key_env: SATURNIN_REVIEW_ATTESTATION_PREVIOUS_KEY
     key_scope_env: SATURNIN_REVIEW_ATTESTATION_KEY_SCOPE
     role_env: SATURNIN_AGENT_ROLE
 

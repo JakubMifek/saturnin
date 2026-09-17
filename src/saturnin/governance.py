@@ -592,6 +592,17 @@ class Governance:
         key_env = attestation.get("key_env")
         if not isinstance(key_env, str) or not key_env.strip():
             problems.append("review attestation policy requires a key_env")
+        previous_key_env = attestation.get("previous_key_env")
+        if previous_key_env is not None and (
+            not isinstance(previous_key_env, str) or not previous_key_env.strip()
+        ):
+            problems.append("review attestation previous_key_env must be a non-empty string")
+        if (
+            isinstance(key_env, str)
+            and isinstance(previous_key_env, str)
+            and key_env.strip() == previous_key_env.strip()
+        ):
+            problems.append("review attestation previous_key_env must differ from key_env")
         if not attestation.get("role_scoped", False):
             problems.append("review attestation keys must be role-scoped")
         for name in ("key_scope_env", "role_env"):

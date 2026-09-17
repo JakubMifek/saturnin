@@ -822,6 +822,10 @@ def test_launcher_worker_environment_uses_allowlist_and_constrained_github_token
     monkeypatch.setenv("PYTHONPATH", "/host/untrusted")
     monkeypatch.setenv("HOME", "/host/home")
     monkeypatch.setenv("SATURNIN_GITHUB_MCP_TOKEN", "scoped-read-token")
+    monkeypatch.setenv(
+        "SATURNIN_REVIEW_ATTESTATION_PREVIOUS_KEY",
+        "old-master-key",
+    )
     config.policy("mcp")["launcher"]["env_allowlist"].append(
         "SATURNIN_REVIEW_ATTESTATION_KEY"
     )
@@ -847,6 +851,7 @@ def test_launcher_worker_environment_uses_allowlist_and_constrained_github_token
     assert "GH_TOKEN" not in environment
     assert "GITHUB_TOKEN" not in environment
     assert "SATURNIN_REVIEW_ATTESTATION_KEY" not in environment
+    assert "SATURNIN_REVIEW_ATTESTATION_PREVIOUS_KEY" not in environment
     assert environment["SATURNIN_AGENT_ROLE"] == contract.role
     assert "AWS_SECRET_ACCESS_KEY" not in environment
     assert "host" not in environment["PYTHONPATH"]
@@ -926,6 +931,7 @@ def test_launcher_rejects_approved_config_destination_collisions(
 def test_launcher_injects_role_scoped_attestation_key_only_for_reviewers(
     config: Config, board: Board, git_repo: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
+    monkeypatch.setenv("SATURNIN_REVIEW_ATTESTATION_PREVIOUS_KEY", "old-master-key")
     task = board.create("Review a pull request")
     worktree = WorktreeManager(config, repo=git_repo, board=board).create(
         "feature/reviewer-key"
@@ -951,6 +957,7 @@ def test_launcher_injects_role_scoped_attestation_key_only_for_reviewers(
     assert role_key != "test-review-attestation-key"
     assert environment["SATURNIN_REVIEW_ATTESTATION_KEY_SCOPE"] == "role"
     assert environment["SATURNIN_AGENT_ROLE"] == "pr-reviewer"
+    assert "SATURNIN_REVIEW_ATTESTATION_PREVIOUS_KEY" not in environment
 
     attestation = sign_review_attestation(
         key=role_key,
@@ -965,6 +972,7 @@ def test_launcher_injects_role_scoped_attestation_key_only_for_reviewers(
         scoped.setenv("SATURNIN_REVIEW_ATTESTATION_KEY", role_key)
         scoped.setenv("SATURNIN_REVIEW_ATTESTATION_KEY_SCOPE", "role")
         scoped.setenv("SATURNIN_AGENT_ROLE", "pr-reviewer")
+        scoped.setenv("SATURNIN_REVIEW_ATTESTATION_PREVIOUS_KEY", "old-master-key")
         ReviewLedger(config).record(
             subject="JakubMifek/saturnin#reviewer-key",
             kind="pr",

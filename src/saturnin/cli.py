@@ -48,7 +48,7 @@ from .review import (
     sign_review_attestation,
 )
 from .routing import Router, RoutingError
-from .worktrees import GitError, WorktreeManager
+from .worktrees import CleanupPlan, GitError, WorktreeManager
 
 
 def _emit(data: Any, as_json: bool, text: str | None = None) -> None:
@@ -607,6 +607,23 @@ def _configured_repo_checkout(config: Config, repo: str | None) -> tuple[Path | 
             return None, f"configured checkout does not exist for managed repository {repo}: {path}"
         return path, ""
     return None, f"managed repository {repo} is not configured as a discovery source"
+
+
+def _configured_repo_checkouts(config: Config) -> list[Path]:
+    checkouts = [config.root.resolve()]
+    sources = config.policy("repos").get("discovery", {}).get("sources", []) or []
+    if not isinstance(sources, list):
+        raise BoardError("configured discovery sources must be a list")
+    for source in sources:
+        if not isinstance(source, dict) or not str(source.get("slug", "")).strip():
+            raise BoardError("each configured discovery source must be a mapping with a slug")
+        checkout, reason = _configured_repo_checkout(config, str(source["slug"]))
+        if checkout is None:
+            raise BoardError(reason)
+        resolved = checkout.resolve()
+        if resolved not in checkouts:
+            checkouts.append(resolved)
+    return checkouts
 
 
 def _provision_and_launch(
@@ -1370,10 +1387,16 @@ def _run_dispatch(args: argparse.Namespace, config: Config, board: Board, as_jso
 
 
 def _run_worktree(args: argparse.Namespace, config: Config, board: Board, as_json: bool) -> int:
-    manager = WorktreeManager(config, board=board)
     if args.worktree_command == "create":
         if args.start and not args.task:
             raise BoardError("--start requires --task")
+        checkout = config.root
+        if args.task:
+            task = board.get(args.task)
+            checkout, reason = _configured_repo_checkout(config, task.repo)
+            if checkout is None:
+                raise BoardError(reason)
+        manager = WorktreeManager(config, repo=checkout, board=board)
         with manager.lifecycle_lock():
             attachment_error = "already has an attached branch/worktree"
             actor = args.actor or "cli"
@@ -1418,6 +1441,7 @@ def _run_worktree(args: argparse.Namespace, config: Config, board: Board, as_jso
         )
         return 0
     if args.worktree_command == "list":
+        manager = WorktreeManager(config, board=board)
         worktrees = [
             {"path": str(w.path), "branch": w.branch, "main": w.is_main} for w in manager.list()
         ]
@@ -1427,11 +1451,32 @@ def _run_worktree(args: argparse.Namespace, config: Config, board: Board, as_jso
             "\n".join(f"{w['branch'] or '(detached)':<32} {w['path']}" for w in worktrees),
         )
         return 0
-    plan = manager.plan_cleanup(now=datetime.now(timezone.utc))
-    if args.apply:
-        manager.apply(plan)
-    else:
-        manager.log_plan(plan)
+    now = datetime.now(timezone.utc)
+    managers = [
+        WorktreeManager(config, repo=checkout, board=board)
+        for checkout in _configured_repo_checkouts(config)
+    ]
+    plans = [manager.plan_cleanup(now=now) for manager in managers]
+    global_cap = int(config.cleanup.get("safety", {}).get("max_removals_per_run", 10))
+    remaining = global_cap
+    for plan in plans:
+        overflow = plan.actions[remaining:]
+        plan.actions = plan.actions[:remaining]
+        for action in overflow:
+            action.reason += f" (deferred: over global cap of {global_cap} per run)"
+        plan.skipped.extend(overflow)
+        remaining -= len(plan.actions)
+    for manager, plan in zip(managers, plans, strict=True):
+        if args.apply:
+            manager.apply(plan, now=now)
+        else:
+            manager.log_plan(plan)
+    plan = CleanupPlan(
+        actions=[action for item in plans for action in item.actions],
+        skipped=[action for item in plans for action in item.skipped],
+        applied=bool(args.apply),
+        errors=[error for item in plans for error in item.errors],
+    )
     _emit(
         plan.to_dict(),
         as_json,

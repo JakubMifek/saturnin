@@ -32,9 +32,19 @@ unit environments. Only trusted supervisor processes (for example CI jobs or a
 dedicated supervisor shell profile) should load it. Worker launches derive
 role-scoped signing keys and pass them only to configured reviewer roles.
 
-To rotate the key, stop `saturnin-*` timers, replace the trusted supervisor
-secret value, and restart timers. Existing ledger entries were signed with the
-old key, so close or re-record any pending reviews before rotation.
+To rotate the key, stop `saturnin-*` timers, retain the old master key as the
+previous verification key, and install the new current key:
+
+```bash
+export SATURNIN_REVIEW_ATTESTATION_PREVIOUS_KEY='old-secret'
+export SATURNIN_REVIEW_ATTESTATION_KEY='new-secret'
+```
+
+Keep both values in the trusted supervisor environment and restart the timers.
+New attestations are signed only with the current key; the previous key is used
+only to verify ledger history. Remove it only after no ledger entry signed by
+it is needed. Rotate again only after retiring or archiving entries signed by
+the previous key.
 
 ## Cleanup safety model
 

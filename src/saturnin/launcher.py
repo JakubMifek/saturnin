@@ -486,11 +486,22 @@ class AgentLauncher:
             "attestation", {}
         )
         key_env = str(attestation_settings.get("key_env", "SATURNIN_REVIEW_ATTESTATION_KEY"))
+        previous_key_env = str(
+            attestation_settings.get(
+                "previous_key_env",
+                "SATURNIN_REVIEW_ATTESTATION_PREVIOUS_KEY",
+            )
+        )
         scope_env = str(
             attestation_settings.get("key_scope_env", "SATURNIN_REVIEW_ATTESTATION_KEY_SCOPE")
         )
         role_env = str(attestation_settings.get("role_env", "SATURNIN_AGENT_ROLE"))
-        for protected_name in (key_env, scope_env, role_env):
+        for protected_name in (
+            key_env,
+            previous_key_env,
+            scope_env,
+            role_env,
+        ):
             environment.pop(protected_name, None)
         environment[role_env] = contract.role
         source = str(config.root / "src")

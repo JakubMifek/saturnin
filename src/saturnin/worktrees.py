@@ -342,11 +342,11 @@ class WorktreeManager:
                     applied.append(action)
                 except GitError as exc:
                     plan.errors.append(f"{action.kind} {action.target}: {exc}")
-        plan.actions = applied
-        try:
-            git(["worktree", "prune"], self.repo)
-        except GitError as exc:  # pragma: no cover - defensive
-            plan.errors.append(f"worktree prune: {exc}")
+            plan.actions = applied
+            try:
+                git(["worktree", "prune"], self.repo)
+            except GitError as exc:  # pragma: no cover - defensive
+                plan.errors.append(f"worktree prune: {exc}")
         plan.applied = True
         self.log_plan(plan)
         return plan

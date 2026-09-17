@@ -1456,6 +1456,132 @@ def test_cleanup_apply_reports_plan_errors(
     assert run(capsys, "worktree", "cleanup", "--apply")[0] == 1
 
 
+def test_task_worktree_create_uses_configured_repository(
+    home: Path,
+    capsys: pytest.CaptureFixture[str],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    checkout = home / "widget-api"
+    checkout.mkdir()
+    policy_path = home / "policies" / "repos.yaml"
+    policy = yaml.safe_load(policy_path.read_text(encoding="utf-8"))
+    policy["discovery"]["sources"].append(
+        {"slug": "JakubMifek/widget-api", "checkout": str(checkout)}
+    )
+    policy_path.write_text(yaml.safe_dump(policy), encoding="utf-8")
+    task = Board().create("Widget work", repo="JakubMifek/widget-api")
+    observed: list[Path] = []
+
+    def create(manager: WorktreeManager, branch: str, **kwargs: object) -> SimpleNamespace:
+        observed.append(manager.repo)
+        return SimpleNamespace(branch=branch, path=checkout / "worktree")
+
+    monkeypatch.setattr(WorktreeManager, "create", create)
+
+    assert main(["worktree", "create", "feature/widget", "--task", task.id]) == 0
+    assert observed == [checkout.resolve()]
+
+
+def test_worktree_cleanup_visits_all_configured_repository_checkouts(
+    home: Path,
+    capsys: pytest.CaptureFixture[str],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from saturnin.worktrees import CleanupPlan
+
+    checkout = home / "widget-api"
+    checkout.mkdir()
+    policy_path = home / "policies" / "repos.yaml"
+    policy = yaml.safe_load(policy_path.read_text(encoding="utf-8"))
+    policy["discovery"]["sources"].append(
+        {"slug": "JakubMifek/widget-api", "checkout": str(checkout)}
+    )
+    policy["discovery"]["sources"].append(
+        {"slug": "JakubMifek/widget-api-mirror", "checkout": str(checkout)}
+    )
+    policy_path.write_text(yaml.safe_dump(policy), encoding="utf-8")
+    observed: list[Path] = []
+
+    def plan_cleanup(manager: WorktreeManager, *, now: datetime) -> CleanupPlan:
+        observed.append(manager.repo)
+        return CleanupPlan()
+
+    monkeypatch.setattr(WorktreeManager, "plan_cleanup", plan_cleanup)
+    monkeypatch.setattr(WorktreeManager, "log_plan", lambda self, plan: home / "janitor.log")
+
+    assert main(["worktree", "cleanup"]) == 0
+    assert observed == [home.resolve(), checkout.resolve()]
+
+
+def test_worktree_cleanup_enforces_one_global_removal_cap(
+    home: Path,
+    capsys: pytest.CaptureFixture[str],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from saturnin.worktrees import Action, CleanupPlan
+
+    checkout = home / "widget-api"
+    checkout.mkdir()
+    policy_path = home / "policies" / "repos.yaml"
+    policy = yaml.safe_load(policy_path.read_text(encoding="utf-8"))
+    policy["discovery"]["sources"].append(
+        {"slug": "JakubMifek/widget-api", "checkout": str(checkout)}
+    )
+    policy_path.write_text(yaml.safe_dump(policy), encoding="utf-8")
+    applied: list[tuple[int, int]] = []
+
+    def plan_cleanup(manager: WorktreeManager, *, now: datetime) -> CleanupPlan:
+        return CleanupPlan(
+            actions=[
+                Action("remove_worktree", f"{manager.repo}/worktree-{index}", "stale")
+                for index in range(8)
+            ]
+        )
+
+    def apply(
+        manager: WorktreeManager, plan: CleanupPlan, *, now: datetime
+    ) -> CleanupPlan:
+        applied.append((len(plan.actions), len(plan.skipped)))
+        plan.applied = True
+        return plan
+
+    monkeypatch.setattr(WorktreeManager, "plan_cleanup", plan_cleanup)
+    monkeypatch.setattr(WorktreeManager, "apply", apply)
+
+    assert main(["worktree", "cleanup", "--apply"]) == 0
+    assert applied == [(8, 0), (2, 6)]
+
+
+@pytest.mark.parametrize(
+    "source",
+    [
+        "JakubMifek/widget-api",
+        {"slug": "JakubMifek/widget-api"},
+        {"slug": "JakubMifek/widget-api", "checkout": "missing-checkout"},
+        {"checkout": "missing-slug"},
+    ],
+)
+def test_worktree_cleanup_fails_closed_for_invalid_checkout_configuration(
+    home: Path,
+    capsys: pytest.CaptureFixture[str],
+    monkeypatch: pytest.MonkeyPatch,
+    source: object,
+) -> None:
+    policy_path = home / "policies" / "repos.yaml"
+    policy = yaml.safe_load(policy_path.read_text(encoding="utf-8"))
+    policy["discovery"]["sources"].append(source)
+    policy_path.write_text(yaml.safe_dump(policy), encoding="utf-8")
+    planned: list[Path] = []
+    monkeypatch.setattr(
+        WorktreeManager,
+        "plan_cleanup",
+        lambda manager, *, now: planned.append(manager.repo),
+    )
+
+    assert main(["worktree", "cleanup", "--apply"]) == 1
+    assert planned == []
+
+
 def test_checkpoint_roundtrip(home: Path, capsys: pytest.CaptureFixture[str]) -> None:
     task = json.loads(run(capsys, "--json", "task", "add", "Long job")[1])
     run(

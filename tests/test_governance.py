@@ -14,8 +14,10 @@ from saturnin.jsonlines import durable_append_text
 from saturnin.review import (
     ReviewLedger,
     ReviewError,
+    _verification_keys,
     issue_content_digest,
     review_attestation_signing_key,
+    role_scoped_review_attestation_key,
     sign_review_attestation,
 )
 
@@ -55,6 +57,16 @@ def governance(config: Config) -> Governance:
 
 def test_policies_audit_clean(governance: Governance) -> None:
     assert governance.audit() == []
+
+
+def test_review_attestation_key_environments_must_be_distinct(config: Config) -> None:
+    attestation = config.governance["review"]["attestation"]
+    attestation["previous_key_env"] = attestation["key_env"]
+
+    assert any(
+        "previous_key_env must differ from key_env" in problem
+        for problem in Governance(config).audit()
+    )
 
 
 @pytest.mark.parametrize(
@@ -337,6 +349,24 @@ def test_role_scoped_attestation_signing_requires_agent_role(
         review_attestation_signing_key(config, "pr-reviewer")
 
 
+def test_verification_derives_master_keys_once_and_accepts_scoped_worker_key(
+    config: Config, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("SATURNIN_REVIEW_ATTESTATION_KEY", "current-master")
+    monkeypatch.setenv("SATURNIN_REVIEW_ATTESTATION_PREVIOUS_KEY", "previous-master")
+
+    assert _verification_keys(config, "pr-reviewer") == [
+        role_scoped_review_attestation_key("current-master", "pr-reviewer"),
+        role_scoped_review_attestation_key("previous-master", "pr-reviewer"),
+    ]
+
+    monkeypatch.setenv("SATURNIN_REVIEW_ATTESTATION_KEY", "already-scoped")
+    monkeypatch.setenv("SATURNIN_REVIEW_ATTESTATION_KEY_SCOPE", "role")
+    monkeypatch.setenv("SATURNIN_AGENT_ROLE", "pr-reviewer")
+
+    assert _verification_keys(config, "pr-reviewer") == ["already-scoped"]
+
+
 def test_review_gate_rejects_tampered_attestation(config: Config) -> None:
     ledger = ReviewLedger(config)
     subject = "JakubMifek/saturnin#tampered"
@@ -356,6 +386,43 @@ def test_review_gate_rejects_tampered_attestation(config: Config) -> None:
 
     with pytest.raises(ReviewError, match="invalid review attestation"):
         ledger.for_subject(subject, "pr")
+
+
+def test_review_key_rotation_retains_history_without_blocking_other_subjects(
+    config: Config, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    ledger = ReviewLedger(config)
+    old_subject = "JakubMifek/saturnin#old-key"
+    new_subject = "JakubMifek/saturnin#new-key"
+    monkeypatch.setenv("SATURNIN_REVIEW_ATTESTATION_KEY", "old-master-key")
+    record_review(
+        ledger,
+        subject=old_subject,
+        kind="pr",
+        author="code-worker",
+        reviewer="pr-reviewer",
+        verdict="approved",
+        head_sha=TEST_HEAD_SHA,
+    )
+
+    monkeypatch.setenv("SATURNIN_REVIEW_ATTESTATION_KEY", "new-master-key")
+    monkeypatch.setenv("SATURNIN_REVIEW_ATTESTATION_PREVIOUS_KEY", "old-master-key")
+
+    assert ledger.for_subject(old_subject, "pr")
+    record_review(
+        ledger,
+        subject=new_subject,
+        kind="pr",
+        author="code-worker",
+        reviewer="pr-reviewer",
+        verdict="approved",
+        head_sha="b" * 40,
+    )
+    monkeypatch.delenv("SATURNIN_REVIEW_ATTESTATION_PREVIOUS_KEY")
+
+    assert ledger.for_subject(new_subject, "pr")
+    with pytest.raises(ReviewError, match="signature does not match"):
+        ledger.for_subject(old_subject, "pr")
 
 
 def test_review_subjects_are_exact_and_roles_are_valid(config: Config) -> None:

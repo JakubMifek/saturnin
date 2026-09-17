@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import subprocess
+from contextlib import contextmanager
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
@@ -189,6 +190,32 @@ def test_cleanup_enforces_configured_reflog_retention(
     for key in ("gc.reflogExpire", "gc.reflogExpireUnreachable", "gc.pruneExpire"):
         assert git(["config", "--local", "--get", key], git_repo).strip() == "90 days ago"
     git(["reflog", "expire", "--dry-run", "--all"], git_repo)
+
+
+def test_worktree_prune_stays_inside_lifecycle_lock(
+    manager: WorktreeManager, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    locked = False
+    original_git = worktrees.git
+
+    @contextmanager
+    def lifecycle_lock():
+        nonlocal locked
+        locked = True
+        try:
+            yield
+        finally:
+            locked = False
+
+    def checked_git(args: list[str], cwd: Path) -> str:
+        if args == ["worktree", "prune"]:
+            assert locked
+        return original_git(args, cwd)
+
+    monkeypatch.setattr(manager, "lifecycle_lock", lifecycle_lock)
+    monkeypatch.setattr(worktrees, "git", checked_git)
+
+    manager.apply(manager.plan_cleanup())
 
 
 def test_invalid_reflog_retention_blocks_cleanup(

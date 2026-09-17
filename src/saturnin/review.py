@@ -267,7 +267,7 @@ def review_attestation_signing_key(
     return key
 
 
-def _verification_key(config: Config, reviewer: str) -> str:
+def _verification_keys(config: Config, reviewer: str) -> list[str]:
     settings = config.governance.get("review", {}).get("attestation", {})
     key = _load_attestation_key(config)
     scope_env = str(settings.get("key_scope_env", "SATURNIN_REVIEW_ATTESTATION_KEY_SCOPE"))
@@ -285,10 +285,17 @@ def _verification_key(config: Config, reviewer: str) -> str:
             raise ReviewError(
                 f"{role_env}={current_role} may not verify reviewer {reviewer_name}"
             )
-        return key
+        return [key]
+    previous_env = str(
+        settings.get("previous_key_env", "SATURNIN_REVIEW_ATTESTATION_PREVIOUS_KEY")
+    )
+    masters = [key]
+    previous = os.environ.get(previous_env, "")
+    if previous and previous != key:
+        masters.append(previous)
     if settings.get("role_scoped", True):
-        return role_scoped_review_attestation_key(key, reviewer)
-    return key
+        return [role_scoped_review_attestation_key(master, reviewer) for master in masters]
+    return masters
 
 
 def _verify_review_attestation(attestation: str, config: Config) -> dict[str, Any]:
@@ -309,12 +316,18 @@ def _verify_review_attestation(attestation: str, config: Config) -> dict[str, An
         expected_type = bool if field_name == "zero_context" else str
         if type(payload[field_name]) is not expected_type:
             raise ReviewError(f"review attestation field {field_name!r} has the wrong type")
-    expected = hmac.new(
-        _verification_key(config, str(payload["reviewer"])).encode("utf-8"),
-        _canonical_attestation_payload(payload),
-        hashlib.sha256,
-    ).hexdigest()
-    if not hmac.compare_digest(signature, expected):
+    verification_keys = _verification_keys(config, str(payload["reviewer"]))
+    if not any(
+        hmac.compare_digest(
+            signature,
+            hmac.new(
+                candidate.encode("utf-8"),
+                _canonical_attestation_payload(payload),
+                hashlib.sha256,
+            ).hexdigest(),
+        )
+        for candidate in verification_keys
+    ):
         raise ReviewError("review attestation signature does not match")
     return payload
 
@@ -440,11 +453,16 @@ class ReviewLedger:
         return entry
 
     def for_subject(self, subject: str, kind: str) -> list[ReviewRecord]:
-        records: list[ReviewRecord] = []
-        for path in sorted(self.dir.glob(f"{kind}-*.jsonl")):
-            records.extend(
-                record for record in self._records(path) if record.subject == subject and record.kind == kind
-            )
+        path = self.dir / f"{kind}-{slugify(subject)}.jsonl"
+        records = (
+            [
+                record
+                for record in self._records(path)
+                if record.subject == subject and record.kind == kind
+            ]
+            if path.is_file()
+            else []
+        )
         latest: dict[str, ReviewRecord] = {}
         for record in records:
             latest[record.reviewer] = record
