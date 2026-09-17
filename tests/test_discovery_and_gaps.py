@@ -87,6 +87,18 @@ def test_carried_labels_and_priority_match_regardless_of_case(config: Config, bo
     assert any(label.casefold() == "incident" for label in task.labels)
 
 
+def test_mixed_label_priority_follows_configured_policy_order(
+    config: Config, board: Board
+) -> None:
+    config.policy("repos")["discovery"]["priority_by_label"] = {
+        "incident": "P0",
+        "bug": "P1",
+    }
+    discovery = _discovery(config, board, [_issue(12, labels=["bug", "incident"])])
+
+    assert discovery.run()[0].priority == "P0"
+
+
 def test_discovery_respects_the_enabled_switch(config: Config, board: Board) -> None:
     policy = config.policy("repos")
     policy["discovery"]["enabled"] = False

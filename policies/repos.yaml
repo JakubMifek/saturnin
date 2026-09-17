@@ -51,7 +51,7 @@ discovery:
   labels: [saturnin, alert, incident]
   # Labels copied onto the board task, so the router can see what it is routing.
   carry_labels: [alert, incident, security, bug, monitor]
-  # Priority is taken from the first matching label.
+  # Priority is taken from the first matching entry in this ordered mapping.
   priority_by_label:
     incident: P0
     alert: P0

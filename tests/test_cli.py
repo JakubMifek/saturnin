@@ -388,6 +388,36 @@ def test_dispatch_launches_the_selected_agent(
     assert launched == [task["id"]]
 
 
+def test_disabled_automatic_launch_is_deferred_for_dispatch_all_retry(
+    home: Path, capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    task = json.loads(
+        run(capsys, "--json", "task", "add", "Launch when enabled", "--dispatch")[1]
+    )
+
+    assert task["state"] == "routed"
+    assert task["launch_deferred_at"] is not None
+    assert task["launch_deferred_reason"] == "agent launcher is disabled"
+
+    launched: list[str] = []
+    worktree = home / "var" / "worktrees" / "deferred"
+    worktree.mkdir(parents=True)
+    monkeypatch.setattr(AgentLauncher, "enabled", property(lambda self: True))
+    monkeypatch.setattr(
+        WorktreeManager,
+        "create",
+        lambda self, branch, base=None: SimpleNamespace(path=worktree, branch=branch),
+    )
+    monkeypatch.setattr(
+        AgentLauncher,
+        "launch",
+        lambda self, task_id, **kwargs: launched.append(task_id),
+    )
+
+    assert run(capsys, "dispatch", "--all")[0] == 0
+    assert launched == [task["id"]]
+
+
 def test_task_add_provisions_worktree_before_launch(
     home: Path, capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch
 ) -> None:

@@ -187,11 +187,10 @@ def _carried_labels(issue: InboundIssue, policy: dict[str, Any]) -> list[str]:
 
 def _priority(issue: InboundIssue, policy: dict[str, Any]) -> str:
     mapping: dict[str, str] = policy.get("priority_by_label", {}) or {}
-    mapping_casefold = {str(label).casefold(): str(value) for label, value in mapping.items()}
-    for label in issue.labels:
-        folded = label.casefold()
-        if folded in mapping_casefold:
-            return mapping_casefold[folded]
+    issue_labels = {label.casefold() for label in issue.labels}
+    for label, priority in mapping.items():
+        if str(label).casefold() in issue_labels:
+            return str(priority)
     return str(policy.get("default_priority", "P2"))
 
 

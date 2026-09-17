@@ -643,6 +643,7 @@ def _provision_and_launch(
 ) -> LaunchResult | None:
     launcher = AgentLauncher(config, board)
     if not launcher.enabled:
+        _defer_launch(board, task_id, "agent launcher is disabled")
         return None
     task = board.get(task_id)
     if not task.worktree:
