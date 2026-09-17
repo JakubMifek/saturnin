@@ -357,6 +357,9 @@ def test_verification_derives_master_keys_once_and_accepts_scoped_worker_key(
 
     assert _verification_keys(config, "pr-reviewer") == [
         role_scoped_review_attestation_key("current-master", "pr-reviewer"),
+    ]
+    assert _verification_keys(config, "pr-reviewer", include_previous=True) == [
+        role_scoped_review_attestation_key("current-master", "pr-reviewer"),
         role_scoped_review_attestation_key("previous-master", "pr-reviewer"),
     ]
 
@@ -408,7 +411,29 @@ def test_review_key_rotation_retains_history_without_blocking_other_subjects(
     monkeypatch.setenv("SATURNIN_REVIEW_ATTESTATION_KEY", "new-master-key")
     monkeypatch.setenv("SATURNIN_REVIEW_ATTESTATION_PREVIOUS_KEY", "old-master-key")
 
+    with pytest.raises(ReviewError, match="manifest is missing or invalid"):
+        ledger.for_subject(old_subject, "pr")
+    manifest_path = ledger.seal_rotation_manifest()
     assert ledger.for_subject(old_subject, "pr")
+    stale_key_attestation = sign_review_attestation(
+        key=role_scoped_review_attestation_key("old-master-key", "pr-reviewer"),
+        subject="JakubMifek/saturnin#stale-key",
+        kind="pr",
+        author="code-worker",
+        reviewer="pr-reviewer",
+        verdict="approved",
+        head_sha="c" * 40,
+    )
+    with pytest.raises(ReviewError, match="signature does not match"):
+        ledger.record(
+            subject="JakubMifek/saturnin#stale-key",
+            kind="pr",
+            author="code-worker",
+            reviewer="pr-reviewer",
+            verdict="approved",
+            head_sha="c" * 40,
+            attestation=stale_key_attestation,
+        )
     record_review(
         ledger,
         subject=new_subject,
@@ -421,6 +446,13 @@ def test_review_key_rotation_retains_history_without_blocking_other_subjects(
     monkeypatch.delenv("SATURNIN_REVIEW_ATTESTATION_PREVIOUS_KEY")
 
     assert ledger.for_subject(new_subject, "pr")
+    with pytest.raises(ReviewError, match="signature does not match"):
+        ledger.for_subject(old_subject, "pr")
+
+    monkeypatch.setenv("SATURNIN_REVIEW_ATTESTATION_PREVIOUS_KEY", "old-master-key")
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    manifest["attestations"][0]["reviewer"] = "issue-reviewer"
+    manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
     with pytest.raises(ReviewError, match="signature does not match"):
         ledger.for_subject(old_subject, "pr")
 

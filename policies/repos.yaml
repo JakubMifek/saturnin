@@ -64,6 +64,7 @@ discovery:
   # labels and maintainer-applied trust labels:
   #   - slug: JakubMifek/widget-api
   #     checkout: /home/saturnin/projects/widget-api
+  #     default_branch: trunk  # optional when origin/HEAD is configured locally
   #     labels: [alert, incident]
   #     require_labels: [saturnin:trusted]
   sources:

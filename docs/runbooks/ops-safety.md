@@ -38,13 +38,16 @@ previous verification key, and install the new current key:
 ```bash
 export SATURNIN_REVIEW_ATTESTATION_PREVIOUS_KEY='old-secret'
 export SATURNIN_REVIEW_ATTESTATION_KEY='new-secret'
+saturnin review seal-rotation
 ```
 
-Keep both values in the trusted supervisor environment and restart the timers.
-New attestations are signed only with the current key; the previous key is used
-only to verify ledger history. Remove it only after no ledger entry signed by
-it is needed. Rotate again only after retiring or archiving entries signed by
-the previous key.
+Run the sealing command before restarting timers. It writes a manifest
+authenticated by a dedicated derivation of the current master key and seals
+the exact reviewer, attestation ID, and signature tuples retained from the old
+key. Previous-key records fail closed if this manifest is absent, malformed,
+or altered; newly minted old-key attestations are never accepted. Keep master
+and previous keys only in the trusted supervisor environment. Rotate again
+only after retiring or archiving records signed by the previous key.
 
 ## Cleanup safety model
 

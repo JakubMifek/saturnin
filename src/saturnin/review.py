@@ -33,6 +33,7 @@ KINDS = ("pr", "issue")
 _HEX_SHA_RE = re.compile(r"[0-9a-fA-F]{40}")
 _ISSUE_DIGEST_RE = re.compile(r"[0-9a-fA-F]{64}")
 _REPOSITORY_SLUG_RE = re.compile(r"[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+")
+_ATTESTATION_SIGNATURE_RE = re.compile(r"(?:[0-9a-f]{64}:)?[0-9a-f]{64}")
 
 
 class ReviewError(RuntimeError):
@@ -119,6 +120,10 @@ class ReviewRecord:
             raise ValueError("issue review record requires destination_repo")
         if bool(data["attestation_id"]) != bool(data["attestation_signature"]):
             raise ValueError("review record attestation id and signature must be paired")
+        if data["attestation_signature"] and not _ATTESTATION_SIGNATURE_RE.fullmatch(
+            data["attestation_signature"]
+        ):
+            raise ValueError("review record attestation signature has the wrong format")
         try:
             created_at = datetime.fromisoformat(data["created_at"])
         except ValueError as exc:
@@ -140,6 +145,7 @@ ATTESTED_FIELDS = (
     "destination_repo",
 )
 ROLE_SCOPED_KEY_CONTEXT = "saturnin-review-attestation"
+ROTATION_MANIFEST_KEY_CONTEXT = "saturnin-review-rotation-manifest:v1"
 
 
 def slugify(subject: str) -> str:
@@ -169,6 +175,8 @@ def normalize_repository_slug(repo: str) -> str:
 def _canonical_attestation_payload(payload: dict[str, Any]) -> bytes:
     covered = {field: payload[field] for field in ATTESTED_FIELDS}
     covered["attestation_id"] = payload["attestation_id"]
+    if "key_id" in payload:
+        covered["key_id"] = payload["key_id"]
     return json.dumps(covered, sort_keys=True, separators=(",", ":")).encode("utf-8")
 
 
@@ -208,6 +216,7 @@ def sign_review_attestation(
         "issue_digest": issue_digest.strip(),
         "destination_repo": normalized_destination,
         "attestation_id": attestation_id or secrets.token_hex(16),
+        "key_id": hashlib.sha256(key.encode("utf-8")).hexdigest(),
     }
     signature = hmac.new(
         key.encode("utf-8"),
@@ -229,6 +238,14 @@ def role_scoped_review_attestation_key(master_key: str, reviewer: str) -> str:
         f"{ROLE_SCOPED_KEY_CONTEXT}:{reviewer_name}".encode("utf-8"),
         hashlib.sha256,
     ).hexdigest()
+
+
+def _rotation_manifest_key(master_key: str) -> bytes:
+    return hmac.new(
+        master_key.encode("utf-8"),
+        ROTATION_MANIFEST_KEY_CONTEXT.encode("utf-8"),
+        hashlib.sha256,
+    ).digest()
 
 
 def _load_attestation_key(config: Config) -> str:
@@ -267,7 +284,9 @@ def review_attestation_signing_key(
     return key
 
 
-def _verification_keys(config: Config, reviewer: str) -> list[str]:
+def _verification_keys(
+    config: Config, reviewer: str, *, include_previous: bool = False
+) -> list[str]:
     settings = config.governance.get("review", {}).get("attestation", {})
     key = _load_attestation_key(config)
     scope_env = str(settings.get("key_scope_env", "SATURNIN_REVIEW_ATTESTATION_KEY_SCOPE"))
@@ -286,19 +305,25 @@ def _verification_keys(config: Config, reviewer: str) -> list[str]:
                 f"{role_env}={current_role} may not verify reviewer {reviewer_name}"
             )
         return [key]
-    previous_env = str(
-        settings.get("previous_key_env", "SATURNIN_REVIEW_ATTESTATION_PREVIOUS_KEY")
-    )
     masters = [key]
-    previous = os.environ.get(previous_env, "")
-    if previous and previous != key:
-        masters.append(previous)
+    if include_previous:
+        previous_env = str(
+            settings.get("previous_key_env", "SATURNIN_REVIEW_ATTESTATION_PREVIOUS_KEY")
+        )
+        previous = os.environ.get(previous_env, "")
+        if previous and previous != key:
+            masters.append(previous)
     if settings.get("role_scoped", True):
         return [role_scoped_review_attestation_key(master, reviewer) for master in masters]
     return masters
 
 
-def _verify_review_attestation(attestation: str, config: Config) -> dict[str, Any]:
+def _verify_review_attestation(
+    attestation: str,
+    config: Config,
+    *,
+    historical_identity: tuple[str, str, str] | None = None,
+) -> dict[str, Any]:
     try:
         payload = json.loads(attestation)
     except json.JSONDecodeError as exc:
@@ -306,19 +331,40 @@ def _verify_review_attestation(attestation: str, config: Config) -> dict[str, An
     if not isinstance(payload, dict):
         raise ReviewError("review attestation must be a JSON object")
     required = {*ATTESTED_FIELDS, "attestation_id", "signature"}
+    if historical_identity is None:
+        required.add("key_id")
     missing = sorted(required - set(payload))
     if missing:
         raise ReviewError(f"review attestation is missing field(s): {', '.join(missing)}")
     signature = payload.get("signature")
     if not isinstance(signature, str) or not re.fullmatch(r"[0-9a-fA-F]{64}", signature):
         raise ReviewError("review attestation signature must be a SHA-256 HMAC")
-    for field_name in (*ATTESTED_FIELDS, "attestation_id"):
+    for field_name in (*ATTESTED_FIELDS, "attestation_id", "key_id"):
+        if field_name not in payload:
+            continue
         expected_type = bool if field_name == "zero_context" else str
         if type(payload[field_name]) is not expected_type:
             raise ReviewError(f"review attestation field {field_name!r} has the wrong type")
-    verification_keys = _verification_keys(config, str(payload["reviewer"]))
-    if not any(
-        hmac.compare_digest(
+    include_previous = historical_identity is not None
+    verification_keys = _verification_keys(
+        config, str(payload["reviewer"]), include_previous=include_previous
+    )
+    key_id = payload.get("key_id")
+    if key_id is not None and not re.fullmatch(r"[0-9a-f]{64}", key_id):
+        raise ReviewError("review attestation key_id must be a SHA-256 digest")
+    matching_keys = [
+        candidate
+        for candidate in verification_keys
+        if key_id is None
+        or hmac.compare_digest(
+            key_id,
+            hashlib.sha256(candidate.encode("utf-8")).hexdigest(),
+        )
+    ]
+    verified_keys = [
+        candidate
+        for candidate in matching_keys
+        if hmac.compare_digest(
             signature,
             hmac.new(
                 candidate.encode("utf-8"),
@@ -326,10 +372,82 @@ def _verify_review_attestation(attestation: str, config: Config) -> dict[str, An
                 hashlib.sha256,
             ).hexdigest(),
         )
-        for candidate in verification_keys
-    ):
+    ]
+    if not verified_keys:
         raise ReviewError("review attestation signature does not match")
+    current_key = _verification_keys(config, str(payload["reviewer"]))[0]
+    uses_previous = not any(
+        hmac.compare_digest(candidate, current_key) for candidate in verified_keys
+    )
+    if uses_previous:
+        assert historical_identity is not None
+        _require_sealed_previous_attestation(config, historical_identity)
     return payload
+
+
+def _manifest_payload(entries: list[dict[str, str]]) -> bytes:
+    return json.dumps(
+        {"version": 1, "attestations": entries},
+        sort_keys=True,
+        separators=(",", ":"),
+    ).encode("utf-8")
+
+
+def _rotation_manifest_path(config: Config) -> Path:
+    return config.board_dir / "reviews" / "rotation-manifest.json"
+
+
+def _load_rotation_manifest(config: Config) -> set[tuple[str, str, str]]:
+    settings = config.governance.get("review", {}).get("attestation", {})
+    scope_env = str(settings.get("key_scope_env", "SATURNIN_REVIEW_ATTESTATION_KEY_SCOPE"))
+    if os.environ.get(scope_env) == "role":
+        raise ReviewError("previous-key ledger history requires trusted supervisor verification")
+    path = _rotation_manifest_path(config)
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as exc:
+        raise ReviewError(f"previous-key rotation manifest is missing or invalid: {path}") from exc
+    if not isinstance(data, dict) or set(data) != {"version", "attestations", "signature"}:
+        raise ReviewError("previous-key rotation manifest has an invalid schema")
+    entries = data["attestations"]
+    signature = data["signature"]
+    if data["version"] != 1 or not isinstance(entries, list):
+        raise ReviewError("previous-key rotation manifest has an invalid schema")
+    if not isinstance(signature, str) or not re.fullmatch(r"[0-9a-f]{64}", signature):
+        raise ReviewError("previous-key rotation manifest has an invalid signature")
+    normalized: list[dict[str, str]] = []
+    for entry in entries:
+        if (
+            not isinstance(entry, dict)
+            or set(entry) != {"reviewer", "attestation_id", "signature"}
+            or not all(isinstance(value, str) and value for value in entry.values())
+        ):
+            raise ReviewError("previous-key rotation manifest has an invalid entry")
+        normalized.append(entry)
+    if normalized != sorted(
+        normalized,
+        key=lambda item: (item["reviewer"], item["attestation_id"], item["signature"]),
+    ):
+        raise ReviewError("previous-key rotation manifest entries are not canonical")
+    expected = hmac.new(
+        _rotation_manifest_key(_load_attestation_key(config)),
+        _manifest_payload(normalized),
+        hashlib.sha256,
+    ).hexdigest()
+    if not hmac.compare_digest(signature, expected):
+        raise ReviewError("previous-key rotation manifest signature does not match")
+    return {
+        (entry["reviewer"], entry["attestation_id"], entry["signature"])
+        for entry in normalized
+    }
+
+
+def _require_sealed_previous_attestation(
+    config: Config,
+    identity: tuple[str, str, str],
+) -> None:
+    if identity not in _load_rotation_manifest(config):
+        raise ReviewError("previous-key review attestation is not sealed by the rotation manifest")
 
 
 class ReviewLedger:
@@ -411,7 +529,9 @@ class ReviewLedger:
                         f"review attestation {field_name} does not match the record"
                     )
             attestation_id = str(payload["attestation_id"])
-            attestation_signature = str(payload["signature"])
+            attestation_signature = (
+                f"{payload['key_id']}:{payload['signature']}"
+            )
         entry = ReviewRecord(
             subject=subject,
             kind=kind,
@@ -472,6 +592,90 @@ class ReviewLedger:
         for path in sorted(self.dir.glob("*.jsonl")):
             yield from self._records(path)
 
+    def seal_rotation_manifest(self) -> Path:
+        settings = self.config.governance.get("review", {}).get("attestation", {})
+        scope_env = str(
+            settings.get("key_scope_env", "SATURNIN_REVIEW_ATTESTATION_KEY_SCOPE")
+        )
+        if os.environ.get(scope_env) == "role":
+            raise ReviewError("rotation manifests require the trusted supervisor environment")
+        previous_env = str(
+            settings.get("previous_key_env", "SATURNIN_REVIEW_ATTESTATION_PREVIOUS_KEY")
+        )
+        previous_master = os.environ.get(previous_env, "")
+        if not previous_master:
+            raise ReviewError(f"rotation manifest requires {previous_env}")
+        current_master = _load_attestation_key(self.config)
+        if hmac.compare_digest(previous_master, current_master):
+            raise ReviewError("current and previous review attestation keys must differ")
+        entries: list[dict[str, str]] = []
+        for path in sorted(self.dir.glob("*.jsonl")):
+            with file_lock(path, exclusive=False):
+                text = path.read_text(encoding="utf-8")
+            try:
+                records = [
+                    ReviewRecord.from_dict(data)
+                    for data in objects(
+                        text,
+                        path,
+                        required_fields=REQUIRED_FIELDS,
+                        validator=ReviewRecord.validate_dict,
+                    )
+                ]
+            except JSONLinesError as exc:
+                raise ReviewError(f"corrupt review ledger {exc}") from exc
+            for record in records:
+                if self._record_matches_master(record, previous_master):
+                    entries.append(
+                        {
+                            "reviewer": record.reviewer,
+                            "attestation_id": record.attestation_id,
+                            "signature": record.attestation_signature,
+                        }
+                    )
+        entries.sort(
+            key=lambda item: (item["reviewer"], item["attestation_id"], item["signature"])
+        )
+        payload = _manifest_payload(entries)
+        manifest = {
+            "version": 1,
+            "attestations": entries,
+            "signature": hmac.new(
+                _rotation_manifest_key(current_master),
+                payload,
+                hashlib.sha256,
+            ).hexdigest(),
+        }
+        path = _rotation_manifest_path(self.config)
+        with file_lock(path):
+            atomic_replace_text(
+                path,
+                json.dumps(manifest, sort_keys=True, separators=(",", ":")) + "\n",
+            )
+        return path
+
+    @staticmethod
+    def _record_matches_master(record: ReviewRecord, master_key: str) -> bool:
+        key = role_scoped_review_attestation_key(master_key, record.reviewer)
+        payload = {field: getattr(record, field) for field in ATTESTED_FIELDS}
+        payload["attestation_id"] = record.attestation_id
+        stored_signature = record.attestation_signature
+        if ":" in stored_signature:
+            key_id, signature = stored_signature.split(":", 1)
+            if not hmac.compare_digest(
+                key_id, hashlib.sha256(key.encode("utf-8")).hexdigest()
+            ):
+                return False
+            payload["key_id"] = key_id
+        else:
+            signature = stored_signature
+        expected = hmac.new(
+            key.encode("utf-8"),
+            _canonical_attestation_payload(payload),
+            hashlib.sha256,
+        ).hexdigest()
+        return hmac.compare_digest(signature, expected)
+
     def _records(self, path: Path) -> Iterator[ReviewRecord]:
         with file_lock(path, exclusive=False):
             text = path.read_text(encoding="utf-8")
@@ -502,11 +706,21 @@ class ReviewLedger:
             for field in ATTESTED_FIELDS
         }
         payload["attestation_id"] = record.attestation_id
-        payload["signature"] = record.attestation_signature
+        if ":" in record.attestation_signature:
+            key_id, signature = record.attestation_signature.split(":", 1)
+            payload["key_id"] = key_id
+            payload["signature"] = signature
+        else:
+            payload["signature"] = record.attestation_signature
         try:
             _verify_review_attestation(
                 json.dumps(payload, sort_keys=True, separators=(",", ":")),
                 self.config,
+                historical_identity=(
+                    record.reviewer,
+                    record.attestation_id,
+                    record.attestation_signature,
+                ),
             )
         except ReviewError as exc:
             raise ReviewError(

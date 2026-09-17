@@ -70,6 +70,13 @@ def test_managed_repo_relative_worktree_root_stays_with_repo(
     (managed / "README.md").write_text("managed\n", encoding="utf-8")
     git(["add", "."], managed)
     git(["commit", "-m", "initial"], managed)
+    linked_config.policy("repos")["discovery"]["sources"].append(
+        {
+            "slug": "JakubMifek/managed-repo",
+            "checkout": str(managed),
+            "default_branch": "main",
+        }
+    )
 
     worktree = WorktreeManager(
         linked_config, repo=managed, board=Board(linked_config)
@@ -216,6 +223,68 @@ def test_worktree_prune_stays_inside_lifecycle_lock(
     monkeypatch.setattr(worktrees, "git", checked_git)
 
     manager.apply(manager.plan_cleanup())
+
+
+def test_managed_repository_uses_its_configured_default_branch(
+    config: Config,
+    board: Board,
+    tmp_path: Path,
+) -> None:
+    managed = tmp_path / "managed"
+    managed.mkdir()
+    git(["init", "-b", "trunk"], managed)
+    git(["config", "user.email", "saturnin@example.com"], managed)
+    git(["config", "user.name", "Saturnin"], managed)
+    (managed / "README.md").write_text("managed\n", encoding="utf-8")
+    git(["add", "."], managed)
+    git(["commit", "-m", "initial"], managed)
+    config.policy("repos")["discovery"]["sources"].append(
+        {
+            "slug": "JakubMifek/managed",
+            "checkout": str(managed),
+            "default_branch": "trunk",
+        }
+    )
+    manager = WorktreeManager(config, repo=managed, board=board)
+
+    created = manager.create("feature/managed")
+
+    assert created.branch == "feature/managed"
+    assert git(["merge-base", "--is-ancestor", "trunk", "feature/managed"], managed) == ""
+    assert manager.default_branch() == "trunk"
+    assert manager.has_local_commits("feature/managed") is False
+
+
+def test_managed_repository_uses_local_origin_head(
+    config: Config,
+    board: Board,
+    tmp_path: Path,
+) -> None:
+    managed = tmp_path / "managed-origin"
+    managed.mkdir()
+    git(["init", "-b", "trunk"], managed)
+    git(["config", "user.email", "saturnin@example.com"], managed)
+    git(["config", "user.name", "Saturnin"], managed)
+    (managed / "README.md").write_text("managed\n", encoding="utf-8")
+    git(["add", "."], managed)
+    git(["commit", "-m", "initial"], managed)
+    git(["update-ref", "refs/remotes/origin/trunk", "trunk"], managed)
+    git(["symbolic-ref", "refs/remotes/origin/HEAD", "refs/remotes/origin/trunk"], managed)
+
+    assert WorktreeManager(config, repo=managed, board=board).default_branch() == "trunk"
+
+
+def test_managed_repository_fails_closed_when_default_branch_is_unknown(
+    config: Config,
+    board: Board,
+    tmp_path: Path,
+) -> None:
+    managed = tmp_path / "managed-unknown"
+    managed.mkdir()
+    git(["init", "-b", "trunk"], managed)
+
+    with pytest.raises(GitError, match="cannot resolve default branch"):
+        WorktreeManager(config, repo=managed, board=board).default_branch()
 
 
 def test_invalid_reflog_retention_blocks_cleanup(

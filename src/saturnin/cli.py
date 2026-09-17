@@ -241,6 +241,10 @@ def build_parser() -> argparse.ArgumentParser:
         default="",
         help="reviewed title/body digest for issue reviews",
     )
+    review.add_parser(
+        "seal-rotation",
+        help="seal retained previous-key attestations with the current master key",
+    )
     gate = review.add_parser("gate", help="check whether merge/submission is allowed")
     gate.add_argument("subject")
     gate.add_argument("--kind", choices=["pr", "issue"], required=True)
@@ -615,8 +619,12 @@ def _configured_repo_checkouts(config: Config) -> list[Path]:
     if not isinstance(sources, list):
         raise BoardError("configured discovery sources must be a list")
     for source in sources:
+        if isinstance(source, str):
+            source = {"slug": source}
         if not isinstance(source, dict) or not str(source.get("slug", "")).strip():
             raise BoardError("each configured discovery source must be a mapping with a slug")
+        if not source.get("checkout"):
+            continue
         checkout, reason = _configured_repo_checkout(config, str(source["slug"]))
         if checkout is None:
             raise BoardError(reason)
@@ -1562,6 +1570,15 @@ def _run_checkpoint(args: argparse.Namespace, config: Config, board: Board, as_j
 
 def _run_review(args: argparse.Namespace, config: Config, as_json: bool) -> int:
     ledger = ReviewLedger(config)
+    if args.review_command == "seal-rotation":
+        path = ledger.seal_rotation_manifest()
+        data = json.loads(path.read_text(encoding="utf-8"))
+        _emit(
+            {"path": str(path), "attestations": len(data["attestations"])},
+            as_json,
+            f"sealed {len(data['attestations'])} attestation(s) in {path}",
+        )
+        return 0
     if args.review_command == "attest":
         attestation = sign_review_attestation(
             key=_review_attestation_key(config, args.reviewer),

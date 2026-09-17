@@ -23,7 +23,7 @@ from saturnin.review import (
     sign_review_attestation,
 )
 from saturnin.routing import Router
-from saturnin.worktrees import WorktreeManager
+from saturnin.worktrees import CleanupPlan, WorktreeManager
 
 
 def run(capsys: pytest.CaptureFixture[str], *argv: str) -> tuple[int, str]:
@@ -1466,7 +1466,7 @@ def test_task_worktree_create_uses_configured_repository(
     policy_path = home / "policies" / "repos.yaml"
     policy = yaml.safe_load(policy_path.read_text(encoding="utf-8"))
     policy["discovery"]["sources"].append(
-        {"slug": "JakubMifek/widget-api", "checkout": str(checkout)}
+        {"slug": "JakubMifek/widget-api", "checkout": "widget-api"}
     )
     policy_path.write_text(yaml.safe_dump(policy), encoding="utf-8")
     task = Board().create("Widget work", repo="JakubMifek/widget-api")
@@ -1493,8 +1493,9 @@ def test_worktree_cleanup_visits_all_configured_repository_checkouts(
     checkout.mkdir()
     policy_path = home / "policies" / "repos.yaml"
     policy = yaml.safe_load(policy_path.read_text(encoding="utf-8"))
+    policy["discovery"]["sources"].append("JakubMifek/remote-only")
     policy["discovery"]["sources"].append(
-        {"slug": "JakubMifek/widget-api", "checkout": str(checkout)}
+        {"slug": "JakubMifek/widget-api", "checkout": "widget-api"}
     )
     policy["discovery"]["sources"].append(
         {"slug": "JakubMifek/widget-api-mirror", "checkout": str(checkout)}
@@ -1557,11 +1558,43 @@ def test_worktree_cleanup_enforces_one_global_removal_cap(
     [
         "JakubMifek/widget-api",
         {"slug": "JakubMifek/widget-api"},
+    ],
+)
+def test_worktree_cleanup_skips_sources_without_local_checkouts(
+    home: Path,
+    capsys: pytest.CaptureFixture[str],
+    monkeypatch: pytest.MonkeyPatch,
+    source: object,
+) -> None:
+    policy_path = home / "policies" / "repos.yaml"
+    policy = yaml.safe_load(policy_path.read_text(encoding="utf-8"))
+    policy["discovery"]["sources"].append(source)
+    policy_path.write_text(yaml.safe_dump(policy), encoding="utf-8")
+    planned: list[Path] = []
+
+    def plan_cleanup(manager: WorktreeManager, *, now: datetime) -> CleanupPlan:
+        planned.append(manager.repo)
+        return CleanupPlan()
+
+    monkeypatch.setattr(WorktreeManager, "plan_cleanup", plan_cleanup)
+    monkeypatch.setattr(
+        WorktreeManager,
+        "apply",
+        lambda manager, plan, *, now: plan,
+    )
+
+    assert main(["worktree", "cleanup", "--apply"]) == 0
+    assert planned == [home.resolve()]
+
+
+@pytest.mark.parametrize(
+    "source",
+    [
         {"slug": "JakubMifek/widget-api", "checkout": "missing-checkout"},
         {"checkout": "missing-slug"},
     ],
 )
-def test_worktree_cleanup_fails_closed_for_invalid_checkout_configuration(
+def test_worktree_cleanup_fails_closed_for_malformed_local_checkout(
     home: Path,
     capsys: pytest.CaptureFixture[str],
     monkeypatch: pytest.MonkeyPatch,

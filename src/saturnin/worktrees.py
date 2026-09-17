@@ -162,8 +162,33 @@ class WorktreeManager:
         raw = git(["log", "-1", "--format=%cI", branch], self.repo).strip()
         return datetime.fromisoformat(raw)
 
+    def default_branch(self) -> str:
+        if self.repo.resolve() == self.config.root.resolve():
+            return self.governance.default_branch
+        for source in self.config.policy("repos").get("discovery", {}).get("sources", []) or []:
+            if not isinstance(source, dict) or not source.get("checkout"):
+                continue
+            checkout = Path(str(source["checkout"])).expanduser()
+            if not checkout.is_absolute():
+                checkout = self.config.root / checkout
+            if checkout.resolve() == self.repo.resolve() and source.get("default_branch"):
+                return str(source["default_branch"])
+        try:
+            remote_head = git(
+                ["symbolic-ref", "--quiet", "--short", "refs/remotes/origin/HEAD"],
+                self.repo,
+            ).strip()
+        except GitError:
+            remote_head = ""
+        if remote_head.startswith("origin/"):
+            return remote_head.removeprefix("origin/")
+        raise GitError(
+            f"cannot resolve default branch for managed repository {self.repo}; "
+            "configure discovery.sources[].default_branch or origin/HEAD"
+        )
+
     def merged_branches(self) -> set[str]:
-        default = self.governance.default_branch
+        default = self.default_branch()
         try:
             out = git(["branch", "--merged", default, "--format=%(refname:short)"], self.repo)
         except GitError:
@@ -178,7 +203,7 @@ class WorktreeManager:
 
     def has_local_commits(self, branch: str) -> bool:
         """Return True if *branch* has commits not present in the default branch."""
-        default = self.governance.default_branch
+        default = self.default_branch()
         try:
             out = git(["log", f"{default}..{branch}", "--oneline"], self.repo)
             return bool(out.strip())
@@ -196,7 +221,10 @@ class WorktreeManager:
         decision = self.governance.check_branch(branch)
         if not decision.allowed:
             raise GitError("; ".join(decision.reasons))
-        base = base or self.governance.default_branch
+        default = self.default_branch()
+        if branch == default:
+            raise GitError(f"branch {branch!r} is protected")
+        base = base or default
         root = Path(self.config.governance.get("git", {}).get("worktree_root", "var/worktrees"))
         if not root.is_absolute():
             repository_config = Config(self.repo)
@@ -232,7 +260,7 @@ class WorktreeManager:
         wt_policy = self.policy.get("worktree", {})
         br_policy = self.policy.get("branch", {})
         safety = self.policy.get("safety", {})
-        protected = set(self.governance.protected_branches)
+        protected = set(self.governance.protected_branches) | {self.default_branch()}
         merged = self.merged_branches()
         plan = CleanupPlan()
 
@@ -396,7 +424,7 @@ class WorktreeManager:
 
     def _delete_branch_skip_reason(self, branch: str, *, now: datetime | None = None) -> str | None:
         now = now or datetime.now(timezone.utc)
-        if branch in self.governance.protected_branches:
+        if branch in set(self.governance.protected_branches) | {self.default_branch()}:
             return "protected branch"
         if branch in {worktree.branch for worktree in self.list()}:
             return "checked out in a worktree"
