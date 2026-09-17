@@ -16,7 +16,7 @@ from pathlib import Path
 from typing import Any, Iterable, Iterator
 
 from .config import Config, default_config
-from .jsonlines import atomic_replace_text
+from .jsonlines import PRIVATE_FILE_MODE, atomic_replace_text
 from .locking import file_lock
 
 KINDS = ("objective", "epic", "feature", "task", "pr-review", "issue-review",
@@ -149,7 +149,11 @@ class Board:
         return task
 
     def _write(self, path: Path, task: Task) -> None:
-        atomic_replace_text(path, json.dumps(task.to_dict(), indent=2) + "\n")
+        atomic_replace_text(
+            path,
+            json.dumps(task.to_dict(), indent=2) + "\n",
+            mode=PRIVATE_FILE_MODE,
+        )
 
     @contextmanager
     def edit(self, task_id: str) -> Iterator[Task]:

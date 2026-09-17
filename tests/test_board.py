@@ -26,7 +26,7 @@ def test_board_writes_use_durable_atomic_replace(
 ) -> None:
     writes: list[tuple[Path, str]] = []
 
-    def durable_write(path: Path, text: str) -> None:
+    def durable_write(path: Path, text: str, *, mode: int | None = None) -> None:
         writes.append((path, text))
         path.write_text(text, encoding="utf-8")
 
@@ -37,6 +37,19 @@ def test_board_writes_use_durable_atomic_replace(
     assert len(writes) == 1
     assert writes[0][0] == board.path_for(task.id)
     assert '"title": "Power-loss-safe task"' in writes[0][1]
+
+
+def test_task_files_are_created_and_rewritten_private(board: Board) -> None:
+    task = board.create("Private task")
+    path = board.path_for(task.id)
+
+    assert path.stat().st_mode & 0o777 == 0o600
+
+    path.chmod(0o666)
+    with board.edit(task.id) as stored:
+        stored.title = "Still private"
+
+    assert path.stat().st_mode & 0o777 == 0o600
 
 
 def test_failed_atomic_replace_preserves_authoritative_task(

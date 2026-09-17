@@ -41,7 +41,7 @@ The default installation is non-launching: the task is routed, and `saturnin run
 <task-id>` reports `{"disabled": true}` until `policies/mcp.yaml` is configured
 for this host. Enable launching only after the worker has an attached feature
 branch/worktree, installs and verifies the pinned GitHub MCP server, and checks
-that the `copilot`, `npx` and `uvx` prerequisites are installed.
+that the `bwrap`, `copilot`, `npx` and `uvx` prerequisites are installed.
 
 ## 4. Do the work in a worktree
 

@@ -6,9 +6,10 @@ import json
 import os
 import shutil
 import subprocess
+from contextlib import contextmanager
 from dataclasses import asdict, dataclass
 from pathlib import Path
-from typing import Any
+from typing import Any, BinaryIO, Iterator
 
 from yaml import YAMLError
 
@@ -22,7 +23,7 @@ from .contracts import (
     mcp_authorization_problem,
     project_agent_path,
 )
-from .jsonlines import atomic_replace_text
+from .jsonlines import PRIVATE_FILE_MODE, atomic_replace_text
 from .mcp import MCPError, server_process, verify_github_binary
 from .review import role_scoped_review_attestation_key
 
@@ -77,8 +78,10 @@ class AgentLauncher:
             task = self.board.get(task_id)
         checkpoint = CheckpointStore(self.config, self.board).latest(task.id)
         executable = str(self.policy.get("command", "copilot"))
-        if shutil.which(executable) is None:
+        executable_path = shutil.which(executable)
+        if executable_path is None:
             raise LauncherError(f"agent launcher executable not found: {executable}")
+        sandbox_path = self._sandbox_executable()
         mcp_path: Path | None = None
         log_path = self.dir / f"{task.id}.log"
         launch_error: LauncherError | None = None
@@ -148,16 +151,26 @@ class AgentLauncher:
                             ],
                         )
                     ]
-                    with log_path.open("ab") as output:
+                    environment = self._worker_environment(
+                        worker_config,
+                        contract,
+                        task=claimed,
+                        workdir=workdir,
+                    )
+                    home = Path(environment["HOME"])
+                    command = self._sandbox_command(
+                        sandbox_path,
+                        executable_path,
+                        args,
+                        workdir=workdir,
+                        isolated_home=home,
+                        trusted_config=self._trusted_config(worker_config),
+                    )
+                    with self._private_log(log_path) as output:
                         process = subprocess.Popen(
-                            [executable, *args],
+                            command,
                             cwd=workdir,
-                            env=self._worker_environment(
-                                worker_config,
-                                contract,
-                                task=claimed,
-                                workdir=workdir,
-                            ),
+                            env=environment,
                             stdin=subprocess.DEVNULL,
                             stdout=output,
                             stderr=subprocess.STDOUT,
@@ -406,6 +419,99 @@ class AgentLauncher:
             return wait(timeout=float(self.policy.get("failure_grace_seconds", 0.05)))
         except subprocess.TimeoutExpired:
             return None
+
+    def _sandbox_executable(self) -> str:
+        sandbox = self.policy.get("sandbox", {})
+        if not isinstance(sandbox, dict):
+            raise LauncherError("mcp.launcher.sandbox must be a mapping")
+        executable = str(sandbox.get("command", "bwrap")).strip()
+        path = shutil.which(executable)
+        if path is None:
+            raise LauncherError(f"required worker sandbox executable not found: {executable}")
+        return path
+
+    @staticmethod
+    @contextmanager
+    def _private_log(path: Path) -> Iterator[BinaryIO]:
+        fd = os.open(
+            path,
+            os.O_WRONLY | os.O_CREAT | os.O_APPEND | os.O_NOFOLLOW,
+            PRIVATE_FILE_MODE,
+        )
+        try:
+            os.fchmod(fd, PRIVATE_FILE_MODE)
+            with os.fdopen(fd, "ab") as output:
+                fd = -1
+                yield output
+        finally:
+            if fd >= 0:
+                os.close(fd)
+
+    @staticmethod
+    def _sandbox_command(
+        sandbox: str,
+        executable: str,
+        args: list[str],
+        *,
+        workdir: Path,
+        isolated_home: Path,
+        trusted_config: Config,
+    ) -> list[str]:
+        hidden_candidates = {
+            Path.home().resolve(),
+            Path("/home"),
+            Path("/root"),
+            Path("/run"),
+            Path("/tmp"),
+        }
+        hidden_roots = {
+            path
+            for path in hidden_candidates
+            if path != Path("/")
+            and not any(
+                path != other and path.is_relative_to(other)
+                for other in hidden_candidates
+            )
+        }
+        command = [
+            sandbox,
+            "--unshare-all",
+            "--share-net",
+            "--new-session",
+            "--cap-drop",
+            "ALL",
+            "--ro-bind",
+            "/",
+            "/",
+            "--proc",
+            "/proc",
+            "--dev",
+            "/dev",
+        ]
+        for root in sorted(hidden_roots, key=str):
+            if root.exists():
+                command.extend(("--tmpfs", str(root)))
+
+        mounts = (
+            ("--ro-bind", trusted_config.root.resolve()),
+            ("--bind", workdir.resolve()),
+            ("--bind", isolated_home.resolve()),
+        )
+        created: set[Path] = set()
+        for _, target in mounts:
+            for hidden in hidden_roots:
+                if target == hidden or not target.is_relative_to(hidden):
+                    continue
+                relative = target.relative_to(hidden)
+                for index in range(1, len(relative.parts) + 1):
+                    directory = hidden.joinpath(*relative.parts[:index])
+                    if directory not in created:
+                        command.extend(("--dir", str(directory)))
+                        created.add(directory)
+        for operation, path in mounts:
+            command.extend((operation, str(path), str(path)))
+        command.extend(("--chdir", str(workdir.resolve()), "--", executable, *args))
+        return command
 
     def _validated_workdir(self, task: Task) -> Path:
         if not task.branch:

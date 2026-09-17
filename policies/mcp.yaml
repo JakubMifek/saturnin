@@ -51,9 +51,12 @@ rules:
 
 launcher:
   # Repository default is safety-first: routing/dispatch works everywhere,
-  # launch is enabled per host once copilot/npx/uvx are installed.
+  # launch is enabled per host once bwrap/copilot/npx/uvx are installed.
   enabled: false
   command: copilot
+  sandbox:
+    # Mandatory mount/user namespace isolation for every autonomous worker.
+    command: bwrap
   failure_grace_seconds: 1.0
   # Worker subprocesses get only these inherited environment keys. Host
   # credentials and host configuration (GH_TOKEN, GITHUB_TOKEN, HOME, cloud

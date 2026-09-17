@@ -103,6 +103,82 @@ def test_launcher_starts_routed_role_with_filtered_mcp(
     assert metadata["process_start_time_ticks"] == 123456
 
 
+@pytest.mark.parametrize("existing", [False, True])
+def test_launch_logs_are_private(
+    config: Config,
+    board: Board,
+    existing: bool,
+) -> None:
+    path = config.var_dir / "launches" / "worker.log"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    if existing:
+        path.write_bytes(b"existing\n")
+        path.chmod(0o666)
+
+    with AgentLauncher(config, board)._private_log(path) as output:
+        output.write(b"next\n")
+
+    assert path.stat().st_mode & 0o777 == 0o600
+    assert path.read_bytes().endswith(b"next\n")
+
+
+def test_worker_command_uses_mandatory_os_sandbox(
+    config: Config,
+    board: Board,
+    git_repo: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    task = board.create("Run inside a sandbox")
+    worktree = WorktreeManager(config, repo=git_repo, board=board).create(
+        "feature/sandbox"
+    )
+    launcher = AgentLauncher(config, board)
+    home = launcher._isolated_home(task.id)
+    monkeypatch.setenv("HOME", str(config.root.parent))
+
+    command = launcher._sandbox_command(
+        "/usr/bin/bwrap",
+        "/usr/bin/copilot",
+        ["--autopilot"],
+        workdir=worktree.path,
+        isolated_home=home,
+        trusted_config=config,
+    )
+
+    assert command[:2] == ["/usr/bin/bwrap", "--unshare-all"]
+    assert ["--ro-bind", "/", "/"] == command[
+        command.index("--ro-bind"):command.index("--ro-bind") + 3
+    ]
+    assert ["--tmpfs", "/run"] == command[
+        command.index("/run") - 1:command.index("/run") + 1
+    ]
+    root_mount = ["--ro-bind", str(config.root), str(config.root)]
+    worktree_mount = ["--bind", str(worktree.path), str(worktree.path)]
+    home_mount = ["--bind", str(home), str(home)]
+    assert any(command[index:index + 3] == root_mount for index in range(len(command) - 2))
+    assert any(command[index:index + 3] == worktree_mount for index in range(len(command) - 2))
+    assert any(command[index:index + 3] == home_mount for index in range(len(command) - 2))
+    assert command[-3:] == ["--", "/usr/bin/copilot", "--autopilot"]
+
+
+def test_launcher_fails_closed_without_worker_sandbox(
+    config: Config, board: Board, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    config.policy("mcp")["launcher"]["enabled"] = True
+    task = board.create("Do not launch unsandboxed")
+    Router(config).dispatch(board, task)
+
+    monkeypatch.setattr(
+        "saturnin.launcher.shutil.which",
+        lambda executable: "/usr/bin/copilot" if executable == "copilot" else None,
+    )
+
+    with pytest.raises(LauncherError, match="required worker sandbox executable"):
+        AgentLauncher(config, board).launch(task.id)
+
+    assert board.get(task.id).state == "routed"
+
+
 def test_launcher_intersects_role_mcp_with_project_allowlist(
     config: Config, board: Board, git_repo: Path, monkeypatch
 ) -> None:
