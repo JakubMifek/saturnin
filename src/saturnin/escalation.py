@@ -61,10 +61,14 @@ def submit(
     *,
     title: str,
     body: str,
+    urgency: str,
     config: Config | None = None,
     task_id: str | None = None,
 ) -> str:
     config = config or default_config()
+    decision = validate(body, urgency=urgency, config=config)
+    if not decision.allowed:
+        raise MirrorError("; ".join(decision.reasons))
     mirror = IssueMirror(config)
     repo = mirror.board_repo
     label = config.governance.get("escalation", {}).get("label")

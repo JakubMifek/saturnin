@@ -1,6 +1,7 @@
 from __future__ import annotations
 from contextlib import contextmanager
 from datetime import datetime, timezone
+import json
 import os
 from pathlib import Path
 import stat
@@ -144,6 +145,60 @@ def test_corrupt_checkpoint_before_latest_is_reported(config: Config, board: Boa
 
     with pytest.raises(CheckpointError, match=r"line 2"):
         store.history(task.id)
+
+
+@pytest.mark.parametrize(
+    ("field", "value"),
+    [
+        ("resume_after", 123),
+        ("resume_after", "not-a-timestamp"),
+        ("next_steps", "continue"),
+    ],
+)
+def test_malformed_checkpoint_fields_are_reported(
+    config: Config, board: Board, field: str, value: object
+) -> None:
+    task = board.create("Malformed checkpoint")
+    store = CheckpointStore(config, board)
+    record = {
+        "task_id": task.id,
+        "role": "scribe",
+        "summary": "saved",
+        "next_steps": ["continue"],
+        field: value,
+    }
+    store.path_for(task.id).write_text(json.dumps(record) + "\n", encoding="utf-8")
+
+    with pytest.raises(CheckpointError, match=r"line 1"):
+        store.history(task.id)
+
+
+def test_save_rejects_malformed_complete_checkpoint_tail(
+    config: Config, board: Board
+) -> None:
+    task = board.create("Malformed checkpoint tail")
+    store = CheckpointStore(config, board)
+    store.path_for(task.id).write_text(
+        json.dumps(
+            {
+                "task_id": task.id,
+                "role": "scribe",
+                "summary": "saved",
+                "next_steps": "continue",
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    with pytest.raises(CheckpointError, match=r"line 1"):
+        store.save(
+            Checkpoint(
+                task_id=task.id,
+                role="scribe",
+                summary="after",
+                next_steps=["continue"],
+            )
+        )
 
 
 def test_save_uses_locked_board_edit(

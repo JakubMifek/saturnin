@@ -10,7 +10,7 @@ import yaml
 from saturnin.board import Board, BoardError
 from saturnin.cli import check_managed_repo, main
 from saturnin.config import Config
-from saturnin.escalation import submit
+from saturnin.escalation import render, submit
 from saturnin.governance import Governance
 from saturnin.issues import IssueMirror, MirrorError, run_gh
 
@@ -466,10 +466,37 @@ def test_malformed_escalation_lookup_stops_issue_creation(
         return output
 
     monkeypatch.setattr("saturnin.escalation.run_gh", fake_run)
+    body = render(
+        title="Need help",
+        context="Deployment is blocked",
+        checklist=["Choose a recovery path"],
+        urgency="high",
+        unblock_criteria=["Approve the recovery path"],
+        task_id="T-retry",
+        config=config,
+    )
 
     with pytest.raises(MirrorError, match="invalid JSON or shape"):
-        submit(title="Need help", body="Context", config=config, task_id="T-retry")
+        submit(
+            title="Need help",
+            body=body,
+            urgency="high",
+            config=config,
+            task_id="T-retry",
+        )
     assert not any(call[:2] == ["issue", "create"] for call in calls)
+
+
+def test_escalation_submission_rejects_invalid_body_before_github(
+    config: Config, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(
+        "saturnin.escalation.run_gh",
+        lambda args: pytest.fail(f"unexpected GitHub call: {args}"),
+    )
+
+    with pytest.raises(MirrorError, match="missing section"):
+        submit(title="Need help", body="Context", urgency="high", config=config)
 
 
 def test_missing_gh_error_applies_to_all_integrations(

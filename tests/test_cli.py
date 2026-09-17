@@ -1777,6 +1777,7 @@ def test_task_escalation_lock_prevents_duplicate_concurrent_submission(
                     task_id=task.id,
                     title="Need help",
                     body="body",
+                    urgency="normal",
                     actor="chief-of-staff",
                 )
             )

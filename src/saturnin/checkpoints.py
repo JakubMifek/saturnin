@@ -42,6 +42,41 @@ def _validate_resume_after(value: str | None) -> None:
         ) from exc
 
 
+def _validate_checkpoint_record(data: dict[str, Any]) -> None:
+    for name in ("task_id", "role", "summary"):
+        value = data.get(name)
+        if not isinstance(value, str) or not value:
+            raise TypeError(f"checkpoint field {name!r} must be a non-empty string")
+    for name in ("next_steps", "artifacts", "blockers"):
+        value = data.get(name, [])
+        if not isinstance(value, list) or not all(isinstance(item, str) for item in value):
+            raise TypeError(f"checkpoint field {name!r} must be a list of strings")
+    if not data["next_steps"]:
+        raise TypeError("checkpoint field 'next_steps' must not be empty")
+    for name in ("branch", "worktree", "resume_after"):
+        value = data.get(name)
+        if value is not None and not isinstance(value, str):
+            raise TypeError(f"checkpoint field {name!r} must be a string or null")
+    created_at = data.get("created_at")
+    if created_at is not None:
+        if not isinstance(created_at, str) or not created_at:
+            raise TypeError("checkpoint field 'created_at' must be a non-empty string")
+        try:
+            datetime.fromisoformat(created_at)
+        except ValueError as exc:
+            raise ValueError(
+                f"checkpoint field 'created_at' must be a valid ISO-8601 timestamp"
+            ) from exc
+    resume_after = data.get("resume_after")
+    if resume_after is not None:
+        try:
+            datetime.fromisoformat(resume_after)
+        except ValueError as exc:
+            raise ValueError(
+                f"checkpoint field 'resume_after' must be a valid ISO-8601 timestamp"
+            ) from exc
+
+
 @dataclass
 class Checkpoint:
     task_id: str
@@ -104,13 +139,20 @@ class CheckpointStore:
             if not getattr(checkpoint, name):
                 raise CheckpointError(f"checkpoint field {name!r} must not be empty")
         _validate_resume_after(checkpoint.resume_after)
+        try:
+            _validate_checkpoint_record(checkpoint.to_dict())
+        except (TypeError, ValueError) as exc:
+            raise CheckpointError(str(exc)) from exc
         path = self.path_for(checkpoint.task_id)
         with file_lock(path):
             if path.exists():
                 raw = path.read_text(encoding="utf-8")
                 try:
                     repaired = repair_unterminated_tail(
-                        raw, path, required_fields=REQUIRED_FIELDS
+                        raw,
+                        path,
+                        required_fields=REQUIRED_FIELDS,
+                        validator=_validate_checkpoint_record,
                     )
                 except JSONLinesError as exc:
                     raise CheckpointError(f"corrupt checkpoint store {exc}") from exc
@@ -144,6 +186,7 @@ class CheckpointStore:
                     path,
                     required_fields=REQUIRED_FIELDS,
                     tolerate_unterminated_tail=True,
+                    validator=_validate_checkpoint_record,
                 )
             ]
         except JSONLinesError as exc:

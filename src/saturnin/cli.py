@@ -877,6 +877,7 @@ def _submit_task_escalation(
     task_id: str,
     title: str,
     body: str,
+    urgency: str,
     actor: str,
 ) -> str:
     board.path_for(task_id)
@@ -894,6 +895,7 @@ def _submit_task_escalation(
             url = escalation_mod.submit(
                 title=title,
                 body=body,
+                urgency=urgency,
                 config=config,
                 task_id=task_id,
             )
@@ -1013,10 +1015,16 @@ def _run(args: argparse.Namespace, config: Config) -> int:  # noqa: C901 - flat 
                 task_id=args.task,
                 title=args.title,
                 body=body,
+                urgency=args.urgency,
                 actor=getattr(args, "actor", "chief-of-staff"),
             )
         elif args.push:
-            url = escalation_mod.submit(title=args.title, body=body, config=config)
+            url = escalation_mod.submit(
+                title=args.title,
+                body=body,
+                urgency=args.urgency,
+                config=config,
+            )
         else:
             url = None
         payload = {"body": body, "url": url}
