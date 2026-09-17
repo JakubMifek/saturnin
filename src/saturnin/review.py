@@ -551,25 +551,28 @@ class ReviewLedger:
         except (TypeError, ValueError) as exc:
             raise ReviewError(f"invalid review record: {exc}") from exc
         path = self.dir / f"{kind}-{slugify(subject)}.jsonl"
-        with file_lock(path):
-            serialized = json.dumps(entry.to_dict()) + "\n"
-            if path.exists():
-                raw = path.read_text(encoding="utf-8")
-                try:
-                    repaired = repair_unterminated_tail(
-                        raw,
-                        path,
-                        required_fields=REQUIRED_FIELDS,
-                        validator=ReviewRecord.validate_dict,
-                    )
-                except JSONLinesError as exc:
-                    raise ReviewError(f"corrupt review ledger {exc}") from exc
-                if repaired != raw:
-                    self._reject_replayed_attestation(path, attestation_id, repaired)
-                    atomic_replace_text(path, repaired + serialized)
-                    return entry
-                self._reject_replayed_attestation(path, attestation_id, raw)
-            durable_append_text(path, serialized)
+        # Rotation lock always precedes a per-ledger lock so sealing can take a
+        # stable snapshot without deadlocking concurrent record writers.
+        with file_lock(_rotation_manifest_path(self.config)):
+            with file_lock(path):
+                serialized = json.dumps(entry.to_dict()) + "\n"
+                if path.exists():
+                    raw = path.read_text(encoding="utf-8")
+                    try:
+                        repaired = repair_unterminated_tail(
+                            raw,
+                            path,
+                            required_fields=REQUIRED_FIELDS,
+                            validator=ReviewRecord.validate_dict,
+                        )
+                    except JSONLinesError as exc:
+                        raise ReviewError(f"corrupt review ledger {exc}") from exc
+                    if repaired != raw:
+                        self._reject_replayed_attestation(path, attestation_id, repaired)
+                        atomic_replace_text(path, repaired + serialized)
+                        return entry
+                    self._reject_replayed_attestation(path, attestation_id, raw)
+                durable_append_text(path, serialized)
         return entry
 
     def for_subject(self, subject: str, kind: str) -> list[ReviewRecord]:
@@ -593,61 +596,61 @@ class ReviewLedger:
             yield from self._records(path)
 
     def seal_rotation_manifest(self) -> Path:
-        settings = self.config.governance.get("review", {}).get("attestation", {})
-        scope_env = str(
-            settings.get("key_scope_env", "SATURNIN_REVIEW_ATTESTATION_KEY_SCOPE")
-        )
-        if os.environ.get(scope_env) == "role":
-            raise ReviewError("rotation manifests require the trusted supervisor environment")
-        previous_env = str(
-            settings.get("previous_key_env", "SATURNIN_REVIEW_ATTESTATION_PREVIOUS_KEY")
-        )
-        previous_master = os.environ.get(previous_env, "")
-        if not previous_master:
-            raise ReviewError(f"rotation manifest requires {previous_env}")
-        current_master = _load_attestation_key(self.config)
-        if hmac.compare_digest(previous_master, current_master):
-            raise ReviewError("current and previous review attestation keys must differ")
-        entries: list[dict[str, str]] = []
-        for path in sorted(self.dir.glob("*.jsonl")):
-            with file_lock(path, exclusive=False):
-                text = path.read_text(encoding="utf-8")
-            try:
-                records = [
-                    ReviewRecord.from_dict(data)
-                    for data in objects(
-                        text,
-                        path,
-                        required_fields=REQUIRED_FIELDS,
-                        validator=ReviewRecord.validate_dict,
-                    )
-                ]
-            except JSONLinesError as exc:
-                raise ReviewError(f"corrupt review ledger {exc}") from exc
-            for record in records:
-                if self._record_matches_master(record, previous_master):
-                    entries.append(
-                        {
-                            "reviewer": record.reviewer,
-                            "attestation_id": record.attestation_id,
-                            "signature": record.attestation_signature,
-                        }
-                    )
-        entries.sort(
-            key=lambda item: (item["reviewer"], item["attestation_id"], item["signature"])
-        )
-        payload = _manifest_payload(entries)
-        manifest = {
-            "version": 1,
-            "attestations": entries,
-            "signature": hmac.new(
-                _rotation_manifest_key(current_master),
-                payload,
-                hashlib.sha256,
-            ).hexdigest(),
-        }
         path = _rotation_manifest_path(self.config)
         with file_lock(path):
+            settings = self.config.governance.get("review", {}).get("attestation", {})
+            scope_env = str(
+                settings.get("key_scope_env", "SATURNIN_REVIEW_ATTESTATION_KEY_SCOPE")
+            )
+            if os.environ.get(scope_env) == "role":
+                raise ReviewError("rotation manifests require the trusted supervisor environment")
+            previous_env = str(
+                settings.get("previous_key_env", "SATURNIN_REVIEW_ATTESTATION_PREVIOUS_KEY")
+            )
+            previous_master = os.environ.get(previous_env, "")
+            if not previous_master:
+                raise ReviewError(f"rotation manifest requires {previous_env}")
+            current_master = _load_attestation_key(self.config)
+            if hmac.compare_digest(previous_master, current_master):
+                raise ReviewError("current and previous review attestation keys must differ")
+            entries: list[dict[str, str]] = []
+            for ledger_path in sorted(self.dir.glob("*.jsonl")):
+                with file_lock(ledger_path, exclusive=False):
+                    text = ledger_path.read_text(encoding="utf-8")
+                try:
+                    records = [
+                        ReviewRecord.from_dict(data)
+                        for data in objects(
+                            text,
+                            ledger_path,
+                            required_fields=REQUIRED_FIELDS,
+                            validator=ReviewRecord.validate_dict,
+                        )
+                    ]
+                except JSONLinesError as exc:
+                    raise ReviewError(f"corrupt review ledger {exc}") from exc
+                for record in records:
+                    if self._record_matches_master(record, previous_master):
+                        entries.append(
+                            {
+                                "reviewer": record.reviewer,
+                                "attestation_id": record.attestation_id,
+                                "signature": record.attestation_signature,
+                            }
+                        )
+            entries.sort(
+                key=lambda item: (item["reviewer"], item["attestation_id"], item["signature"])
+            )
+            payload = _manifest_payload(entries)
+            manifest = {
+                "version": 1,
+                "attestations": entries,
+                "signature": hmac.new(
+                    _rotation_manifest_key(current_master),
+                    payload,
+                    hashlib.sha256,
+                ).hexdigest(),
+            }
             atomic_replace_text(
                 path,
                 json.dumps(manifest, sort_keys=True, separators=(",", ":")) + "\n",

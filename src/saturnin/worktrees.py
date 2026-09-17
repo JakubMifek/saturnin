@@ -411,7 +411,7 @@ class WorktreeManager:
             return "worktree is locked"
         if worktree.branch is None:
             return "detached HEAD"
-        if worktree.branch in self.governance.protected_branches:
+        if worktree.branch in set(self.governance.protected_branches) | {self.default_branch()}:
             return "protected branch"
         if worktree.branch and self.board.open_tasks_for_branch(worktree.branch):
             return "has an open board task"

@@ -3,11 +3,15 @@ from __future__ import annotations
 import json
 import os
 import shutil
+import threading
+from contextlib import contextmanager
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
+from typing import Iterator
 
 import pytest
 
+from saturnin import review
 from saturnin.config import Config
 from saturnin.governance import Governance, _curl_targets, _git_targets
 from saturnin.jsonlines import durable_append_text
@@ -455,6 +459,96 @@ def test_review_key_rotation_retains_history_without_blocking_other_subjects(
     manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
     with pytest.raises(ReviewError, match="signature does not match"):
         ledger.for_subject(old_subject, "pr")
+
+
+def test_rotation_seal_serializes_concurrent_record_writes(
+    config: Config, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    ledger = ReviewLedger(config)
+    monkeypatch.setenv("SATURNIN_REVIEW_ATTESTATION_KEY", "old-master-key")
+    record_review(
+        ledger,
+        subject="JakubMifek/saturnin#before-rotation",
+        kind="pr",
+        author="code-worker",
+        reviewer="pr-reviewer",
+        verdict="approved",
+        head_sha=TEST_HEAD_SHA,
+    )
+    monkeypatch.setenv("SATURNIN_REVIEW_ATTESTATION_KEY", "new-master-key")
+    monkeypatch.setenv("SATURNIN_REVIEW_ATTESTATION_PREVIOUS_KEY", "old-master-key")
+
+    manifest_path = ledger.dir / "rotation-manifest.json"
+    install_started = threading.Event()
+    release_install = threading.Event()
+    writer_lock_attempted = threading.Event()
+    append_started = threading.Event()
+    errors: list[BaseException] = []
+    original_lock = review.file_lock
+    original_replace = review.atomic_replace_text
+    original_append = review.durable_append_text
+
+    @contextmanager
+    def tracked_lock(
+        path: Path, *, exclusive: bool = True, timeout: float = 10.0
+    ) -> Iterator[None]:
+        if path == manifest_path and threading.current_thread().name == "record-writer":
+            writer_lock_attempted.set()
+        with original_lock(path, exclusive=exclusive, timeout=timeout):
+            yield
+
+    def blocked_replace(path: Path, text: str) -> None:
+        if path == manifest_path:
+            install_started.set()
+            assert release_install.wait(5)
+        original_replace(path, text)
+
+    def tracked_append(path: Path, text: str) -> None:
+        append_started.set()
+        original_append(path, text)
+
+    monkeypatch.setattr(review, "file_lock", tracked_lock)
+    monkeypatch.setattr(review, "atomic_replace_text", blocked_replace)
+    monkeypatch.setattr(review, "durable_append_text", tracked_append)
+
+    def seal() -> None:
+        try:
+            ledger.seal_rotation_manifest()
+        except BaseException as exc:
+            errors.append(exc)
+
+    def write() -> None:
+        try:
+            record_review(
+                ledger,
+                subject="JakubMifek/saturnin#during-rotation",
+                kind="pr",
+                author="code-worker",
+                reviewer="pr-reviewer",
+                verdict="approved",
+                head_sha="b" * 40,
+            )
+        except BaseException as exc:
+            errors.append(exc)
+
+    sealer = threading.Thread(target=seal, name="manifest-sealer")
+    writer = threading.Thread(target=write, name="record-writer")
+    sealer.start()
+    assert install_started.wait(5)
+    writer.start()
+    assert writer_lock_attempted.wait(5)
+    assert not append_started.wait(0.1)
+
+    release_install.set()
+    sealer.join(5)
+    writer.join(5)
+
+    assert not sealer.is_alive()
+    assert not writer.is_alive()
+    assert errors == []
+    assert append_started.is_set()
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    assert len(manifest["attestations"]) == 1
 
 
 def test_review_subjects_are_exact_and_roles_are_valid(config: Config) -> None:

@@ -337,6 +337,44 @@ def test_apply_rechecks_open_task_before_removing_worktree(
     )
 
 
+def test_apply_rechecks_changed_default_branch_before_removing_worktree(
+    config: Config,
+    board: Board,
+    tmp_path: Path,
+) -> None:
+    managed = tmp_path / "managed-changing-default"
+    managed.mkdir()
+    git(["init", "-b", "trunk"], managed)
+    git(["config", "user.email", "saturnin@example.com"], managed)
+    git(["config", "user.name", "Saturnin"], managed)
+    (managed / "README.md").write_text("managed\n", encoding="utf-8")
+    git(["add", "."], managed)
+    git(["commit", "-m", "initial"], managed)
+    git(["update-ref", "refs/remotes/origin/trunk", "trunk"], managed)
+    git(["symbolic-ref", "refs/remotes/origin/HEAD", "refs/remotes/origin/trunk"], managed)
+    manager = WorktreeManager(config, repo=managed, board=board)
+    worktree = manager.create("feature/new-default")
+    later = datetime.now(timezone.utc) + timedelta(days=30)
+    plan = manager.plan_cleanup(now=later)
+    assert str(worktree.path) in {action.target for action in plan.actions}
+
+    git(
+        [
+            "symbolic-ref",
+            "refs/remotes/origin/HEAD",
+            "refs/remotes/origin/feature/new-default",
+        ],
+        managed,
+    )
+    manager.apply(plan, now=later)
+
+    assert worktree.path.exists()
+    assert any(
+        action.target == str(worktree.path) and action.reason == "protected branch"
+        for action in plan.skipped
+    )
+
+
 def test_apply_skips_recreated_worktree_from_stale_plan(manager: WorktreeManager) -> None:
     worktree = manager.create("feature/recreated")
     later = datetime.now(timezone.utc) + timedelta(days=30)
