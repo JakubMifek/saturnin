@@ -1,4 +1,4 @@
-# Hard governance rules for Saturnin. Machine-readable mirror of docs/operating-model.md.
+# Hard governance rules for Saturnin. Source of truth for generated governance docs.
 # Changing this file requires an independent reviewer approval (see review pipelines).
 version: 1
 

@@ -264,6 +264,27 @@ def test_durable_append_syncs_new_file_and_directory(
     assert calls == [False, True]
 
 
+def test_durable_append_creates_private_file(tmp_path: Path) -> None:
+    path = tmp_path / "events.jsonl"
+    old_umask = os.umask(0)
+    try:
+        durable_append_text(path, "{}\n")
+    finally:
+        os.umask(old_umask)
+
+    assert stat.S_IMODE(path.stat().st_mode) == 0o600
+
+
+def test_durable_append_tightens_existing_file(tmp_path: Path) -> None:
+    path = tmp_path / "events.jsonl"
+    path.write_text("{}\n", encoding="utf-8")
+    path.chmod(0o644)
+
+    durable_append_text(path, "{}\n")
+
+    assert stat.S_IMODE(path.stat().st_mode) == 0o600
+
+
 def test_durable_append_syncs_existing_file_without_directory(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

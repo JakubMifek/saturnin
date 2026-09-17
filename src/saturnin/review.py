@@ -569,6 +569,7 @@ class ReviewLedger:
                         raise ReviewError(f"corrupt review ledger {exc}") from exc
                     if repaired != raw:
                         self._reject_replayed_attestation(path, attestation_id, repaired)
+                        path.chmod(0o600)
                         atomic_replace_text(path, repaired + serialized)
                         return entry
                     self._reject_replayed_attestation(path, attestation_id, raw)

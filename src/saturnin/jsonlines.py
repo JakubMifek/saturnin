@@ -4,8 +4,11 @@ from __future__ import annotations
 
 import json
 import os
+import stat
 from pathlib import Path
 from typing import Any, Callable, Collection, Iterator
+
+PRIVATE_FILE_MODE = 0o600
 
 
 class JSONLinesError(ValueError):
@@ -16,10 +19,18 @@ class JSONLinesError(ValueError):
         self.cause = cause
 
 
-def atomic_replace_text(path: Path, text: str) -> None:
+def atomic_replace_text(path: Path, text: str, *, mode: int | None = None) -> None:
     temporary = path.with_name(f".{path.name}.{os.getpid()}.tmp")
+    target_mode = mode
+    if target_mode is None:
+        try:
+            target_mode = stat.S_IMODE(path.stat().st_mode)
+        except FileNotFoundError:
+            target_mode = None
     try:
         with temporary.open("w", encoding="utf-8") as handle:
+            if target_mode is not None:
+                os.fchmod(handle.fileno(), target_mode)
             handle.write(text)
             handle.flush()
             os.fsync(handle.fileno())
@@ -35,10 +46,17 @@ def atomic_replace_text(path: Path, text: str) -> None:
 
 def durable_append_text(path: Path, text: str) -> None:
     existed = path.exists()
-    with path.open("a", encoding="utf-8") as handle:
-        handle.write(text)
-        handle.flush()
-        os.fsync(handle.fileno())
+    fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_APPEND, PRIVATE_FILE_MODE)
+    try:
+        os.fchmod(fd, PRIVATE_FILE_MODE)
+        with os.fdopen(fd, "a", encoding="utf-8") as handle:
+            fd = -1
+            handle.write(text)
+            handle.flush()
+            os.fsync(handle.fileno())
+    finally:
+        if fd >= 0:
+            os.close(fd)
     if not existed:
         directory = os.open(path.parent, os.O_RDONLY | os.O_DIRECTORY)
         try:

@@ -157,6 +157,7 @@ class CheckpointStore:
                 except JSONLinesError as exc:
                     raise CheckpointError(f"corrupt checkpoint store {exc}") from exc
                 if repaired != raw:
+                    path.chmod(0o600)
                     atomic_replace_text(path, repaired)
             durable_append_text(path, json.dumps(checkpoint.to_dict()) + "\n")
             try:
