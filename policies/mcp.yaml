@@ -57,12 +57,29 @@ launcher:
   sandbox:
     # Mandatory mount/user namespace isolation for every autonomous worker.
     command: bwrap
+    # The sandbox starts from an empty root. These host paths are the minimum
+    # system runtime needed for executables, TLS, DNS and user lookup.
+    read_only_paths:
+      - /bin
+      - /lib
+      - /lib64
+      - /usr
+      - /etc/alternatives
+      - /etc/ssl/certs
+      - /etc/ca-certificates
+      - /etc/ca-certificates.conf
+      - /etc/resolv.conf
+      - /etc/hosts
+      - /etc/nsswitch.conf
+      - /etc/gai.conf
+      - /etc/passwd
+      - /etc/group
+      - /etc/ld.so.cache
   failure_grace_seconds: 1.0
   # Worker subprocesses get only these inherited environment keys. Host
   # credentials and host configuration (GH_TOKEN, GITHUB_TOKEN, HOME, cloud
   # keys, PYTHONPATH, etc.) are not passed through by default; the launcher
-  # creates an isolated HOME/XDG tree and points Saturnin commands at the
-  # trusted runtime checkout.
+  # creates an isolated HOME/XDG tree and exposes only trusted runtime paths.
   env_allowlist:
     - PATH
     - LANG

@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import os
 import shutil
+import stat
 import subprocess
 from contextlib import contextmanager
 from dataclasses import asdict, dataclass
@@ -54,6 +55,7 @@ class AgentLauncher:
         self.policy = trusted_config.policy("mcp").get("launcher", {})
         self.dir = self.config.var_dir / "launches"
         self.dir.mkdir(parents=True, exist_ok=True)
+        self._tighten_existing_logs()
 
     @property
     def enabled(self) -> bool:
@@ -81,6 +83,7 @@ class AgentLauncher:
         executable_path = shutil.which(executable)
         if executable_path is None:
             raise LauncherError(f"agent launcher executable not found: {executable}")
+        executable_path = str(Path(executable_path).resolve())
         sandbox_path = self._sandbox_executable()
         mcp_path: Path | None = None
         log_path = self.dir / f"{task.id}.log"
@@ -158,6 +161,12 @@ class AgentLauncher:
                         workdir=workdir,
                     )
                     home = Path(environment["HOME"])
+                    git_environment, git_objects = self._isolated_git_environment(
+                        claimed,
+                        workdir,
+                        home,
+                    )
+                    environment.update(git_environment)
                     command = self._sandbox_command(
                         sandbox_path,
                         executable_path,
@@ -165,6 +174,8 @@ class AgentLauncher:
                         workdir=workdir,
                         isolated_home=home,
                         trusted_config=self._trusted_config(worker_config),
+                        git_objects=git_objects,
+                        mcp_config=mcp_path,
                     )
                     with self._private_log(log_path) as output:
                         process = subprocess.Popen(
@@ -428,17 +439,41 @@ class AgentLauncher:
         path = shutil.which(executable)
         if path is None:
             raise LauncherError(f"required worker sandbox executable not found: {executable}")
-        return path
+        return str(Path(path).resolve())
+
+    def _tighten_existing_logs(self) -> None:
+        for path in self.dir.glob("*.log"):
+            try:
+                self._tighten_log(path)
+            except FileNotFoundError:
+                continue
+
+    @staticmethod
+    def _tighten_log(path: Path) -> None:
+        try:
+            fd = os.open(path, os.O_RDONLY | os.O_NONBLOCK | os.O_NOFOLLOW)
+        except FileNotFoundError:
+            raise
+        except OSError as exc:
+            raise LauncherError(f"unsafe launch log {path}: {exc}") from exc
+        try:
+            if not stat.S_ISREG(os.fstat(fd).st_mode):
+                raise LauncherError(f"unsafe launch log is not a regular file: {path}")
+            os.fchmod(fd, PRIVATE_FILE_MODE)
+        finally:
+            os.close(fd)
 
     @staticmethod
     @contextmanager
     def _private_log(path: Path) -> Iterator[BinaryIO]:
         fd = os.open(
             path,
-            os.O_WRONLY | os.O_CREAT | os.O_APPEND | os.O_NOFOLLOW,
+            os.O_WRONLY | os.O_CREAT | os.O_APPEND | os.O_NONBLOCK | os.O_NOFOLLOW,
             PRIVATE_FILE_MODE,
         )
         try:
+            if not stat.S_ISREG(os.fstat(fd).st_mode):
+                raise LauncherError(f"unsafe launch log is not a regular file: {path}")
             os.fchmod(fd, PRIVATE_FILE_MODE)
             with os.fdopen(fd, "ab") as output:
                 fd = -1
@@ -456,23 +491,20 @@ class AgentLauncher:
         workdir: Path,
         isolated_home: Path,
         trusted_config: Config,
+        git_objects: Path,
+        mcp_config: Path,
     ) -> list[str]:
-        hidden_candidates = {
-            Path.home().resolve(),
-            Path("/home"),
-            Path("/root"),
-            Path("/run"),
-            Path("/tmp"),
-        }
-        hidden_roots = {
-            path
-            for path in hidden_candidates
-            if path != Path("/")
-            and not any(
-                path != other and path.is_relative_to(other)
-                for other in hidden_candidates
+        sandbox_policy = trusted_config.policy("mcp").get("launcher", {}).get(
+            "sandbox", {}
+        )
+        read_only_paths = sandbox_policy.get("read_only_paths", [])
+        if not isinstance(read_only_paths, list) or not all(
+            isinstance(path, str) and Path(path).is_absolute()
+            for path in read_only_paths
+        ):
+            raise LauncherError(
+                "mcp.launcher.sandbox.read_only_paths must be a list of absolute paths"
             )
-        }
         command = [
             sandbox,
             "--unshare-all",
@@ -480,38 +512,158 @@ class AgentLauncher:
             "--new-session",
             "--cap-drop",
             "ALL",
-            "--ro-bind",
-            "/",
+            "--tmpfs",
             "/",
             "--proc",
             "/proc",
             "--dev",
             "/dev",
+            "--tmpfs",
+            "/tmp",
+            "--tmpfs",
+            "/run",
         ]
-        for root in sorted(hidden_roots, key=str):
-            if root.exists():
-                command.extend(("--tmpfs", str(root)))
 
-        mounts = (
-            ("--ro-bind", trusted_config.root.resolve()),
+        trusted_paths = (
+            trusted_config.root / "src",
+            trusted_config.root / "policies",
+            trusted_config.root / "agents",
+            trusted_config.root / "skills",
+            trusted_config.root / "automation",
+            trusted_config.root / ".venv",
+            trusted_config.var_dir / "bin",
+        )
+        read_only_mounts = [
+            Path(path) for path in read_only_paths if Path(path).exists()
+        ]
+        read_only_mounts.extend(path for path in trusted_paths if path.exists())
+        read_only_mounts.extend((Path(executable), git_objects, mcp_config))
+        mounts = [
+            *[("--ro-bind", path) for path in dict.fromkeys(read_only_mounts)],
             ("--bind", workdir.resolve()),
             ("--bind", isolated_home.resolve()),
-        )
+        ]
         created: set[Path] = set()
         for _, target in mounts:
-            for hidden in hidden_roots:
-                if target == hidden or not target.is_relative_to(hidden):
-                    continue
-                relative = target.relative_to(hidden)
-                for index in range(1, len(relative.parts) + 1):
-                    directory = hidden.joinpath(*relative.parts[:index])
-                    if directory not in created:
-                        command.extend(("--dir", str(directory)))
-                        created.add(directory)
+            parent = target if target.is_dir() else target.parent
+            for directory in reversed(parent.parents):
+                if directory != Path("/") and directory not in created:
+                    command.extend(("--dir", str(directory)))
+                    created.add(directory)
+            if parent != Path("/") and parent not in created:
+                command.extend(("--dir", str(parent)))
+                created.add(parent)
         for operation, path in mounts:
             command.extend((operation, str(path), str(path)))
         command.extend(("--chdir", str(workdir.resolve()), "--", executable, *args))
         return command
+
+    def _isolated_git_environment(
+        self,
+        task: Task,
+        workdir: Path,
+        isolated_home: Path,
+    ) -> tuple[dict[str, str], Path]:
+        common_output = self._git_output(
+            ["rev-parse", "--git-common-dir"],
+            cwd=workdir,
+        )
+        common_dir = Path(common_output)
+        if not common_dir.is_absolute():
+            common_dir = workdir / common_dir
+        objects = common_dir.resolve() / "objects"
+        if not objects.is_dir():
+            raise LauncherError(f"Git object store does not exist: {objects}")
+
+        git_dir = isolated_home / ".saturnin-git"
+        initialized = git_dir / ".saturnin-initialized"
+        if not initialized.is_file():
+            if git_dir.exists():
+                shutil.rmtree(git_dir)
+            git_dir.mkdir(mode=0o700)
+            self._git_output(["init", "--bare", str(git_dir)])
+            self._git_output(
+                ["--git-dir", str(git_dir), "config", "core.bare", "false"]
+            )
+            self._git_output(
+                [
+                    "--git-dir",
+                    str(git_dir),
+                    "config",
+                    "core.worktree",
+                    str(workdir.resolve()),
+                ]
+            )
+            alternates = git_dir / "objects" / "info" / "alternates"
+            atomic_replace_text(
+                alternates,
+                f"{objects}\n",
+                mode=PRIVATE_FILE_MODE,
+            )
+            head = self._git_output(["rev-parse", "HEAD"], cwd=workdir)
+            branch_ref = f"refs/heads/{task.branch}"
+            self._git_output(
+                ["--git-dir", str(git_dir), "update-ref", branch_ref, head]
+            )
+            self._git_output(
+                ["--git-dir", str(git_dir), "symbolic-ref", "HEAD", branch_ref]
+            )
+            for key in ("user.name", "user.email"):
+                value = self._git_output(
+                    ["config", "--get", key],
+                    cwd=workdir,
+                    required=False,
+                )
+                if value:
+                    self._git_output(
+                        ["--git-dir", str(git_dir), "config", key, value]
+                    )
+            self._git_output(
+                [
+                    "--git-dir",
+                    str(git_dir),
+                    "--work-tree",
+                    str(workdir.resolve()),
+                    "read-tree",
+                    "HEAD",
+                ]
+            )
+            atomic_replace_text(
+                initialized,
+                f"{task.branch}\n",
+                mode=PRIVATE_FILE_MODE,
+            )
+        return (
+            {
+                "GIT_DIR": str(git_dir),
+                "GIT_WORK_TREE": str(workdir.resolve()),
+                "GIT_CONFIG_GLOBAL": "/dev/null",
+                "GIT_CONFIG_NOSYSTEM": "1",
+            },
+            objects,
+        )
+
+    @staticmethod
+    def _git_output(
+        args: list[str],
+        *,
+        cwd: Path | None = None,
+        required: bool = True,
+    ) -> str:
+        result = subprocess.run(
+            ["git", *args],
+            cwd=cwd,
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        if result.returncode != 0:
+            if not required:
+                return ""
+            raise LauncherError(
+                f"could not prepare isolated Git metadata: {result.stderr.strip()}"
+            )
+        return result.stdout.strip()
 
     def _validated_workdir(self, task: Task) -> Path:
         if not task.branch:

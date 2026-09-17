@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import os
 import subprocess
 from contextlib import contextmanager
 from datetime import datetime, timedelta, timezone
@@ -122,19 +123,63 @@ def test_launch_logs_are_private(
     assert path.read_bytes().endswith(b"next\n")
 
 
+def test_launcher_initialization_tightens_all_existing_logs(
+    config: Config,
+    board: Board,
+) -> None:
+    launch_dir = config.var_dir / "launches"
+    launch_dir.mkdir(parents=True, exist_ok=True)
+    logs = [launch_dir / "first.log", launch_dir / "second.log"]
+    for path in logs:
+        path.write_text("existing\n", encoding="utf-8")
+        path.chmod(0o666)
+
+    AgentLauncher(config, board)
+
+    assert [path.stat().st_mode & 0o777 for path in logs] == [0o600, 0o600]
+
+
+def test_launcher_does_not_follow_existing_log_symlinks(
+    config: Config,
+    board: Board,
+) -> None:
+    launch_dir = config.var_dir / "launches"
+    launch_dir.mkdir(parents=True, exist_ok=True)
+    target = config.root / "not-a-log"
+    target.write_text("protected\n", encoding="utf-8")
+    target.chmod(0o666)
+    (launch_dir / "unsafe.log").symlink_to(target)
+
+    with pytest.raises(LauncherError, match="unsafe launch log"):
+        AgentLauncher(config, board)
+
+    assert target.stat().st_mode & 0o777 == 0o666
+
+
 def test_worker_command_uses_mandatory_os_sandbox(
     config: Config,
     board: Board,
     git_repo: Path,
-    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     task = board.create("Run inside a sandbox")
     worktree = WorktreeManager(config, repo=git_repo, board=board).create(
         "feature/sandbox"
     )
+    with board.edit(task.id) as stored:
+        stored.branch = "feature/sandbox"
+        stored.worktree = str(worktree.path)
+    task = board.get(task.id)
     launcher = AgentLauncher(config, board)
     home = launcher._isolated_home(task.id)
-    monkeypatch.setenv("HOME", str(config.root.parent))
+    git_environment, git_objects = launcher._isolated_git_environment(
+        task,
+        worktree.path,
+        home,
+    )
+    credential = config.root / ".env"
+    credential.write_text("not mounted\n", encoding="utf-8")
+    mcp_config = config.var_dir / "launches" / f"{task.id}.mcp.json"
+    mcp_config.write_text('{"mcpServers": {}}\n', encoding="utf-8")
 
     command = launcher._sandbox_command(
         "/usr/bin/bwrap",
@@ -143,22 +188,144 @@ def test_worker_command_uses_mandatory_os_sandbox(
         workdir=worktree.path,
         isolated_home=home,
         trusted_config=config,
+        git_objects=git_objects,
+        mcp_config=mcp_config,
     )
 
     assert command[:2] == ["/usr/bin/bwrap", "--unshare-all"]
-    assert ["--ro-bind", "/", "/"] == command[
-        command.index("--ro-bind"):command.index("--ro-bind") + 3
+    assert ["--tmpfs", "/"] == command[
+        command.index("--tmpfs"):command.index("--tmpfs") + 2
     ]
+    assert not any(
+        command[index:index + 3] == ["--ro-bind", "/", "/"]
+        for index in range(len(command) - 2)
+    )
     assert ["--tmpfs", "/run"] == command[
         command.index("/run") - 1:command.index("/run") + 1
     ]
-    root_mount = ["--ro-bind", str(config.root), str(config.root)]
+    runtime_mount = [
+        "--ro-bind",
+        str(config.root / "policies"),
+        str(config.root / "policies"),
+    ]
+    objects_mount = ["--ro-bind", str(git_objects), str(git_objects)]
+    mcp_mount = ["--ro-bind", str(mcp_config), str(mcp_config)]
     worktree_mount = ["--bind", str(worktree.path), str(worktree.path)]
     home_mount = ["--bind", str(home), str(home)]
-    assert any(command[index:index + 3] == root_mount for index in range(len(command) - 2))
-    assert any(command[index:index + 3] == worktree_mount for index in range(len(command) - 2))
-    assert any(command[index:index + 3] == home_mount for index in range(len(command) - 2))
+    assert any(
+        command[index:index + 3] == runtime_mount
+        for index in range(len(command) - 2)
+    )
+    assert any(
+        command[index:index + 3] == objects_mount
+        for index in range(len(command) - 2)
+    )
+    assert any(
+        command[index:index + 3] == mcp_mount
+        for index in range(len(command) - 2)
+    )
+    assert any(
+        command[index:index + 3] == worktree_mount
+        for index in range(len(command) - 2)
+    )
+    assert any(
+        command[index:index + 3] == home_mount
+        for index in range(len(command) - 2)
+    )
+    writable_sources = {
+        command[index + 1]
+        for index, value in enumerate(command[:-2])
+        if value == "--bind"
+    }
+    assert writable_sources == {str(worktree.path), str(home)}
+    assert str(config.root) not in [
+        command[index + 1]
+        for index, value in enumerate(command[:-1])
+        if value == "--ro-bind"
+    ]
+    assert str(credential) not in command
+    assert git_environment["GIT_DIR"].startswith(str(home))
     assert command[-3:] == ["--", "/usr/bin/copilot", "--autopilot"]
+
+
+def test_isolated_git_metadata_supports_commit_without_changing_shared_refs(
+    config: Config,
+    board: Board,
+    git_repo: Path,
+) -> None:
+    task = board.create("Commit with isolated Git metadata")
+    worktree = WorktreeManager(config, repo=git_repo, board=board).create(
+        "feature/isolated-git"
+    )
+    with board.edit(task.id) as stored:
+        stored.branch = "feature/isolated-git"
+        stored.worktree = str(worktree.path)
+    task = board.get(task.id)
+    launcher = AgentLauncher(config, board)
+    home = launcher._isolated_home(task.id)
+    environment, objects = launcher._isolated_git_environment(
+        task,
+        worktree.path,
+        home,
+    )
+    process_environment = {**os.environ, **environment}
+    shared_branch_before = subprocess.run(
+        ["git", "rev-parse", task.branch],
+        cwd=git_repo,
+        capture_output=True,
+        text=True,
+        check=True,
+    ).stdout.strip()
+    protected_before = subprocess.run(
+        ["git", "rev-parse", "main"],
+        cwd=git_repo,
+        capture_output=True,
+        text=True,
+        check=True,
+    ).stdout.strip()
+    changed = worktree.path / "worker-change.txt"
+    changed.write_text("isolated\n", encoding="utf-8")
+
+    subprocess.run(
+        ["git", "add", "worker-change.txt"],
+        cwd=worktree.path,
+        env=process_environment,
+        check=True,
+    )
+    subprocess.run(
+        ["git", "commit", "-m", "isolated worker commit"],
+        cwd=worktree.path,
+        env=process_environment,
+        check=True,
+        capture_output=True,
+    )
+
+    private_head = subprocess.run(
+        ["git", "rev-parse", "HEAD"],
+        cwd=worktree.path,
+        env=process_environment,
+        capture_output=True,
+        text=True,
+        check=True,
+    ).stdout.strip()
+    assert private_head != shared_branch_before
+    assert subprocess.run(
+        ["git", "rev-parse", task.branch],
+        cwd=git_repo,
+        capture_output=True,
+        text=True,
+        check=True,
+    ).stdout.strip() == shared_branch_before
+    assert subprocess.run(
+        ["git", "rev-parse", "main"],
+        cwd=git_repo,
+        capture_output=True,
+        text=True,
+        check=True,
+    ).stdout.strip() == protected_before
+    assert Path(environment["GIT_DIR"]).is_relative_to(home)
+    assert Path(environment["GIT_DIR"]).stat().st_mode & 0o777 == 0o700
+    assert objects == (git_repo / ".git" / "objects").resolve()
 
 
 def test_launcher_fails_closed_without_worker_sandbox(
@@ -496,9 +663,17 @@ def test_launcher_terminates_and_rolls_back_when_metadata_persistence_fails(
         ),
     )
 
-    def fail_after_replace(path: Path, text: str) -> None:
+    def fail_after_replace(
+        path: Path,
+        text: str,
+        *,
+        mode: int | None = None,
+    ) -> None:
         path.write_text(text, encoding="utf-8")
-        raise OSError("metadata fsync failed")
+        if mode is not None:
+            path.chmod(mode)
+        if path.name == f"{task.id}.json":
+            raise OSError("metadata fsync failed")
 
     monkeypatch.setattr("saturnin.launcher.atomic_replace_text", fail_after_replace)
 
