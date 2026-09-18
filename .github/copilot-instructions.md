@@ -27,11 +27,11 @@ the CEO, stop and dispatch instead.
      sweep (`saturnin task list --open`).
    - `pr-gate` - the answer is a review verdict
      (`saturnin review gate <repo#N> ...`).
-   - `poller` - nothing in our control will report back, so a *worker* writes
-     the declarative poller status file that represents the signal and
-     re-triggers Saturnin
-     (`automation/library/result_poller.sh`, `saturnin-poller` timer). Building
-     the poller is itself dispatched work, never yours.
+   - `poller` - nothing in our control will report back, so a *worker*
+     registers a declarative status-file probe through
+     `saturnin poller register`; the trusted callback installs it for
+     `automation/library/result_poller.sh` and the `saturnin-poller` timer.
+     Building the poller is itself dispatched work, never yours.
    - `escalation` - a human owns it; the escalation issue is the tracker.
 
    Blocking on a worker is a governance violation (rule 8), not merely bad

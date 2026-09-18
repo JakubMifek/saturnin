@@ -651,7 +651,7 @@ class AgentLauncher:
                 f"{task.branch}\n",
                 mode=PRIVATE_FILE_MODE,
             )
-        push_urls = self._validated_push_urls(task, workdir)
+        self._validated_push_urls(task, workdir)
         self._git_output(
             ["--git-dir", str(git_dir), "config", "--unset-all", "remote.origin.url"],
             required=False,
@@ -660,20 +660,6 @@ class AgentLauncher:
             ["--git-dir", str(git_dir), "config", "--unset-all", "remote.origin.pushurl"],
             required=False,
         )
-        self._git_output(
-            ["--git-dir", str(git_dir), "config", "remote.origin.url", push_urls[0]]
-        )
-        for push_url in push_urls:
-            self._git_output(
-                [
-                    "--git-dir",
-                    str(git_dir),
-                    "config",
-                    "--add",
-                    "remote.origin.pushurl",
-                    push_url,
-                ]
-            )
         return (
             {
                 "GIT_DIR": str(git_dir),

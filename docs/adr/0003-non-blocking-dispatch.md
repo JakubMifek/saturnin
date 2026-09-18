@@ -35,11 +35,12 @@ Every dispatch names how the result will arrive:
 
 The `poller` contract is the important one: when nothing in our control will
 report back (a long external build, a third-party deployment, someone else's
-review), Saturnin does not watch it. It dispatches a worker to *write the
-poller* - a JSON status file in `var/pollers/<task-id>.json` that says
-`complete`, `pending` or `failed` - and the `saturnin-poller` timer runs
-`automation/library/result_poller.sh` every five minutes, moving the task to
-`review` or `blocked` on the worker's behalf.
+review), Saturnin does not watch it. It dispatches a worker to register a
+declarative `status-file` probe through `saturnin poller register`; the trusted
+worker callback installs `var/pollers/<task-id>.json`, and the
+`saturnin-poller` timer runs `automation/library/result_poller.sh` every five
+minutes, re-reading the signal file and moving the task to `review` or
+`blocked` on the worker's behalf.
 
 Building the poller is itself work, so it is delegated too. The CEO's
 involvement in any task ends at dispatch.

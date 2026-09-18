@@ -15,7 +15,7 @@ security boundary is the operating-system user account plus the credentials
 
 | Control | Where |
 | --- | --- |
-| Reports protected branch targets as denied when Saturnin's branch or push checks are invoked; direct Git commands remain outside Saturnin's control | `saturnin check branch`, `Governance.push_allowed` |
+| Workers get isolated Git metadata with no `origin` push destination; repository pushes go through `saturnin push`, which denies protected branch targets | `AgentLauncher`, `saturnin push`, `Governance.push_allowed` |
 | No merge without an independent, zero-context review by someone other than the author | `Governance.merge_allowed`, `ReviewLedger` |
 | No issue filed in a managed repository without an independent issue review | `Governance.issue_submission_allowed` |
 | Never runs as root; `apt` only for Saturnin-dedicated service dependencies; `systemctl` only for `saturnin-*` units; timers only in the user scope | `Governance.check_server_command`, `policies/server_scope.yaml` |

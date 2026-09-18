@@ -19,7 +19,7 @@ from saturnin.mcp import MCPError
 from saturnin.review import ReviewLedger, sign_review_attestation
 from saturnin.routing import Router
 from saturnin.worktrees import WorktreeManager
-from saturnin.worker_callbacks import CALLBACKS_FILE
+from saturnin.worker_callbacks import CALLBACKS_FILE, WorkerCallbackError, apply_queued
 
 
 _REAL_PROCESS_START_TIME = AgentLauncher._process_start_time
@@ -253,7 +253,7 @@ def test_reconcile_applies_worker_callbacks_before_requeue(
     config: Config,
     board: Board,
 ) -> None:
-    task = board.create("Replay worker callbacks")
+    task = board.create("Fix worker callbacks")
     Router(config).dispatch(board, task)
     board.transition_id(task.id, "in_progress", actor="launcher")
     launcher = AgentLauncher(config, board)
@@ -303,6 +303,92 @@ def test_reconcile_applies_worker_callbacks_before_requeue(
     assert CheckpointStore(config, board).latest(task.id).summary == "paused"
     assert not metadata_path.exists()
     assert not (callback_dir / CALLBACKS_FILE).exists()
+
+
+@pytest.mark.parametrize(
+    "callback",
+    [
+        {
+            "type": "task_move",
+            "state": "review",
+            "actor": "chief-of-staff",
+            "note": "ready",
+        },
+        {
+            "type": "checkpoint_save",
+            "role": "chief-of-staff",
+            "summary": "paused",
+            "next_steps": ["resume"],
+            "blockers": [],
+            "artifacts": [],
+        },
+    ],
+)
+def test_worker_callbacks_reject_forged_role_identity(
+    config: Config,
+    board: Board,
+    callback: dict[str, object],
+) -> None:
+    task = board.create("Fix forged callback")
+    Router(config).dispatch(board, task)
+    board.transition_id(task.id, "in_progress", actor="launcher")
+    callback_dir = AgentLauncher(config, board)._isolated_home(task.id) / ".saturnin-callbacks"
+    callback_dir.mkdir(parents=True)
+    callback["task_id"] = task.id
+    (callback_dir / CALLBACKS_FILE).write_text(
+        json.dumps(callback) + "\n",
+        encoding="utf-8",
+    )
+
+    with pytest.raises(WorkerCallbackError, match="trusted task role"):
+        apply_queued(config, board, task_id=task.id, callback_dir=str(callback_dir))
+
+    assert board.get(task.id).state == "in_progress"
+
+
+def test_worker_callback_registers_trusted_poller(
+    config: Config,
+    board: Board,
+) -> None:
+    task = board.create("Fix poller")
+    Router(config).dispatch(board, task)
+    with board.edit(task.id) as stored:
+        stored.result_contract = "poller"
+    callback_dir = AgentLauncher(config, board)._isolated_home(task.id) / ".saturnin-callbacks"
+    callback_dir.mkdir(parents=True)
+    callback = {
+        "type": "poller_register",
+        "task_id": task.id,
+        "status_file": f"var/poller-signals/{task.id}.json",
+        "pending_message": "waiting for CI",
+        "actor": "chief-of-staff",
+    }
+    (callback_dir / CALLBACKS_FILE).write_text(
+        json.dumps(callback) + "\n",
+        encoding="utf-8",
+    )
+
+    with pytest.raises(WorkerCallbackError, match="trusted task role"):
+        apply_queued(config, board, task_id=task.id, callback_dir=str(callback_dir))
+    callback["actor"] = "code-worker"
+    (callback_dir / CALLBACKS_FILE).write_text(
+        json.dumps(callback) + "\n",
+        encoding="utf-8",
+    )
+
+    apply_queued(config, board, task_id=task.id, callback_dir=str(callback_dir))
+
+    poller = json.loads(
+        (config.var_dir / "pollers" / f"{task.id}.json").read_text(encoding="utf-8")
+    )
+    assert poller == {
+        "pending_message": "waiting for CI",
+        "probe": {
+            "path": f"var/poller-signals/{task.id}.json",
+            "type": "status-file",
+        },
+        "task_id": task.id,
+    }
 
 
 def test_isolated_git_metadata_supports_commit_without_changing_shared_refs(
@@ -376,24 +462,19 @@ def test_isolated_git_metadata_supports_commit_without_changing_shared_refs(
         env=process_environment,
         capture_output=True,
         text=True,
-        check=True,
-    ).stdout.splitlines()
+        check=False,
+    )
     isolated_remote_config = subprocess.run(
         ["git", "config", "--get-regexp", r"^remote\.origin\."],
         cwd=worktree.path,
         env=process_environment,
         capture_output=True,
         text=True,
-        check=True,
-    ).stdout.splitlines()
+        check=False,
+    )
     assert private_head != shared_branch_before
-    assert isolated_remote == [
-        "http://localhost:26831/JakubMifek/saturnin"
-    ]
-    assert isolated_remote_config == [
-        "remote.origin.url http://localhost:26831/JakubMifek/saturnin",
-        "remote.origin.pushurl http://localhost:26831/JakubMifek/saturnin",
-    ]
+    assert isolated_remote.returncode != 0
+    assert isolated_remote_config.returncode != 0
     assert subprocess.run(
         ["git", "rev-parse", task.branch],
         cwd=git_repo,

@@ -659,6 +659,28 @@ def test_dispatch_squad_override_survives_project_preparation(
     assert Board().get(task["id"]).squad == ["pr-reviewer"]
 
 
+def test_task_reroute_adds_labels_and_routes_current_task(
+    home: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    task = json.loads(run(capsys, "--json", "task", "add", "Classify me", "--dispatch")[1])
+
+    code, out = run(
+        capsys,
+        "--json",
+        "task",
+        "reroute",
+        task["id"],
+        "--label",
+        "fix",
+    )
+
+    payload = json.loads(out)
+    assert code == 0
+    assert payload["role"] == "code-worker"
+    assert payload["route"]["rule"] == "code"
+    assert payload["history"][-2]["actor"] == "chief-of-staff"
+
+
 def test_branch_and_command_checks(home: Path, capsys: pytest.CaptureFixture[str]) -> None:
     assert run(capsys, "check", "branch", "feature/x")[0] == 0
     assert run(capsys, "check", "branch", "main")[0] == 2
@@ -855,6 +877,45 @@ def test_sandboxed_worker_callback_rejects_other_task(
     assert code == 1
     assert "worker may only update its own task" in error
     assert not (callback_dir / CALLBACKS_FILE).exists()
+
+
+def test_sandboxed_worker_poller_registration_is_queued(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    callback_dir = tmp_path / "callbacks"
+    monkeypatch.setenv(ENV_CALLBACK_DIR, str(callback_dir))
+    monkeypatch.setenv(ENV_CALLBACK_TASK_ID, "T-callback")
+
+    code, out = run(
+        capsys,
+        "poller",
+        "register",
+        "T-callback",
+        "--status-file",
+        "var/poller-signals/T-callback.json",
+        "--pending-message",
+        "waiting",
+        "--actor",
+        "code-worker",
+    )
+
+    assert code == 0
+    assert "queued worker callback" in out
+    records = [
+        json.loads(line)
+        for line in (callback_dir / CALLBACKS_FILE)
+        .read_text(encoding="utf-8")
+        .splitlines()
+    ]
+    assert records == [
+        {
+            "actor": "code-worker",
+            "pending_message": "waiting",
+            "status_file": "var/poller-signals/T-callback.json",
+            "task_id": "T-callback",
+            "type": "poller_register",
+        }
+    ]
 
 
 def test_review_gate_flow(home: Path, capsys: pytest.CaptureFixture[str]) -> None:

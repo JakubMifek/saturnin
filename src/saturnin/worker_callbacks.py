@@ -8,10 +8,10 @@ from argparse import Namespace
 from pathlib import Path
 from typing import Any
 
-from .board import Board
+from .board import Board, BoardError, Task
 from .checkpoints import Checkpoint, CheckpointStore
 from .config import Config
-from .jsonlines import durable_append_text, objects
+from .jsonlines import PRIVATE_FILE_MODE, atomic_replace_text, durable_append_text, objects
 
 ENV_CALLBACK_DIR = "SATURNIN_CALLBACK_DIR"
 ENV_CALLBACK_TASK_ID = "SATURNIN_CALLBACK_TASK_ID"
@@ -63,17 +63,22 @@ def apply_queued(
                 f"callback for {record['task_id']} cannot update task {task_id}"
             )
         if record["type"] == "task_move":
-            board.transition_id(
-                task_id,
-                record["state"],
-                actor=record.get("actor"),
-                note=record.get("note", ""),
-            )
+            with board.edit(task_id) as task:
+                trusted_role = _trusted_task_role(task)
+                _reject_conflicting_identity(record.get("actor"), trusted_role, "actor")
+                board._apply_transition(  # noqa: SLF001 - callback replay is a board mutation
+                    task,
+                    record["state"],
+                    actor=trusted_role,
+                    note=record.get("note", ""),
+                )
         elif record["type"] == "checkpoint_save":
+            trusted_role = _trusted_task_role(board.get(task_id))
+            _reject_conflicting_identity(record.get("role"), trusted_role, "role")
             checkpoint_store.save(
                 Checkpoint(
                     task_id=task_id,
-                    role=record["role"],
+                    role=trusted_role,
                     summary=record["summary"],
                     next_steps=record["next_steps"],
                     blockers=record["blockers"],
@@ -82,6 +87,17 @@ def apply_queued(
                     worktree=record.get("worktree"),
                     resume_after=record.get("resume_after"),
                 )
+            )
+        elif record["type"] == "poller_register":
+            trusted_role = _trusted_task_role(board.get(task_id))
+            _reject_conflicting_identity(record.get("actor"), trusted_role, "actor")
+            register_poller(
+                config,
+                board,
+                task_id=task_id,
+                status_file=record["status_file"],
+                pending_message=record.get("pending_message", ""),
+                actor=trusted_role,
             )
         else:  # pragma: no cover - validator guards this
             raise WorkerCallbackError(f"unknown worker callback {record['type']!r}")
@@ -122,6 +138,15 @@ def _record_from_args(args: Namespace, task_id: str) -> dict[str, Any] | None:
             "worktree": args.worktree,
             "resume_after": args.resume_after,
         }
+    if args.command == "poller" and args.poller_command == "register":
+        _check_task(args.task_id, task_id)
+        return {
+            "type": "poller_register",
+            "task_id": args.task_id,
+            "status_file": args.status_file,
+            "pending_message": args.pending_message,
+            "actor": args.actor,
+        }
     return None
 
 
@@ -153,4 +178,79 @@ def _validate_record(record: dict[str, Any]) -> None:
             if record.get(name) is not None and not isinstance(record[name], str):
                 raise TypeError(f"callback field {name!r} must be a string or null")
         return
+    if record["type"] == "poller_register":
+        for name in ("task_id", "status_file"):
+            if not isinstance(record.get(name), str) or not record[name]:
+                raise TypeError(f"callback field {name!r} must be a non-empty string")
+        for name in ("pending_message", "actor"):
+            if record.get(name) is not None and not isinstance(record[name], str):
+                raise TypeError(f"callback field {name!r} must be a string or null")
+        return
     raise TypeError(f"callback field 'type' is unsupported: {record['type']!r}")
+
+
+def _trusted_task_role(task: Task) -> str:
+    if not task.role:
+        raise WorkerCallbackError(f"task {task.id} has no trusted assigned role")
+    return task.role
+
+
+def _reject_conflicting_identity(value: Any, trusted_role: str, field: str) -> None:
+    if value is not None and value != trusted_role:
+        raise WorkerCallbackError(
+            f"callback {field} {value!r} does not match trusted task role {trusted_role!r}"
+        )
+
+
+def register_poller(
+    config: Config,
+    board: Board,
+    *,
+    task_id: str,
+    status_file: str,
+    pending_message: str = "",
+    actor: str | None = None,
+) -> dict[str, Any]:
+    """Install a trusted declarative poller registration."""
+    signal_path = _validated_signal_path(config, status_file)
+    with board.edit(task_id) as task:
+        if task.result_contract != "poller":
+            raise WorkerCallbackError(
+                f"task {task_id} does not use the poller result contract"
+            )
+        trusted_role = _trusted_task_role(task)
+        _reject_conflicting_identity(actor, trusted_role, "actor")
+        payload: dict[str, Any] = {
+            "task_id": task_id,
+            "probe": {
+                "type": "status-file",
+                "path": signal_path,
+            },
+            "pending_message": pending_message or "awaiting external signal",
+        }
+        pollers_dir = config.var_dir / "pollers"
+        pollers_dir.mkdir(parents=True, exist_ok=True)
+        atomic_replace_text(
+            pollers_dir / f"{task_id}.json",
+            json.dumps(payload, indent=2, sort_keys=True) + "\n",
+            mode=PRIVATE_FILE_MODE,
+        )
+        task.log("poller:registered", actor=trusted_role, status_file=signal_path)
+        return payload
+
+
+def _validated_signal_path(config: Config, value: str) -> str:
+    requested = Path(value)
+    if requested.is_absolute() or any(part == ".." for part in requested.parts):
+        raise WorkerCallbackError("poller status file must be relative to var/poller-signals")
+    root = (config.var_dir / "poller-signals").resolve()
+    candidate = (config.data_root / requested).resolve()
+    try:
+        relative = candidate.relative_to(root)
+    except ValueError as exc:
+        raise WorkerCallbackError(
+            "poller status file must be under var/poller-signals"
+        ) from exc
+    if not relative.parts:
+        raise WorkerCallbackError("poller status file must name a file")
+    return candidate.relative_to(config.data_root).as_posix()

@@ -194,3 +194,26 @@ def test_dispatch_accepts_explicit_actor(config: Config, board: Board) -> None:
     stored = board.get(task.id)
     dispatch_events = [e for e in stored.history if e["event"] == "dispatch"]
     assert dispatch_events[-1]["actor"] == "discovery"
+
+
+def test_relabel_and_reroute_updates_already_routed_task_atomically(
+    config: Config, board: Board
+) -> None:
+    task = board.create("Needs classification")
+    router = Router(config)
+    router.dispatch(board, task)
+
+    route = router.relabel_and_reroute(
+        board,
+        task.id,
+        labels=["fix"],
+        actor="chief-of-staff",
+    )
+
+    stored = board.get(task.id)
+    assert route.role == "code-worker"
+    assert stored.state == "routed"
+    assert stored.role == "code-worker"
+    assert "fix" in stored.labels
+    assert stored.history[-2]["event"] == "reroute"
+    assert stored.history[-2]["actor"] == "chief-of-staff"

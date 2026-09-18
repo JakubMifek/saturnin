@@ -683,6 +683,57 @@ def test_result_poller_serializes_overlapping_runs(config: Config) -> None:
     assert "another result-poller run is active" in second.stdout
 
 
+def test_result_poller_rereads_registered_status_file(config: Config) -> None:
+    pollers = config.var_dir / "pollers"
+    signals = config.var_dir / "poller-signals"
+    pollers.mkdir(parents=True)
+    signals.mkdir(parents=True)
+    task_id = "T-dynamic"
+    (pollers / f"{task_id}.json").write_text(
+        '{"task_id": "T-dynamic", "pending_message": "waiting", '
+        '"probe": {"type": "status-file", "path": "var/poller-signals/T-dynamic.json"}}\n',
+        encoding="utf-8",
+    )
+    args_log = config.root / "saturnin-args"
+    fake_saturin = config.root / ".venv" / "bin" / "saturnin"
+    fake_saturin.parent.mkdir(parents=True)
+    fake_saturin.write_text(
+        "#!/bin/sh\n"
+        f"printf '%s\\n' \"$*\" >> {args_log}\n"
+        "if [ \"$1\" = '--json' ] && [ \"$2\" = 'task' ] && [ \"$3\" = 'show' ]; then\n"
+        "  printf '%s\\n' '{\"state\":\"in_progress\"}'\n"
+        "fi\n",
+        encoding="utf-8",
+    )
+    fake_saturin.chmod(0o755)
+    env = {**os.environ, "SATURNIN_HOME": str(config.root)}
+
+    first = subprocess.run(
+        ["bash", str(config.root / "automation/library/result_poller.sh")],
+        check=True,
+        capture_output=True,
+        text=True,
+        env=env,
+    )
+    (signals / f"{task_id}.json").write_text(
+        '{"task_id": "T-dynamic", "status": "complete", "message": "done"}\n',
+        encoding="utf-8",
+    )
+    second = subprocess.run(
+        ["bash", str(config.root / "automation/library/result_poller.sh")],
+        check=True,
+        capture_output=True,
+        text=True,
+        env=env,
+    )
+
+    calls = args_log.read_text(encoding="utf-8")
+    assert "still pending" in first.stdout
+    assert f"task move {task_id} review --actor result-poller" in calls
+    assert "signal received" in second.stdout
+    assert (pollers / f"{task_id}.json.done").exists()
+
+
 def test_result_poller_persists_escalation_reference(config: Config) -> None:
     pollers = config.var_dir / "pollers"
     pollers.mkdir(parents=True)

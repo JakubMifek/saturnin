@@ -48,7 +48,7 @@ from .review import (
 )
 from .routing import Router, RoutingError
 from .worktrees import CleanupPlan, GitError, WorktreeManager
-from .worker_callbacks import queue_from_args
+from .worker_callbacks import queue_from_args, register_poller
 
 
 def _emit(data: Any, as_json: bool, text: str | None = None) -> None:
@@ -101,6 +101,11 @@ def build_parser() -> argparse.ArgumentParser:
     move.add_argument("--actor", default=None, help="default: the configured CEO role")
     move.add_argument("--note", default="")
     move.add_argument("--escalation", default="", help="escalation issue URL/ref for blocked tasks")
+
+    reroute = task.add_parser("reroute", help="add labels and route a task atomically")
+    reroute.add_argument("task_id")
+    reroute.add_argument("--label", action="append", default=[], required=True)
+    reroute.add_argument("--actor", default="chief-of-staff")
 
     tree = task.add_parser("tree", help="show the work hierarchy")
     tree.add_argument("task_id", nargs="?", help="root; default: every top level item")
@@ -292,6 +297,22 @@ def build_parser() -> argparse.ArgumentParser:
     push = sub.add_parser("push", help="push the current commit through the branch policy")
     push.add_argument("--remote", default="origin")
     push.add_argument("--branch", help="destination branch; default: current branch")
+
+    poller = sub.add_parser("poller", help="trusted result-poller registrations").add_subparsers(
+        dest="poller_command", required=True
+    )
+    poller_register = poller.add_parser("register", help="register a declarative status-file probe")
+    poller_register.add_argument("task_id")
+    poller_register.add_argument(
+        "--status-file",
+        required=True,
+        help="relative path under var/poller-signals containing status JSON",
+    )
+    poller_register.add_argument(
+        "--pending-message",
+        default="awaiting external signal",
+    )
+    poller_register.add_argument("--actor")
 
     # escalate ---------------------------------------------------------
     esc = sub.add_parser("escalate", help="render a human escalation issue body")
@@ -922,6 +943,21 @@ def _run(args: argparse.Namespace, config: Config) -> int:  # noqa: C901 - flat 
         return _run_checkpoint(args, config, board, as_json)
     if args.command == "review":
         return _run_review(args, config, as_json)
+    if args.command == "poller":
+        registration = register_poller(
+            config,
+            board,
+            task_id=args.task_id,
+            status_file=args.status_file,
+            pending_message=args.pending_message,
+            actor=args.actor,
+        )
+        _emit(
+            registration,
+            as_json,
+            f"registered poller for {args.task_id}: {registration['probe']['path']}",
+        )
+        return 0
     if args.command == "check":
         governance = Governance(config)
         decision = (
@@ -1217,6 +1253,22 @@ def _run_task(args: argparse.Namespace, config: Config, board: Board, as_json: b
         lines: list[str] = []
         payload = [_tree_dict(board, root, lines, 0) for root in roots]
         _emit(payload, as_json, "\n".join(lines) or "(board is empty)")
+        return 0
+    if args.task_command == "reroute":
+        route = Router(config).relabel_and_reroute(
+            board,
+            args.task_id,
+            labels=args.label,
+            actor=args.actor,
+        )
+        task = board.get(args.task_id)
+        payload = task.to_dict()
+        payload["route"] = {
+            "role": route.role,
+            "rule": route.rule,
+            "result_contract": route.result_contract,
+        }
+        _emit(payload, as_json, _task_line(task))
         return 0
     if args.task_command == "sync":
         mirror = IssueMirror(config, board)

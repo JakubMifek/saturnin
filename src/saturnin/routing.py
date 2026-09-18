@@ -227,6 +227,48 @@ class Router:
         task.__dict__.update(current.__dict__)
         return route
 
+    def relabel_and_reroute(
+        self,
+        board: Board,
+        task_id: str,
+        *,
+        labels: Sequence[str],
+        actor: str | None = None,
+    ) -> Route:
+        """Atomically add labels and route an already-owned unclassified task."""
+        effective_actor = actor if actor is not None else self.ceo_role
+        with board.edit(task_id) as current:
+            if current.kind in CONTAINER_KINDS:
+                raise BoardError(
+                    f"task {current.id} is a {current.kind} container and cannot be rerouted"
+                )
+            if current.state not in ("intake", "routed", "blocked"):
+                raise BoardError(
+                    f"task {current.id} is not reroutable from state {current.state}"
+                )
+            current.labels = sorted(
+                {*current.labels, *(label.strip() for label in labels if label.strip())}
+            )
+            route = self.resolve(current)
+            current.role = route.role
+            current.unit = route.unit
+            current.squad = list(route.squad)
+            if PRIORITIES.index(route.priority) < PRIORITIES.index(current.priority):
+                current.priority = route.priority
+            current.result_contract = route.result_contract
+            current.log(
+                "reroute",
+                actor=effective_actor,
+                role=route.role,
+                rule=route.rule,
+                labels=",".join(current.labels),
+                result_contract=route.result_contract,
+            )
+            current.routed_at = current.routed_at or current.history[-1]["ts"]
+            current.state = "routed"
+            current.log("state:routed", actor=effective_actor, note=f"rule={route.rule}")
+        return route
+
     def validate_policy(self) -> list[str]:
         """Return a list of problems with the routing policy (empty == healthy)."""
         problems: list[str] = []
