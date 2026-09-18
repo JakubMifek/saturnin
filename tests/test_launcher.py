@@ -391,6 +391,120 @@ def test_worker_callback_registers_trusted_poller(
     }
 
 
+def test_worker_callback_submits_escalation_on_trusted_host(
+    config: Config,
+    board: Board,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    task = board.create("Escalate safely")
+    with board.edit(task.id) as stored:
+        stored.role = "code-worker"
+        stored.state = "in_progress"
+    callback_dir = AgentLauncher(config, board)._isolated_home(task.id) / ".saturnin-callbacks"
+    callback_dir.mkdir(parents=True)
+    callback = {
+        "type": "escalation_request",
+        "task_id": task.id,
+        "title": "Need help",
+        "context": "stuck",
+        "checklist": ["decide"],
+        "unblock": ["answer"],
+        "urgency": "high",
+        "actor": "code-worker",
+    }
+    (callback_dir / CALLBACKS_FILE).write_text(
+        json.dumps(callback) + "\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(
+        "saturnin.escalation.submit",
+        lambda **kwargs: "https://github.com/JakubMifek/saturnin/issues/1",
+    )
+
+    apply_queued(config, board, task_id=task.id, callback_dir=str(callback_dir))
+
+    stored = board.get(task.id)
+    assert stored.state == "blocked"
+    assert any(
+        entry["event"] == "state:blocked"
+        and entry["actor"] == "code-worker"
+        and entry["note"] == "escalated: https://github.com/JakubMifek/saturnin/issues/1"
+        for entry in stored.history
+    )
+
+
+def test_worker_callback_rejects_direct_blocked_transition(
+    config: Config,
+    board: Board,
+) -> None:
+    task = board.create("Reject fake escalation")
+    with board.edit(task.id) as stored:
+        stored.role = "code-worker"
+        stored.state = "in_progress"
+    callback_dir = AgentLauncher(config, board)._isolated_home(task.id) / ".saturnin-callbacks"
+    callback_dir.mkdir(parents=True)
+    callback = {
+        "type": "task_move",
+        "task_id": task.id,
+        "state": "blocked",
+        "actor": "code-worker",
+        "note": "escalated: https://github.com/example/repo/issues/1",
+    }
+    (callback_dir / CALLBACKS_FILE).write_text(
+        json.dumps(callback) + "\n",
+        encoding="utf-8",
+    )
+
+    with pytest.raises(ValueError, match="escalation_request"):
+        apply_queued(config, board, task_id=task.id, callback_dir=str(callback_dir))
+
+    assert board.get(task.id).state == "in_progress"
+
+
+def test_worker_callback_runs_ops_host_command(
+    config: Config,
+    board: Board,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    task = board.create("Restart timer")
+    with board.edit(task.id) as stored:
+        stored.role = "ops-worker"
+        stored.state = "in_progress"
+    callback_dir = AgentLauncher(config, board)._isolated_home(task.id) / ".saturnin-callbacks"
+    callback_dir.mkdir(parents=True)
+    callback = {
+        "type": "server_command",
+        "task_id": task.id,
+        "cmdline": "systemctl --user restart saturnin-janitor.timer",
+        "service": None,
+    }
+    (callback_dir / CALLBACKS_FILE).write_text(
+        json.dumps(callback) + "\n",
+        encoding="utf-8",
+    )
+    calls: list[list[str]] = []
+
+    def run_command(*args, **kwargs):
+        calls.append(args[0])
+        return SimpleNamespace(returncode=0, stdout="ok\n", stderr="")
+
+    monkeypatch.setattr("saturnin.governance.os.geteuid", lambda: 1000)
+    monkeypatch.setattr("saturnin.worker_callbacks.subprocess.run", run_command)
+
+    apply_queued(config, board, task_id=task.id, callback_dir=str(callback_dir))
+
+    assert calls == [["systemctl", "--user", "restart", "saturnin-janitor.timer"]]
+    stored = board.get(task.id)
+    assert any(entry["event"] == "host:command_started" for entry in stored.history)
+    assert any(
+        entry["event"] == "host:command_finished" and entry["returncode"] == 0
+        for entry in stored.history
+    )
+    assert (
+        config.var_dir / "logs" / "host-operations" / f"{task.id}.jsonl"
+    ).is_file()
+
+
 def test_isolated_git_metadata_supports_commit_without_changing_shared_refs(
     config: Config,
     board: Board,

@@ -20,7 +20,9 @@ draws around it.
 
 ## Procedure
 1. Check every command first: `saturnin check command "<cmd>"`. A denial is an
-   instruction, not an obstacle to route around.
+   instruction, not an obstacle to route around. When the command must run on
+   the host, queue it through the trusted broker:
+   `saturnin check command "<cmd>" --execute --task <task-id>`.
 2. Change units by editing files in `systemd/` on a feature branch, then install
    with `scripts/install_user_units.sh` - never hand-edit installed units.
 3. Record what you changed in the task; ops changes without a board trail do not

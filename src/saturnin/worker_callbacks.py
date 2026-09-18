@@ -4,13 +4,17 @@ from __future__ import annotations
 
 import json
 import os
+import shlex
+import subprocess
 from argparse import Namespace
 from pathlib import Path
 from typing import Any
 
-from .board import Board, BoardError, Task
+from . import escalation
+from .board import Board, Task
 from .checkpoints import Checkpoint, CheckpointStore
 from .config import Config
+from .governance import Governance
 from .jsonlines import PRIVATE_FILE_MODE, atomic_replace_text, durable_append_text, objects
 
 ENV_CALLBACK_DIR = "SATURNIN_CALLBACK_DIR"
@@ -99,6 +103,37 @@ def apply_queued(
                 pending_message=record.get("pending_message", ""),
                 actor=trusted_role,
             )
+        elif record["type"] == "escalation_request":
+            trusted_role = _trusted_task_role(board.get(task_id))
+            _reject_conflicting_identity(record.get("actor"), trusted_role, "actor")
+            body = escalation.render(
+                title=record["title"],
+                context=record.get("context", ""),
+                checklist=record["checklist"],
+                urgency=record["urgency"],
+                unblock_criteria=record["unblock"],
+                task_id=task_id,
+                config=config,
+            )
+            escalation.submit_task_escalation(
+                config=config,
+                board=board,
+                task_id=task_id,
+                title=record["title"],
+                body=body,
+                urgency=record["urgency"],
+                actor=trusted_role,
+            )
+        elif record["type"] == "server_command":
+            trusted_role = _trusted_task_role(board.get(task_id))
+            run_server_command(
+                config,
+                board,
+                task_id=task_id,
+                cmdline=record["cmdline"],
+                service=record.get("service"),
+                actor=trusted_role,
+            )
         else:  # pragma: no cover - validator guards this
             raise WorkerCallbackError(f"unknown worker callback {record['type']!r}")
     if records:
@@ -109,14 +144,12 @@ def apply_queued(
 def _record_from_args(args: Namespace, task_id: str) -> dict[str, Any] | None:
     if args.command == "task" and args.task_command == "move":
         _check_task(args.task_id, task_id)
-        note = args.note
-        if args.state == "blocked" and args.escalation.strip():
-            escalation_ref = args.escalation.strip()
-            note = (
-                f"escalated: {escalation_ref}"
-                if not note
-                else f"escalated: {escalation_ref}; {note}"
+        if args.state == "blocked":
+            raise WorkerCallbackError(
+                "sandboxed workers must request escalations with "
+                "`saturnin escalate --push --task`, not `task move blocked`"
             )
+        note = args.note
         return {
             "type": "task_move",
             "task_id": args.task_id,
@@ -147,6 +180,31 @@ def _record_from_args(args: Namespace, task_id: str) -> dict[str, Any] | None:
             "pending_message": args.pending_message,
             "actor": args.actor,
         }
+    if args.command == "escalate" and args.push and args.task:
+        _check_task(args.task, task_id)
+        return {
+            "type": "escalation_request",
+            "task_id": args.task,
+            "title": args.title,
+            "context": args.context,
+            "checklist": args.checklist,
+            "unblock": args.unblock,
+            "urgency": args.urgency,
+            "actor": args.actor,
+        }
+    if (
+        args.command == "check"
+        and args.check_command == "command"
+        and getattr(args, "execute", False)
+    ):
+        callback_task = args.task or task_id
+        _check_task(callback_task, task_id)
+        return {
+            "type": "server_command",
+            "task_id": callback_task,
+            "cmdline": args.cmdline,
+            "service": args.service,
+        }
     return None
 
 
@@ -160,6 +218,8 @@ def _validate_record(record: dict[str, Any]) -> None:
         for name in ("task_id", "state"):
             if not isinstance(record.get(name), str) or not record[name]:
                 raise TypeError(f"callback field {name!r} must be a non-empty string")
+        if record["state"] == "blocked":
+            raise TypeError("blocked transitions require an escalation_request callback")
         if record.get("actor") is not None and not isinstance(record["actor"], str):
             raise TypeError("callback field 'actor' must be a string or null")
         if not isinstance(record.get("note", ""), str):
@@ -186,6 +246,27 @@ def _validate_record(record: dict[str, Any]) -> None:
             if record.get(name) is not None and not isinstance(record[name], str):
                 raise TypeError(f"callback field {name!r} must be a string or null")
         return
+    if record["type"] == "escalation_request":
+        for name in ("task_id", "title", "urgency"):
+            if not isinstance(record.get(name), str) or not record[name]:
+                raise TypeError(f"callback field {name!r} must be a non-empty string")
+        if not isinstance(record.get("context", ""), str):
+            raise TypeError("callback field 'context' must be a string")
+        for name in ("checklist", "unblock"):
+            if not isinstance(record.get(name), list) or not all(
+                isinstance(item, str) for item in record[name]
+            ):
+                raise TypeError(f"callback field {name!r} must be a list of strings")
+        if record.get("actor") is not None and not isinstance(record["actor"], str):
+            raise TypeError("callback field 'actor' must be a string or null")
+        return
+    if record["type"] == "server_command":
+        for name in ("task_id", "cmdline"):
+            if not isinstance(record.get(name), str) or not record[name]:
+                raise TypeError(f"callback field {name!r} must be a non-empty string")
+        if record.get("service") is not None and not isinstance(record["service"], str):
+            raise TypeError("callback field 'service' must be a string or null")
+        return
     raise TypeError(f"callback field 'type' is unsupported: {record['type']!r}")
 
 
@@ -200,6 +281,89 @@ def _reject_conflicting_identity(value: Any, trusted_role: str, field: str) -> N
         raise WorkerCallbackError(
             f"callback {field} {value!r} does not match trusted task role {trusted_role!r}"
         )
+
+
+def run_server_command(
+    config: Config,
+    board: Board,
+    *,
+    task_id: str,
+    cmdline: str,
+    service: str | None = None,
+    actor: str = "ops-worker",
+) -> dict[str, Any]:
+    if actor != "ops-worker":
+        raise WorkerCallbackError("only ops-worker tasks may request host server commands")
+    board.path_for(task_id)
+    decision = Governance(config).check_server_command(cmdline, dedicated_service=service)
+    if not decision.allowed:
+        raise WorkerCallbackError("; ".join(decision.reasons))
+    try:
+        parts = shlex.split(cmdline)
+    except ValueError as exc:
+        raise WorkerCallbackError(f"unparsable command: {exc}") from exc
+    logs_dir = config.var_dir / "logs" / "host-operations"
+    logs_dir.mkdir(parents=True, exist_ok=True)
+    log_path = logs_dir / f"{task_id}.jsonl"
+    with board.edit(task_id) as task:
+        if task.role != actor:
+            raise WorkerCallbackError(
+                f"task {task_id} is assigned to {task.role!r}, not {actor!r}"
+            )
+        for entry in reversed(task.history):
+            if (
+                entry.get("event") == "host:command_finished"
+                and entry.get("command") == cmdline
+                and entry.get("service") == service
+                and entry.get("returncode") == 0
+            ):
+                return {
+                    "command": cmdline,
+                    "service": service,
+                    "returncode": 0,
+                    "log": str(entry.get("log", log_path)),
+                }
+        task.log(
+            "host:command_started",
+            actor=actor,
+            command=cmdline,
+            service=service,
+        )
+    result = subprocess.run(
+        parts,
+        cwd=config.root,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    record = {
+        "task_id": task_id,
+        "command": cmdline,
+        "service": service,
+        "returncode": result.returncode,
+        "stdout": result.stdout,
+        "stderr": result.stderr,
+    }
+    durable_append_text(log_path, json.dumps(record, sort_keys=True) + "\n")
+    with board.edit(task_id) as task:
+        task.log(
+            "host:command_finished",
+            actor=actor,
+            command=cmdline,
+            service=service,
+            returncode=result.returncode,
+            log=str(log_path),
+        )
+    if result.returncode:
+        raise WorkerCallbackError(
+            f"host command exited {result.returncode}; see {log_path}"
+        )
+    return {
+        "command": cmdline,
+        "service": service,
+        "returncode": result.returncode,
+        "log": str(log_path),
+    }
 
 
 def register_poller(

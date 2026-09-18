@@ -48,7 +48,7 @@ from .review import (
 )
 from .routing import Router, RoutingError
 from .worktrees import CleanupPlan, GitError, WorktreeManager
-from .worker_callbacks import queue_from_args, register_poller
+from .worker_callbacks import queue_from_args, register_poller, run_server_command
 
 
 def _emit(data: Any, as_json: bool, text: str | None = None) -> None:
@@ -294,6 +294,12 @@ def build_parser() -> argparse.ArgumentParser:
         "--service",
         help="Saturnin-dedicated service that requires an apt command",
     )
+    command.add_argument(
+        "--execute",
+        action="store_true",
+        help="execute an allowed host command; sandboxed workers queue a trusted callback",
+    )
+    command.add_argument("--task", help="board task associated with --execute")
     push = sub.add_parser("push", help="push the current commit through the branch policy")
     push.add_argument("--remote", default="origin")
     push.add_argument("--branch", help="destination branch; default: current branch")
@@ -859,47 +865,6 @@ def _doctor_config_path(args: argparse.Namespace) -> Path:
     return root / "policies" / "governance.yaml"
 
 
-def _task_escalation_reference(task: Task) -> str:
-    for entry in reversed(task.history):
-        note = str(entry.get("note", ""))
-        if note.startswith("escalated:"):
-            return note.removeprefix("escalated:").strip()
-    return ""
-
-
-def _submit_task_escalation(
-    *,
-    config: Config,
-    board: Board,
-    task_id: str,
-    title: str,
-    body: str,
-    urgency: str,
-    actor: str,
-) -> str:
-    board.path_for(task_id)
-    lock_path = config.var_dir / "locks" / f"escalation-{task_id}"
-    with file_lock(lock_path):
-        with board.edit(task_id) as task:
-            existing = _task_escalation_reference(task)
-            if task.state == "blocked" and existing:
-                return existing
-            if task.state not in ("routed", "in_progress", "review"):
-                raise BoardError(
-                    f"task {task_id} cannot be blocked from state {task.state}; "
-                    "escalation was not submitted"
-                )
-            url = escalation_mod.submit(
-                title=title,
-                body=body,
-                urgency=urgency,
-                config=config,
-                task_id=task_id,
-            )
-            Board._apply_transition(task, "blocked", actor=actor, note=f"escalated: {url}")
-            return url
-
-
 def _run(args: argparse.Namespace, config: Config) -> int:  # noqa: C901 - flat command table
     as_json = args.json
     if args.command == "doctor":
@@ -965,6 +930,26 @@ def _run(args: argparse.Namespace, config: Config) -> int:  # noqa: C901 - flat 
             if args.check_command == "branch"
             else governance.check_server_command(args.cmdline, dedicated_service=args.service)
         )
+        if args.check_command == "command" and args.execute:
+            if not decision.allowed:
+                _emit(
+                    {"allowed": False, "reasons": decision.reasons},
+                    as_json,
+                    "DENIED: " + "; ".join(decision.reasons),
+                )
+                return 2
+            if not args.task:
+                raise RuntimeError("check command --execute requires --task")
+            result = run_server_command(
+                config,
+                board,
+                task_id=args.task,
+                cmdline=args.cmdline,
+                service=args.service,
+                actor="ops-worker",
+            )
+            _emit(result, as_json, f"executed host command: {result['command']}")
+            return 0
         _emit(
             {"allowed": decision.allowed, "reasons": decision.reasons},
             as_json,
@@ -1038,7 +1023,7 @@ def _run(args: argparse.Namespace, config: Config) -> int:  # noqa: C901 - flat 
             print("; ".join(decision.reasons), file=sys.stderr)
             return 2
         if args.push and args.task:
-            url = _submit_task_escalation(
+            url = escalation_mod.submit_task_escalation(
                 config=config,
                 board=board,
                 task_id=args.task,

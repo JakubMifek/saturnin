@@ -8,9 +8,11 @@ from __future__ import annotations
 
 from typing import Iterable
 
+from .board import Board, BoardError, Task
 from .config import Config, default_config
 from .governance import Decision, Governance
 from .issues import IssueMirror, MirrorError, ensure_labels, issue_search_url, run_gh
+from .locking import file_lock
 
 
 def render(
@@ -96,6 +98,47 @@ def submit(
     if not url:
         raise MirrorError("gh issue create returned no URL")
     return url
+
+
+def submit_task_escalation(
+    *,
+    config: Config,
+    board: Board,
+    task_id: str,
+    title: str,
+    body: str,
+    urgency: str,
+    actor: str,
+) -> str:
+    board.path_for(task_id)
+    lock_path = config.var_dir / "locks" / f"escalation-{task_id}"
+    with file_lock(lock_path):
+        with board.edit(task_id) as task:
+            existing = _task_escalation_reference(task)
+            if task.state == "blocked" and existing:
+                return existing
+            if task.state not in ("routed", "in_progress", "review"):
+                raise BoardError(
+                    f"task {task_id} cannot be blocked from state {task.state}; "
+                    "escalation was not submitted"
+                )
+            url = submit(
+                title=title,
+                body=body,
+                urgency=urgency,
+                config=config,
+                task_id=task_id,
+            )
+            Board._apply_transition(task, "blocked", actor=actor, note=f"escalated: {url}")
+            return url
+
+
+def _task_escalation_reference(task: Task) -> str:
+    for entry in reversed(task.history):
+        note = str(entry.get("note", ""))
+        if note.startswith("escalated:"):
+            return note.removeprefix("escalated:").strip()
+    return ""
 
 
 def _find_issue_by_marker(repo: str, marker: str) -> str | None:

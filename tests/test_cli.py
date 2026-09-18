@@ -13,9 +13,10 @@ import yaml
 
 from saturnin.board import Board, BoardError
 from saturnin.checkpoints import Checkpoint, CheckpointStore
-from saturnin.cli import _submit_task_escalation, main
+from saturnin.cli import main
 from saturnin.config import Config
 from saturnin.discovery import InboundIssue, IssueDiscovery
+from saturnin.escalation import submit_task_escalation
 from saturnin.launcher import AgentLauncher
 from saturnin.review import (
     issue_content_digest,
@@ -864,6 +865,30 @@ def test_sandboxed_worker_task_move_is_queued_without_board_access(
     ]
 
 
+def test_sandboxed_worker_cannot_queue_blocked_move_with_issue_ref(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    callback_dir = tmp_path / "callbacks"
+    monkeypatch.setenv(ENV_CALLBACK_DIR, str(callback_dir))
+    monkeypatch.setenv(ENV_CALLBACK_TASK_ID, "T-callback")
+
+    code = main(
+        [
+            "task",
+            "move",
+            "T-callback",
+            "blocked",
+            "--escalation",
+            "https://github.com/example/repo/issues/1",
+        ]
+    )
+    error = capsys.readouterr().err
+
+    assert code == 1
+    assert "sandboxed workers must request escalations" in error
+    assert not (callback_dir / CALLBACKS_FILE).exists()
+
+
 def test_sandboxed_worker_callback_rejects_other_task(
     tmp_path: Path, capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -877,6 +902,54 @@ def test_sandboxed_worker_callback_rejects_other_task(
     assert code == 1
     assert "worker may only update its own task" in error
     assert not (callback_dir / CALLBACKS_FILE).exists()
+
+
+def test_sandboxed_worker_escalation_is_queued(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    callback_dir = tmp_path / "callbacks"
+    monkeypatch.setenv(ENV_CALLBACK_DIR, str(callback_dir))
+    monkeypatch.setenv(ENV_CALLBACK_TASK_ID, "T-callback")
+
+    code, out = run(
+        capsys,
+        "escalate",
+        "Need help",
+        "--context",
+        "stuck",
+        "--item",
+        "decide",
+        "--unblock",
+        "answer",
+        "--urgency",
+        "high",
+        "--task",
+        "T-callback",
+        "--actor",
+        "code-worker",
+        "--push",
+    )
+
+    assert code == 0
+    assert "queued worker callback" in out
+    records = [
+        json.loads(line)
+        for line in (callback_dir / CALLBACKS_FILE)
+        .read_text(encoding="utf-8")
+        .splitlines()
+    ]
+    assert records == [
+        {
+            "actor": "code-worker",
+            "checklist": ["decide"],
+            "context": "stuck",
+            "task_id": "T-callback",
+            "title": "Need help",
+            "type": "escalation_request",
+            "unblock": ["answer"],
+            "urgency": "high",
+        }
+    ]
 
 
 def test_sandboxed_worker_poller_registration_is_queued(
@@ -914,6 +987,41 @@ def test_sandboxed_worker_poller_registration_is_queued(
             "status_file": "var/poller-signals/T-callback.json",
             "task_id": "T-callback",
             "type": "poller_register",
+        }
+    ]
+
+
+def test_sandboxed_worker_host_command_is_queued(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    callback_dir = tmp_path / "callbacks"
+    monkeypatch.setenv(ENV_CALLBACK_DIR, str(callback_dir))
+    monkeypatch.setenv(ENV_CALLBACK_TASK_ID, "T-callback")
+
+    code, out = run(
+        capsys,
+        "check",
+        "command",
+        "systemctl --user restart saturnin-janitor.timer",
+        "--execute",
+        "--task",
+        "T-callback",
+    )
+
+    assert code == 0
+    assert "queued worker callback" in out
+    records = [
+        json.loads(line)
+        for line in (callback_dir / CALLBACKS_FILE)
+        .read_text(encoding="utf-8")
+        .splitlines()
+    ]
+    assert records == [
+        {
+            "cmdline": "systemctl --user restart saturnin-janitor.timer",
+            "service": None,
+            "task_id": "T-callback",
+            "type": "server_command",
         }
     ]
 
@@ -1942,12 +2050,12 @@ def test_task_escalation_lock_prevents_duplicate_concurrent_submission(
         assert release.wait(5)
         return "https://github.com/JakubMifek/saturnin-ops/issues/45"
 
-    monkeypatch.setattr("saturnin.cli.escalation_mod.submit", fake_submit)
+    monkeypatch.setattr("saturnin.escalation.submit", fake_submit)
 
     def worker() -> None:
         try:
             results.append(
-                _submit_task_escalation(
+                submit_task_escalation(
                     config=config,
                     board=board,
                     task_id=task.id,
