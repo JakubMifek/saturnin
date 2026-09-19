@@ -97,7 +97,10 @@ class AgentLauncher:
         launch_error: LauncherError | None = None
         process: subprocess.Popen[bytes] | None = None
         workdir: Path | None = None
+        metadata: dict[str, Any] | None = None
         metadata_attempted = False
+        completed_during_grace = False
+        completed_persistence_problem: str | None = None
         failure_cleanup_problem: str | None = None
         previous_state = task.state
         previous_checkpoint_resumed_at = task.checkpoint_resumed_at
@@ -195,17 +198,18 @@ class AgentLauncher:
                             stderr=subprocess.STDOUT,
                             start_new_session=True,
                         )
-                        immediate_status = self._immediate_exit_status(process)
-                        if immediate_status is not None:
-                            raise LauncherError(
-                                "agent launcher exited immediately with "
-                                f"status {immediate_status}; see {log_path}"
-                            )
                         process_start_time = self._process_start_time(process.pid)
                         if process_start_time is None:
                             raise LauncherError(
                                 f"could not read process identity for agent pid {process.pid}"
                             )
+                        immediate_status = self._immediate_exit_status(process)
+                        if immediate_status not in (None, 0):
+                            raise LauncherError(
+                                "agent launcher exited immediately with "
+                                f"status {immediate_status}; see {log_path}"
+                            )
+                        completed_during_grace = immediate_status == 0
                     metadata = {
                         "task_id": claimed.id,
                         "role": contract.role,
@@ -217,23 +221,32 @@ class AgentLauncher:
                         "log": str(log_path),
                         "resumed_checkpoint": resumed_checkpoint,
                         "callback_dir": environment.get(ENV_CALLBACK_DIR),
+                        "completed": completed_during_grace,
                     }
                     metadata_attempted = True
                     atomic_replace_text(
                         metadata_path, json.dumps(metadata, indent=2) + "\n"
                     )
                 except (LauncherError, MCPError, OSError) as exc:
-                    failure_cleanup_problem = self._terminate_process(process)
-                    if previous_state in ("routed", "in_progress"):
-                        stored.state = previous_state
-                    stored.checkpoint_resumed_at = previous_checkpoint_resumed_at
                     reason = str(exc)
-                    if failure_cleanup_problem:
-                        reason = f"{reason}; {failure_cleanup_problem}"
-                    stored.log("agent:launch_failed", actor="launcher", reason=reason)
-                    launch_error = LauncherError(
-                        f"agent launcher failed for task {task.id}: {reason}"
-                    )
+                    if completed_during_grace:
+                        completed_persistence_problem = reason
+                        stored.log(
+                            "agent:launch_recovery_pending",
+                            actor="launcher",
+                            reason=reason,
+                        )
+                    else:
+                        failure_cleanup_problem = self._terminate_process(process)
+                        if previous_state in ("routed", "in_progress"):
+                            stored.state = previous_state
+                        stored.checkpoint_resumed_at = previous_checkpoint_resumed_at
+                        if failure_cleanup_problem:
+                            reason = f"{reason}; {failure_cleanup_problem}"
+                        stored.log("agent:launch_failed", actor="launcher", reason=reason)
+                        launch_error = LauncherError(
+                            f"agent launcher failed for task {task.id}: {reason}"
+                        )
                 else:
                     stored.launch_deferred_at = None
                     stored.launch_deferred_reason = None
@@ -250,25 +263,30 @@ class AgentLauncher:
                     )
                     task = Task.from_dict(stored.to_dict())
         except OSError as exc:
-            termination_problem = self._terminate_process(process)
             reason = f"could not persist launch state: {exc}"
-            if termination_problem:
-                reason = f"{reason}; {termination_problem}"
-            restored = self._restore_launch_claim(
-                task.id,
-                previous_state=previous_state,
-                previous_checkpoint_resumed_at=previous_checkpoint_resumed_at,
-                previous_launch_deferred_at=previous_launch_deferred_at,
-                previous_launch_deferred_reason=previous_launch_deferred_reason,
-                reason=reason,
-            )
-            if not restored:
-                reason = f"{reason}; launch-state rollback remains pending"
-            elif not termination_problem and metadata_attempted:
-                removal_problem = self._remove_launch_metadata(metadata_path)
-                if removal_problem:
-                    reason = f"{reason}; {removal_problem}"
-            raise LauncherError(f"agent launcher failed for task {task.id}: {reason}") from exc
+            if completed_during_grace:
+                completed_persistence_problem = reason
+            else:
+                termination_problem = self._terminate_process(process)
+                if termination_problem:
+                    reason = f"{reason}; {termination_problem}"
+                restored = self._restore_launch_claim(
+                    task.id,
+                    previous_state=previous_state,
+                    previous_checkpoint_resumed_at=previous_checkpoint_resumed_at,
+                    previous_launch_deferred_at=previous_launch_deferred_at,
+                    previous_launch_deferred_reason=previous_launch_deferred_reason,
+                    reason=reason,
+                )
+                if not restored:
+                    reason = f"{reason}; launch-state rollback remains pending"
+                elif not termination_problem and metadata_attempted:
+                    removal_problem = self._remove_launch_metadata(metadata_path)
+                    if removal_problem:
+                        reason = f"{reason}; {removal_problem}"
+                raise LauncherError(
+                    f"agent launcher failed for task {task.id}: {reason}"
+                ) from exc
         if launch_error is not None:
             if not failure_cleanup_problem and metadata_attempted:
                 removal_problem = self._remove_launch_metadata(metadata_path)
@@ -277,6 +295,26 @@ class AgentLauncher:
             raise launch_error
         if process is None or workdir is None or mcp_path is None:  # pragma: no cover
             raise LauncherError(f"agent launcher failed for task {task.id}")
+        if completed_during_grace:
+            if not metadata_path.exists() and metadata is not None:
+                try:
+                    atomic_replace_text(
+                        metadata_path, json.dumps(metadata, indent=2) + "\n"
+                    )
+                except OSError as exc:
+                    completed_persistence_problem = (
+                        f"{completed_persistence_problem}; {exc}"
+                        if completed_persistence_problem
+                        else str(exc)
+                    )
+            self.reconcile_exited_launches()
+            if not metadata_path.exists():
+                completed_persistence_problem = None
+        if completed_persistence_problem:
+            raise LauncherError(
+                f"agent launcher completed for task {task.id}, but recovery remains "
+                f"pending: {completed_persistence_problem}"
+            )
         return LaunchResult(
             task_id=task.id,
             role=contract.role,
@@ -298,7 +336,8 @@ class AgentLauncher:
                 continue
             process_start_time = metadata.get("process_start_time_ticks")
             if (
-                isinstance(process_start_time, int)
+                metadata.get("completed") is not True
+                and isinstance(process_start_time, int)
                 and not isinstance(process_start_time, bool)
                 and self._process_start_time(pid) == process_start_time
             ):
@@ -333,6 +372,36 @@ class AgentLauncher:
                     pass
                 continue
             reason = f"agent process exited or identity changed after launch with pid {pid}"
+            if metadata.get("completed") is True:
+                resumed_checkpoint = metadata.get("resumed_checkpoint")
+                try:
+                    with self.board.edit(task_id) as task:
+                        recovered = False
+                        if task.state == "routed":
+                            task.state = "in_progress"
+                            task.launch_deferred_at = None
+                            task.launch_deferred_reason = None
+                            recovered = True
+                        if (
+                            isinstance(resumed_checkpoint, str)
+                            and resumed_checkpoint
+                            and task.checkpoint_resumed_at != resumed_checkpoint
+                        ):
+                            task.checkpoint_resumed_at = resumed_checkpoint
+                            recovered = True
+                        if recovered:
+                            task.log(
+                                "agent:launch_recovered",
+                                actor="launcher",
+                                pid=pid,
+                            )
+                            task.log(
+                                "state:in_progress",
+                                actor=task.role or "launcher",
+                                note=f"recovered completed agent pid={pid}",
+                            )
+                except (BoardError, OSError):
+                    continue
             callbacks_complete = True
             try:
                 apply_queued(
@@ -348,7 +417,9 @@ class AgentLauncher:
                 reason = f"{reason}; worker callbacks failed: {exc}"
             try:
                 with self.board.edit(task_id) as task:
-                    if task.state == "in_progress":
+                    if not callbacks_complete:
+                        task.log("agent:callback_failed", actor="launcher", reason=reason)
+                    elif task.state == "in_progress":
                         if self._poller_is_waiting(task):
                             task.log(
                                 "agent:poller_waiting",
@@ -362,8 +433,6 @@ class AgentLauncher:
                             task.log("agent:launch_failed", actor="launcher", reason=reason)
                             task.log("state:routed", actor="launcher", note=reason)
                             resumed.append(task.id)
-                    elif not callbacks_complete:
-                        task.log("agent:callback_failed", actor="launcher", reason=reason)
             except OSError:
                 continue
             except BoardError:
@@ -386,6 +455,7 @@ class AgentLauncher:
         started = metadata.get("process_start_time_ticks")
         return (
             metadata.get("task_id") == task_id
+            and metadata.get("completed") is not True
             and isinstance(pid, int)
             and not isinstance(pid, bool)
             and isinstance(started, int)

@@ -317,13 +317,15 @@ def test_reconcile_applies_worker_callbacks_before_requeue(
             {
                 "task_id": task.id,
                 "pid": 123,
-                "process_start_time_ticks": 999,
+                "process_start_time_ticks": 123456,
                 "callback_dir": str(callback_dir),
+                "completed": True,
             }
         ),
         encoding="utf-8",
     )
 
+    assert not launcher.has_active_launch(task.id)
     assert launcher.reconcile_exited_launches() == []
 
     assert board.get(task.id).state == "review"
@@ -395,6 +397,57 @@ def test_reconcile_retries_only_unacknowledged_callbacks_after_task_state_change
 
     assert launcher.reconcile_exited_launches() == []
     assert CheckpointStore(config, board).latest(task.id).summary == "handoff"
+    assert not metadata_path.exists()
+    assert not queue_path.exists()
+
+
+def test_reconcile_callback_failure_keeps_in_progress_task_for_retry(
+    config: Config,
+    board: Board,
+) -> None:
+    task = board.create("Retry failed worker callback")
+    Router(config).dispatch(board, task)
+    board.transition_id(task.id, "in_progress", actor="launcher")
+    launcher = AgentLauncher(config, board)
+    callback_dir = launcher._isolated_home(task.id) / ".saturnin-callbacks"
+    callback_dir.mkdir(parents=True)
+    callback = {
+        "type": "task_move",
+        "task_id": task.id,
+        "state": "review",
+        "actor": "not-the-task-role",
+        "note": "ready",
+    }
+    queue_path = callback_dir / CALLBACKS_FILE
+    queue_path.write_text(json.dumps(callback) + "\n", encoding="utf-8")
+    metadata_path = launcher.dir / f"{task.id}.json"
+    metadata_path.write_text(
+        json.dumps(
+            {
+                "task_id": task.id,
+                "pid": 123,
+                "process_start_time_ticks": 123456,
+                "callback_dir": str(callback_dir),
+                "completed": True,
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    assert launcher.reconcile_exited_launches() == []
+
+    retained = board.get(task.id)
+    assert retained.state == "in_progress"
+    assert retained.launch_deferred_at is None
+    assert retained.history[-1]["event"] == "agent:callback_failed"
+    assert metadata_path.exists()
+    assert queue_path.exists()
+
+    callback["actor"] = board.get(task.id).role
+    queue_path.write_text(json.dumps(callback) + "\n", encoding="utf-8")
+
+    assert launcher.reconcile_exited_launches() == []
+    assert board.get(task.id).state == "review"
     assert not metadata_path.exists()
     assert not queue_path.exists()
 
@@ -1647,6 +1700,168 @@ def test_launcher_rolls_back_claim_when_child_exits_immediately(
     assert stored.state == "routed"
     assert stored.checkpoint_resumed_at is None
     assert stored.history[-1]["event"] == "agent:launch_failed"
+    assert not (config.var_dir / "launches" / f"{task.id}.json").exists()
+
+
+def test_launcher_reconciles_callbacks_when_child_completes_during_grace(
+    config: Config, board: Board, git_repo: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    config.policy("mcp")["launcher"]["enabled"] = True
+    task = board.create("Complete a small fix")
+    Router(config).dispatch(board, task)
+    worktree = WorktreeManager(config, repo=git_repo, board=board).create(
+        "feature/complete-launch"
+    )
+    with board.edit(task.id) as stored:
+        stored.branch = "feature/complete-launch"
+        stored.worktree = str(worktree.path)
+    monkeypatch.setattr("saturnin.launcher.shutil.which", lambda _: "/usr/bin/copilot")
+    callback_dir = (
+        AgentLauncher(config, board)._isolated_home(task.id) / ".saturnin-callbacks"
+    )
+    callback_dir.mkdir(parents=True)
+    process_events: list[str] = []
+    real_popen = subprocess.Popen
+
+    class CompletedProcess:
+        pid = 4242
+
+        def wait(self, timeout=None):
+            process_events.append("wait")
+            (callback_dir / CALLBACKS_FILE).write_text(
+                json.dumps(
+                    {
+                        "type": "task_move",
+                        "task_id": task.id,
+                        "state": "review",
+                        "actor": "code-worker",
+                        "note": "ready",
+                    }
+                )
+                + "\n",
+                encoding="utf-8",
+            )
+            return 0
+
+    monkeypatch.setattr(
+        AgentLauncher,
+        "_process_start_time",
+        staticmethod(lambda pid: process_events.append("identity") or 123456),
+    )
+    monkeypatch.setattr(
+        "saturnin.launcher.subprocess.Popen",
+        lambda command, **kwargs: (
+            real_popen(command, **kwargs)
+            if command[0] == "git"
+            else CompletedProcess()
+        ),
+    )
+
+    result = AgentLauncher(config, board).launch(task.id)
+
+    assert result is not None
+    assert process_events == ["identity", "wait"]
+    assert board.get(task.id).state == "review"
+    assert not (config.var_dir / "launches" / f"{task.id}.json").exists()
+    assert not (callback_dir / CALLBACKS_FILE).exists()
+
+
+@pytest.mark.parametrize("failed_persistence", ["metadata", "board"])
+def test_launcher_preserves_completed_callback_when_persistence_fails(
+    config: Config,
+    board: Board,
+    git_repo: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    failed_persistence: str,
+) -> None:
+    config.policy("mcp")["launcher"]["enabled"] = True
+    task = board.create("Fix and preserve a completed worker result")
+    Router(config).dispatch(board, task)
+    worktree = WorktreeManager(config, repo=git_repo, board=board).create(
+        f"feature/completed-{failed_persistence}-failure"
+    )
+    with board.edit(task.id) as stored:
+        stored.branch = f"feature/completed-{failed_persistence}-failure"
+        stored.worktree = str(worktree.path)
+    monkeypatch.setattr("saturnin.launcher.shutil.which", lambda _: "/usr/bin/copilot")
+    callback_dir = (
+        AgentLauncher(config, board)._isolated_home(task.id) / ".saturnin-callbacks"
+    )
+    callback_dir.mkdir(parents=True)
+    real_popen = subprocess.Popen
+
+    class CompletedProcess:
+        pid = 4242
+        terminated = False
+
+        def wait(self, timeout=None):
+            (callback_dir / CALLBACKS_FILE).write_text(
+                json.dumps(
+                    {
+                        "type": "task_move",
+                        "task_id": task.id,
+                        "state": "review",
+                        "actor": "code-worker",
+                        "note": "ready",
+                    }
+                )
+                + "\n",
+                encoding="utf-8",
+            )
+            return 0
+
+        def terminate(self):
+            self.terminated = True
+
+    process = CompletedProcess()
+    monkeypatch.setattr(
+        "saturnin.launcher.subprocess.Popen",
+        lambda command, **kwargs: (
+            real_popen(command, **kwargs) if command[0] == "git" else process
+        ),
+    )
+    failed = False
+    if failed_persistence == "metadata":
+
+        def fail_metadata_once(
+            path: Path,
+            text: str,
+            *,
+            mode: int | None = None,
+        ) -> None:
+            nonlocal failed
+            if not failed and path.name == f"{task.id}.json":
+                failed = True
+                raise OSError("metadata fsync failed")
+            path.write_text(text, encoding="utf-8")
+            if mode is not None:
+                path.chmod(mode)
+
+        monkeypatch.setattr(
+            "saturnin.launcher.atomic_replace_text", fail_metadata_once
+        )
+    else:
+        original_write = board._write
+
+        def fail_board_once(path: Path, stored) -> None:
+            nonlocal failed
+            if not failed and any(
+                entry["event"] == "agent:launched" for entry in stored.history
+            ):
+                failed = True
+                raise OSError("board directory fsync failed")
+            original_write(path, stored)
+
+        monkeypatch.setattr(board, "_write", fail_board_once)
+
+    result = AgentLauncher(config, board).launch(task.id)
+
+    assert result is not None
+    assert failed
+    assert not process.terminated
+    assert board.get(task.id).state == "review"
+    assert not (config.var_dir / "launches" / f"{task.id}.json").exists()
+    assert not (callback_dir / CALLBACKS_FILE).exists()
 
 
 def test_launcher_rejects_unauthorized_project_mcp(
