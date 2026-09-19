@@ -1163,7 +1163,7 @@ def _run_bounded_command(
     deadline = time.monotonic() + timeout
     kill_deadline: float | None = None
     timed_out = False
-    while selector.get_map():
+    while selector.get_map() or process.poll() is None:
         now = time.monotonic()
         if kill_deadline is None and now >= deadline:
             timed_out = True
@@ -1178,7 +1178,11 @@ def _run_bounded_command(
                 key.fileobj.close()
             break
         wait_until = kill_deadline if kill_deadline is not None else deadline
-        for key, _ in selector.select(timeout=min(0.1, max(0.0, wait_until - now))):
+        wait = min(0.1, max(0.0, wait_until - now))
+        if not selector.get_map():
+            time.sleep(wait)
+            continue
+        for key, _ in selector.select(timeout=wait):
             try:
                 chunk = os.read(key.fd, 64 * 1024)
             except BlockingIOError:
@@ -1197,7 +1201,10 @@ def _run_bounded_command(
     try:
         returncode = process.wait(timeout=1)
     except subprocess.TimeoutExpired:
-        process.kill()
+        try:
+            os.killpg(process.pid, signal.SIGKILL)
+        except ProcessLookupError:
+            pass
         returncode = process.wait()
     stdout = buffers["stdout"].decode("utf-8", errors="replace")
     stderr = buffers["stderr"].decode("utf-8", errors="replace")

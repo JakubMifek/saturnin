@@ -5,6 +5,7 @@ import os
 import subprocess
 import sys
 import threading
+import time
 from contextlib import contextmanager
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -1333,6 +1334,42 @@ def test_bounded_command_caps_output_and_times_out(git_repo: Path) -> None:
 
     assert timed_out.timed_out
     assert timed_out.returncode != 0
+
+
+def test_bounded_command_tracks_closed_pipes_and_kills_descendants(
+    git_repo: Path,
+) -> None:
+    script = (
+        "import os, subprocess, sys, time;"
+        "child=subprocess.Popen([sys.executable, '-c', "
+        "'import time; time.sleep(30)'], stdout=subprocess.DEVNULL, "
+        "stderr=subprocess.DEVNULL);"
+        "print(child.pid, flush=True);"
+        "os.close(1); os.close(2);"
+        "time.sleep(30)"
+    )
+
+    result = worker_callbacks._run_bounded_command(
+        [sys.executable, "-c", script],
+        cwd=git_repo,
+        env=os.environ.copy(),
+        timeout=0.05,
+    )
+
+    assert result.timed_out
+    child_pid = int(result.stdout.strip())
+    deadline = time.monotonic() + 2
+    while _process_is_running(child_pid) and time.monotonic() < deadline:
+        time.sleep(0.01)
+    assert not _process_is_running(child_pid)
+
+
+def _process_is_running(pid: int) -> bool:
+    try:
+        state = Path(f"/proc/{pid}/stat").read_text(encoding="utf-8").split()[2]
+    except FileNotFoundError:
+        return False
+    return state != "Z"
 
 
 def test_host_command_timeout_is_audited(
