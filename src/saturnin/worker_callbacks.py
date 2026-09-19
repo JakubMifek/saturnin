@@ -61,7 +61,8 @@ def queue_from_args(
         raise WorkerCallbackError(str(exc)) from exc
     target = Path(callback_dir) / CALLBACKS_FILE
     target.parent.mkdir(parents=True, exist_ok=True)
-    durable_append_text(target, json.dumps(record, sort_keys=True) + "\n")
+    with file_lock(target):
+        durable_append_text(target, json.dumps(record, sort_keys=True) + "\n")
     return record
 
 
@@ -1120,6 +1121,8 @@ def register_poller(
             json.dumps(payload, indent=2, sort_keys=True) + "\n",
             mode=PRIVATE_FILE_MODE,
         )
+        task.launch_deferred_at = None
+        task.launch_deferred_reason = None
         task.log("poller:registered", actor=trusted_role, status_file=signal_path)
         return payload
 

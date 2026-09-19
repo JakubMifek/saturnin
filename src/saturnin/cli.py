@@ -556,6 +556,12 @@ def _prepare_project_route(
     squad_override: Sequence[str] | None = None,
 ) -> Task:
     task = board.get(task_id)
+    if task.state == "in_progress" and task.launch_deferred_at is not None:
+        if squad_override is not None:
+            raise BoardError(
+                f"task {task.id} cannot change squad while retrying a deferred launch"
+            )
+        return task
     local_roles, lead, project_squad = _project_routing_context(task, config)
     if not lead and not project_squad and squad_override is None:
         return task
@@ -613,6 +619,8 @@ def _find_governed_issue(repo: str, marker: str) -> str | None:
 
 def _defer_launch(board: Board, task_id: str, reason: str) -> None:
     with board.edit(task_id) as task:
+        if task.state == "in_progress" and task.launch_deferred_at is None:
+            return
         if task.launch_deferred_reason == reason:
             return
         task.launch_deferred_at = datetime.now(timezone.utc).isoformat(timespec="microseconds")
@@ -1355,7 +1363,10 @@ def _run_dispatch(args: argparse.Namespace, config: Config, board: Board, as_jso
                 task.state == "intake"
                 and task.kind not in CONTAINER_KINDS
             )
-            or (task.state == "routed" and task.launch_deferred_at is not None)
+            or (
+                task.state in ("routed", "in_progress")
+                and task.launch_deferred_at is not None
+            )
         ]
     elif args.task_id:
         targets = [board.get(args.task_id)]
@@ -1369,7 +1380,9 @@ def _run_dispatch(args: argparse.Namespace, config: Config, board: Board, as_jso
             squad = args.squad or project_squad
             if squad:
                 router.validate_dispatch_squad(squad, local_roles)
-            if task.state == "routed":
+            if task.state == "routed" or (
+                task.state == "in_progress" and task.launch_deferred_at is not None
+            ):
                 route = router.resolve(
                     task,
                     additional_roles=local_roles,

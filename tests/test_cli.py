@@ -17,7 +17,7 @@ from saturnin.cli import main
 from saturnin.config import Config
 from saturnin.discovery import InboundIssue, IssueDiscovery
 from saturnin.escalation import submit_task_escalation
-from saturnin.launcher import AgentLauncher
+from saturnin.launcher import AgentLauncher, LauncherError
 from saturnin.review import (
     issue_content_digest,
     review_attestation_signing_key,
@@ -422,6 +422,75 @@ def test_disabled_automatic_launch_is_deferred_for_dispatch_all_retry(
 
     assert run(capsys, "dispatch", "--all")[0] == 0
     assert launched == [task["id"]]
+
+
+@pytest.mark.parametrize("dispatch_args", [("--all",), ("task",)])
+def test_dispatch_retries_deferred_in_progress_launch(
+    config: Config,
+    board: Board,
+    capsys: pytest.CaptureFixture[str],
+    monkeypatch: pytest.MonkeyPatch,
+    dispatch_args: tuple[str, ...],
+) -> None:
+    retry = board.create("Retry failed launch")
+    Router(config).dispatch(board, retry)
+    board.transition_id(retry.id, "in_progress", actor="launcher")
+    ordinary = board.create("Preserve callback recovery")
+    Router(config).dispatch(board, ordinary)
+    board.transition_id(ordinary.id, "in_progress", actor="launcher")
+    worktree = config.root / "retry-worktree"
+    worktree.mkdir()
+    with board.edit(retry.id) as stored:
+        stored.branch = "feature/retry-launch"
+        stored.worktree = str(worktree)
+        stored.launch_deferred_at = "2026-09-19T20:00:00+00:00"
+        stored.launch_deferred_reason = "agent process exited"
+    launched: list[str] = []
+    monkeypatch.setattr(AgentLauncher, "enabled", property(lambda self: True))
+    monkeypatch.setattr(
+        AgentLauncher,
+        "launch",
+        lambda self, task_id, **kwargs: launched.append(task_id),
+    )
+    args = (retry.id,) if dispatch_args == ("task",) else dispatch_args
+
+    assert run(capsys, "dispatch", *args)[0] == 0
+    assert launched == [retry.id]
+
+
+def test_concurrent_dispatch_does_not_restore_cleared_deferred_marker(
+    config: Config,
+    board: Board,
+    capsys: pytest.CaptureFixture[str],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    task = board.create("Dispatch once")
+    Router(config).dispatch(board, task)
+    board.transition_id(task.id, "in_progress", actor="launcher")
+    worktree = config.root / "dispatch-once-worktree"
+    worktree.mkdir()
+    with board.edit(task.id) as stored:
+        stored.branch = "feature/dispatch-once"
+        stored.worktree = str(worktree)
+        stored.launch_deferred_at = "2026-09-19T20:00:00+00:00"
+        stored.launch_deferred_reason = "agent process exited"
+    monkeypatch.setattr(AgentLauncher, "enabled", property(lambda self: True))
+    monkeypatch.setattr(AgentLauncher, "reconcile_exited_launches", lambda self: [])
+
+    def reject_after_concurrent_launch(self, task_id, **kwargs):
+        with self.board.edit(task_id) as stored:
+            stored.launch_deferred_at = None
+            stored.launch_deferred_reason = None
+        raise LauncherError(f"task {task_id} already has an active launch")
+
+    monkeypatch.setattr(AgentLauncher, "launch", reject_after_concurrent_launch)
+
+    assert run(capsys, "dispatch", "--all")[0] == 0
+
+    active = board.get(task.id)
+    assert active.state == "in_progress"
+    assert active.launch_deferred_at is None
+    assert active.launch_deferred_reason is None
 
 
 def test_task_add_provisions_worktree_before_launch(
