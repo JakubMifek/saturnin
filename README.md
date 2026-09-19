@@ -81,9 +81,13 @@ src/saturnin/, tests/             the implementation and its tests
 
 ## Runtime
 
+<!-- generated:runtime-summary -->
 Primary runtime is the local Debian server, as an unprivileged user with
 systemd **user** timers (`saturnin-janitor`, `saturnin-improve`). GitHub Actions
-is only an integration helper: tests, policy health and the branch gate on PRs.
+is only an integration helper: CI checks tests, policy health and PR branches,
+while [the trusted governance workflow](.github/workflows/governance.yml)
+independently enforces the review gate.
+<!-- /generated:runtime-summary -->
 
 ## Documentation
 

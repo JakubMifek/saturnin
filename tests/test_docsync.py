@@ -32,6 +32,13 @@ def test_checked_in_docs_match_policy() -> None:
     assert rows[:2] == ["| Capability | Command |", "| --- | --- |"]
     assert all(row.startswith("| ") and row.endswith(" |") for row in rows)
     assert sum("Governance gates" in row for row in rows) == 1
+    runtime_block = next(
+        match
+        for match in docsync.MARKER.finditer(readme)
+        if match.group("name") == "runtime-summary"
+    )
+    assert ".github/workflows/governance.yml" in runtime_block.group("body")
+    assert "independently enforces the review gate" in runtime_block.group("body")
 
 
 def test_generated_blocks_are_found(docs_home: Config) -> None:

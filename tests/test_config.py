@@ -81,6 +81,12 @@ def test_ci_governance_uses_base_controlled_workflow_and_code() -> None:
     assert "listReviews" not in workflow
 
 
+def test_runtime_summary_is_policy_generated() -> None:
+    readme = (REPO_ROOT / "README.md").read_text(encoding="utf-8")
+
+    assert "<!-- generated:runtime-summary -->" in readme
+
+
 def test_public_task_template_matches_discovery_source_labels() -> None:
     policy = yaml.safe_load((REPO_ROOT / "policies/repos.yaml").read_text(encoding="utf-8"))
     template = yaml.safe_load(

@@ -96,6 +96,19 @@ def _capabilities_table(config: Config) -> str:
     return "\n".join(lines)
 
 
+def _governance_documentation(config: Config, name: str) -> str:
+    value = config.governance.get("documentation", {}).get(name)
+    if not isinstance(value, str) or not value.strip():
+        raise GeneratedBlockError(
+            f"governance documentation.{name} must be a non-empty string"
+        )
+    return value
+
+
+def _runtime_summary(config: Config) -> str:
+    return _governance_documentation(config, "runtime_summary")
+
+
 def _roles_table(config: Config) -> str:
     roles: dict[str, dict[str, Any]] = config.routing.get("roles", {})
     lines = ["| Role | Unit | Executes | Purpose |", "| --- | --- | --- | --- |"]
@@ -144,6 +157,7 @@ GENERATORS: dict[str, Callable[[Config], str]] = {
     "rules": _rules_table,
     "rules-list": _rules_list,
     "capabilities": _capabilities_table,
+    "runtime-summary": _runtime_summary,
     "roles": _roles_table,
     "routing": _routing_table,
     "backlog": _backlog_table,

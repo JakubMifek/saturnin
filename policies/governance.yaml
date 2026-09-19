@@ -6,6 +6,12 @@ documentation:
   capability:
     description: Governance gates (branches, merges, issues, server)
     command: 'saturnin check branch\|command'
+  runtime_summary: |-
+    Primary runtime is the local Debian server, as an unprivileged user with
+    systemd **user** timers (`saturnin-janitor`, `saturnin-improve`). GitHub Actions
+    is only an integration helper: CI checks tests, policy health and PR branches,
+    while [the trusted governance workflow](.github/workflows/governance.yml)
+    independently enforces the review gate.
 
 # The canonical rule list. Documentation tables are GENERATED from this block
 # (`saturnin docs render`), so prose and policy cannot drift apart.
