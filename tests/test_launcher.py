@@ -1312,6 +1312,113 @@ def test_host_commands_dedupe_only_the_same_callback(
     ]
 
 
+def test_host_command_replay_requires_manual_recovery_after_unmatched_start(
+    config: Config,
+    board: Board,
+    git_repo: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    task = board.create("Recover interrupted host command")
+    worktree = WorktreeManager(config, repo=git_repo, board=board).create(
+        "fix/interrupted-host-command"
+    )
+    operation_id = "d" * 32
+    command = "systemctl --user restart saturnin-janitor.timer"
+    with board.edit(task.id) as stored:
+        stored.role = "ops-worker"
+        stored.state = "in_progress"
+        stored.branch = worktree.branch
+        stored.worktree = str(worktree.path)
+        stored.log(
+            "host:command_finished",
+            actor="ops-worker",
+            callback_id=operation_id,
+            command=command,
+            service=None,
+            returncode=0,
+            log="previous.log",
+        )
+        stored.log(
+            "host:command_started",
+            actor="ops-worker",
+            callback_id=operation_id,
+            command=command,
+            service=None,
+        )
+    monkeypatch.setattr("saturnin.governance.os.geteuid", lambda: 1000)
+    real_bounded = worker_callbacks._run_bounded_command
+
+    def reject_execution(args, **kwargs):
+        if args[0] == "git":
+            return real_bounded(args, **kwargs)
+        pytest.fail(f"interrupted host operation was replayed: {args}")
+
+    monkeypatch.setattr("saturnin.worker_callbacks._run_bounded_command", reject_execution)
+
+    with pytest.raises(WorkerCallbackError, match="manual recovery is required"):
+        run_server_command(
+            config,
+            board,
+            task_id=task.id,
+            cmdline=command,
+            callback_id=operation_id,
+        )
+
+
+@pytest.mark.parametrize(
+    "callback",
+    [
+        {
+            "type": "task_move",
+            "state": "review",
+            "actor": "code-worker",
+            "note": "ready",
+        },
+        {
+            "type": "checkpoint_save",
+            "role": "code-worker",
+            "summary": "paused",
+            "next_steps": ["resume"],
+            "blockers": [],
+            "artifacts": [],
+            "branch": None,
+            "worktree": None,
+            "resume_after": None,
+        },
+    ],
+)
+def test_callback_types_require_manual_recovery_after_unmatched_start(
+    config: Config,
+    board: Board,
+    callback: dict[str, object],
+) -> None:
+    task = board.create("Recover interrupted callback")
+    Router(config).dispatch(board, task)
+    board.transition_id(task.id, "in_progress", actor="launcher")
+    callback_id = "e" * 32
+    callback.update({"task_id": task.id, "callback_id": callback_id})
+    callback_dir = AgentLauncher(config, board)._isolated_home(
+        task.id
+    ) / ".saturnin-callbacks"
+    callback_dir.mkdir(parents=True)
+    queue_path = callback_dir / CALLBACKS_FILE
+    queue_path.write_text(json.dumps(callback) + "\n", encoding="utf-8")
+    with board.edit(task.id) as stored:
+        stored.log(
+            "worker:callback_started",
+            actor=stored.role,
+            callback_id=callback_id,
+            operation=callback["type"],
+        )
+
+    with pytest.raises(WorkerCallbackError, match="manual recovery is required"):
+        apply_queued(config, board, task_id=task.id, callback_dir=str(callback_dir))
+
+    assert queue_path.is_file()
+    assert board.get(task.id).state == "in_progress"
+    assert CheckpointStore(config, board).latest(task.id) is None
+
+
 def test_bounded_command_caps_output_and_times_out(git_repo: Path) -> None:
     output = worker_callbacks._run_bounded_command(
         [sys.executable, "-c", "import sys; sys.stdout.write('x' * 4096)"],
@@ -1543,6 +1650,37 @@ def test_trusted_push_callback_delivers_exact_isolated_commit(
         "saturnin.worker_callbacks.github_repo_slug",
         lambda value, **kwargs: "JakubMifek/saturnin",
     )
+    with board.edit(task.id) as stored:
+        for event in ("git:push_finished", "git:push_started"):
+            stored.log(
+                event,
+                actor=stored.role,
+                callback_id=queued["callback_id"],
+                branch=queued["branch"],
+                commit=queued["commit"],
+                remote=queued["remote"],
+            )
+    for _ in range(2):
+        with pytest.raises(WorkerCallbackError, match="manual recovery is required"):
+            worker_callbacks._deliver_isolated_commit(
+                config,
+                board,
+                task_id=task.id,
+                callback_dir=callback_dir,
+                record=queued,
+            )
+    assert not any(
+        entry["event"] == "git:push_failed"
+        and entry.get("callback_id") == queued["callback_id"]
+        for entry in board.get(task.id).history
+    )
+    with board.edit(task.id) as stored:
+        stored.history = [
+            entry
+            for entry in stored.history
+            if entry.get("callback_id") != queued["callback_id"]
+        ]
+
     apply_queued(config, board, task_id=task.id, callback_dir=str(callback_dir))
 
     remote_head = subprocess.run(

@@ -126,13 +126,54 @@ def apply_queued(
                 raise WorkerCallbackError(
                     f"callback for {record['task_id']} cannot update task {task_id}"
                 )
-            _apply_record(
-                config,
-                board,
-                task_id=task_id,
-                callback_dir=callback_root,
-                record=record,
+            callback_id = _callback_id(record)
+            replay_state = _operation_replay_state(
+                board.get(task_id).history,
+                callback_id=callback_id,
+                started_event="worker:callback_started",
+                finished_event="worker:callback_finished",
+                failed_event="worker:callback_failed",
             )
+            if replay_state == "started":
+                raise WorkerCallbackError(
+                    f"callback {callback_id} has an unmatched start event; "
+                    "manual recovery is required"
+                )
+            if replay_state != "finished":
+                role = _trusted_task_role(board.get(task_id))
+                operation = str(record.get("operation", record["type"]))
+                with board.edit(task_id) as task:
+                    task.log(
+                        "worker:callback_started",
+                        actor=role,
+                        callback_id=callback_id,
+                        operation=operation,
+                    )
+                try:
+                    _apply_record(
+                        config,
+                        board,
+                        task_id=task_id,
+                        callback_dir=callback_root,
+                        record=record,
+                    )
+                except Exception as exc:
+                    with board.edit(task_id) as task:
+                        task.log(
+                            "worker:callback_failed",
+                            actor=role,
+                            callback_id=callback_id,
+                            operation=operation,
+                            reason=str(exc),
+                        )
+                    raise
+                with board.edit(task_id) as task:
+                    task.log(
+                        "worker:callback_finished",
+                        actor=role,
+                        callback_id=callback_id,
+                        operation=operation,
+                    )
             applied.append(record)
             remaining = records[index + 1 :]
             if remaining:
@@ -644,6 +685,27 @@ def _callback_id(record: dict[str, Any]) -> str:
     ).hexdigest()
 
 
+def _operation_replay_state(
+    history: Sequence[dict[str, Any]],
+    *,
+    callback_id: str,
+    started_event: str,
+    finished_event: str,
+    failed_event: str,
+) -> str | None:
+    for entry in reversed(history):
+        if entry.get("callback_id") != callback_id:
+            continue
+        event = entry.get("event")
+        if event == finished_event:
+            return "finished"
+        if event == started_event:
+            return "started"
+        if event == failed_event:
+            return "failed"
+    return None
+
+
 def _resume_replayed_task_add(
     config: Config,
     board: Board,
@@ -780,6 +842,20 @@ def _deliver_isolated_commit(
                 f"callback branch {record['branch']!r} does not match task branch "
                 f"{task.branch!r}"
             )
+        push_state = _operation_replay_state(
+            task.history,
+            callback_id=_callback_id(record),
+            started_event="git:push_started",
+            finished_event="git:push_finished",
+            failed_event="git:push_failed",
+        )
+        if push_state == "started":
+            raise WorkerCallbackError(
+                f"push callback {_callback_id(record)} has an unmatched start event; "
+                "manual recovery is required"
+            )
+        if push_state == "finished":
+            return
         try:
             worktree = validated_task_worktree(task)
             _validate_worktree_repository(config, task, worktree)
@@ -863,7 +939,7 @@ def _deliver_isolated_commit(
                 )
                 if not decision.allowed:
                     raise WorkerCallbackError("; ".join(decision.reasons))
-            if any(
+            if push_state is None and any(
                 entry.get("event") == "git:push_finished"
                 and entry.get("commit") == record["commit"]
                 and entry.get("remote") == record["remote"]
@@ -873,6 +949,7 @@ def _deliver_isolated_commit(
             task.log(
                 "git:push_started",
                 actor=trusted_role,
+                callback_id=_callback_id(record),
                 branch=record["branch"],
                 commit=record["commit"],
                 remote=record["remote"],
@@ -900,6 +977,7 @@ def _deliver_isolated_commit(
             task.log(
                 "git:push_finished",
                 actor=trusted_role,
+                callback_id=_callback_id(record),
                 branch=record["branch"],
                 commit=record["commit"],
                 remote=record["remote"],
@@ -913,6 +991,7 @@ def _deliver_isolated_commit(
             task.log(
                 "git:push_failed",
                 actor=trusted_role,
+                callback_id=_callback_id(record),
                 branch=record["branch"],
                 commit=record["commit"],
                 remote=record["remote"],
@@ -1052,12 +1131,26 @@ def run_server_command(
                         f"repository command target {resolved} is outside task worktree "
                         f"{worktree}"
                     )
-        for entry in reversed(task.history):
-            if (
-                entry.get("event") == "host:command_finished"
-                and entry.get("callback_id") == operation_id
-                and entry.get("returncode") == 0
-            ):
+        replay_state = _operation_replay_state(
+            task.history,
+            callback_id=operation_id,
+            started_event="host:command_started",
+            finished_event="host:command_finished",
+            failed_event="host:command_failed",
+        )
+        if replay_state == "started":
+            raise WorkerCallbackError(
+                f"host operation {operation_id} has an unmatched start event; "
+                "manual recovery is required"
+            )
+        if replay_state == "finished":
+            entry = next(
+                item
+                for item in reversed(task.history)
+                if item.get("callback_id") == operation_id
+                and item.get("event") == "host:command_finished"
+            )
+            if entry.get("returncode") == 0:
                 return {
                     "command": cmdline,
                     "service": service,

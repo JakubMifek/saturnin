@@ -53,6 +53,49 @@ def _rules_list(config: Config) -> str:
     return "\n".join(f"{r['id']}. {r['summary']}." for r in rules)
 
 
+def _capabilities_table(config: Config) -> str:
+    capability = config.governance.get("documentation", {}).get("capability")
+    if not isinstance(capability, dict):
+        raise GeneratedBlockError("governance documentation.capability must be a mapping")
+    description = capability.get("description")
+    command = capability.get("command")
+    if not isinstance(description, str) or not description:
+        raise GeneratedBlockError(
+            "governance documentation.capability.description must be a non-empty string"
+        )
+    if not isinstance(command, str) or not command:
+        raise GeneratedBlockError(
+            "governance documentation.capability.command must be a non-empty string"
+        )
+    rows = [
+        ("Task intake + centralised board", r"saturnin task add\|list\|show\|move\|attach"),
+        ("Work hierarchy (objective/epic/feature/task)", "saturnin task tree`, `--parent"),
+        (
+            "Optional GitHub issue mirror; durable copy once mirroring is enabled",
+            "saturnin task sync --all --push",
+        ),
+        ("Ultra-fast dispatch (table lookup, no deliberation)", r"saturnin dispatch <id> \| --all"),
+        (description, command),
+        (
+            "Independent PR/issue review pipelines",
+            r"saturnin review attest\|record\|gate\|merge\|submit-issue",
+        ),
+        ("Checkpoints, handoff and delayed resume", r"saturnin checkpoint save\|resume"),
+        ("Worktree lifecycle + safe stale cleanup", r"saturnin worktree create\|list\|cleanup"),
+        (
+            "Reusable automation library + repeat detection",
+            r"saturnin automation find\|list\|detect",
+        ),
+        ("Human escalation issues", "saturnin escalate"),
+        ("Continuous self-improvement loop", "saturnin improve`, `saturnin board metrics"),
+        ("Managed-repo contract validation", "saturnin repo check <path>"),
+        ("Documentation generated from policy", "saturnin docs render [--check]"),
+    ]
+    lines = ["| Capability | Command |", "| --- | --- |"]
+    lines.extend(f"| {name} | `{command}` |" for name, command in rows)
+    return "\n".join(lines)
+
+
 def _roles_table(config: Config) -> str:
     roles: dict[str, dict[str, Any]] = config.routing.get("roles", {})
     lines = ["| Role | Unit | Executes | Purpose |", "| --- | --- | --- | --- |"]
@@ -100,6 +143,7 @@ def _aslist(value: Any) -> list[Any]:
 GENERATORS: dict[str, Callable[[Config], str]] = {
     "rules": _rules_table,
     "rules-list": _rules_list,
+    "capabilities": _capabilities_table,
     "roles": _roles_table,
     "routing": _routing_table,
     "backlog": _backlog_table,

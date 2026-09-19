@@ -158,7 +158,7 @@ def slugify(subject: str) -> str:
 
 def issue_content_digest(title: str, body: str) -> str:
     payload = json.dumps(
-        {"title": title.strip(), "body": body.strip()},
+        {"title": title, "body": body},
         sort_keys=True,
         separators=(",", ":"),
     )

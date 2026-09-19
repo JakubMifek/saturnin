@@ -22,6 +22,16 @@ def docs_home(config: Config) -> Config:
 def test_checked_in_docs_match_policy() -> None:
     """The repository itself must never be stale."""
     assert docsync.render(Config.load(REPO_ROOT), write=False) == []
+    readme = (REPO_ROOT / "README.md").read_text(encoding="utf-8")
+    capability_block = next(
+        match
+        for match in docsync.MARKER.finditer(readme)
+        if match.group("name") == "capabilities"
+    )
+    rows = capability_block.group("body").splitlines()
+    assert rows[:2] == ["| Capability | Command |", "| --- | --- |"]
+    assert all(row.startswith("| ") and row.endswith(" |") for row in rows)
+    assert sum("Governance gates" in row for row in rows) == 1
 
 
 def test_generated_blocks_are_found(docs_home: Config) -> None:

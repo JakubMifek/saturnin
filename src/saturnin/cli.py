@@ -36,7 +36,8 @@ from .discovery import DiscoveryError, IssueDiscovery
 from . import docsync
 from .governance import Governance, github_repo_slug
 from .improve import ImprovementLoop
-from .issues import IssueMirror, MirrorError, issue_search_url, run_gh
+from .issues import IssueMirror, MirrorError, run_gh
+from .jsonlines import PRIVATE_FILE_MODE, atomic_replace_text
 from .launcher import AgentLauncher, LauncherError, LaunchResult
 from .locking import file_lock
 from .review import (
@@ -588,33 +589,50 @@ def _prepare_project_route(
     return board.get(task_id)
 
 
-def _governed_issue_marker(subject: str, repo: str, issue_digest: str) -> str:
-    seed = json.dumps(
-        {"digest": issue_digest, "repo": repo.casefold(), "subject": subject},
+def _issue_submission_identity(subject: str, repo: str, digest: str) -> str:
+    payload = json.dumps(
+        {"digest": digest, "repo": repo.casefold(), "subject": subject},
         sort_keys=True,
         separators=(",", ":"),
     )
-    return f"saturnin:review-issue:{hashlib.sha256(seed.encode('utf-8')).hexdigest()}"
+    return hashlib.sha256(payload.encode("utf-8")).hexdigest()
 
 
-def _find_governed_issue(repo: str, marker: str) -> str | None:
-    output = run_gh(
-        [
-            "issue",
-            "list",
-            "--repo",
-            repo,
-            "--search",
-            marker,
-            "--state",
-            "all",
-            "--json",
-            "url",
-            "--limit",
-            "1",
-        ]
-    )
-    return issue_search_url(output)
+def _read_issue_submission(
+    path: Path,
+    *,
+    identity: str,
+    subject: str,
+    repo: str,
+    digest: str,
+) -> str | None:
+    if not path.exists():
+        return None
+    if path.is_symlink() or not path.is_file():
+        raise ReviewError(f"governed issue submission record is unsafe: {path}")
+    try:
+        record = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as exc:
+        raise ReviewError(f"invalid governed issue submission record {path}: {exc}") from exc
+    expected = {
+        "identity": identity,
+        "subject": subject,
+        "repo": repo.casefold(),
+        "issue_digest": digest,
+    }
+    if not isinstance(record, dict) or any(
+        record.get(name) != value for name, value in expected.items()
+    ):
+        raise ReviewError(f"governed issue submission record does not match {subject}")
+    if record.get("status") == "started":
+        raise ReviewError(
+            f"governed issue submission {identity} has no recorded result; "
+            "manual recovery is required"
+        )
+    url = record.get("url")
+    if record.get("status") != "finished" or not isinstance(url, str) or not url:
+        raise ReviewError(f"governed issue submission record is invalid: {path}")
+    return url
 
 
 def _defer_launch(board: Board, task_id: str, reason: str) -> None:
@@ -1761,15 +1779,35 @@ def _run_review(args: argparse.Namespace, config: Config, as_json: bool) -> int:
                 "BLOCKED: " + "; ".join(decision.reasons),
             )
             return 2
-        marker = _governed_issue_marker(args.subject, args.repo, digest)
-        marker_comment = f"<!-- {marker} -->"
-        body = args.body if marker_comment in args.body else f"{marker_comment}\n\n{args.body}"
-        lock_id = hashlib.sha256(marker.encode("utf-8")).hexdigest()
-        submission_lock = config.var_dir / "locks" / f"governed-issue-{lock_id}"
+        identity = _issue_submission_identity(args.subject, args.repo, digest)
+        submissions = config.var_dir / "issue-submissions"
+        submissions.mkdir(parents=True, exist_ok=True, mode=0o700)
+        submissions.chmod(0o700)
+        submission_path = submissions / f"{identity}.json"
+        submission_lock = config.var_dir / "locks" / f"governed-issue-{identity}"
         try:
             with file_lock(submission_lock):
-                url = _find_governed_issue(args.repo, marker)
+                url = _read_issue_submission(
+                    submission_path,
+                    identity=identity,
+                    subject=args.subject,
+                    repo=args.repo,
+                    digest=digest,
+                )
                 if not url:
+                    submission = {
+                        "identity": identity,
+                        "subject": args.subject,
+                        "repo": args.repo.casefold(),
+                        "issue_digest": digest,
+                        "status": "started",
+                        "url": "",
+                    }
+                    atomic_replace_text(
+                        submission_path,
+                        json.dumps(submission, sort_keys=True) + "\n",
+                        mode=PRIVATE_FILE_MODE,
+                    )
                     create_args = [
                         "issue",
                         "create",
@@ -1778,12 +1816,19 @@ def _run_review(args: argparse.Namespace, config: Config, as_json: bool) -> int:
                         "--title",
                         args.title,
                         "--body",
-                        body,
+                        args.body,
                     ]
                     for label in args.label:
                         create_args.extend(["--label", label])
                     output = run_gh(create_args)
                     url = output.strip().splitlines()[-1].strip() if output.strip() else ""
+                    if url:
+                        submission.update({"status": "finished", "url": url})
+                        atomic_replace_text(
+                            submission_path,
+                            json.dumps(submission, sort_keys=True) + "\n",
+                            mode=PRIVATE_FILE_MODE,
+                        )
         except MirrorError as exc:
             raise ReviewError(f"governed issue submission failed for {args.subject}: {exc}") from exc
         if not url:

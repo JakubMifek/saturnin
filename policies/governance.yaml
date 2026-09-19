@@ -2,6 +2,11 @@
 # Changing this file requires an independent reviewer approval (see review pipelines).
 version: 1
 
+documentation:
+  capability:
+    description: Governance gates (branches, merges, issues, server)
+    command: 'saturnin check branch\|command'
+
 # The canonical rule list. Documentation tables are GENERATED from this block
 # (`saturnin docs render`), so prose and policy cannot drift apart.
 rules:

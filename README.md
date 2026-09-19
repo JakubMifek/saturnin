@@ -26,6 +26,7 @@ Full walkthrough: [`docs/runbooks/day-1-startup.md`](docs/runbooks/day-1-startup
 
 ## What it does
 
+<!-- generated:capabilities -->
 | Capability | Command |
 | --- | --- |
 | Task intake + centralised board | `saturnin task add\|list\|show\|move\|attach` |
@@ -41,6 +42,7 @@ Full walkthrough: [`docs/runbooks/day-1-startup.md`](docs/runbooks/day-1-startup
 | Continuous self-improvement loop | `saturnin improve`, `saturnin board metrics` |
 | Managed-repo contract validation | `saturnin repo check <path>` |
 | Documentation generated from policy | `saturnin docs render [--check]` |
+<!-- /generated:capabilities -->
 
 ## Governance in one screen
 
