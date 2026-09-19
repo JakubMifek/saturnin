@@ -683,6 +683,26 @@ def test_result_poller_serializes_overlapping_runs(config: Config) -> None:
     assert "another result-poller run is active" in second.stdout
 
 
+def test_monitors_serialize_overlapping_runs(config: Config) -> None:
+    monitors = config.var_dir / "monitors"
+    monitors.mkdir(parents=True)
+    lock_path = monitors / ".run-monitors"
+    script = config.root / "automation" / "library" / "run_monitors.sh"
+    env = {**os.environ, "SATURNIN_HOME": str(config.root)}
+
+    with lock_path.open("w") as lock:
+        fcntl.flock(lock, fcntl.LOCK_EX)
+        second = subprocess.run(
+            ["bash", str(script), str(config.root / "managed-app")],
+            check=True,
+            capture_output=True,
+            text=True,
+            env=env,
+        )
+
+    assert "another monitor run is active" in second.stdout
+
+
 def test_result_poller_rereads_registered_status_file(config: Config) -> None:
     pollers = config.var_dir / "pollers"
     signals = config.var_dir / "poller-signals"

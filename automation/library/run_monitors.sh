@@ -21,6 +21,12 @@ source "$(dirname "${BASH_SOURCE[0]}")/_common.sh"
 RESULTS_DIR="${SATURNIN_HOME}/var/monitors"
 mkdir -p "$RESULTS_DIR"
 
+exec {monitors_lock_fd}>"${RESULTS_DIR}/.run-monitors"
+if ! flock -n "$monitors_lock_fd"; then
+  log "another monitor run is active; leaving monitors to that run"
+  exit 0
+fi
+
 if [[ -x "${SATURNIN_HOME}/.venv/bin/python" ]]; then
   PYTHON="${SATURNIN_HOME}/.venv/bin/python"
 elif command -v python3 >/dev/null 2>&1; then
