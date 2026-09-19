@@ -923,6 +923,7 @@ def test_sandboxed_worker_task_move_is_queued_without_board_access(
         .read_text(encoding="utf-8")
         .splitlines()
     ]
+    assert records[0].pop("callback_id")
     assert records == [
         {
             "actor": "code-worker",
@@ -1007,6 +1008,7 @@ def test_sandboxed_worker_escalation_is_queued(
         .read_text(encoding="utf-8")
         .splitlines()
     ]
+    assert records[0].pop("callback_id")
     assert records == [
         {
             "actor": "code-worker",
@@ -1049,6 +1051,7 @@ def test_sandboxed_worker_poller_registration_is_queued(
         .read_text(encoding="utf-8")
         .splitlines()
     ]
+    assert records[0].pop("callback_id")
     assert records == [
         {
             "actor": "code-worker",
@@ -1085,6 +1088,7 @@ def test_sandboxed_worker_host_command_is_queued(
         .read_text(encoding="utf-8")
         .splitlines()
     ]
+    assert records[0].pop("callback_id")
     assert records == [
         {
             "cmdline": "systemctl --user restart saturnin-janitor.timer",

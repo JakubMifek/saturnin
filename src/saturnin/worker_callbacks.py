@@ -7,9 +7,13 @@ import json
 import os
 import re
 import secrets
+import selectors
 import shlex
+import signal
 import subprocess
+import time
 from argparse import Namespace
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Sequence
 
@@ -28,6 +32,10 @@ ENV_CALLBACK_TASK_ID = "SATURNIN_CALLBACK_TASK_ID"
 CALLBACKS_FILE = "callbacks.jsonl"
 _HEX_SHA_RE = re.compile(r"[0-9a-f]{40}")
 _REMOTE_RE = re.compile(r"[A-Za-z0-9._-]+")
+_CALLBACK_ID_RE = re.compile(r"[0-9a-f]{32,64}")
+_COMMAND_TIMEOUT_SECONDS = 300.0
+_COMMAND_OUTPUT_LIMIT_BYTES = 1024 * 1024
+_OUTPUT_TRUNCATED = "\n...[output truncated]...\n"
 
 
 class WorkerCallbackError(RuntimeError):
@@ -55,6 +63,7 @@ def queue_from_args(
             "sandboxed workers may not execute this command directly; "
             "no trusted callback is defined"
         )
+    record.setdefault("callback_id", secrets.token_hex(16))
     try:
         _validate_record(record)
     except (TypeError, ValueError) as exc:
@@ -101,6 +110,17 @@ def apply_queued(
                 validator=_validate_record,
             )
         )
+        migrated = False
+        for record in records:
+            if "callback_id" not in record:
+                record["callback_id"] = secrets.token_hex(16)
+                migrated = True
+        if migrated:
+            atomic_replace_text(
+                path,
+                "".join(json.dumps(item, sort_keys=True) + "\n" for item in records),
+                mode=PRIVATE_FILE_MODE,
+            )
         for index, record in enumerate(records):
             if record["task_id"] != task_id:
                 raise WorkerCallbackError(
@@ -203,6 +223,7 @@ def _apply_record(
             cmdline=record["cmdline"],
             service=record.get("service"),
             actor=trusted_role,
+            callback_id=record["callback_id"],
         )
     elif record["type"] == "git_push":
         _deliver_isolated_commit(
@@ -404,6 +425,13 @@ def _git_push_record(args: Namespace, task_id: str) -> dict[str, Any]:
 
 
 def _validate_record(record: dict[str, Any]) -> None:
+    callback_id = record.get("callback_id")
+    if callback_id is not None and (
+        not isinstance(callback_id, str) or not _CALLBACK_ID_RE.fullmatch(callback_id)
+    ):
+        raise ValueError(
+            "callback field 'callback_id' must be a 32-64 character lowercase hex id"
+        )
     if record["type"] == "task_move":
         for name in ("task_id", "state"):
             if not isinstance(record.get(name), str) or not record[name]:
@@ -477,14 +505,6 @@ def _validate_record(record: dict[str, Any]) -> None:
             raise TypeError("callback field 'argv' must be a non-empty list of strings")
         if any(value == "--home" or value.startswith("--home=") for value in argv):
             raise ValueError("trusted CLI callbacks may not override --home")
-        callback_id = record.get("callback_id")
-        if callback_id is not None and (
-            not isinstance(callback_id, str)
-            or not re.fullmatch(r"[0-9a-f]{32,64}", callback_id)
-        ):
-            raise ValueError(
-                "callback field 'callback_id' must be a 32-64 character lowercase hex id"
-            )
         return
     raise TypeError(f"callback field 'type' is unsupported: {record['type']!r}")
 
@@ -922,13 +942,20 @@ def _git_run(
             "GIT_WORK_TREE",
         ):
             env.pop(name, None)
-    return subprocess.run(
+    result = _run_bounded_command(
         ["git", *args],
         cwd=cwd,
         env=env,
-        capture_output=True,
-        text=True,
-        check=False,
+    )
+    if result.timed_out:
+        raise WorkerCallbackError(
+            f"git {' '.join(args)} timed out after {_COMMAND_TIMEOUT_SECONDS:g}s"
+        )
+    return subprocess.CompletedProcess(
+        ["git", *args],
+        result.returncode,
+        stdout=result.stdout,
+        stderr=result.stderr,
     )
 
 
@@ -962,6 +989,7 @@ def run_server_command(
     cmdline: str,
     service: str | None = None,
     actor: str = "ops-worker",
+    callback_id: str | None = None,
 ) -> dict[str, Any]:
     if actor != "ops-worker":
         raise WorkerCallbackError("only ops-worker tasks may request host server commands")
@@ -972,8 +1000,11 @@ def run_server_command(
     logs_dir = config.var_dir / "logs" / "host-operations"
     logs_dir.mkdir(parents=True, exist_ok=True)
     log_path = logs_dir / f"{task_id}.jsonl"
-    failure: WorkerCallbackError | None = None
-    result: subprocess.CompletedProcess[str] | None = None
+    operation_id = callback_id or secrets.token_hex(16)
+    if not _CALLBACK_ID_RE.fullmatch(operation_id):
+        raise WorkerCallbackError(
+            "callback ID must be a 32-64 character lowercase hex value"
+        )
     with board.edit(task_id) as task:
         if task.role != actor:
             raise WorkerCallbackError(
@@ -1024,8 +1055,7 @@ def run_server_command(
         for entry in reversed(task.history):
             if (
                 entry.get("event") == "host:command_finished"
-                and entry.get("command") == cmdline
-                and entry.get("service") == service
+                and entry.get("callback_id") == operation_id
                 and entry.get("returncode") == 0
             ):
                 return {
@@ -1037,45 +1067,54 @@ def run_server_command(
         task.log(
             "host:command_started",
             actor=actor,
+            callback_id=operation_id,
             command=cmdline,
             service=service,
         )
-        command_environment = os.environ.copy()
-        for name in (
-            "GIT_COMMON_DIR",
-            "GIT_DIR",
-            "GIT_INDEX_FILE",
-            "GIT_WORK_TREE",
-        ):
-            command_environment.pop(name, None)
-        result = subprocess.run(
-            parts,
-            cwd=worktree,
-            env=command_environment,
-            capture_output=True,
-            text=True,
-            check=False,
+    command_environment = os.environ.copy()
+    for name in (
+        "GIT_COMMON_DIR",
+        "GIT_DIR",
+        "GIT_INDEX_FILE",
+        "GIT_WORK_TREE",
+    ):
+        command_environment.pop(name, None)
+    result = _run_bounded_command(
+        parts,
+        cwd=worktree,
+        env=command_environment,
+    )
+    failure: WorkerCallbackError | None = None
+    if result.timed_out:
+        failure = WorkerCallbackError(
+            f"host command timed out after {_COMMAND_TIMEOUT_SECONDS:g}s; see {log_path}"
         )
-        if result.returncode:
-            failure = WorkerCallbackError(
-                f"host command exited {result.returncode}; see {log_path}"
-            )
+    elif result.returncode:
+        failure = WorkerCallbackError(
+            f"host command exited {result.returncode}; see {log_path}"
+        )
+    with board.edit(task_id) as task:
         task.log(
             "host:command_finished",
             actor=actor,
+            callback_id=operation_id,
             command=cmdline,
             service=service,
             returncode=result.returncode,
             log=str(log_path),
+            timed_out=result.timed_out,
+            output_truncated=result.output_truncated,
         )
-    assert result is not None  # Board.edit either executes or raises.
     record = {
         "task_id": task_id,
+        "callback_id": operation_id,
         "command": cmdline,
         "service": service,
         "returncode": result.returncode,
         "stdout": result.stdout,
         "stderr": result.stderr,
+        "timed_out": result.timed_out,
+        "output_truncated": result.output_truncated,
     }
     durable_append_text(log_path, json.dumps(record, sort_keys=True) + "\n")
     if failure is not None:
@@ -1086,6 +1125,93 @@ def run_server_command(
         "returncode": result.returncode,
         "log": str(log_path),
     }
+
+
+@dataclass(frozen=True)
+class _BoundedCommandResult:
+    returncode: int
+    stdout: str
+    stderr: str
+    timed_out: bool
+    output_truncated: bool
+
+
+def _run_bounded_command(
+    args: Sequence[str],
+    *,
+    cwd: Path,
+    env: dict[str, str],
+    timeout: float = _COMMAND_TIMEOUT_SECONDS,
+    output_limit: int = _COMMAND_OUTPUT_LIMIT_BYTES,
+) -> _BoundedCommandResult:
+    process = subprocess.Popen(
+        list(args),
+        cwd=cwd,
+        env=env,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        start_new_session=True,
+    )
+    assert process.stdout is not None
+    assert process.stderr is not None
+    buffers = {"stdout": bytearray(), "stderr": bytearray()}
+    truncated: set[str] = set()
+    selector = selectors.DefaultSelector()
+    for name, stream in (("stdout", process.stdout), ("stderr", process.stderr)):
+        os.set_blocking(stream.fileno(), False)
+        selector.register(stream, selectors.EVENT_READ, name)
+    deadline = time.monotonic() + timeout
+    kill_deadline: float | None = None
+    timed_out = False
+    while selector.get_map():
+        now = time.monotonic()
+        if kill_deadline is None and now >= deadline:
+            timed_out = True
+            try:
+                os.killpg(process.pid, signal.SIGKILL)
+            except ProcessLookupError:
+                pass
+            kill_deadline = now + 1
+        if kill_deadline is not None and now >= kill_deadline:
+            for key in list(selector.get_map().values()):
+                selector.unregister(key.fileobj)
+                key.fileobj.close()
+            break
+        wait_until = kill_deadline if kill_deadline is not None else deadline
+        for key, _ in selector.select(timeout=min(0.1, max(0.0, wait_until - now))):
+            try:
+                chunk = os.read(key.fd, 64 * 1024)
+            except BlockingIOError:
+                continue
+            if not chunk:
+                selector.unregister(key.fileobj)
+                key.fileobj.close()
+                continue
+            name = key.data
+            remaining = output_limit - len(buffers[name])
+            if remaining > 0:
+                buffers[name].extend(chunk[:remaining])
+            if len(chunk) > remaining:
+                truncated.add(name)
+    selector.close()
+    try:
+        returncode = process.wait(timeout=1)
+    except subprocess.TimeoutExpired:
+        process.kill()
+        returncode = process.wait()
+    stdout = buffers["stdout"].decode("utf-8", errors="replace")
+    stderr = buffers["stderr"].decode("utf-8", errors="replace")
+    if "stdout" in truncated:
+        stdout += _OUTPUT_TRUNCATED
+    if "stderr" in truncated:
+        stderr += _OUTPUT_TRUNCATED
+    return _BoundedCommandResult(
+        returncode=returncode,
+        stdout=stdout,
+        stderr=stderr,
+        timed_out=timed_out,
+        output_truncated=bool(truncated),
+    )
 
 
 def register_poller(

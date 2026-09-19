@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import os
 import subprocess
+import sys
 import threading
 from contextlib import contextmanager
 from datetime import datetime, timedelta, timezone
@@ -470,6 +471,7 @@ def test_reconcile_retries_only_unacknowledged_callbacks_after_task_state_change
     remaining = [
         json.loads(line) for line in queue_path.read_text(encoding="utf-8").splitlines()
     ]
+    assert remaining[0].pop("callback_id")
     assert remaining == [callbacks[1]]
 
     remaining[0]["role"] = "code-worker"
@@ -531,6 +533,7 @@ def test_reconcile_discovers_orphaned_callbacks_after_partial_state_change(
     assert not callbacks_complete
     assert board.get(task.id).state == "review"
     remaining = json.loads(queue_path.read_text(encoding="utf-8"))
+    assert remaining.pop("callback_id")
     assert remaining == callbacks[1]
 
     remaining["role"] = board.get(task.id).role
@@ -669,6 +672,7 @@ def test_callback_append_waits_for_replay_replacement(
 
     assert not writer.is_alive()
     remaining = [json.loads(line) for line in queue_path.read_text().splitlines()]
+    assert remaining[0].pop("callback_id")
     assert remaining == [
         {
             "actor": role,
@@ -1207,17 +1211,22 @@ def test_worker_callback_runs_ops_host_command(
         encoding="utf-8",
     )
     calls: list[tuple[list[str], Path]] = []
+    real_bounded = worker_callbacks._run_bounded_command
 
-    real_run = subprocess.run
-
-    def run_command(*args, **kwargs):
-        if args[0][0] == "git":
-            return real_run(*args, **kwargs)
-        calls.append((args[0], kwargs["cwd"]))
-        return SimpleNamespace(returncode=0, stdout="ok\n", stderr="")
+    def run_command(args, *, cwd, env, **kwargs):
+        if args[0] == "git":
+            return real_bounded(args, cwd=cwd, env=env, **kwargs)
+        calls.append((list(args), cwd))
+        return worker_callbacks._BoundedCommandResult(
+            returncode=0,
+            stdout="ok\n",
+            stderr="",
+            timed_out=False,
+            output_truncated=False,
+        )
 
     monkeypatch.setattr("saturnin.governance.os.geteuid", lambda: 1000)
-    monkeypatch.setattr("saturnin.worker_callbacks.subprocess.run", run_command)
+    monkeypatch.setattr("saturnin.worker_callbacks._run_bounded_command", run_command)
 
     apply_queued(config, board, task_id=task.id, callback_dir=str(callback_dir))
 
@@ -1236,6 +1245,143 @@ def test_worker_callback_runs_ops_host_command(
     assert (
         config.var_dir / "logs" / "host-operations" / f"{task.id}.jsonl"
     ).is_file()
+
+
+def test_host_commands_dedupe_only_the_same_callback(
+    config: Config,
+    board: Board,
+    git_repo: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    task = board.create("Repeat host command")
+    worktree = WorktreeManager(config, repo=git_repo, board=board).create(
+        "fix/repeat-host-command"
+    )
+    with board.edit(task.id) as stored:
+        stored.role = "ops-worker"
+        stored.state = "in_progress"
+        stored.branch = worktree.branch
+        stored.worktree = str(worktree.path)
+    calls: list[list[str]] = []
+    real_bounded = worker_callbacks._run_bounded_command
+
+    def run_command(args, *, cwd, env, **kwargs):
+        if args[0] == "git":
+            return real_bounded(args, cwd=cwd, env=env, **kwargs)
+        calls.append(list(args))
+        with board.edit(task.id) as stored:
+            stored.labels.append(f"host-call-{len(calls)}")
+        return worker_callbacks._BoundedCommandResult(
+            returncode=0,
+            stdout="",
+            stderr="",
+            timed_out=False,
+            output_truncated=False,
+        )
+
+    monkeypatch.setattr("saturnin.governance.os.geteuid", lambda: 1000)
+    monkeypatch.setattr("saturnin.worker_callbacks._run_bounded_command", run_command)
+    command = "systemctl --user restart saturnin-janitor.timer"
+
+    run_server_command(
+        config,
+        board,
+        task_id=task.id,
+        cmdline=command,
+        callback_id="a" * 32,
+    )
+    run_server_command(
+        config,
+        board,
+        task_id=task.id,
+        cmdline=command,
+        callback_id="b" * 32,
+    )
+    run_server_command(
+        config,
+        board,
+        task_id=task.id,
+        cmdline=command,
+        callback_id="b" * 32,
+    )
+
+    assert calls == [
+        ["systemctl", "--user", "restart", "saturnin-janitor.timer"],
+        ["systemctl", "--user", "restart", "saturnin-janitor.timer"],
+    ]
+
+
+def test_bounded_command_caps_output_and_times_out(git_repo: Path) -> None:
+    output = worker_callbacks._run_bounded_command(
+        [sys.executable, "-c", "import sys; sys.stdout.write('x' * 4096)"],
+        cwd=git_repo,
+        env=os.environ.copy(),
+        timeout=5,
+        output_limit=128,
+    )
+
+    assert output.returncode == 0
+    assert output.output_truncated
+    assert output.stdout == "x" * 128 + worker_callbacks._OUTPUT_TRUNCATED
+
+    timed_out = worker_callbacks._run_bounded_command(
+        [sys.executable, "-c", "import time; time.sleep(10)"],
+        cwd=git_repo,
+        env=os.environ.copy(),
+        timeout=0.01,
+    )
+
+    assert timed_out.timed_out
+    assert timed_out.returncode != 0
+
+
+def test_host_command_timeout_is_audited(
+    config: Config,
+    board: Board,
+    git_repo: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    task = board.create("Bound host command")
+    worktree = WorktreeManager(config, repo=git_repo, board=board).create(
+        "fix/bound-host-command"
+    )
+    with board.edit(task.id) as stored:
+        stored.role = "ops-worker"
+        stored.state = "in_progress"
+        stored.branch = worktree.branch
+        stored.worktree = str(worktree.path)
+    monkeypatch.setattr("saturnin.governance.os.geteuid", lambda: 1000)
+    real_bounded = worker_callbacks._run_bounded_command
+
+    def timeout_command(args, *, cwd, env, **kwargs):
+        if args[0] == "git":
+            return real_bounded(args, cwd=cwd, env=env, **kwargs)
+        return worker_callbacks._BoundedCommandResult(
+            returncode=-9,
+            stdout="",
+            stderr="",
+            timed_out=True,
+            output_truncated=False,
+        )
+
+    monkeypatch.setattr(
+        "saturnin.worker_callbacks._run_bounded_command",
+        timeout_command,
+    )
+
+    with pytest.raises(WorkerCallbackError, match="timed out"):
+        run_server_command(
+            config,
+            board,
+            task_id=task.id,
+            cmdline="systemctl --user restart saturnin-janitor.timer",
+            callback_id="c" * 32,
+        )
+
+    finished = board.get(task.id).history[-1]
+    assert finished["event"] == "host:command_finished"
+    assert finished["callback_id"] == "c" * 32
+    assert finished["timed_out"] is True
 
 
 def test_ops_host_git_command_cannot_escape_task_worktree(
