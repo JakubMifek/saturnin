@@ -19,13 +19,28 @@ other people read.
 2. Check: is it a duplicate? Is the problem stated before the solution? Is there
    a reproduction or a measurable outcome? Is the scope one issue, not five? Is
    the tone right for a public repository? Does it leak secrets or private data?
-3. Compute the digest of the exact title/body under review:
-   `python -c 'from saturnin.review import issue_content_digest; print(issue_content_digest("TITLE", "BODY"))'`.
-4. Sign and record the verdict with that digest:
-   `attestation="$(saturnin review attest <draft-id> --kind issue --repo <owner/repo> --author <role> --reviewer issue-reviewer --verdict ... --issue-digest <digest>)"` and
-   `saturnin review record <draft-id> --kind issue --repo <owner/repo> --author <role> --reviewer issue-reviewer --verdict ... --issue-digest <digest> --attestation "$attestation"`.
-5. Submission is only allowed when the same digest is passed to the gate:
-   `saturnin review gate <draft-id> --kind issue --repo <owner/repo> --author <role> --issue-digest <digest>` passes.
+3. Follow the generated issue review flow:
+
+<!-- generated:issue-review-flow -->
+```bash
+digest="$(python -c 'from saturnin.review import issue_content_digest; print(issue_content_digest("TITLE", "BODY"))')"
+VERDICT=approved
+attestation="$(saturnin review attest <draft-id> --kind issue \
+  --repo <owner/repo> --author <author-role> \
+  --reviewer issue-reviewer --verdict "$VERDICT" \
+  --issue-digest "$digest")"
+saturnin review record <draft-id> --kind issue \
+  --repo <owner/repo> --author <author-role> \
+  --reviewer issue-reviewer --verdict "$VERDICT" \
+  --issue-digest "$digest" --attestation "$attestation"
+saturnin review gate <draft-id> --kind issue \
+  --repo <owner/repo> --author <author-role> --issue-digest "$digest"
+```
+
+Compute the digest from the exact title and body under review, then pass that identical digest through attest, record and gate.
+<!-- /generated:issue-review-flow -->
+
+4. Submission is only allowed when the same digest is passed to the gate.
 
 ## Definition of done
 A verdict, and for `changes_requested` a rewritten title/body suggestion.

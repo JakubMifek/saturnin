@@ -54,12 +54,26 @@ Never hold a correct, safe diff hostage to a follow-up.
 3. Verify the governance rules mechanically:
    `saturnin check branch <branch>` and, for server changes,
    `saturnin check command "<cmd>"`.
-4. Resolve the PR head once, then sign and record the verdict with that exact
-   SHA:
-   `HEAD_SHA="$(gh pr view <N> --repo <owner/repo> --json headRefOid --jq .headRefOid)"`,
-   `attestation="$(saturnin review attest <owner/repo#N> --kind pr --author <role> --reviewer pr-reviewer --verdict approved|changes_requested|rejected --head-sha "$HEAD_SHA")"` and
-   `saturnin review record <owner/repo#N> --kind pr --author <role> --reviewer pr-reviewer --verdict approved|changes_requested|rejected --head-sha "$HEAD_SHA" --attestation "$attestation" --notes "..."`.
-5. The gate decides, not you: `saturnin review gate <owner/repo#N> --kind pr --repo <repo> --author <role> --head-sha "$HEAD_SHA"`.
+4. Follow the generated PR review flow:
+
+<!-- generated:pr-review-flow -->
+```bash
+HEAD_SHA="$(gh pr view <N> --repo JakubMifek/saturnin --json headRefOid --jq .headRefOid)"
+VERDICT=approved
+attestation="$(saturnin review attest JakubMifek/saturnin#<N> --kind pr \
+  --author <author-role> --reviewer pr-reviewer --verdict "$VERDICT" \
+  --head-sha "$HEAD_SHA")"
+saturnin review record JakubMifek/saturnin#<N> --kind pr \
+  --author <author-role> --reviewer pr-reviewer --verdict "$VERDICT" \
+  --head-sha "$HEAD_SHA" --attestation "$attestation"
+saturnin review gate JakubMifek/saturnin#<N> --kind pr \
+  --repo JakubMifek/saturnin --author <author-role> --head-sha "$HEAD_SHA"
+```
+
+Resolve the PR head once and pass that identical SHA through attest, record and gate.
+<!-- /generated:pr-review-flow -->
+
+5. The gate decides, not you.
 
 ## Definition of done
 A recorded verdict with concrete, actionable findings, each marked blocking or

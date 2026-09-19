@@ -55,22 +55,22 @@ saturnin checkpoint save <task-id> --role code-worker \
 
 ## 5. Review before merge
 
+<!-- generated:pr-review-flow -->
 ```bash
-HEAD_SHA="$(gh pr view 12 --repo JakubMifek/saturnin --json headRefOid --jq .headRefOid)"
-attestation="$(saturnin review attest JakubMifek/saturnin#12 --kind pr \
-  --author code-worker --reviewer pr-reviewer --verdict approved \
+HEAD_SHA="$(gh pr view <N> --repo JakubMifek/saturnin --json headRefOid --jq .headRefOid)"
+VERDICT=approved
+attestation="$(saturnin review attest JakubMifek/saturnin#<N> --kind pr \
+  --author <author-role> --reviewer pr-reviewer --verdict "$VERDICT" \
   --head-sha "$HEAD_SHA")"
-saturnin review record JakubMifek/saturnin#12 --kind pr \
-  --author code-worker --reviewer pr-reviewer --verdict approved \
+saturnin review record JakubMifek/saturnin#<N> --kind pr \
+  --author <author-role> --reviewer pr-reviewer --verdict "$VERDICT" \
   --head-sha "$HEAD_SHA" --attestation "$attestation"
-saturnin review gate JakubMifek/saturnin#12 --kind pr \
-  --repo JakubMifek/saturnin --author code-worker --head-sha "$HEAD_SHA"
-# exit 0 = may merge
+saturnin review gate JakubMifek/saturnin#<N> --kind pr \
+  --repo JakubMifek/saturnin --author <author-role> --head-sha "$HEAD_SHA"
 ```
 
-Resolve the PR head once and pass that identical SHA through attest, record and
-gate. Do not substitute a local checkout SHA unless it has just been verified
-against the PR head.
+Resolve the PR head once and pass that identical SHA through attest, record and gate.
+<!-- /generated:pr-review-flow -->
 
 For another repository: draft the issue, `--kind issue`, and let the
 issue-reviewer gate it before filing.

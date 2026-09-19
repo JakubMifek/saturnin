@@ -8,19 +8,46 @@ Make the independent-review requirement mechanical instead of aspirational.
   `saturnin task add "Review <subject>" --kind pr-review|issue-review --repo <repo>
   --review-subject <subject> --review-author <role>
   --review-head-sha <sha>|--review-issue-digest <digest> --dispatch`.
-- PR: capture the current head SHA, sign the exact verdict with
-  `saturnin review attest <subject> --kind pr ... --head-sha <sha>`, then pass
-  that value to
-  `saturnin review record <subject> --kind pr ... --head-sha <sha> --attestation "$attestation"` and
-  either `saturnin review gate <subject> --kind pr ... --head-sha <sha>` or
-  `saturnin review merge <subject> --repo <repo> --author <role>`.
-- Issue: compute `issue_content_digest(title, body)` and pass it to both
-  `saturnin review attest <subject> --kind issue --repo <repo> ... --issue-digest <digest>`
-  and
-  `saturnin review record <subject> --kind issue --repo <repo> ... --issue-digest <digest> --attestation "$attestation"`
-  and either `saturnin review gate <subject> --kind issue ... --issue-digest <digest>`
-  or `saturnin review submit-issue <origin-task-id> --repo <repo> --author <role>
-  --title ... --body ...`.
+
+### PR flow
+
+<!-- generated:pr-review-flow -->
+```bash
+HEAD_SHA="$(gh pr view <N> --repo JakubMifek/saturnin --json headRefOid --jq .headRefOid)"
+VERDICT=approved
+attestation="$(saturnin review attest JakubMifek/saturnin#<N> --kind pr \
+  --author <author-role> --reviewer pr-reviewer --verdict "$VERDICT" \
+  --head-sha "$HEAD_SHA")"
+saturnin review record JakubMifek/saturnin#<N> --kind pr \
+  --author <author-role> --reviewer pr-reviewer --verdict "$VERDICT" \
+  --head-sha "$HEAD_SHA" --attestation "$attestation"
+saturnin review gate JakubMifek/saturnin#<N> --kind pr \
+  --repo JakubMifek/saturnin --author <author-role> --head-sha "$HEAD_SHA"
+```
+
+Resolve the PR head once and pass that identical SHA through attest, record and gate.
+<!-- /generated:pr-review-flow -->
+
+### Issue flow
+
+<!-- generated:issue-review-flow -->
+```bash
+digest="$(python -c 'from saturnin.review import issue_content_digest; print(issue_content_digest("TITLE", "BODY"))')"
+VERDICT=approved
+attestation="$(saturnin review attest <draft-id> --kind issue \
+  --repo <owner/repo> --author <author-role> \
+  --reviewer issue-reviewer --verdict "$VERDICT" \
+  --issue-digest "$digest")"
+saturnin review record <draft-id> --kind issue \
+  --repo <owner/repo> --author <author-role> \
+  --reviewer issue-reviewer --verdict "$VERDICT" \
+  --issue-digest "$digest" --attestation "$attestation"
+saturnin review gate <draft-id> --kind issue \
+  --repo <owner/repo> --author <author-role> --issue-digest "$digest"
+```
+
+Compute the digest from the exact title and body under review, then pass that identical digest through attest, record and gate.
+<!-- /generated:issue-review-flow -->
 
 ## Guarantees
 - Author and reviewer can never be the same role.

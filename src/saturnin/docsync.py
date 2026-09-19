@@ -105,6 +105,71 @@ def _governance_documentation(config: Config, name: str) -> str:
     return value
 
 
+def _review_flow(config: Config, kind: str) -> str:
+    review = config.governance.get("review", {}).get(kind)
+    if not isinstance(review, dict):
+        raise GeneratedBlockError(f"governance review.{kind} must be a mapping")
+    roles = review.get("allowed_reviewer_roles")
+    if not isinstance(roles, list) or not roles or not all(isinstance(role, str) for role in roles):
+        raise GeneratedBlockError(
+            f"governance review.{kind}.allowed_reviewer_roles must be a non-empty string list"
+        )
+    reviewer = roles[0]
+    if kind == "pr":
+        repo = config.governance.get("autonomy", {}).get("self_repo", "<owner/repo>")
+        return "\n".join(
+            [
+                "```bash",
+                f'HEAD_SHA="$(gh pr view <N> --repo {repo} --json headRefOid --jq .headRefOid)"',
+                "VERDICT=approved",
+                f'attestation="$(saturnin review attest {repo}#<N> --kind pr \\',
+                f'  --author <author-role> --reviewer {reviewer} --verdict "$VERDICT" \\',
+                '  --head-sha "$HEAD_SHA")"',
+                f"saturnin review record {repo}#<N> --kind pr \\",
+                f'  --author <author-role> --reviewer {reviewer} --verdict "$VERDICT" \\',
+                '  --head-sha "$HEAD_SHA" --attestation "$attestation"',
+                f"saturnin review gate {repo}#<N> --kind pr \\",
+                f'  --repo {repo} --author <author-role> --head-sha "$HEAD_SHA"',
+                "```",
+                "",
+                "Resolve the PR head once and pass that identical SHA through "
+                "attest, record and gate.",
+            ]
+        )
+    if kind == "issue":
+        return "\n".join(
+            [
+                "```bash",
+                "digest=\"$(python -c 'from saturnin.review import "
+                "issue_content_digest; print(issue_content_digest(\"TITLE\", \"BODY\"))')\"",
+                "VERDICT=approved",
+                'attestation="$(saturnin review attest <draft-id> --kind issue \\',
+                "  --repo <owner/repo> --author <author-role> \\",
+                f'  --reviewer {reviewer} --verdict "$VERDICT" \\',
+                '  --issue-digest "$digest")"',
+                "saturnin review record <draft-id> --kind issue \\",
+                "  --repo <owner/repo> --author <author-role> \\",
+                f'  --reviewer {reviewer} --verdict "$VERDICT" \\',
+                '  --issue-digest "$digest" --attestation "$attestation"',
+                "saturnin review gate <draft-id> --kind issue \\",
+                '  --repo <owner/repo> --author <author-role> --issue-digest "$digest"',
+                "```",
+                "",
+                "Compute the digest from the exact title and body under review, "
+                "then pass that identical digest through attest, record and gate.",
+            ]
+        )
+    raise GeneratedBlockError(f"unknown review flow: {kind}")
+
+
+def _pr_review_flow(config: Config) -> str:
+    return _review_flow(config, "pr")
+
+
+def _issue_review_flow(config: Config) -> str:
+    return _review_flow(config, "issue")
+
+
 def _runtime_summary(config: Config) -> str:
     return _governance_documentation(config, "runtime_summary")
 
@@ -158,6 +223,8 @@ GENERATORS: dict[str, Callable[[Config], str]] = {
     "rules-list": _rules_list,
     "capabilities": _capabilities_table,
     "runtime-summary": _runtime_summary,
+    "pr-review-flow": _pr_review_flow,
+    "issue-review-flow": _issue_review_flow,
     "roles": _roles_table,
     "routing": _routing_table,
     "backlog": _backlog_table,
@@ -230,7 +297,13 @@ def documents(config: Config) -> list[Path]:
 
 
 def _document_candidates(config: Config) -> list[Path]:
-    roots = [config.root, config.root / "docs", config.root / "agents", config.root / ".github"]
+    roots = [
+        config.root,
+        config.root / "docs",
+        config.root / "agents",
+        config.root / "skills",
+        config.root / ".github",
+    ]
     found: list[Path] = []
     for root in roots:
         if not root.is_dir():

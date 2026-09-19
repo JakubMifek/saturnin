@@ -43,7 +43,12 @@ def test_checked_in_docs_match_policy() -> None:
 
 def test_generated_blocks_are_found(docs_home: Config) -> None:
     names = {p.name for p in docsync.documents(docs_home)}
-    assert {"operating-model.md", "delegation-policy.md", "copilot-instructions.md"} <= names
+    assert {
+        "operating-model.md",
+        "delegation-policy.md",
+        "copilot-instructions.md",
+        "review-ledger.md",
+    } <= names
 
 
 def test_policy_change_makes_docs_stale(docs_home: Config) -> None:
@@ -59,6 +64,39 @@ def test_policy_change_makes_docs_stale(docs_home: Config) -> None:
     assert main(["--home", str(docs_home.root), "docs", "render", "--check"]) == 2
     assert main(["--home", str(docs_home.root), "docs", "render"]) == 0
     assert docsync.render(Config.load(docs_home.root), write=False) == []
+
+
+def test_review_flow_blocks_are_policy_rendered(docs_home: Config) -> None:
+    policy = docs_home.root / "policies" / "governance.yaml"
+    policy.write_text(
+        policy.read_text().replace(
+            "allowed_reviewer_roles: [pr-reviewer]",
+            "allowed_reviewer_roles: [review-bot]",
+        )
+    )
+    docs_home._cache.clear()
+
+    stale = docsync.render(docs_home, write=False)
+
+    assert docs_home.root / "skills" / "review-ledger.md" in stale
+    assert docs_home.root / "agents" / "pr-reviewer.md" in stale
+    docsync.render(docs_home)
+    rendered = (docs_home.root / "skills" / "review-ledger.md").read_text(encoding="utf-8")
+    assert "--reviewer review-bot" in rendered
+
+
+def test_audit_checks_generated_blocks_in_skills(docs_home: Config) -> None:
+    skill = docs_home.root / "skills" / "review-ledger.md"
+    skill.write_text(
+        "<!-- generated:pr-review-flow -->\nstale\n<!-- /generated:pr-review-flow -->",
+        encoding="utf-8",
+    )
+
+    errors = docsync.audit(docs_home)
+
+    assert errors == [
+        "documentation has drifted from policy (skills/review-ledger.md); run: saturnin docs render"
+    ]
 
 
 def test_unknown_block_is_rejected(docs_home: Config) -> None:
@@ -179,7 +217,27 @@ def test_documented_pr_review_flow_records_attested_head() -> None:
     )
 
     assert "HEAD_SHA=\"$(gh pr view" in runbook
+    assert "VERDICT=approved" in runbook
     assert "--head-sha \"$HEAD_SHA\")" in runbook
     assert "--head-sha \"$HEAD_SHA\" --attestation \"$attestation\"" in runbook
     assert "Review attestation created for that revision" in template
     assert "--head-sha \"$HEAD_SHA\" --attestation \"$attestation\"" in template
+
+
+def test_generated_pr_review_flows_pass_same_head_sha() -> None:
+    for path in [
+        REPO_ROOT / "docs" / "runbooks" / "day-1-startup.md",
+        REPO_ROOT / "agents" / "pr-reviewer.md",
+        REPO_ROOT / "skills" / "review-ledger.md",
+    ]:
+        text = path.read_text(encoding="utf-8")
+        blocks = [
+            match.group("body")
+            for match in docsync.MARKER.finditer(text)
+            if match.group("name") == "pr-review-flow"
+        ]
+        assert blocks, path
+        for block in blocks:
+            assert 'HEAD_SHA="$(gh pr view' in block
+            assert block.count('--head-sha "$HEAD_SHA"') == 3
+            assert "--reviewer pr-reviewer" in block
