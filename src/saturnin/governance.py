@@ -225,6 +225,10 @@ class Governance:
         allowed = _allowed_reviewer_roles(kind, self.config) if kind else set()
         if kind:
             records = [r for r in records if r.reviewer.strip().lower() in allowed]
+        latest_by_reviewer: dict[str, ReviewRecord] = {}
+        for record in records:
+            latest_by_reviewer[record.reviewer.strip().lower()] = record
+        records = list(latest_by_reviewer.values())
         approvals = [r for r in records if r.verdict == "approved"]
         blocking = [
             r for r in records if r.verdict in ("changes_requested", "rejected", "dismissed")
@@ -370,6 +374,7 @@ class Governance:
         command: str,
         *,
         dedicated_service: str | None = None,
+        cwd: Path | None = None,
     ) -> Decision:
         """Rule 7: non-root only, apt/systemctl only for Saturnin-dedicated services."""
         scope = self.config.server_scope
@@ -388,7 +393,7 @@ class Governance:
         if not user.get("allow_root", False) and os.geteuid() == 0:
             return Decision.deny("server commands may not run as root")
         return self._check_scoped_command(
-            parts, dedicated_service=dedicated_service, depth=0
+            parts, dedicated_service=dedicated_service, cwd=cwd, depth=0
         )
 
     def _check_scoped_command(
@@ -396,6 +401,7 @@ class Governance:
         parts: Sequence[str],
         *,
         dedicated_service: str | None,
+        cwd: Path | None,
         depth: int,
     ) -> Decision:
         if depth >= _MAX_COMMAND_DEPTH:
@@ -412,6 +418,7 @@ class Governance:
             binary,
             self.config.server_scope,
             runtime_root=self.config.data_root,
+            cwd=cwd,
         )
         if not executable_decision.allowed:
             return executable_decision
@@ -447,6 +454,7 @@ class Governance:
             return self._check_scoped_command(
                 wrapped,
                 dedicated_service=dedicated_service,
+                cwd=cwd,
                 depth=depth + 1,
             )
 
@@ -454,7 +462,7 @@ class Governance:
         services = scope.get("services", {})
         packages = scope.get("packages", {})
         filesystem_decision = _check_filesystem_scope(
-            binary, parts[1:], scope.get("filesystem", {})
+            binary, parts[1:], scope.get("filesystem", {}), cwd=cwd
         )
         if not filesystem_decision.allowed:
             return filesystem_decision
@@ -699,7 +707,11 @@ def _unsafe_shell_syntax(command: str) -> str | None:
 
 
 def _check_filesystem_scope(
-    binary: str, arguments: Sequence[str], filesystem: dict[str, Any]
+    binary: str,
+    arguments: Sequence[str],
+    filesystem: dict[str, Any],
+    *,
+    cwd: Path | None = None,
 ) -> Decision:
     forbidden_roots = _policy_roots(filesystem.get("forbidden_roots", []))
     try:
@@ -727,7 +739,7 @@ def _check_filesystem_scope(
             if arguments[1] == "saturnin":
                 targets = _saturnin_targets(arguments[2:])
                 if targets:
-                    return _check_filesystem_targets(targets, filesystem)
+                    return _check_filesystem_targets(targets, filesystem, cwd=cwd)
         elif binary in _SHELL_BINARIES or binary in {"ruby", "perl", "node"}:
             if binary not in allowlist:
                 return Decision.deny(
@@ -741,7 +753,7 @@ def _check_filesystem_scope(
             )
         return Decision.ok("command has no explicit filesystem write target")
 
-    return _check_filesystem_targets(targets, filesystem)
+    return _check_filesystem_targets(targets, filesystem, cwd=cwd)
 
 
 def _check_executable_location(
@@ -750,6 +762,7 @@ def _check_executable_location(
     scope: dict[str, Any],
     *,
     runtime_root: Path,
+    cwd: Path | None = None,
 ) -> Decision:
     filesystem = scope.get("filesystem", {})
     classified = (
@@ -764,6 +777,8 @@ def _check_executable_location(
 
     if "/" in executable:
         candidate = Path(executable).expanduser()
+        if not candidate.is_absolute() and cwd is not None:
+            candidate = cwd / candidate
     else:
         found = shutil.which(executable)
         if found is None:
@@ -877,11 +892,16 @@ def _trusted_runtime_executable(filesystem: dict[str, Any], runtime_root: Path) 
     return Path(os.path.abspath(runtime_root / relative))
 
 
-def _check_filesystem_targets(targets: Sequence[str], filesystem: dict[str, Any]) -> Decision:
+def _check_filesystem_targets(
+    targets: Sequence[str],
+    filesystem: dict[str, Any],
+    *,
+    cwd: Path | None = None,
+) -> Decision:
     forbidden_roots = _policy_roots(filesystem.get("forbidden_roots", []))
     writable_roots = _policy_roots(filesystem.get("writable_roots", []))
     for raw_path in targets:
-        path = _resolve_command_path(raw_path)
+        path = _resolve_command_path(raw_path, cwd=cwd)
         forbidden = _containing_root(path, forbidden_roots)
         if forbidden is not None:
             return Decision.deny(
@@ -899,8 +919,11 @@ def _policy_roots(values: Iterable[Any]) -> list[Path]:
     return [_resolve_command_path(str(value)) for value in values]
 
 
-def _resolve_command_path(value: str) -> Path:
-    return Path(value).expanduser().resolve(strict=False)
+def _resolve_command_path(value: str, *, cwd: Path | None = None) -> Path:
+    path = Path(value).expanduser()
+    if not path.is_absolute() and cwd is not None:
+        path = cwd / path
+    return path.resolve(strict=False)
 
 
 def _containing_root(path: Path, roots: Sequence[Path]) -> Path | None:

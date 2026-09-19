@@ -15,7 +15,7 @@ from fnmatch import fnmatch
 from pathlib import Path
 from typing import Any, Iterable, Iterator, Sequence
 
-from .board import Board
+from .board import Board, Task
 from .config import Config, default_config
 from .governance import Governance
 from .locking import file_lock
@@ -36,6 +36,36 @@ def git(args: Sequence[str], cwd: Path) -> str:
     if result.returncode != 0:
         raise GitError(f"git {' '.join(args)} failed: {result.stderr.strip()}")
     return result.stdout
+
+
+def validated_task_worktree(task: Task) -> Path:
+    """Return the task's registered, non-primary worktree on its assigned branch."""
+    if not task.branch:
+        raise GitError(f"task {task.id} has no attached branch")
+    if not task.worktree:
+        raise GitError(f"task {task.id} has no attached worktree")
+    try:
+        worktree = Path(task.worktree).resolve(strict=True)
+    except OSError as exc:
+        raise GitError(f"task worktree does not exist: {task.worktree}") from exc
+    if not worktree.is_dir():
+        raise GitError(f"task worktree does not exist: {worktree}")
+    output = git(["worktree", "list", "--porcelain", "-z"], worktree)
+    registered = [
+        Path(line.removeprefix("worktree ")).resolve()
+        for line in output.split("\0")
+        if line.startswith("worktree ")
+    ]
+    if not registered or worktree not in registered:
+        raise GitError(f"task worktree is not registered with Git: {worktree}")
+    if worktree == registered[0]:
+        raise GitError(f"task {task.id} cannot use a repository's main checkout")
+    current = git(["branch", "--show-current"], worktree).strip()
+    if current != task.branch:
+        raise GitError(
+            f"task worktree {worktree} is not checked out on branch {task.branch}"
+        )
+    return worktree
 
 
 @dataclass

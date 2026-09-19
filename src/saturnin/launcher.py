@@ -33,6 +33,7 @@ from .worker_callbacks import (
     ENV_CALLBACK_TASK_ID,
     apply_queued,
 )
+from .worktrees import GitError, validated_task_worktree
 
 
 class LauncherError(RuntimeError):
@@ -331,6 +332,7 @@ class AgentLauncher:
                     pass
                 continue
             reason = f"agent process exited or identity changed after launch with pid {pid}"
+            callbacks_complete = True
             try:
                 apply_queued(
                     self.config,
@@ -341,6 +343,7 @@ class AgentLauncher:
                     else None,
                 )
             except (OSError, TypeError, ValueError, RuntimeError) as exc:
+                callbacks_complete = False
                 reason = f"{reason}; worker callbacks failed: {exc}"
             try:
                 with self.board.edit(task_id) as task:
@@ -351,15 +354,36 @@ class AgentLauncher:
                         task.log("agent:launch_failed", actor="launcher", reason=reason)
                         task.log("state:routed", actor="launcher", note=reason)
                         resumed.append(task.id)
+                    elif not callbacks_complete:
+                        task.log("agent:callback_failed", actor="launcher", reason=reason)
             except OSError:
                 continue
             except BoardError:
                 pass
+            if not callbacks_complete:
+                continue
             try:
                 metadata_path.unlink()
             except OSError:
                 pass
         return resumed
+
+    def has_active_launch(self, task_id: str) -> bool:
+        metadata_path = self.dir / f"{task_id}.json"
+        try:
+            metadata = json.loads(metadata_path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            return False
+        pid = metadata.get("pid")
+        started = metadata.get("process_start_time_ticks")
+        return (
+            metadata.get("task_id") == task_id
+            and isinstance(pid, int)
+            and not isinstance(pid, bool)
+            and isinstance(started, int)
+            and not isinstance(started, bool)
+            and self._process_start_time(pid) == started
+        )
 
     @staticmethod
     def _remove_launch_metadata(metadata_path: Path) -> str | None:
@@ -548,6 +572,7 @@ class AgentLauncher:
             trusted_config.root / "agents",
             trusted_config.root / "skills",
             trusted_config.root / "automation",
+            trusted_config.board_dir,
             trusted_config.root / ".venv",
             trusted_config.var_dir / "bin",
         )
@@ -719,46 +744,10 @@ class AgentLauncher:
         return result.stdout.strip()
 
     def _validated_workdir(self, task: Task) -> Path:
-        if not task.branch:
-            raise LauncherError(f"task {task.id} has no attached branch")
-        if not task.worktree:
-            raise LauncherError(f"task {task.id} has no attached worktree")
-        workdir = Path(task.worktree)
-        if workdir.resolve() == self.config.root.resolve():
-            raise LauncherError(f"task {task.id} cannot launch in the main checkout")
-        if not workdir.is_dir():
-            raise LauncherError(f"task worktree does not exist: {workdir}")
-        registration = subprocess.run(  # noqa: S603 - fixed executable and arguments
-            ["git", "worktree", "list", "--porcelain", "-z"],
-            cwd=str(workdir),
-            capture_output=True,
-            text=True,
-            check=False,
-        )
-        if registration.returncode != 0:
-            raise LauncherError(f"task worktree is not a Git worktree: {workdir}")
-        registered = [
-            Path(line.removeprefix("worktree ")).resolve()
-            for line in registration.stdout.split("\0")
-            if line.startswith("worktree ")
-        ]
-        resolved_workdir = workdir.resolve()
-        if not registered or resolved_workdir not in registered:
-            raise LauncherError(f"task worktree is not registered with Git: {workdir}")
-        if resolved_workdir == registered[0]:
-            raise LauncherError(f"task {task.id} cannot launch in a repository's main checkout")
-        current = subprocess.run(  # noqa: S603 - fixed executable, arguments are not shell-parsed
-            ["git", "branch", "--show-current"],
-            cwd=str(workdir),
-            capture_output=True,
-            text=True,
-            check=False,
-        )
-        if current.returncode != 0 or current.stdout.strip() != task.branch:
-            raise LauncherError(
-                f"task worktree {workdir} is not checked out on branch {task.branch}"
-            )
-        return workdir
+        try:
+            return validated_task_worktree(task)
+        except GitError as exc:
+            raise LauncherError(str(exc)) from exc
 
     def _worker_config(self, workdir: Path) -> Config:
         candidate = Config(workdir)

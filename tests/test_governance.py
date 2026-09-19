@@ -170,6 +170,35 @@ def test_dismissed_review_blocks_merge(governance: Governance, config: Config) -
     assert "dismissed" in decision.reasons[0]
 
 
+def test_repeated_approvals_from_one_reviewer_count_once(
+    governance: Governance,
+    config: Config,
+) -> None:
+    subject = "JakubMifek/saturnin#repeated-reviewer"
+    ledger = ReviewLedger(config)
+    governance.review["pr"]["min_approvals"] = 2
+    for _ in range(2):
+        record_review(
+            ledger,
+            subject=subject,
+            kind="pr",
+            author="code-worker",
+            reviewer="pr-reviewer",
+            verdict="approved",
+            head_sha=TEST_HEAD_SHA,
+        )
+
+    decision = governance.merge_allowed(
+        repo=SELF_REPO,
+        author="code-worker",
+        records=ledger.for_subject(subject, "pr"),
+        head_sha=TEST_HEAD_SHA,
+    )
+
+    assert not decision.allowed
+    assert "1/2 independent approval(s)" in decision.reasons[0]
+
+
 def test_unauthorized_reviewer_cannot_veto_pr(
     governance: Governance, config: Config
 ) -> None:

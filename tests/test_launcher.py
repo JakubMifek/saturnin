@@ -13,13 +13,25 @@ import yaml
 
 from saturnin.board import Board, utcnow
 from saturnin.checkpoints import Checkpoint, CheckpointStore
+from saturnin.cli import main
 from saturnin.config import Config
 from saturnin.launcher import AgentLauncher, LauncherError
 from saturnin.mcp import MCPError
-from saturnin.review import ReviewLedger, sign_review_attestation
+from saturnin.review import (
+    ReviewLedger,
+    review_attestation_signing_key,
+    sign_review_attestation,
+)
 from saturnin.routing import Router
 from saturnin.worktrees import WorktreeManager
-from saturnin.worker_callbacks import CALLBACKS_FILE, WorkerCallbackError, apply_queued
+from saturnin.worker_callbacks import (
+    CALLBACKS_FILE,
+    ENV_CALLBACK_DIR,
+    ENV_CALLBACK_TASK_ID,
+    WorkerCallbackError,
+    apply_queued,
+    run_server_command,
+)
 
 
 _REAL_PROCESS_START_TIME = AgentLauncher._process_start_time
@@ -305,6 +317,166 @@ def test_reconcile_applies_worker_callbacks_before_requeue(
     assert not (callback_dir / CALLBACKS_FILE).exists()
 
 
+def test_reconcile_retries_only_unacknowledged_callbacks_after_task_state_changes(
+    config: Config,
+    board: Board,
+) -> None:
+    task = board.create("Fix retry worker callbacks")
+    Router(config).dispatch(board, task)
+    board.transition_id(task.id, "in_progress", actor="launcher")
+    launcher = AgentLauncher(config, board)
+    callback_dir = launcher._isolated_home(task.id) / ".saturnin-callbacks"
+    callback_dir.mkdir(parents=True)
+    callbacks = [
+        {
+            "type": "task_move",
+            "task_id": task.id,
+            "state": "review",
+            "actor": "code-worker",
+            "note": "ready",
+        },
+        {
+            "type": "checkpoint_save",
+            "task_id": task.id,
+            "role": "chief-of-staff",
+            "summary": "handoff",
+            "next_steps": ["review"],
+            "blockers": [],
+            "artifacts": [],
+            "branch": None,
+            "worktree": None,
+            "resume_after": None,
+        },
+    ]
+    queue_path = callback_dir / CALLBACKS_FILE
+    queue_path.write_text(
+        "".join(json.dumps(record) + "\n" for record in callbacks),
+        encoding="utf-8",
+    )
+    metadata_path = launcher.dir / f"{task.id}.json"
+    metadata_path.write_text(
+        json.dumps(
+            {
+                "task_id": task.id,
+                "pid": 123,
+                "process_start_time_ticks": 999,
+                "callback_dir": str(callback_dir),
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    assert launcher.reconcile_exited_launches() == []
+
+    assert board.get(task.id).state == "review"
+    assert metadata_path.exists()
+    remaining = [
+        json.loads(line) for line in queue_path.read_text(encoding="utf-8").splitlines()
+    ]
+    assert remaining == [callbacks[1]]
+
+    remaining[0]["role"] = "code-worker"
+    queue_path.write_text(json.dumps(remaining[0]) + "\n", encoding="utf-8")
+
+    assert launcher.reconcile_exited_launches() == []
+    assert CheckpointStore(config, board).latest(task.id).summary == "handoff"
+    assert not metadata_path.exists()
+    assert not queue_path.exists()
+
+
+def test_trusted_cli_callback_applies_task_add(
+    config: Config,
+    board: Board,
+) -> None:
+    task = board.create("File a follow-up")
+    Router(config).dispatch(board, task)
+    board.transition_id(task.id, "in_progress", actor="launcher")
+    callback_dir = AgentLauncher(config, board)._isolated_home(
+        task.id
+    ) / ".saturnin-callbacks"
+    callback_dir.mkdir(parents=True)
+    callback = {
+        "type": "trusted_cli",
+        "task_id": task.id,
+        "operation": "task_add",
+        "argv": [
+            "task",
+            "add",
+            "Extract shared controller",
+            "--label",
+            "architecture",
+        ],
+    }
+    (callback_dir / CALLBACKS_FILE).write_text(
+        json.dumps(callback) + "\n",
+        encoding="utf-8",
+    )
+
+    apply_queued(config, board, task_id=task.id, callback_dir=str(callback_dir))
+
+    created = [item for item in board if item.id != task.id]
+    assert [item.title for item in created] == ["Extract shared controller"]
+    assert created[0].labels == ["architecture"]
+    assert board.get(task.id).history[-1]["operation"] == "task_add"
+
+
+def test_trusted_cli_callback_records_review_as_assigned_reviewer(
+    config: Config,
+    board: Board,
+) -> None:
+    task = board.create("Review the change", kind="pr-review")
+    with board.edit(task.id) as stored:
+        stored.role = "pr-reviewer"
+        stored.state = "in_progress"
+    subject = "JakubMifek/saturnin#trusted-review"
+    head_sha = "c" * 40
+    attestation = sign_review_attestation(
+        key=review_attestation_signing_key(config, "pr-reviewer"),
+        subject=subject,
+        kind="pr",
+        author="code-worker",
+        reviewer="pr-reviewer",
+        verdict="approved",
+        head_sha=head_sha,
+    )
+    callback_dir = AgentLauncher(config, board)._isolated_home(
+        task.id
+    ) / ".saturnin-callbacks"
+    callback_dir.mkdir(parents=True)
+    callback = {
+        "type": "trusted_cli",
+        "task_id": task.id,
+        "operation": "review_record",
+        "argv": [
+            "review",
+            "record",
+            subject,
+            "--kind",
+            "pr",
+            "--author",
+            "code-worker",
+            "--reviewer",
+            "pr-reviewer",
+            "--verdict",
+            "approved",
+            "--head-sha",
+            head_sha,
+            "--attestation",
+            attestation,
+        ],
+    }
+    (callback_dir / CALLBACKS_FILE).write_text(
+        json.dumps(callback) + "\n",
+        encoding="utf-8",
+    )
+
+    apply_queued(config, board, task_id=task.id, callback_dir=str(callback_dir))
+
+    records = ReviewLedger(config).for_subject(subject, "pr")
+    assert len(records) == 1
+    assert records[0].reviewer == "pr-reviewer"
+
+
 @pytest.mark.parametrize(
     "callback",
     [
@@ -464,12 +636,18 @@ def test_worker_callback_rejects_direct_blocked_transition(
 def test_worker_callback_runs_ops_host_command(
     config: Config,
     board: Board,
+    git_repo: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     task = board.create("Restart timer")
+    worktree = WorktreeManager(config, repo=git_repo, board=board).create(
+        "fix/restart-timer"
+    )
     with board.edit(task.id) as stored:
         stored.role = "ops-worker"
         stored.state = "in_progress"
+        stored.branch = worktree.branch
+        stored.worktree = str(worktree.path)
     callback_dir = AgentLauncher(config, board)._isolated_home(task.id) / ".saturnin-callbacks"
     callback_dir.mkdir(parents=True)
     callback = {
@@ -482,10 +660,14 @@ def test_worker_callback_runs_ops_host_command(
         json.dumps(callback) + "\n",
         encoding="utf-8",
     )
-    calls: list[list[str]] = []
+    calls: list[tuple[list[str], Path]] = []
+
+    real_run = subprocess.run
 
     def run_command(*args, **kwargs):
-        calls.append(args[0])
+        if args[0][0] == "git":
+            return real_run(*args, **kwargs)
+        calls.append((args[0], kwargs["cwd"]))
         return SimpleNamespace(returncode=0, stdout="ok\n", stderr="")
 
     monkeypatch.setattr("saturnin.governance.os.geteuid", lambda: 1000)
@@ -493,7 +675,12 @@ def test_worker_callback_runs_ops_host_command(
 
     apply_queued(config, board, task_id=task.id, callback_dir=str(callback_dir))
 
-    assert calls == [["systemctl", "--user", "restart", "saturnin-janitor.timer"]]
+    assert calls == [
+        (
+            ["systemctl", "--user", "restart", "saturnin-janitor.timer"],
+            worktree.path.resolve(),
+        )
+    ]
     stored = board.get(task.id)
     assert any(entry["event"] == "host:command_started" for entry in stored.history)
     assert any(
@@ -503,6 +690,138 @@ def test_worker_callback_runs_ops_host_command(
     assert (
         config.var_dir / "logs" / "host-operations" / f"{task.id}.jsonl"
     ).is_file()
+
+
+def test_ops_host_git_command_cannot_escape_task_worktree(
+    config: Config,
+    board: Board,
+    git_repo: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    task = board.create("Repair task branch")
+    worktree = WorktreeManager(config, repo=git_repo, board=board).create(
+        "fix/task-branch"
+    )
+    with board.edit(task.id) as stored:
+        stored.role = "ops-worker"
+        stored.state = "in_progress"
+        stored.branch = worktree.branch
+        stored.worktree = str(worktree.path)
+    config.policy("server_scope")["filesystem"]["writable_roots"] = [
+        str(config.root)
+    ]
+    monkeypatch.setattr("saturnin.governance.os.geteuid", lambda: 1000)
+
+    with pytest.raises(WorkerCallbackError, match="outside task worktree"):
+        run_server_command(
+            config,
+            board,
+            task_id=task.id,
+            cmdline=f"git -C {config.root} reset --hard",
+        )
+
+
+def test_trusted_push_callback_delivers_exact_isolated_commit(
+    config: Config,
+    board: Board,
+    git_repo: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    task = board.create("Deliver isolated commit", repo="JakubMifek/saturnin")
+    Router(config).dispatch(board, task)
+    worktree = WorktreeManager(config, repo=git_repo, board=board).create(
+        "feature/trusted-delivery"
+    )
+    with board.edit(task.id) as stored:
+        stored.branch = worktree.branch
+        stored.worktree = str(worktree.path)
+    launcher = AgentLauncher(config, board)
+    home = launcher._isolated_home(task.id)
+    callback_dir = home / ".saturnin-callbacks"
+    callback_dir.mkdir(parents=True)
+    environment, _ = launcher._isolated_git_environment(
+        board.get(task.id),
+        worktree.path,
+        home,
+    )
+    process_environment = {**os.environ, **environment}
+    changed = worktree.path / "delivered.txt"
+    changed.write_text("trusted\n", encoding="utf-8")
+    subprocess.run(
+        ["git", "add", "delivered.txt"],
+        cwd=worktree.path,
+        env=process_environment,
+        check=True,
+    )
+    subprocess.run(
+        ["git", "commit", "-m", "isolated delivery"],
+        cwd=worktree.path,
+        env=process_environment,
+        check=True,
+        capture_output=True,
+    )
+    isolated_head = subprocess.run(
+        ["git", "rev-parse", "HEAD"],
+        cwd=worktree.path,
+        env=process_environment,
+        capture_output=True,
+        text=True,
+        check=True,
+    ).stdout.strip()
+    remote = config.root / "delivery-remote.git"
+    subprocess.run(
+        ["git", "init", "--bare", str(remote)],
+        check=True,
+        capture_output=True,
+    )
+    subprocess.run(
+        ["git", "remote", "set-url", "--push", "origin", str(remote)],
+        cwd=git_repo,
+        check=True,
+    )
+    monkeypatch.setenv(ENV_CALLBACK_DIR, str(callback_dir))
+    monkeypatch.setenv(ENV_CALLBACK_TASK_ID, task.id)
+    monkeypatch.setenv("SATURNIN_WORKTREE", str(worktree.path))
+    for name, value in environment.items():
+        monkeypatch.setenv(name, value)
+
+    assert main(["push"]) == 0
+    queued = json.loads(
+        (callback_dir / CALLBACKS_FILE).read_text(encoding="utf-8")
+    )
+    assert queued["commit"] == isolated_head
+    assert queued["branch"] == worktree.branch
+    for name in ("GIT_DIR", "GIT_WORK_TREE", "GIT_CONFIG_GLOBAL", "GIT_CONFIG_NOSYSTEM"):
+        monkeypatch.delenv(name, raising=False)
+
+    monkeypatch.setattr(
+        "saturnin.worker_callbacks.github_repo_slug",
+        lambda value, **kwargs: "JakubMifek/saturnin",
+    )
+    apply_queued(config, board, task_id=task.id, callback_dir=str(callback_dir))
+
+    remote_head = subprocess.run(
+        ["git", "--git-dir", str(remote), "rev-parse", worktree.branch],
+        capture_output=True,
+        text=True,
+        check=True,
+    ).stdout.strip()
+    local_head = subprocess.run(
+        ["git", "rev-parse", worktree.branch],
+        cwd=git_repo,
+        capture_output=True,
+        text=True,
+        check=True,
+    ).stdout.strip()
+    assert remote_head == isolated_head
+    assert local_head == isolated_head
+    assert subprocess.run(
+        ["git", "status", "--porcelain"],
+        cwd=worktree.path,
+        capture_output=True,
+        text=True,
+        check=True,
+    ).stdout == ""
 
 
 def test_isolated_git_metadata_supports_commit_without_changing_shared_refs(

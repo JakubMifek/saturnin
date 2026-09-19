@@ -1026,6 +1026,71 @@ def test_sandboxed_worker_host_command_is_queued(
     ]
 
 
+def test_sandboxed_worker_stateful_command_uses_trusted_cli_callback(
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    callback_dir = tmp_path / "callbacks"
+    monkeypatch.setenv(ENV_CALLBACK_DIR, str(callback_dir))
+    monkeypatch.setenv(ENV_CALLBACK_TASK_ID, "T-callback")
+
+    code, out = run(
+        capsys,
+        "task",
+        "add",
+        "Follow-up",
+        "--label",
+        "architecture",
+        "--dispatch",
+    )
+
+    assert code == 0
+    assert "queued worker callback" in out
+    record = json.loads(
+        (callback_dir / CALLBACKS_FILE).read_text(encoding="utf-8")
+    )
+    assert record == {
+        "argv": [
+            "task",
+            "add",
+            "Follow-up",
+            "--label",
+            "architecture",
+            "--dispatch",
+        ],
+        "operation": "task_add",
+        "task_id": "T-callback",
+        "type": "trusted_cli",
+    }
+
+
+def test_sandboxed_worker_fails_closed_for_unsupported_stateful_command(
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    callback_dir = tmp_path / "callbacks"
+    monkeypatch.setenv(ENV_CALLBACK_DIR, str(callback_dir))
+    monkeypatch.setenv(ENV_CALLBACK_TASK_ID, "T-callback")
+
+    code = main(
+        [
+            "task",
+            "attach",
+            "T-callback",
+            "--branch",
+            "feature/escape",
+            "--worktree",
+            "/outside",
+        ]
+    )
+
+    assert code == 1
+    assert "no trusted callback is defined" in capsys.readouterr().err
+    assert not (callback_dir / CALLBACKS_FILE).exists()
+
+
 def test_review_gate_flow(home: Path, capsys: pytest.CaptureFixture[str]) -> None:
     subject = "JakubMifek/saturnin#42"
     head_sha = "a" * 40
@@ -1261,6 +1326,7 @@ def test_checkpoint_sweep_reconciles_and_skips_active_in_progress_task(
         "reconcile_exited_launches",
         lambda self: calls.append("reconcile") or [],
     )
+    monkeypatch.setattr(AgentLauncher, "has_active_launch", lambda self, task_id: True)
 
     def launch(self, task_id, **kwargs):
         calls.append("launch")
@@ -1273,6 +1339,57 @@ def test_checkpoint_sweep_reconciles_and_skips_active_in_progress_task(
     assert code == 0
     assert calls == ["reconcile"]
     assert json.loads(out) == [{"task_id": task.id, "active": True}]
+
+
+def test_checkpoint_sweep_resumes_paused_in_progress_task_without_live_launch(
+    config: Config,
+    board: Board,
+    capsys: pytest.CaptureFixture[str],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    task = board.create("Resume paused work")
+    checkpoint = CheckpointStore(config, board).save(
+        Checkpoint(
+            task_id=task.id,
+            role="code-worker",
+            summary="paused",
+            next_steps=["continue"],
+            resume_after="2026-09-11T19:00:00+00:00",
+        )
+    )
+    with board.edit(task.id) as stored:
+        stored.state = "in_progress"
+        stored.checkpoint = checkpoint.created_at
+    calls: list[tuple[str, str | None]] = []
+    monkeypatch.setattr(AgentLauncher, "enabled", property(lambda self: True))
+    monkeypatch.setattr(AgentLauncher, "reconcile_exited_launches", lambda self: [])
+    monkeypatch.setattr(
+        AgentLauncher,
+        "has_active_launch",
+        lambda self, task_id: False,
+    )
+
+    def launch(self, task_id, *, resumed_checkpoint=None):
+        calls.append((task_id, resumed_checkpoint))
+        return SimpleNamespace(
+            to_dict=lambda: {
+                "task_id": task_id,
+                "resumed_checkpoint": resumed_checkpoint,
+            }
+        )
+
+    monkeypatch.setattr(AgentLauncher, "launch", launch)
+
+    code, out = run(capsys, "--json", "checkpoint", "sweep")
+
+    assert code == 0
+    assert calls == [(task.id, checkpoint.created_at)]
+    assert json.loads(out) == [
+        {
+            "task_id": task.id,
+            "resumed_checkpoint": checkpoint.created_at,
+        }
+    ]
 
 
 def test_issue_review_gate_requires_matching_digest(

@@ -7,8 +7,11 @@ Produce a diff somebody else can review quickly and merge safely.
 1. Branch and worktree via `worktree-session`; never work in the main checkout.
 2. Small, single-purpose commits; unrelated findings become new board tasks.
 3. PR body: problem, change, verification, risk. No narrative about the session.
-4. Ask for the independent reviewer; record the verdict with `review-ledger`.
-5. Merge only via `saturnin review merge <owner/repo#N> --repo <repo> --author <role>`
+4. Commit and run `saturnin push`; launched workers hand the exact isolated
+   commit to the trusted host broker, which revalidates the attached worktree,
+   repository and branch before pushing.
+5. Ask for the independent reviewer; record the verdict with `review-ledger`.
+6. Merge only via `saturnin review merge <owner/repo#N> --repo <repo> --author <role>`
    so the current head SHA is rechecked and passed as GitHub's expected-head
    precondition.
 

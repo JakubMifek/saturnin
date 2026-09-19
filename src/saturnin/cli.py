@@ -813,9 +813,10 @@ def _git_output(root: Path, *args: str) -> str:
 
 def main(argv: Sequence[str] | None = None) -> int:
     parser = build_parser()
-    args = parser.parse_args(argv)
+    command_argv = list(argv) if argv is not None else sys.argv[1:]
+    args = parser.parse_args(command_argv)
     try:
-        queued_callback = queue_from_args(args)
+        queued_callback = queue_from_args(args, argv=command_argv)
         if queued_callback is not None:
             _emit(
                 queued_callback,
@@ -1575,7 +1576,10 @@ def _run_checkpoint(args: argparse.Namespace, config: Config, board: Board, as_j
                 for checkpoint in due:
                     try:
                         task = board.get(checkpoint.task_id)
-                        if task.state == "in_progress":
+                        if (
+                            task.state == "in_progress"
+                            and launcher.has_active_launch(task.id)
+                        ):
                             payload.append(
                                 {
                                     "task_id": checkpoint.task_id,
