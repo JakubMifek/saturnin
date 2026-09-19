@@ -29,7 +29,7 @@ Every dispatch names how the result will arrive:
 | Contract | Result arrives when | Who builds it |
 | --- | --- | --- |
 | `board-callback` | the worker moves the task itself; Saturnin sees it on the next board sweep | nobody - it is the default |
-| `pr-gate` | the review verdict satisfies `saturnin review gate` | the reviewer |
+| `pr-gate` | the review verdict satisfies `saturnin review gate --kind pr --head-sha <sha>` | the reviewer |
 | `poller` | a scheduled probe detects the external signal and pushes the task forward | **a dispatched worker**, never the CEO |
 | `escalation` | a human answers the escalation issue | the chief of staff |
 

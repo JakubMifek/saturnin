@@ -1050,6 +1050,7 @@ def test_sandboxed_worker_stateful_command_uses_trusted_cli_callback(
     record = json.loads(
         (callback_dir / CALLBACKS_FILE).read_text(encoding="utf-8")
     )
+    assert record.pop("callback_id")
     assert record == {
         "argv": [
             "task",

@@ -1306,6 +1306,26 @@ _CURL_FILE_OPTIONS = frozenset(
     }
 )
 _CURL_WRITE_OUT_OPTIONS = frozenset({"-w", "--write-out"})
+_CURL_ALWAYS_LOCAL_READ_OPTIONS = frozenset(
+    {
+        "-T",
+        "--upload-file",
+        "--netrc-file",
+    }
+)
+_CURL_AT_LOCAL_READ_OPTIONS = frozenset(
+    {
+        "-d",
+        "--data",
+        "--data-ascii",
+        "--data-binary",
+        "--data-urlencode",
+        "--json",
+        "-F",
+        "--form",
+    }
+)
+_CURL_URL_OPTIONS = frozenset({"--url"})
 
 
 def _expand_curl_short_next(arguments: Sequence[str]) -> list[str]:
@@ -1363,6 +1383,73 @@ def _curl_bundled_write_action(argument: str) -> tuple[bool, str, str]:
     return remote_name, "", ""
 
 
+def _curl_bundled_read_action(argument: str) -> tuple[str, str]:
+    if not argument.startswith("-") or argument.startswith("--") or len(argument) <= 2:
+        return "", ""
+    for position, option in enumerate(argument[1:], start=1):
+        if option not in _CURL_SHORT_OPTIONS_WITH_VALUES:
+            continue
+        flag = f"-{option}"
+        return flag, argument[position + 1 :]
+    return "", ""
+
+
+def _curl_value_mentions_local_file(option: str, value: str) -> bool:
+    if option in _CURL_ALWAYS_LOCAL_READ_OPTIONS:
+        return True
+    if option in _CURL_AT_LOCAL_READ_OPTIONS:
+        return value.startswith("@") or "=@" in value or ";@" in value
+    if option in _CURL_URL_OPTIONS:
+        return value.lower().startswith("file:")
+    return False
+
+
+def _check_curl_local_read_sources(arguments: Sequence[str]) -> None:
+    index = 0
+    while index < len(arguments):
+        argument = arguments[index]
+        if argument in {"--next", "-:"}:
+            index += 1
+            continue
+        bundled_option, bundled_value = _curl_bundled_read_action(argument)
+        if bundled_option:
+            if bundled_option in _CURL_ALWAYS_LOCAL_READ_OPTIONS or (
+                bundled_value
+                and _curl_value_mentions_local_file(bundled_option, bundled_value)
+            ):
+                raise _WriteScopeError(
+                    f"unsupported curl option {bundled_option!r}; local file reads are not allowed"
+                )
+            index += 1
+            continue
+        long_option, separator, value = argument.partition("=")
+        if argument in (
+            _CURL_ALWAYS_LOCAL_READ_OPTIONS | _CURL_AT_LOCAL_READ_OPTIONS | _CURL_URL_OPTIONS
+        ):
+            index += 1
+            if index >= len(arguments):
+                raise _WriteScopeError(f"curl option {argument!r} requires a value")
+            value = arguments[index]
+            if _curl_value_mentions_local_file(argument, value):
+                raise _WriteScopeError(
+                    f"unsupported curl option {argument!r}; local file reads are not allowed"
+                )
+            index += 1
+            continue
+        if separator and long_option in (
+            _CURL_ALWAYS_LOCAL_READ_OPTIONS | _CURL_AT_LOCAL_READ_OPTIONS | _CURL_URL_OPTIONS
+        ):
+            if _curl_value_mentions_local_file(long_option, value):
+                raise _WriteScopeError(
+                    f"unsupported curl option {long_option!r}; local file reads are not allowed"
+                )
+            index += 1
+            continue
+        if not argument.startswith("-") and argument.lower().startswith("file:"):
+            raise _WriteScopeError("curl file:// URLs are not allowed")
+        index += 1
+
+
 def _curl_write_out_targets(value: str) -> list[str]:
     if value.startswith("@"):
         raise _WriteScopeError(
@@ -1410,6 +1497,7 @@ def _curl_targets(arguments: Sequence[str]) -> list[str]:
             "curl must use '-q' or '--disable' as its first argument to disable implicit .curlrc"
         )
     arguments = _expand_curl_short_next(arguments)
+    _check_curl_local_read_sources(arguments)
     targets: list[str] = []
     index = 0
     remote_name_all = False

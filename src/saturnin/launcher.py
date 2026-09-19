@@ -27,7 +27,7 @@ from .contracts import (
 from .governance import Governance, github_repo_slug
 from .jsonlines import PRIVATE_FILE_MODE, atomic_replace_text
 from .mcp import MCPError, server_process, verify_github_binary
-from .review import role_scoped_review_attestation_key
+from .review import ReviewError, role_scoped_review_attestation_key, slugify as review_slugify
 from .worker_callbacks import (
     ENV_CALLBACK_DIR,
     ENV_CALLBACK_TASK_ID,
@@ -174,6 +174,7 @@ class AgentLauncher:
                         home,
                     )
                     environment.update(git_environment)
+                    self._stage_worker_board_context(claimed, home, worker_config)
                     command = self._sandbox_command(
                         sandbox_path,
                         executable_path,
@@ -348,12 +349,19 @@ class AgentLauncher:
             try:
                 with self.board.edit(task_id) as task:
                     if task.state == "in_progress":
-                        task.state = "routed"
-                        task.launch_deferred_at = utcnow()
-                        task.launch_deferred_reason = reason
-                        task.log("agent:launch_failed", actor="launcher", reason=reason)
-                        task.log("state:routed", actor="launcher", note=reason)
-                        resumed.append(task.id)
+                        if self._poller_is_waiting(task):
+                            task.log(
+                                "agent:poller_waiting",
+                                actor="launcher",
+                                reason=reason,
+                            )
+                        else:
+                            task.state = "routed"
+                            task.launch_deferred_at = utcnow()
+                            task.launch_deferred_reason = reason
+                            task.log("agent:launch_failed", actor="launcher", reason=reason)
+                            task.log("state:routed", actor="launcher", note=reason)
+                            resumed.append(task.id)
                     elif not callbacks_complete:
                         task.log("agent:callback_failed", actor="launcher", reason=reason)
             except OSError:
@@ -384,6 +392,11 @@ class AgentLauncher:
             and not isinstance(started, bool)
             and self._process_start_time(pid) == started
         )
+
+    def _poller_is_waiting(self, task: Task) -> bool:
+        if task.result_contract != "poller":
+            return False
+        return (self.config.var_dir / "pollers" / f"{task.id}.json").is_file()
 
     @staticmethod
     def _remove_launch_metadata(metadata_path: Path) -> str | None:
@@ -572,22 +585,29 @@ class AgentLauncher:
             trusted_config.root / "agents",
             trusted_config.root / "skills",
             trusted_config.root / "automation",
-            trusted_config.board_dir,
             trusted_config.root / ".venv",
             trusted_config.var_dir / "bin",
         )
         read_only_mounts = [
-            Path(path) for path in read_only_paths if Path(path).exists()
+            (Path(path), Path(path)) for path in read_only_paths if Path(path).exists()
         ]
-        read_only_mounts.extend(path for path in trusted_paths if path.exists())
-        read_only_mounts.extend((Path(executable), git_objects, mcp_config))
+        read_only_mounts.extend((path, path) for path in trusted_paths if path.exists())
+        read_only_mounts.extend(
+            (path, path) for path in (Path(executable), git_objects, mcp_config)
+        )
+        staged_board = isolated_home / ".saturnin-board"
+        if staged_board.exists():
+            read_only_mounts.append((staged_board, trusted_config.board_dir))
         mounts = [
-            *[("--ro-bind", path) for path in dict.fromkeys(read_only_mounts)],
-            ("--bind", workdir.resolve()),
-            ("--bind", isolated_home.resolve()),
+            *[
+                ("--ro-bind", source, target)
+                for source, target in dict.fromkeys(read_only_mounts)
+            ],
+            ("--bind", workdir.resolve(), workdir.resolve()),
+            ("--bind", isolated_home.resolve(), isolated_home.resolve()),
         ]
         created: set[Path] = set()
-        for _, target in mounts:
+        for _, _, target in mounts:
             parent = target if target.is_dir() else target.parent
             for directory in reversed(parent.parents):
                 if directory != Path("/") and directory not in created:
@@ -596,10 +616,49 @@ class AgentLauncher:
             if parent != Path("/") and parent not in created:
                 command.extend(("--dir", str(parent)))
                 created.add(parent)
-        for operation, path in mounts:
-            command.extend((operation, str(path), str(path)))
+        for operation, source, target in mounts:
+            command.extend((operation, str(source), str(target)))
         command.extend(("--chdir", str(workdir.resolve()), "--", executable, *args))
         return command
+
+    def _stage_worker_board_context(
+        self,
+        task: Task,
+        isolated_home: Path,
+        config: Config,
+    ) -> Path:
+        """Stage the minimum board data this worker may read."""
+        trusted_config = self._trusted_config(config)
+        staged = isolated_home / ".saturnin-board"
+        if staged.exists():
+            shutil.rmtree(staged)
+        for name in ("tasks", "checkpoints", "reviews"):
+            (staged / name).mkdir(parents=True, exist_ok=True)
+        for source, destination in (
+            (
+                trusted_config.tasks_dir / f"{task.id}.json",
+                staged / "tasks" / f"{task.id}.json",
+            ),
+            (
+                trusted_config.checkpoints_dir / f"{task.id}.jsonl",
+                staged / "checkpoints" / f"{task.id}.jsonl",
+            ),
+        ):
+            if source.is_file():
+                shutil.copy2(source, destination)
+        if task.review_subject and task.kind in {"pr-review", "issue-review"}:
+            review_kind = task.kind.removesuffix("-review")
+            try:
+                review_name = f"{review_kind}-{review_slugify(task.review_subject)}.jsonl"
+            except ReviewError:
+                review_name = ""
+            source = trusted_config.board_dir / "reviews" / review_name
+            if review_name and source.is_file():
+                shutil.copy2(source, staged / "reviews" / review_name)
+        readme = trusted_config.board_dir / "README.md"
+        if readme.is_file():
+            shutil.copy2(readme, staged / "README.md")
+        return staged
 
     def _isolated_git_environment(
         self,

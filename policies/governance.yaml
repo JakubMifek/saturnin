@@ -13,10 +13,10 @@ rules:
     enforced_by: "`saturnin worktree create`"
   - id: 3
     summary: Every code PR is reviewed by an independent zero-context reviewer
-    enforced_by: "`saturnin review gate --kind pr`"
+    enforced_by: "`saturnin review gate --kind pr --head-sha <sha>`"
   - id: 4
     summary: Autonomous PR flow in this repository once that review passed
-    enforced_by: "`autonomy.self_repo_autonomous_merge`"
+    enforced_by: "`saturnin review merge`"
   - id: 5
     summary: "Managed repos: issues allowed, each independently reviewed first"
     enforced_by: "`saturnin review gate --kind issue`"

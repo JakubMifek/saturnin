@@ -189,6 +189,7 @@ def test_worker_command_uses_mandatory_os_sandbox(
         worktree.path,
         home,
     )
+    staged_board = launcher._stage_worker_board_context(task, home, config)
     credential = config.root / ".env"
     credential.write_text("not mounted\n", encoding="utf-8")
     mcp_config = config.var_dir / "launches" / f"{task.id}.mcp.json"
@@ -223,6 +224,7 @@ def test_worker_command_uses_mandatory_os_sandbox(
     ]
     objects_mount = ["--ro-bind", str(git_objects), str(git_objects)]
     mcp_mount = ["--ro-bind", str(mcp_config), str(mcp_config)]
+    staged_board_mount = ["--ro-bind", str(staged_board), str(config.board_dir)]
     worktree_mount = ["--bind", str(worktree.path), str(worktree.path)]
     home_mount = ["--bind", str(home), str(home)]
     assert any(
@@ -235,6 +237,10 @@ def test_worker_command_uses_mandatory_os_sandbox(
     )
     assert any(
         command[index:index + 3] == mcp_mount
+        for index in range(len(command) - 2)
+    )
+    assert any(
+        command[index:index + 3] == staged_board_mount
         for index in range(len(command) - 2)
     )
     assert any(
@@ -255,6 +261,15 @@ def test_worker_command_uses_mandatory_os_sandbox(
         command[index + 1]
         for index, value in enumerate(command[:-1])
         if value == "--ro-bind"
+    ]
+    assert str(config.board_dir) not in [
+        command[index + 1]
+        for index, value in enumerate(command[:-1])
+        if value == "--ro-bind"
+    ]
+    assert (staged_board / "tasks" / f"{task.id}.json").is_file()
+    assert list((staged_board / "tasks").glob("*.json")) == [
+        staged_board / "tasks" / f"{task.id}.json"
     ]
     assert str(credential) not in command
     assert git_environment["GIT_DIR"].startswith(str(home))
@@ -416,7 +431,8 @@ def test_trusted_cli_callback_applies_task_add(
 
     created = [item for item in board if item.id != task.id]
     assert [item.title for item in created] == ["Extract shared controller"]
-    assert created[0].labels == ["architecture"]
+    assert created[0].labels[0] == "architecture"
+    assert created[0].labels[1].startswith("worker-callback:")
     assert created[0].repo == "JakubMifek/saturnin"
     assert board.get(task.id).history[-1]["operation"] == "task_add"
 
@@ -937,6 +953,20 @@ def test_trusted_push_callback_delivers_exact_isolated_commit(
         home,
     )
     process_environment = {**os.environ, **environment}
+    assert subprocess.run(
+        ["git", "remote", "get-url", "origin"],
+        cwd=worktree.path,
+        env=process_environment,
+        capture_output=True,
+        text=True,
+    ).returncode != 0
+    assert subprocess.run(
+        ["git", "remote", "get-url", "--push", "origin"],
+        cwd=worktree.path,
+        env=process_environment,
+        capture_output=True,
+        text=True,
+    ).returncode != 0
     changed = worktree.path / "delivered.txt"
     changed.write_text("trusted\n", encoding="utf-8")
     subprocess.run(
@@ -1742,6 +1772,55 @@ def test_reconcile_exited_launch_requeues_task(
     assert restored.launch_deferred_reason == (
         "agent process exited or identity changed after launch with pid 4242"
     )
+    assert not launch_file.exists()
+
+
+def test_reconcile_exited_poller_launch_keeps_waiting_task(
+    config: Config, board: Board, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    task = board.create("Wait for external signal")
+    Router(config).dispatch(board, task)
+    board.transition(board.get(task.id), "in_progress")
+    with board.edit(task.id) as stored:
+        stored.result_contract = "poller"
+    poller = config.var_dir / "pollers" / f"{task.id}.json"
+    poller.parent.mkdir(parents=True, exist_ok=True)
+    poller.write_text(
+        json.dumps(
+            {
+                "task_id": task.id,
+                "probe": {"type": "status-file", "path": "var/poller-signals/done.json"},
+            }
+        ),
+        encoding="utf-8",
+    )
+    launch_file = config.var_dir / "launches" / f"{task.id}.json"
+    launch_file.parent.mkdir(parents=True, exist_ok=True)
+    launch_file.write_text(
+        json.dumps(
+            {
+                "task_id": task.id,
+                "role": "code-worker",
+                "pid": 4242,
+                "process_start_time_ticks": 123456,
+                "started_at": utcnow(),
+                "cwd": str(config.root),
+                "mcp_config": str(config.root / ".mcp.json"),
+                "log": str(config.var_dir / "launches" / f"{task.id}.log"),
+            }
+        ),
+        encoding="utf-8",
+    )
+    launcher = AgentLauncher(config, board)
+    monkeypatch.setattr(launcher, "_process_start_time", lambda pid: None)
+
+    reconciled = launcher.reconcile_exited_launches()
+
+    waiting = board.get(task.id)
+    assert reconciled == []
+    assert waiting.state == "in_progress"
+    assert waiting.launch_deferred_reason is None
+    assert any(entry["event"] == "agent:poller_waiting" for entry in waiting.history)
     assert not launch_file.exists()
 
 

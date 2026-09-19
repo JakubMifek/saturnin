@@ -30,8 +30,8 @@ intake --dispatch--> routed --> in_progress --> review --> done
 | --- | --- | --- |
 | 1 | Never push to the default branch | `saturnin push` |
 | 2 | Feature branches plus one worktree per parallel worker | `saturnin worktree create` |
-| 3 | Every code PR is reviewed by an independent zero-context reviewer | `saturnin review gate --kind pr` |
-| 4 | Autonomous PR flow in this repository once that review passed | `autonomy.self_repo_autonomous_merge` |
+| 3 | Every code PR is reviewed by an independent zero-context reviewer | `saturnin review gate --kind pr --head-sha <sha>` |
+| 4 | Autonomous PR flow in this repository once that review passed | `saturnin review merge` |
 | 5 | Managed repos: issues allowed, each independently reviewed first | `saturnin review gate --kind issue` |
 | 6 | Human escalation via a GitHub issue tagging `@jakubmifek` | `saturnin escalate` |
 | 7 | Server: non-root; apt/systemctl only for Saturnin services; user-scope timers | `saturnin check command` |
