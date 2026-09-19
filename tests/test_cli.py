@@ -1065,6 +1065,37 @@ def test_sandboxed_worker_stateful_command_uses_trusted_cli_callback(
     }
 
 
+def test_review_task_intake_persists_trusted_scope(
+    home: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    head_sha = "f" * 40
+    code, out = run(
+        capsys,
+        "--json",
+        "task",
+        "add",
+        "Review scoped PR",
+        "--kind",
+        "pr-review",
+        "--repo",
+        "JakubMifek/saturnin",
+        "--review-subject",
+        "JakubMifek/saturnin#12",
+        "--review-author",
+        "code-worker",
+        "--review-head-sha",
+        head_sha,
+    )
+
+    assert code == 0
+    task = json.loads(out)
+    assert task["review_subject"] == "JakubMifek/saturnin#12"
+    assert task["review_author"] == "code-worker"
+    assert task["review_head_sha"] == head_sha
+    assert task["review_destination_repo"] == "JakubMifek/saturnin"
+
+
 def test_sandboxed_worker_fails_closed_for_unsupported_stateful_command(
     tmp_path: Path,
     capsys: pytest.CaptureFixture[str],
@@ -1390,6 +1421,53 @@ def test_checkpoint_sweep_resumes_paused_in_progress_task_without_live_launch(
             "resumed_checkpoint": checkpoint.created_at,
         }
     ]
+
+
+def test_checkpoint_sweep_fails_closed_without_live_launch_or_pause_marker(
+    config: Config,
+    board: Board,
+    capsys: pytest.CaptureFixture[str],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    task = board.create("Ambiguous in-progress work")
+    checkpoint = CheckpointStore(config, board).save(
+        Checkpoint(
+            task_id=task.id,
+            role="code-worker",
+            summary="checkpoint",
+            next_steps=["continue"],
+            resume_after="2026-09-11T19:00:00+00:00",
+        )
+    )
+    with board.edit(task.id) as stored:
+        stored.state = "in_progress"
+        stored.checkpoint_paused_at = None
+    monkeypatch.setattr(AgentLauncher, "enabled", property(lambda self: True))
+    monkeypatch.setattr(AgentLauncher, "reconcile_exited_launches", lambda self: [])
+    monkeypatch.setattr(
+        AgentLauncher,
+        "has_active_launch",
+        lambda self, task_id: False,
+    )
+    monkeypatch.setattr(
+        AgentLauncher,
+        "launch",
+        lambda *args, **kwargs: pytest.fail("ambiguous task must not launch"),
+    )
+
+    code, out = run(capsys, "--json", "checkpoint", "sweep")
+
+    assert code == 1
+    assert json.loads(out) == [
+        {
+            "task_id": task.id,
+            "recovery_required": True,
+            "error": (
+                "in-progress task has no live launch and no trusted pause marker"
+            ),
+        }
+    ]
+    assert board.get(task.id).checkpoint == checkpoint.created_at
 
 
 def test_issue_review_gate_requires_matching_digest(

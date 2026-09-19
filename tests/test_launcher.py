@@ -417,19 +417,59 @@ def test_trusted_cli_callback_applies_task_add(
     created = [item for item in board if item.id != task.id]
     assert [item.title for item in created] == ["Extract shared controller"]
     assert created[0].labels == ["architecture"]
+    assert created[0].repo == "JakubMifek/saturnin"
     assert board.get(task.id).history[-1]["operation"] == "task_add"
+
+
+def test_trusted_cli_task_add_cannot_escape_task_repository(
+    config: Config,
+    board: Board,
+) -> None:
+    task = board.create("File scoped follow-up", repo="JakubMifek/saturnin")
+    with board.edit(task.id) as stored:
+        stored.role = "code-worker"
+        stored.state = "in_progress"
+    callback_dir = AgentLauncher(config, board)._isolated_home(
+        task.id
+    ) / ".saturnin-callbacks"
+    callback_dir.mkdir(parents=True)
+    callback = {
+        "type": "trusted_cli",
+        "task_id": task.id,
+        "operation": "task_add",
+        "argv": [
+            "task",
+            "add",
+            "Escape repository",
+            "--repo",
+            "JakubMifek/saturnin-ops",
+            "--dispatch",
+        ],
+    }
+    (callback_dir / CALLBACKS_FILE).write_text(
+        json.dumps(callback) + "\n",
+        encoding="utf-8",
+    )
+
+    with pytest.raises(WorkerCallbackError, match="does not match task repository"):
+        apply_queued(config, board, task_id=task.id, callback_dir=str(callback_dir))
+
+    assert [item.id for item in board] == [task.id]
 
 
 def test_trusted_cli_callback_records_review_as_assigned_reviewer(
     config: Config,
     board: Board,
 ) -> None:
+    subject = "JakubMifek/saturnin#trusted-review"
+    head_sha = "c" * 40
     task = board.create("Review the change", kind="pr-review")
     with board.edit(task.id) as stored:
         stored.role = "pr-reviewer"
         stored.state = "in_progress"
-    subject = "JakubMifek/saturnin#trusted-review"
-    head_sha = "c" * 40
+        stored.review_subject = subject
+        stored.review_author = "code-worker"
+        stored.review_head_sha = head_sha
     attestation = sign_review_attestation(
         key=review_attestation_signing_key(config, "pr-reviewer"),
         subject=subject,
@@ -475,6 +515,158 @@ def test_trusted_cli_callback_records_review_as_assigned_reviewer(
     records = ReviewLedger(config).for_subject(subject, "pr")
     assert len(records) == 1
     assert records[0].reviewer == "pr-reviewer"
+
+
+def test_trusted_cli_review_record_requires_exact_task_scope(
+    config: Config,
+    board: Board,
+) -> None:
+    trusted_subject = "JakubMifek/saturnin#trusted"
+    requested_subject = "JakubMifek/saturnin#other"
+    head_sha = "d" * 40
+    task = board.create(
+        "Review one pull request",
+        kind="pr-review",
+        review_subject=trusted_subject,
+        review_author="code-worker",
+        review_head_sha=head_sha,
+    )
+    with board.edit(task.id) as stored:
+        stored.role = "pr-reviewer"
+        stored.state = "in_progress"
+    attestation = sign_review_attestation(
+        key=review_attestation_signing_key(config, "pr-reviewer"),
+        subject=requested_subject,
+        kind="pr",
+        author="code-worker",
+        reviewer="pr-reviewer",
+        verdict="approved",
+        head_sha=head_sha,
+    )
+    callback_dir = AgentLauncher(config, board)._isolated_home(
+        task.id
+    ) / ".saturnin-callbacks"
+    callback_dir.mkdir(parents=True)
+    callback = {
+        "type": "trusted_cli",
+        "task_id": task.id,
+        "operation": "review_record",
+        "argv": [
+            "review",
+            "record",
+            requested_subject,
+            "--kind",
+            "pr",
+            "--author",
+            "code-worker",
+            "--reviewer",
+            "pr-reviewer",
+            "--verdict",
+            "approved",
+            "--head-sha",
+            head_sha,
+            "--attestation",
+            attestation,
+        ],
+    }
+    (callback_dir / CALLBACKS_FILE).write_text(
+        json.dumps(callback) + "\n",
+        encoding="utf-8",
+    )
+
+    with pytest.raises(WorkerCallbackError, match="review_subject"):
+        apply_queued(config, board, task_id=task.id, callback_dir=str(callback_dir))
+
+    assert ReviewLedger(config).for_subject(requested_subject, "pr") == []
+
+
+def test_trusted_cli_merge_requires_pr_on_task_branch(
+    config: Config,
+    board: Board,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    task = board.create("Merge only this task", repo="JakubMifek/saturnin")
+    with board.edit(task.id) as stored:
+        stored.role = "code-worker"
+        stored.state = "in_progress"
+        stored.branch = "feature/owned"
+        stored.log(
+            "git:push_finished",
+            actor="code-worker",
+            branch=stored.branch,
+            commit="e" * 40,
+            remote="origin",
+        )
+    callback_dir = AgentLauncher(config, board)._isolated_home(
+        task.id
+    ) / ".saturnin-callbacks"
+    callback_dir.mkdir(parents=True)
+    callback = {
+        "type": "trusted_cli",
+        "task_id": task.id,
+        "operation": "review_merge",
+        "argv": [
+            "review",
+            "merge",
+            "JakubMifek/saturnin#9",
+            "--repo",
+            "JakubMifek/saturnin",
+            "--author",
+            "code-worker",
+        ],
+    }
+    (callback_dir / CALLBACKS_FILE).write_text(
+        json.dumps(callback) + "\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(
+        "saturnin.issues.run_gh",
+        lambda args: json.dumps(
+            {"head": {"ref": "feature/another-task", "sha": "e" * 40}}
+        ),
+    )
+
+    with pytest.raises(WorkerCallbackError, match="does not match task branch"):
+        apply_queued(config, board, task_id=task.id, callback_dir=str(callback_dir))
+
+
+def test_trusted_cli_issue_submission_requires_originating_task_subject(
+    config: Config,
+    board: Board,
+) -> None:
+    task = board.create("Submit reviewed issue", repo="JakubMifek/saturnin-ops")
+    with board.edit(task.id) as stored:
+        stored.role = "code-worker"
+        stored.state = "in_progress"
+    callback_dir = AgentLauncher(config, board)._isolated_home(
+        task.id
+    ) / ".saturnin-callbacks"
+    callback_dir.mkdir(parents=True)
+    callback = {
+        "type": "trusted_cli",
+        "task_id": task.id,
+        "operation": "review_submit_issue",
+        "argv": [
+            "review",
+            "submit-issue",
+            "another-task",
+            "--repo",
+            "JakubMifek/saturnin-ops",
+            "--author",
+            "code-worker",
+            "--title",
+            "Reviewed issue",
+            "--body",
+            "Exact body",
+        ],
+    }
+    (callback_dir / CALLBACKS_FILE).write_text(
+        json.dumps(callback) + "\n",
+        encoding="utf-8",
+    )
+
+    with pytest.raises(WorkerCallbackError, match="originating task id"):
+        apply_queued(config, board, task_id=task.id, callback_dir=str(callback_dir))
 
 
 @pytest.mark.parametrize(
@@ -785,6 +977,8 @@ def test_trusted_push_callback_delivers_exact_isolated_commit(
     for name, value in environment.items():
         monkeypatch.setenv(name, value)
 
+    assert main(["push", "--remote", "bad/name"]) == 1
+    assert not (callback_dir / CALLBACKS_FILE).exists()
     assert main(["push"]) == 0
     queued = json.loads(
         (callback_dir / CALLBACKS_FILE).read_text(encoding="utf-8")

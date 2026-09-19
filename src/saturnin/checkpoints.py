@@ -163,6 +163,9 @@ class CheckpointStore:
             try:
                 with self.board.edit(checkpoint.task_id) as task:
                     task.checkpoint = checkpoint.created_at
+                    task.checkpoint_paused_at = (
+                        checkpoint.created_at if checkpoint.resume_after else None
+                    )
                     task.log("checkpoint", actor=checkpoint.role, summary=checkpoint.summary[:120])
             except BoardError:
                 # Checkpoints may outlive their task file.

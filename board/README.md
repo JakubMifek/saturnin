@@ -27,7 +27,8 @@ board/reviews/<kind>-<subject>.jsonl append-only review verdicts
 | `issue` | the mirrored GitHub issue when the optional mirror is enabled |
 | `repo` | the repository it concerns, if any |
 | `branch` / `worktree` | where the work happens |
-| `checkpoint` | timestamp of the latest checkpoint |
+| `checkpoint` / `checkpoint_paused_at` | latest checkpoint and an explicit delayed-resume pause marker |
+| `review_*` | immutable subject, author, repository, and head/digest scope for a launched review task |
 | `history` | every event with actor and timestamp |
 
 ## Hierarchy

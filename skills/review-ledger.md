@@ -4,6 +4,10 @@
 Make the independent-review requirement mechanical instead of aspirational.
 
 ## Commands
+- Bind a launched review worker to one immutable draft at intake:
+  `saturnin task add "Review <subject>" --kind pr-review|issue-review --repo <repo>
+  --review-subject <subject> --review-author <role>
+  --review-head-sha <sha>|--review-issue-digest <digest> --dispatch`.
 - PR: capture the current head SHA, sign the exact verdict with
   `saturnin review attest <subject> --kind pr ... --head-sha <sha>`, then pass
   that value to
@@ -15,7 +19,8 @@ Make the independent-review requirement mechanical instead of aspirational.
   and
   `saturnin review record <subject> --kind issue --repo <repo> ... --issue-digest <digest> --attestation "$attestation"`
   and either `saturnin review gate <subject> --kind issue ... --issue-digest <digest>`
-  or `saturnin review submit-issue <subject> --repo <repo> --author <role> --title ... --body ...`.
+  or `saturnin review submit-issue <origin-task-id> --repo <repo> --author <role>
+  --title ... --body ...`.
 
 ## Guarantees
 - Author and reviewer can never be the same role.

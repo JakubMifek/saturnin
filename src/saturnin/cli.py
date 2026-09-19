@@ -83,6 +83,10 @@ def build_parser() -> argparse.ArgumentParser:
     add.add_argument("--repo")
     add.add_argument("--priority", default="P2")
     add.add_argument("--parent", help="objective/epic/feature this work belongs to")
+    add.add_argument("--review-subject")
+    add.add_argument("--review-author")
+    add.add_argument("--review-head-sha")
+    add.add_argument("--review-issue-digest")
     add.add_argument("--dispatch", action="store_true", help="route it immediately")
     add.add_argument("--no-launch", action="store_true", help="route without starting the worker")
 
@@ -1205,6 +1209,11 @@ def _run_task(args: argparse.Namespace, config: Config, board: Board, as_json: b
             repo=args.repo,
             priority=args.priority,
             parent=args.parent,
+            review_subject=args.review_subject,
+            review_author=args.review_author,
+            review_head_sha=args.review_head_sha,
+            review_issue_digest=args.review_issue_digest,
+            review_destination_repo=args.repo,
         )
         if args.dispatch:
             Router(config).dispatch(board, task)
@@ -1576,17 +1585,28 @@ def _run_checkpoint(args: argparse.Namespace, config: Config, board: Board, as_j
                 for checkpoint in due:
                     try:
                         task = board.get(checkpoint.task_id)
-                        if (
-                            task.state == "in_progress"
-                            and launcher.has_active_launch(task.id)
-                        ):
-                            payload.append(
-                                {
-                                    "task_id": checkpoint.task_id,
-                                    "active": True,
-                                }
-                            )
-                            continue
+                        if task.state == "in_progress":
+                            if launcher.has_active_launch(task.id):
+                                payload.append(
+                                    {
+                                        "task_id": checkpoint.task_id,
+                                        "active": True,
+                                    }
+                                )
+                                continue
+                            if task.checkpoint_paused_at != checkpoint.created_at:
+                                had_errors = True
+                                payload.append(
+                                    {
+                                        "task_id": checkpoint.task_id,
+                                        "recovery_required": True,
+                                        "error": (
+                                            "in-progress task has no live launch and no "
+                                            "trusted pause marker"
+                                        ),
+                                    }
+                                )
+                                continue
                         if task.state in ("intake", "blocked"):
                             router.dispatch(board, task, actor="checkpoint-sweeper")
                         launched = launcher.launch(

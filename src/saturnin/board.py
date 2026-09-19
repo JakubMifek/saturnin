@@ -78,6 +78,7 @@ class Task:
     branch: str | None = None
     worktree: str | None = None
     checkpoint: str | None = None
+    checkpoint_paused_at: str | None = None
     checkpoint_resumed_at: str | None = None
     launch_deferred_at: str | None = None
     launch_deferred_reason: str | None = None
@@ -90,6 +91,11 @@ class Task:
     # How the dispatcher will learn that this task finished, so that nobody has
     # to sit and wait for a worker (see docs/operating-model.md).
     result_contract: str | None = None
+    review_subject: str | None = None
+    review_author: str | None = None
+    review_head_sha: str | None = None
+    review_issue_digest: str | None = None
+    review_destination_repo: str | None = None
     created_at: str = field(default_factory=utcnow)
     updated_at: str = field(default_factory=utcnow)
     routed_at: str | None = None
@@ -193,6 +199,11 @@ class Board:
         repo: str | None = None,
         priority: str = "P2",
         parent: str | None = None,
+        review_subject: str | None = None,
+        review_author: str | None = None,
+        review_head_sha: str | None = None,
+        review_issue_digest: str | None = None,
+        review_destination_repo: str | None = None,
         source: str = "cli",
     ) -> Task:
         with file_lock(self.config.tasks_dir / ".board"):
@@ -204,6 +215,11 @@ class Board:
                 repo=repo,
                 priority=priority,
                 parent=parent,
+                review_subject=review_subject,
+                review_author=review_author,
+                review_head_sha=review_head_sha,
+                review_issue_digest=review_issue_digest,
+                review_destination_repo=review_destination_repo,
                 source=source,
             )
 
@@ -237,6 +253,11 @@ class Board:
         repo: str | None = None,
         priority: str = "P2",
         parent: str | None = None,
+        review_subject: str | None = None,
+        review_author: str | None = None,
+        review_head_sha: str | None = None,
+        review_issue_digest: str | None = None,
+        review_destination_repo: str | None = None,
         source: str = "cli",
     ) -> Task:
         if not title.strip():
@@ -259,6 +280,11 @@ class Board:
             repo=repo,
             priority=priority,
             parent=parent,
+            review_subject=review_subject,
+            review_author=review_author,
+            review_head_sha=review_head_sha,
+            review_issue_digest=review_issue_digest,
+            review_destination_repo=review_destination_repo,
         )
         task.log("intake", actor=source)
         return self.save(task)

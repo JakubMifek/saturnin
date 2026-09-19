@@ -2,9 +2,11 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import re
+import secrets
 import shlex
 import subprocess
 from argparse import Namespace
@@ -18,7 +20,7 @@ from .config import Config
 from .governance import Governance, _git_targets, github_repo_slug
 from .jsonlines import PRIVATE_FILE_MODE, atomic_replace_text, durable_append_text, objects
 from .locking import file_lock
-from .review import normalize_repository_slug
+from .review import ReviewLedger, normalize_repository_slug
 from .worktrees import GitError, validated_task_worktree
 
 ENV_CALLBACK_DIR = "SATURNIN_CALLBACK_DIR"
@@ -53,6 +55,10 @@ def queue_from_args(
             "sandboxed workers may not execute this command directly; "
             "no trusted callback is defined"
         )
+    try:
+        _validate_record(record)
+    except (TypeError, ValueError) as exc:
+        raise WorkerCallbackError(str(exc)) from exc
     target = Path(callback_dir) / CALLBACKS_FILE
     target.parent.mkdir(parents=True, exist_ok=True)
     durable_append_text(target, json.dumps(record, sort_keys=True) + "\n")
@@ -294,6 +300,7 @@ def _record_from_args(
         return {
             "type": "trusted_cli",
             "task_id": task_id,
+            "callback_id": secrets.token_hex(16),
             "operation": operation,
             "argv": command,
         }
@@ -342,8 +349,6 @@ def _trusted_cli_operation(args: Namespace) -> str | None:
         return "task_add"
     if args.command == "task" and args.task_command == "reroute":
         return "task_reroute"
-    if args.command == "dispatch":
-        return "dispatch"
     if (
         args.command == "worktree"
         and args.worktree_command == "cleanup"
@@ -471,6 +476,14 @@ def _validate_record(record: dict[str, Any]) -> None:
             raise TypeError("callback field 'argv' must be a non-empty list of strings")
         if any(value == "--home" or value.startswith("--home=") for value in argv):
             raise ValueError("trusted CLI callbacks may not override --home")
+        callback_id = record.get("callback_id")
+        if callback_id is not None and (
+            not isinstance(callback_id, str)
+            or not re.fullmatch(r"[0-9a-f]{32,64}", callback_id)
+        ):
+            raise ValueError(
+                "callback field 'callback_id' must be a 32-64 character lowercase hex id"
+            )
         return
     raise TypeError(f"callback field 'type' is unsupported: {record['type']!r}")
 
@@ -508,16 +521,16 @@ def _run_trusted_cli(
         )
     task = board.get(task_id)
     trusted_role = _trusted_task_role(task)
+    callback_marker = f"worker-callback:{_callback_id(record)}"
     if operation == "task_reroute":
         _check_task(args.task_id, task_id)
+        if callback_marker in task.labels:
+            return
         if trusted_role != "chief-of-staff":
             raise WorkerCallbackError("only chief-of-staff may request task rerouting")
         _reject_conflicting_identity(args.actor, trusted_role, "actor")
         args.actor = trusted_role
-    elif operation == "dispatch":
-        if args.all or not args.task_id:
-            raise WorkerCallbackError("sandboxed workers may only dispatch their own task")
-        _check_task(args.task_id, task_id)
+        args.label.append(callback_marker)
     elif operation == "worktree_cleanup":
         if trusted_role != "janitor":
             raise WorkerCallbackError("only janitor may request worktree cleanup")
@@ -541,13 +554,29 @@ def _run_trusted_cli(
             raise WorkerCallbackError(
                 "trusted review callbacks require the attestation value inline"
             )
-    elif operation in {"review_merge", "review_submit_issue"}:
+        _require_review_scope(task, args)
+        if _review_callback_already_recorded(config, args):
+            return
+    elif operation == "review_merge":
         _reject_conflicting_identity(
             args.author.strip().lower(),
             trusted_role.strip().lower(),
             "author",
         )
         _require_task_repository(config, task, args.repo)
+        if _require_task_pr_merge(task, args.subject, args.repo):
+            return
+    elif operation == "review_submit_issue":
+        _reject_conflicting_identity(
+            args.author.strip().lower(),
+            trusted_role.strip().lower(),
+            "author",
+        )
+        _require_task_repository(config, task, args.repo)
+        if args.subject != task.id:
+            raise WorkerCallbackError(
+                f"issue submission subject must be the originating task id {task.id}"
+            )
     elif operation == "automation_propose":
         if trusted_role != "automation-smith":
             raise WorkerCallbackError(
@@ -556,10 +585,18 @@ def _run_trusted_cli(
     elif operation == "improve":
         if trusted_role != "improver":
             raise WorkerCallbackError("only improver may run the improvement loop")
-    elif operation not in {
-        "task_add",
-        "docs_render",
-    }:  # pragma: no cover - operation classifier guards this
+    elif operation == "task_add":
+        expected_repo = task.repo or str(
+            config.governance.get("autonomy", {}).get("self_repo", "")
+        )
+        if args.repo:
+            _require_task_repository(config, task, args.repo)
+        args.repo = expected_repo
+        if callback_marker not in args.label:
+            args.label.append(callback_marker)
+        if _resume_replayed_task_add(config, board, args, callback_marker):
+            return
+    elif operation != "docs_render":  # pragma: no cover - classifier guards this
         raise WorkerCallbackError(f"unsupported trusted CLI callback {operation!r}")
     execution_config = config
     if operation == "docs_render":
@@ -576,6 +613,48 @@ def _run_trusted_cli(
         stored.log("worker:callback", actor=trusted_role, operation=operation)
 
 
+def _callback_id(record: dict[str, Any]) -> str:
+    value = record.get("callback_id")
+    if isinstance(value, str) and value:
+        return value
+    payload = {key: item for key, item in record.items() if key != "callback_id"}
+    return hashlib.sha256(
+        json.dumps(payload, sort_keys=True, separators=(",", ":")).encode("utf-8")
+    ).hexdigest()
+
+
+def _resume_replayed_task_add(
+    config: Config,
+    board: Board,
+    args: Namespace,
+    marker: str,
+) -> bool:
+    existing = next((task for task in board if marker in task.labels), None)
+    if existing is None:
+        return False
+    if args.dispatch:
+        from .cli import _provision_and_launch
+        from .routing import Router
+
+        if existing.state == "intake":
+            Router(config).dispatch(board, existing, actor="worker-callback")
+            existing = board.get(existing.id)
+        if not args.no_launch and existing.state == "routed":
+            _provision_and_launch(config, board, existing.id)
+    return True
+
+
+def _review_callback_already_recorded(config: Config, args: Namespace) -> bool:
+    try:
+        attestation_id = str(json.loads(args.attestation)["attestation_id"])
+    except (json.JSONDecodeError, KeyError, TypeError):
+        return False
+    return any(
+        record.attestation_id == attestation_id
+        for record in ReviewLedger(config).for_subject(args.subject, args.kind)
+    )
+
+
 def _require_task_repository(config: Config, task: Task, requested: str) -> None:
     expected = task.repo or str(
         config.governance.get("autonomy", {}).get("self_repo", "")
@@ -590,6 +669,61 @@ def _require_task_repository(config: Config, task: Task, requested: str) -> None
         raise WorkerCallbackError(
             f"callback repository {requested!r} does not match task repository {expected!r}"
         )
+
+
+def _require_review_scope(task: Task, args: Namespace) -> None:
+    if task.kind != f"{args.kind}-review":
+        raise WorkerCallbackError(
+            f"task {task.id} is not a {args.kind}-review task"
+        )
+    required = {
+        "review_subject": args.subject,
+        "review_author": args.author,
+    }
+    if args.kind == "pr":
+        required["review_head_sha"] = args.head_sha
+    else:
+        required["review_issue_digest"] = args.issue_digest
+        required["review_destination_repo"] = normalize_repository_slug(args.repo)
+    for field, requested in required.items():
+        expected = getattr(task, field)
+        if field == "review_destination_repo" and expected:
+            expected = normalize_repository_slug(expected)
+        if not expected or expected != requested:
+            raise WorkerCallbackError(
+                f"review callback {field} {requested!r} does not match "
+                f"trusted task scope {expected!r}"
+            )
+
+
+def _require_task_pr_merge(task: Task, subject: str, repo: str) -> bool:
+    from .cli import _parse_pr_subject
+    from .issues import MirrorError, run_gh
+
+    subject_repo, number = _parse_pr_subject(subject, repo=repo)
+    try:
+        payload = json.loads(run_gh(["api", f"repos/{subject_repo}/pulls/{number}"]))
+        head = payload["head"]
+        branch = str(head["ref"]).strip()
+        commit = str(head["sha"]).strip().lower()
+    except (MirrorError, json.JSONDecodeError, KeyError, TypeError) as exc:
+        raise WorkerCallbackError(
+            f"could not validate task PR binding for {subject}: {exc}"
+        ) from exc
+    if branch != task.branch:
+        raise WorkerCallbackError(
+            f"PR head branch {branch!r} does not match task branch {task.branch!r}"
+        )
+    delivered = {
+        str(entry.get("commit", "")).lower()
+        for entry in task.history
+        if entry.get("event") == "git:push_finished"
+    }
+    if commit not in delivered:
+        raise WorkerCallbackError(
+            f"PR head {commit[:12]} was not delivered by task {task.id}"
+        )
+    return bool(payload.get("merged"))
 
 
 def _validate_worktree_repository(config: Config, task: Task, worktree: Path) -> None:

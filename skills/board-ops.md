@@ -4,7 +4,9 @@
 Create, inspect and move work on the centralised board.
 
 ## Commands
-- `saturnin task add "<title>" [--body ...] [--label ...] [--repo ...] [--priority P0..P3] [--dispatch]`
+- `saturnin task add "<title>" [--body ...] [--label ...] [--repo ...]
+  [--priority P0..P3] [--dispatch]`; review tasks also bind
+  `--review-subject`, `--review-author`, and the reviewed head SHA or issue digest.
 - `saturnin task list [--open] [--state S] [--role R] [--priority P]`
 - `saturnin task show <id>` / `saturnin task move <id> <state> [--note ...]`
 - `saturnin task attach <id> --branch feature/x --worktree <path>`
