@@ -986,3 +986,76 @@ def test_review_gate_imports_only_the_designated_reviewer(config: Config) -> Non
     assert 'author="github:${pr_author}"' in script
     assert "saturnin_python -c '" in script
     assert "import json, sys, yaml" in script
+
+
+def test_review_gate_reads_pages_until_empty_before_aggregating(config: Config) -> None:
+    pages_log = config.root / "review-pages"
+    args_log = config.root / "saturnin-args"
+    (config.root / "sitecustomize.py").write_text(
+        "import io\n"
+        "import json\n"
+        "import urllib.parse\n"
+        "import urllib.request\n"
+        f"_pages_log = {str(pages_log)!r}\n"
+        "def _urlopen(request, timeout=None):\n"
+        "    page = int(urllib.parse.parse_qs("
+        "urllib.parse.urlparse(request.full_url).query)['page'][0])\n"
+        "    with open(_pages_log, 'a', encoding='utf-8') as stream:\n"
+        "        stream.write(f'{page}\\n')\n"
+        "    if page <= 11:\n"
+        "        state = 'CHANGES_REQUESTED' if page == 11 else 'APPROVED'\n"
+        "        reviews = [{'commit_id': 'head-sha', 'state': state, "
+        "'user': {'login': 'copilot-pull-request-reviewer[bot]', "
+        "'type': 'Bot'}}]\n"
+        "    else:\n"
+        "        reviews = []\n"
+        "    return io.BytesIO(json.dumps(reviews).encode())\n"
+        "urllib.request.urlopen = _urlopen\n",
+        encoding="utf-8",
+    )
+    fake_bin = config.root / "fake-bin"
+    fake_bin.mkdir()
+    curl = fake_bin / "curl"
+    curl.write_text(
+        "#!/bin/sh\n"
+        "printf '%s\\n' "
+        '\'{"head":{"sha":"head-sha"},"user":{"login":"author"}}\'\n',
+        encoding="utf-8",
+    )
+    curl.chmod(0o755)
+    saturnin = config.root / ".venv" / "bin" / "saturnin"
+    saturnin.parent.mkdir(parents=True)
+    saturnin.write_text(
+        "#!/bin/sh\n"
+        f"printf '%s\\n' \"$*\" >> {args_log}\n"
+        "case \"$*\" in\n"
+        "  *\"review attest \"*) printf attestation ;;\n"
+        "esac\n",
+        encoding="utf-8",
+    )
+    saturnin.chmod(0o755)
+
+    subprocess.run(
+        [
+            "bash",
+            str(config.root / "automation/library/review_gate.sh"),
+            "pr",
+            "owner/repo#42",
+            "owner/repo",
+        ],
+        check=True,
+        capture_output=True,
+        text=True,
+        env={
+            **os.environ,
+            "PATH": f"{fake_bin}:{os.environ['PATH']}",
+            "PYTHONPATH": str(config.root),
+            "SATURNIN_HOME": str(config.root),
+        },
+    )
+
+    assert pages_log.read_text(encoding="utf-8").splitlines() == [
+        str(page) for page in range(1, 13)
+    ]
+    assert "review record owner/repo#42" in args_log.read_text(encoding="utf-8")
+    assert "--verdict changes_requested" in args_log.read_text(encoding="utf-8")

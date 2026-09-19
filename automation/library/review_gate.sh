@@ -73,7 +73,8 @@ if token:
     headers["Authorization"] = f"token {token}"
 
 latest = {}
-for page in range(1, 11):
+page = 1
+while True:
     request = urllib.request.Request(
         f"https://api.github.com/repos/{repo}/pulls/{pr_number}/reviews?per_page=100&page={page}",
         headers=headers,
@@ -97,6 +98,7 @@ for page in range(1, 11):
         ):
             continue
         latest[user.casefold()] = (state, user)
+    page += 1
 
 blocking = [review for review in latest.values() if review[0] in {
     "changes_requested", "rejected", "dismissed"
