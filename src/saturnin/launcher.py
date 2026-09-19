@@ -29,6 +29,7 @@ from .jsonlines import PRIVATE_FILE_MODE, atomic_replace_text
 from .mcp import MCPError, server_process, verify_github_binary
 from .review import ReviewError, role_scoped_review_attestation_key, slugify as review_slugify
 from .worker_callbacks import (
+    CALLBACKS_FILE,
     ENV_CALLBACK_DIR,
     ENV_CALLBACK_TASK_ID,
     apply_queued,
@@ -78,9 +79,15 @@ class AgentLauncher:
             return None
         task = self.board.get(task_id)
         metadata_path = self.dir / f"{task.id}.json"
-        if metadata_path.exists():
+        callback_path = (
+            self.dir
+            / f"{task.id}.home"
+            / ".saturnin-callbacks"
+            / CALLBACKS_FILE
+        )
+        if metadata_path.exists() or callback_path.exists():
             self.reconcile_exited_launches()
-            if metadata_path.exists():
+            if metadata_path.exists() or callback_path.exists():
                 raise LauncherError(
                     f"task {task.id} already has an active or unrecoverable launch"
                 )
@@ -229,6 +236,13 @@ class AgentLauncher:
                     )
                 except (LauncherError, MCPError, OSError) as exc:
                     reason = str(exc)
+                    if (
+                        not completed_during_grace
+                        and self._reap_exit_status(process) == 0
+                    ):
+                        completed_during_grace = True
+                        if metadata is not None:
+                            metadata["completed"] = True
                     if completed_during_grace:
                         completed_persistence_problem = reason
                         stored.log(
@@ -264,6 +278,13 @@ class AgentLauncher:
                     task = Task.from_dict(stored.to_dict())
         except OSError as exc:
             reason = f"could not persist launch state: {exc}"
+            if (
+                not completed_during_grace
+                and self._reap_exit_status(process) == 0
+            ):
+                completed_during_grace = True
+                if metadata is not None:
+                    metadata["completed"] = True
             if completed_during_grace:
                 completed_persistence_problem = reason
             else:
@@ -296,18 +317,22 @@ class AgentLauncher:
         if process is None or workdir is None or mcp_path is None:  # pragma: no cover
             raise LauncherError(f"agent launcher failed for task {task.id}")
         if completed_during_grace:
-            if not metadata_path.exists() and metadata is not None:
+            metadata_ready = metadata_path.exists() and completed_persistence_problem is None
+            if completed_persistence_problem and metadata is not None:
                 try:
                     atomic_replace_text(
                         metadata_path, json.dumps(metadata, indent=2) + "\n"
                     )
                 except OSError as exc:
+                    metadata_ready = False
                     completed_persistence_problem = (
                         f"{completed_persistence_problem}; {exc}"
                         if completed_persistence_problem
                         else str(exc)
                     )
-            if metadata_path.exists():
+                else:
+                    metadata_ready = True
+            if metadata_ready:
                 self.reconcile_exited_launches()
                 if not metadata_path.exists():
                     completed_persistence_problem = None
@@ -316,13 +341,22 @@ class AgentLauncher:
                     self._reconcile_exited_launch(metadata)
                 )
                 if callbacks_complete:
-                    completed_persistence_problem = None
+                    removal_problem = self._remove_launch_metadata(metadata_path)
+                    completed_persistence_problem = removal_problem
                 else:
                     completed_persistence_problem = (
                         f"{completed_persistence_problem}; {recovery_reason}"
                         if completed_persistence_problem
                         else recovery_reason
                     )
+                    if not metadata_path.exists():
+                        retry_problem = self._defer_callback_retry(
+                            task.id, recovery_reason
+                        )
+                        if retry_problem:
+                            completed_persistence_problem = (
+                                f"{completed_persistence_problem}; {retry_problem}"
+                            )
         if completed_persistence_problem:
             raise LauncherError(
                 f"agent launcher completed for task {task.id}, but recovery remains "
@@ -393,6 +427,41 @@ class AgentLauncher:
                 metadata_path.unlink()
             except OSError:
                 pass
+        for queue_path in sorted(
+            self.dir.glob(f"*.home/.saturnin-callbacks/{CALLBACKS_FILE}")
+        ):
+            task_id = queue_path.parent.parent.name.removesuffix(".home")
+            if not task_id or (self.dir / f"{task_id}.json").exists():
+                continue
+            try:
+                task = self.board.get(task_id)
+            except BoardError:
+                continue
+            deferred_retry = (
+                task.state != "routed"
+                or not task.launch_deferred_reason
+                or "worker callbacks failed:" not in task.launch_deferred_reason
+            )
+            failed_in_progress = (
+                task.state == "in_progress"
+                and bool(task.history)
+                and task.history[-1].get("event") == "agent:callback_failed"
+            )
+            if deferred_retry and not failed_in_progress:
+                continue
+            requeued, callbacks_complete, reason = self._reconcile_exited_launch(
+                {
+                    "task_id": task_id,
+                    "pid": 0,
+                    "callback_dir": str(queue_path.parent),
+                    "completed": True,
+                }
+            )
+            if requeued:
+                resumed.append(task_id)
+            if not callbacks_complete:
+                self._defer_callback_retry(task_id, reason)
+                continue
         return resumed
 
     def _reconcile_exited_launch(
@@ -501,6 +570,23 @@ class AgentLauncher:
             return f"could not remove launch metadata: {exc}"
         return None
 
+    def _defer_callback_retry(self, task_id: str, reason: str) -> str | None:
+        try:
+            with self.board.edit(task_id) as task:
+                if task.state == "in_progress":
+                    task.state = "routed"
+                    task.launch_deferred_at = utcnow()
+                    task.launch_deferred_reason = reason
+                    task.log(
+                        "agent:callback_retry_pending",
+                        actor="launcher",
+                        reason=reason,
+                    )
+                    task.log("state:routed", actor="launcher", note=reason)
+        except (BoardError, OSError) as exc:
+            return f"could not persist callback retry state: {exc}"
+        return None
+
     def _terminate_process(self, process: subprocess.Popen[bytes] | None) -> str | None:
         if process is None:
             return None
@@ -526,6 +612,20 @@ class AgentLauncher:
         except (AttributeError, OSError, subprocess.TimeoutExpired) as exc:
             return f"could not terminate spawned agent pid {process.pid}: {exc}"
         return None
+
+    @staticmethod
+    def _reap_exit_status(
+        process: subprocess.Popen[bytes] | None,
+    ) -> int | None:
+        if process is None:
+            return None
+        wait = getattr(process, "wait", None)
+        if wait is None:
+            return None
+        try:
+            return wait(timeout=0)
+        except (AttributeError, OSError, subprocess.TimeoutExpired):
+            return None
 
     def _restore_launch_claim(
         self,
