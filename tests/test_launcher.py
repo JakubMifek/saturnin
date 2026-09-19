@@ -1864,6 +1864,83 @@ def test_launcher_preserves_completed_callback_when_persistence_fails(
     assert not (callback_dir / CALLBACKS_FILE).exists()
 
 
+def test_launcher_reports_repeated_completed_metadata_persistence_failure(
+    config: Config, board: Board, git_repo: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    config.policy("mcp")["launcher"]["enabled"] = True
+    task = board.create("Preserve an unreconciled completed worker result")
+    Router(config).dispatch(board, task)
+    worktree = WorktreeManager(config, repo=git_repo, board=board).create(
+        "feature/completed-metadata-failure"
+    )
+    with board.edit(task.id) as stored:
+        stored.branch = "feature/completed-metadata-failure"
+        stored.worktree = str(worktree.path)
+    monkeypatch.setattr("saturnin.launcher.shutil.which", lambda _: "/usr/bin/copilot")
+    callback_dir = (
+        AgentLauncher(config, board)._isolated_home(task.id) / ".saturnin-callbacks"
+    )
+    callback_dir.mkdir(parents=True)
+    real_popen = subprocess.Popen
+
+    class CompletedProcess:
+        pid = 4242
+        terminated = False
+
+        def wait(self, timeout=None):
+            (callback_dir / CALLBACKS_FILE).write_text(
+                json.dumps(
+                    {
+                        "type": "task_move",
+                        "task_id": task.id,
+                        "state": "review",
+                        "actor": "code-worker",
+                        "note": "ready",
+                    }
+                )
+                + "\n",
+                encoding="utf-8",
+            )
+            return 0
+
+        def terminate(self):
+            self.terminated = True
+
+    process = CompletedProcess()
+    monkeypatch.setattr(
+        "saturnin.launcher.subprocess.Popen",
+        lambda command, **kwargs: (
+            real_popen(command, **kwargs) if command[0] == "git" else process
+        ),
+    )
+    failed_writes = 0
+
+    def fail_metadata(
+        path: Path,
+        text: str,
+        *,
+        mode: int | None = None,
+    ) -> None:
+        nonlocal failed_writes
+        if path.name == f"{task.id}.json":
+            failed_writes += 1
+            raise OSError("metadata fsync failed")
+        path.write_text(text, encoding="utf-8")
+        if mode is not None:
+            path.chmod(mode)
+
+    monkeypatch.setattr("saturnin.launcher.atomic_replace_text", fail_metadata)
+
+    with pytest.raises(LauncherError, match="recovery remains pending"):
+        AgentLauncher(config, board).launch(task.id)
+
+    assert failed_writes == 2
+    assert not process.terminated
+    assert board.get(task.id).state == "in_progress"
+    assert not (config.var_dir / "launches" / f"{task.id}.json").exists()
+    assert (callback_dir / CALLBACKS_FILE).exists()
+
+
 def test_launcher_rejects_unauthorized_project_mcp(
     config: Config, board: Board, git_repo: Path, monkeypatch
 ) -> None:

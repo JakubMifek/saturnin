@@ -307,9 +307,10 @@ class AgentLauncher:
                         if completed_persistence_problem
                         else str(exc)
                     )
-            self.reconcile_exited_launches()
-            if not metadata_path.exists():
-                completed_persistence_problem = None
+            if metadata_path.exists():
+                self.reconcile_exited_launches()
+                if not metadata_path.exists():
+                    completed_persistence_problem = None
         if completed_persistence_problem:
             raise LauncherError(
                 f"agent launcher completed for task {task.id}, but recovery remains "
