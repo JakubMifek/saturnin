@@ -311,6 +311,18 @@ class AgentLauncher:
                 self.reconcile_exited_launches()
                 if not metadata_path.exists():
                     completed_persistence_problem = None
+            elif metadata is not None:
+                _, callbacks_complete, recovery_reason = (
+                    self._reconcile_exited_launch(metadata)
+                )
+                if callbacks_complete:
+                    completed_persistence_problem = None
+                else:
+                    completed_persistence_problem = (
+                        f"{completed_persistence_problem}; {recovery_reason}"
+                        if completed_persistence_problem
+                        else recovery_reason
+                    )
         if completed_persistence_problem:
             raise LauncherError(
                 f"agent launcher completed for task {task.id}, but recovery remains "
@@ -372,72 +384,9 @@ class AgentLauncher:
                 except (BoardError, OSError):
                     pass
                 continue
-            reason = f"agent process exited or identity changed after launch with pid {pid}"
-            if metadata.get("completed") is True:
-                resumed_checkpoint = metadata.get("resumed_checkpoint")
-                try:
-                    with self.board.edit(task_id) as task:
-                        recovered = False
-                        if task.state == "routed":
-                            task.state = "in_progress"
-                            task.launch_deferred_at = None
-                            task.launch_deferred_reason = None
-                            recovered = True
-                        if (
-                            isinstance(resumed_checkpoint, str)
-                            and resumed_checkpoint
-                            and task.checkpoint_resumed_at != resumed_checkpoint
-                        ):
-                            task.checkpoint_resumed_at = resumed_checkpoint
-                            recovered = True
-                        if recovered:
-                            task.log(
-                                "agent:launch_recovered",
-                                actor="launcher",
-                                pid=pid,
-                            )
-                            task.log(
-                                "state:in_progress",
-                                actor=task.role or "launcher",
-                                note=f"recovered completed agent pid={pid}",
-                            )
-                except (BoardError, OSError):
-                    continue
-            callbacks_complete = True
-            try:
-                apply_queued(
-                    self.config,
-                    self.board,
-                    task_id=task_id,
-                    callback_dir=metadata.get("callback_dir")
-                    if isinstance(metadata.get("callback_dir"), str)
-                    else None,
-                )
-            except (OSError, TypeError, ValueError, RuntimeError) as exc:
-                callbacks_complete = False
-                reason = f"{reason}; worker callbacks failed: {exc}"
-            try:
-                with self.board.edit(task_id) as task:
-                    if not callbacks_complete:
-                        task.log("agent:callback_failed", actor="launcher", reason=reason)
-                    elif task.state == "in_progress":
-                        if self._poller_is_waiting(task):
-                            task.log(
-                                "agent:poller_waiting",
-                                actor="launcher",
-                                reason=reason,
-                            )
-                        else:
-                            task.state = "routed"
-                            task.launch_deferred_at = utcnow()
-                            task.launch_deferred_reason = reason
-                            task.log("agent:launch_failed", actor="launcher", reason=reason)
-                            task.log("state:routed", actor="launcher", note=reason)
-                            resumed.append(task.id)
-            except OSError:
-                continue
-            except BoardError:
-                pass
+            requeued, callbacks_complete, _ = self._reconcile_exited_launch(metadata)
+            if requeued:
+                resumed.append(task_id)
             if not callbacks_complete:
                 continue
             try:
@@ -445,6 +394,81 @@ class AgentLauncher:
             except OSError:
                 pass
         return resumed
+
+    def _reconcile_exited_launch(
+        self,
+        metadata: dict[str, Any],
+    ) -> tuple[bool, bool, str]:
+        task_id = str(metadata["task_id"])
+        pid = int(metadata["pid"])
+        reason = f"agent process exited or identity changed after launch with pid {pid}"
+        if metadata.get("completed") is True:
+            resumed_checkpoint = metadata.get("resumed_checkpoint")
+            try:
+                with self.board.edit(task_id) as task:
+                    recovered = False
+                    if task.state == "routed":
+                        task.state = "in_progress"
+                        task.launch_deferred_at = None
+                        task.launch_deferred_reason = None
+                        recovered = True
+                    if (
+                        isinstance(resumed_checkpoint, str)
+                        and resumed_checkpoint
+                        and task.checkpoint_resumed_at != resumed_checkpoint
+                    ):
+                        task.checkpoint_resumed_at = resumed_checkpoint
+                        recovered = True
+                    if recovered:
+                        task.log(
+                            "agent:launch_recovered",
+                            actor="launcher",
+                            pid=pid,
+                        )
+                        task.log(
+                            "state:in_progress",
+                            actor=task.role or "launcher",
+                            note=f"recovered completed agent pid={pid}",
+                        )
+            except (BoardError, OSError) as exc:
+                return False, False, f"{reason}; launch recovery failed: {exc}"
+        callbacks_complete = True
+        try:
+            apply_queued(
+                self.config,
+                self.board,
+                task_id=task_id,
+                callback_dir=metadata.get("callback_dir")
+                if isinstance(metadata.get("callback_dir"), str)
+                else None,
+            )
+        except (OSError, TypeError, ValueError, RuntimeError) as exc:
+            callbacks_complete = False
+            reason = f"{reason}; worker callbacks failed: {exc}"
+        requeued = False
+        try:
+            with self.board.edit(task_id) as task:
+                if not callbacks_complete:
+                    task.log("agent:callback_failed", actor="launcher", reason=reason)
+                elif task.state == "in_progress":
+                    if self._poller_is_waiting(task):
+                        task.log(
+                            "agent:poller_waiting",
+                            actor="launcher",
+                            reason=reason,
+                        )
+                    else:
+                        task.state = "routed"
+                        task.launch_deferred_at = utcnow()
+                        task.launch_deferred_reason = reason
+                        task.log("agent:launch_failed", actor="launcher", reason=reason)
+                        task.log("state:routed", actor="launcher", note=reason)
+                        requeued = True
+        except OSError as exc:
+            return False, False, f"{reason}; launch reconciliation failed: {exc}"
+        except BoardError:
+            pass
+        return requeued, callbacks_complete, reason
 
     def has_active_launch(self, task_id: str) -> bool:
         metadata_path = self.dir / f"{task_id}.json"

@@ -1864,12 +1864,18 @@ def test_launcher_preserves_completed_callback_when_persistence_fails(
     assert not (callback_dir / CALLBACKS_FILE).exists()
 
 
-def test_launcher_reports_repeated_completed_metadata_persistence_failure(
-    config: Config, board: Board, git_repo: Path, monkeypatch: pytest.MonkeyPatch
+@pytest.mark.parametrize("callback_valid", [True, False])
+def test_launcher_directly_reconciles_when_completed_metadata_cannot_persist(
+    config: Config,
+    board: Board,
+    git_repo: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    callback_valid: bool,
 ) -> None:
     config.policy("mcp")["launcher"]["enabled"] = True
-    task = board.create("Preserve an unreconciled completed worker result")
+    task = board.create("Recover a completed worker without launch metadata")
     Router(config).dispatch(board, task)
+    callback_actor = board.get(task.id).role if callback_valid else "wrong-role"
     worktree = WorktreeManager(config, repo=git_repo, board=board).create(
         "feature/completed-metadata-failure"
     )
@@ -1894,7 +1900,7 @@ def test_launcher_reports_repeated_completed_metadata_persistence_failure(
                         "type": "task_move",
                         "task_id": task.id,
                         "state": "review",
-                        "actor": "code-worker",
+                        "actor": callback_actor,
                         "note": "ready",
                     }
                 )
@@ -1931,14 +1937,49 @@ def test_launcher_reports_repeated_completed_metadata_persistence_failure(
 
     monkeypatch.setattr("saturnin.launcher.atomic_replace_text", fail_metadata)
 
-    with pytest.raises(LauncherError, match="recovery remains pending"):
-        AgentLauncher(config, board).launch(task.id)
+    inside_board_edit = False
+    original_edit = board.edit
+
+    @contextmanager
+    def tracked_edit(task_id):
+        nonlocal inside_board_edit
+        with original_edit(task_id) as stored:
+            inside_board_edit = True
+            try:
+                yield stored
+            finally:
+                inside_board_edit = False
+
+    callback_lock_states: list[bool] = []
+
+    def tracked_apply_queued(*args, **kwargs):
+        callback_lock_states.append(inside_board_edit)
+        return apply_queued(*args, **kwargs)
+
+    monkeypatch.setattr(board, "edit", tracked_edit)
+    monkeypatch.setattr("saturnin.launcher.apply_queued", tracked_apply_queued)
+
+    if callback_valid:
+        result = AgentLauncher(config, board).launch(task.id)
+        assert result is not None
+        assert board.get(task.id).state == "review"
+        assert not (callback_dir / CALLBACKS_FILE).exists()
+    else:
+        with pytest.raises(
+            LauncherError,
+            match="recovery remains pending: .*worker callbacks failed",
+        ):
+            AgentLauncher(config, board).launch(task.id)
+        retained = board.get(task.id)
+        assert retained.state == "in_progress"
+        assert retained.launch_deferred_at is None
+        assert retained.history[-1]["event"] == "agent:callback_failed"
+        assert (callback_dir / CALLBACKS_FILE).exists()
 
     assert failed_writes == 2
     assert not process.terminated
-    assert board.get(task.id).state == "in_progress"
+    assert callback_lock_states == [False]
     assert not (config.var_dir / "launches" / f"{task.id}.json").exists()
-    assert (callback_dir / CALLBACKS_FILE).exists()
 
 
 def test_launcher_rejects_unauthorized_project_mcp(
