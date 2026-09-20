@@ -2,8 +2,11 @@
 
 from __future__ import annotations
 
+import hashlib
+import hmac
 import json
 import os
+import re
 import shutil
 import stat
 import subprocess
@@ -25,10 +28,17 @@ from .contracts import (
     project_agent_path,
 )
 from .governance import Governance, github_repo_slug
+from .issues import MirrorError, run_gh
 from .jsonlines import PRIVATE_FILE_MODE, atomic_replace_text
 from .locking import file_lock
 from .mcp import MCPError, server_process, verify_github_binary
-from .review import ReviewError, role_scoped_review_attestation_key, slugify as review_slugify
+from .review import (
+    ReviewError,
+    issue_content_digest,
+    normalize_repository_slug,
+    role_scoped_review_attestation_key,
+    slugify as review_slugify,
+)
 from .worker_callbacks import (
     CALLBACKS_FILE,
     ENV_CALLBACK_DIR,
@@ -40,6 +50,23 @@ from .worktrees import GitError, validated_task_worktree
 
 class LauncherError(RuntimeError):
     pass
+
+
+@dataclass(frozen=True)
+class _VerifiedReviewInput:
+    task_id: str
+    kind: str
+    binding: str
+    payload: str
+
+
+@dataclass(frozen=True)
+class _StagedReviewInput:
+    task_id: str
+    kind: str
+    binding: str
+    path: Path
+    payload_digest: str
 
 
 @dataclass(frozen=True)
@@ -171,33 +198,29 @@ class AgentLauncher:
                         config=worker_config,
                         worktree_scope=workdir,
                     )
+                    verified_review_input = self._verified_review_input(claimed)
+                    review_input = self._stage_review_input(
+                        claimed,
+                        verified_review_input,
+                    )
                     prompt = self._prompt(
                         claimed,
                         contract,
                         config=worker_config,
                         checkpoint=checkpoint,
+                        review_input=review_input,
                     )
-                    args = [
-                        str(value).format(
-                            mcp_config=str(mcp_path), prompt=prompt, task_id=claimed.id
-                        )
-                        for value in self.policy.get(
-                            "args",
-                            [
-                                "--autopilot",
-                                "--no-ask-user",
-                                "--additional-mcp-config",
-                                "{mcp_config}",
-                                "-p",
-                                "{prompt}",
-                            ],
-                        )
-                    ]
+                    args = self._agent_args(
+                        prompt=prompt,
+                        mcp_config=mcp_path,
+                        task_id=claimed.id,
+                    )
                     environment = self._worker_environment(
                         worker_config,
                         contract,
                         task=claimed,
                         workdir=workdir,
+                        review_input=review_input,
                     )
                     home = Path(environment["HOME"])
                     git_environment, git_objects = self._isolated_git_environment(
@@ -217,6 +240,7 @@ class AgentLauncher:
                         trusted_config=self._trusted_config(worker_config),
                         git_objects=git_objects,
                         mcp_config=mcp_path,
+                        review_input=review_input.path if review_input else None,
                     )
                     with self._private_log(log_path) as output:
                         process = subprocess.Popen(
@@ -686,6 +710,26 @@ class AgentLauncher:
             raise LauncherError(f"required worker sandbox executable not found: {executable}")
         return str(Path(path).resolve())
 
+    def _agent_args(self, *, prompt: str, mcp_config: Path, task_id: str) -> list[str]:
+        return [
+            str(value).format(
+                mcp_config=str(mcp_config),
+                prompt=prompt,
+                task_id=task_id,
+            )
+            for value in self.policy.get(
+                "args",
+                [
+                    "--autopilot",
+                    "--no-ask-user",
+                    "--additional-mcp-config",
+                    "{mcp_config}",
+                    "-p",
+                    "{prompt}",
+                ],
+            )
+        ]
+
     def _network_sandbox_executable(self) -> str:
         sandbox = self.policy.get("sandbox", {})
         if not isinstance(sandbox, dict):
@@ -754,6 +798,7 @@ class AgentLauncher:
         trusted_config: Config,
         git_objects: Path,
         mcp_config: Path,
+        review_input: Path | None = None,
     ) -> list[str]:
         sandbox_policy = trusted_config.policy("mcp").get("launcher", {}).get(
             "sandbox", {}
@@ -834,6 +879,8 @@ class AgentLauncher:
         read_only_mounts.extend(
             (path, path) for path in (Path(executable), git_objects, mcp_config)
         )
+        if review_input is not None:
+            read_only_mounts.append((review_input, review_input))
         staged_board = isolated_home / ".saturnin-board"
         if staged_board.exists():
             read_only_mounts.append((staged_board, trusted_config.board_dir))
@@ -1066,6 +1113,7 @@ class AgentLauncher:
         *,
         task: Task,
         workdir: Path,
+        review_input: _StagedReviewInput | None = None,
     ) -> dict[str, str]:
         trusted_config = self._trusted_config(config)
         token_name = str(
@@ -1116,6 +1164,10 @@ class AgentLauncher:
         source = str(config.root / "src")
         environment["PYTHONPATH"] = source
         if contract.role in self._review_attestation_roles(trusted_config):
+            if not self._staged_review_input_matches_task(task, review_input):
+                raise LauncherError(
+                    f"reviewer role {contract.role!r} requires verified review input"
+                )
             master_key = os.environ.get(key_env, "")
             if not master_key:
                 raise LauncherError(
@@ -1127,6 +1179,177 @@ class AgentLauncher:
             )
             environment[scope_env] = "role"
         return environment
+
+    def _verified_review_input(self, task: Task) -> _VerifiedReviewInput | None:
+        if task.kind == "pr-review":
+            return self._verified_pr_review_input(task)
+        if task.kind == "issue-review":
+            return self._verified_issue_review_input(task)
+        return None
+
+    def _stage_review_input(
+        self,
+        task: Task,
+        review_input: _VerifiedReviewInput | None,
+    ) -> _StagedReviewInput | None:
+        if review_input is None:
+            return None
+        if not self._review_input_matches_task(task, review_input):
+            raise LauncherError("verified review input does not match review task")
+        path = self.dir / f"{task.id}.review-input.json"
+        payload = review_input.payload.encode()
+        atomic_replace_text(path, review_input.payload + "\n", mode=PRIVATE_FILE_MODE)
+        return _StagedReviewInput(
+            task_id=review_input.task_id,
+            kind=review_input.kind,
+            binding=review_input.binding,
+            path=path,
+            payload_digest=hashlib.sha256(payload).hexdigest(),
+        )
+
+    @staticmethod
+    def _verified_pr_review_input(task: Task) -> _VerifiedReviewInput:
+        subject = (task.review_subject or "").strip()
+        match = re.fullmatch(r"([^/\s]+/[^#\s]+)#([1-9][0-9]*)", subject)
+        if match is None:
+            raise LauncherError("PR review task requires review_subject as owner/repository#number")
+        try:
+            repo = normalize_repository_slug(match.group(1))
+            task_repo = normalize_repository_slug(task.repo) if task.repo else repo
+        except ValueError as exc:
+            raise LauncherError(f"PR review task has an invalid repository: {exc}") from exc
+        if task_repo != repo:
+            raise LauncherError("PR review subject repository does not match task repository")
+        expected_head = (task.review_head_sha or "").strip().lower()
+        if not re.fullmatch(r"[0-9a-f]{40}", expected_head):
+            raise LauncherError("PR review task requires a 40-character review_head_sha")
+        try:
+            metadata = json.loads(
+                run_gh(
+                    [
+                        "pr",
+                        "view",
+                        match.group(2),
+                        "--repo",
+                        repo,
+                        "--json",
+                        "baseRefOid,headRefOid",
+                    ]
+                )
+            )
+            base = str(metadata["baseRefOid"]).strip().lower()
+            current_head = str(metadata["headRefOid"]).strip().lower()
+            if not re.fullmatch(r"[0-9a-f]{40}", base) or not re.fullmatch(
+                r"[0-9a-f]{40}", current_head
+            ):
+                raise ValueError("invalid PR commit identity")
+            if not hmac.compare_digest(current_head, expected_head):
+                raise LauncherError(
+                    f"PR review head {current_head} does not match "
+                    f"task review_head_sha {expected_head}"
+                )
+            diff = run_gh(
+                [
+                    "api",
+                    f"repos/{repo}/compare/{base}...{expected_head}",
+                    "-H",
+                    "Accept: application/vnd.github.v3.diff",
+                ]
+            )
+        except (MirrorError, json.JSONDecodeError, KeyError, TypeError, ValueError) as exc:
+            raise LauncherError(f"could not stage immutable PR review input: {exc}") from exc
+        return _VerifiedReviewInput(
+            task_id=task.id,
+            kind="pr",
+            binding=expected_head,
+            payload=json.dumps(
+                {
+                    "kind": "pr",
+                    "subject": subject,
+                    "base_sha": base,
+                    "head_sha": expected_head,
+                    "title": task.title,
+                    "body": task.body,
+                    "diff": diff,
+                },
+                indent=2,
+            ),
+        )
+
+    @staticmethod
+    def _verified_issue_review_input(task: Task) -> _VerifiedReviewInput:
+        expected_digest = (task.review_issue_digest or "").strip().lower()
+        actual_digest = issue_content_digest(task.title, task.body)
+        if not hmac.compare_digest(actual_digest, expected_digest):
+            raise LauncherError(
+                f"issue draft digest {actual_digest} does not match "
+                f"task review_issue_digest {expected_digest or '<missing>'}"
+            )
+        return _VerifiedReviewInput(
+            task_id=task.id,
+            kind="issue",
+            binding=expected_digest,
+            payload=json.dumps(
+                {
+                    "kind": "issue",
+                    "subject": task.review_subject,
+                    "destination_repo": task.review_destination_repo or task.repo,
+                    "issue_digest": expected_digest,
+                    "title": task.title,
+                    "body": task.body,
+                },
+                indent=2,
+            ),
+        )
+
+    @staticmethod
+    def _review_input_matches_task(
+        task: Task, review_input: _VerifiedReviewInput | _StagedReviewInput | None
+    ) -> bool:
+        if review_input is None or review_input.task_id != task.id:
+            return False
+        if task.kind == "pr-review":
+            return review_input.kind == "pr" and hmac.compare_digest(
+                review_input.binding,
+                (task.review_head_sha or "").strip().lower(),
+            )
+        if task.kind == "issue-review":
+            expected = (task.review_issue_digest or "").strip().lower()
+            return (
+                review_input.kind == "issue"
+                and hmac.compare_digest(review_input.binding, expected)
+                and hmac.compare_digest(
+                    issue_content_digest(task.title, task.body),
+                    expected,
+                )
+            )
+        return False
+
+    def _staged_review_input_matches_task(
+        self,
+        task: Task,
+        review_input: _StagedReviewInput | None,
+    ) -> bool:
+        if not self._review_input_matches_task(task, review_input):
+            return False
+        assert review_input is not None
+        if review_input.path != self.dir / f"{task.id}.review-input.json":
+            return False
+        try:
+            metadata = review_input.path.lstat()
+            payload = review_input.path.read_bytes()
+        except OSError:
+            return False
+        if payload.endswith(b"\n"):
+            payload = payload[:-1]
+        return (
+            stat.S_ISREG(metadata.st_mode)
+            and stat.S_IMODE(metadata.st_mode) == PRIVATE_FILE_MODE
+            and hmac.compare_digest(
+                hashlib.sha256(payload).hexdigest(),
+                review_input.payload_digest,
+            )
+        )
 
     @staticmethod
     def _review_attestation_roles(config: Config) -> set[str]:
@@ -1421,13 +1644,26 @@ class AgentLauncher:
         *,
         config: Config | None = None,
         checkpoint: Checkpoint | None = None,
+        review_input: _StagedReviewInput | None = None,
     ) -> str:
         config = config or self.config
+        task_metadata = task.to_dict()
+        if review_input is not None:
+            if not self._staged_review_input_matches_task(task, review_input):
+                raise LauncherError("verified review input does not match review task")
+            for field in ("title", "body", "history"):
+                task_metadata.pop(field, None)
         sections = [
             f"Complete Saturnin task {task.id}.",
-            json.dumps(task.to_dict(), indent=2),
+            json.dumps(task_metadata, indent=2),
             contract.path.read_text(encoding="utf-8"),
         ]
+        if review_input is not None:
+            sections.append(
+                "Immutable review input was verified by the launcher against the "
+                f"task {review_input.kind} binding. Read the complete, read-only "
+                f"input from:\n{review_input.path}"
+            )
         if task.worktree:
             worktree_root = Path(task.worktree).resolve(strict=False)
             manifest_path = (worktree_root / ".saturnin" / "repo.yaml").resolve(strict=False)

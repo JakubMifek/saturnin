@@ -23,6 +23,7 @@ from saturnin.launcher import AgentLauncher, LauncherError
 from saturnin.mcp import MCPError
 from saturnin.review import (
     ReviewLedger,
+    issue_content_digest,
     review_attestation_signing_key,
     sign_review_attestation,
 )
@@ -3352,7 +3353,14 @@ def test_launcher_injects_role_scoped_attestation_key_only_for_reviewers(
     config: Config, board: Board, git_repo: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     monkeypatch.setenv("SATURNIN_REVIEW_ATTESTATION_PREVIOUS_KEY", "old-master-key")
-    task = board.create("Review a pull request")
+    head_sha = "c" * 40
+    task = board.create(
+        "Review a pull request",
+        kind="pr-review",
+        repo="JakubMifek/saturnin",
+        review_subject="JakubMifek/saturnin#1",
+        review_head_sha=head_sha,
+    )
     worktree = WorktreeManager(config, repo=git_repo, board=board).create(
         "feature/reviewer-key"
     )
@@ -3366,11 +3374,25 @@ def test_launcher_injects_role_scoped_attestation_key_only_for_reviewers(
     launcher = AgentLauncher(config, board)
     worker_config = launcher._worker_config(worktree.path)
     contract = launcher._contract(board.get(task.id), worker_config)
+    monkeypatch.setattr(
+        "saturnin.launcher.run_gh",
+        lambda args: (
+            json.dumps({"baseRefOid": "a" * 40, "headRefOid": head_sha})
+            if args[0:2] == ["pr", "view"]
+            else "review diff"
+        ),
+    )
+    verified_review_input = launcher._verified_review_input(board.get(task.id))
+    review_input = launcher._stage_review_input(
+        board.get(task.id),
+        verified_review_input,
+    )
     environment = launcher._worker_environment(
         worker_config,
         contract,
         task=board.get(task.id),
         workdir=worktree.path,
+        review_input=review_input,
     )
 
     role_key = environment["SATURNIN_REVIEW_ATTESTATION_KEY"]
@@ -3408,7 +3430,14 @@ def test_launcher_injects_role_scoped_attestation_key_only_for_reviewers(
 def test_launcher_refuses_reviewer_without_attestation_key(
     config: Config, board: Board, git_repo: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    task = board.create("Review without a signing key")
+    head_sha = "d" * 40
+    task = board.create(
+        "Review without a signing key",
+        kind="pr-review",
+        repo="JakubMifek/saturnin",
+        review_subject="JakubMifek/saturnin#2",
+        review_head_sha=head_sha,
+    )
     worktree = WorktreeManager(config, repo=git_repo, board=board).create(
         "feature/no-reviewer-key"
     )
@@ -3423,6 +3452,19 @@ def test_launcher_refuses_reviewer_without_attestation_key(
     launcher = AgentLauncher(config, board)
     worker_config = launcher._worker_config(worktree.path)
     contract = launcher._contract(board.get(task.id), worker_config)
+    monkeypatch.setattr(
+        "saturnin.launcher.run_gh",
+        lambda args: (
+            json.dumps({"baseRefOid": "a" * 40, "headRefOid": head_sha})
+            if args[0:2] == ["pr", "view"]
+            else "review diff"
+        ),
+    )
+    verified_review_input = launcher._verified_review_input(board.get(task.id))
+    review_input = launcher._stage_review_input(
+        board.get(task.id),
+        verified_review_input,
+    )
 
     with pytest.raises(LauncherError, match="requires SATURNIN_REVIEW_ATTESTATION_KEY"):
         launcher._worker_environment(
@@ -3430,7 +3472,234 @@ def test_launcher_refuses_reviewer_without_attestation_key(
             contract,
             task=board.get(task.id),
             workdir=worktree.path,
+            review_input=review_input,
         )
+
+
+def test_launcher_stages_pr_diff_for_exact_review_head_before_signing(
+    config: Config,
+    board: Board,
+    git_repo: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    base_sha = "a" * 40
+    head_sha = "b" * 40
+    task = board.create(
+        "Review pull request 7",
+        kind="pr-review",
+        repo="JakubMifek/saturnin",
+        review_subject="JakubMifek/saturnin#7",
+        review_author="code-worker",
+        review_head_sha=head_sha,
+    )
+    with board.edit(task.id) as stored:
+        stored.role = "pr-reviewer"
+        stored.unit = "assurance"
+    task = board.get(task.id)
+    calls: list[list[str]] = []
+
+    def fake_run_gh(args: list[str]) -> str:
+        calls.append(args)
+        if args[0:2] == ["pr", "view"]:
+            return json.dumps({"baseRefOid": base_sha, "headRefOid": head_sha})
+        return "diff --git a/app.py b/app.py\n+secured\n"
+
+    monkeypatch.setattr("saturnin.launcher.run_gh", fake_run_gh)
+    launcher = AgentLauncher(config, board)
+    contract = launcher._contract(task, config)
+
+    verified_review_input = launcher._verified_review_input(task)
+    review_input = launcher._stage_review_input(task, verified_review_input)
+    prompt = launcher._prompt(task, contract, review_input=review_input)
+    environment = launcher._worker_environment(
+        config,
+        contract,
+        task=task,
+        workdir=git_repo,
+        review_input=review_input,
+    )
+
+    assert calls == [
+        [
+            "pr",
+            "view",
+            "7",
+            "--repo",
+            "jakubmifek/saturnin",
+            "--json",
+            "baseRefOid,headRefOid",
+        ],
+        [
+            "api",
+            f"repos/jakubmifek/saturnin/compare/{base_sha}...{head_sha}",
+            "-H",
+            "Accept: application/vnd.github.v3.diff",
+        ],
+    ]
+    assert review_input is not None
+    assert str(review_input.path) in prompt
+    assert '"head_sha": "' + head_sha + '"' in review_input.path.read_text()
+    assert "diff --git a/app.py b/app.py" in review_input.path.read_text()
+    assert "diff --git a/app.py b/app.py" not in prompt
+    assert review_input.path.stat().st_mode & 0o777 == 0o600
+    assert "SATURNIN_REVIEW_ATTESTATION_KEY" in environment
+
+
+def test_launcher_keeps_large_verified_pr_diff_out_of_command_arguments(
+    config: Config,
+    board: Board,
+    git_repo: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    base_sha = "a" * 40
+    head_sha = "b" * 40
+    large_diff = "diff --git a/large b/large\n+" + ("x" * (2 * 1024 * 1024))
+    title = "Review a large pull request with requirements"
+    body = "immutable task requirements\n" + ("y" * (2 * 1024 * 1024))
+    task = board.create(
+        title,
+        body=body,
+        kind="pr-review",
+        repo="JakubMifek/saturnin",
+        review_subject="JakubMifek/saturnin#8",
+        review_head_sha=head_sha,
+    )
+    with board.edit(task.id) as stored:
+        stored.role = "pr-reviewer"
+        stored.unit = "assurance"
+    task = board.get(task.id)
+
+    monkeypatch.setattr(
+        "saturnin.launcher.run_gh",
+        lambda args: (
+            json.dumps({"baseRefOid": base_sha, "headRefOid": head_sha})
+            if args[0:2] == ["pr", "view"]
+            else large_diff
+        ),
+    )
+    launcher = AgentLauncher(config, board)
+    contract = launcher._contract(task, config)
+    verified_review_input = launcher._verified_review_input(task)
+    review_input = launcher._stage_review_input(task, verified_review_input)
+
+    assert review_input is not None
+    prompt = launcher._prompt(task, contract, review_input=review_input)
+    mcp_config = config.var_dir / "launches" / f"{task.id}.mcp.json"
+    mcp_config.write_text('{"mcpServers": {}}\n', encoding="utf-8")
+    args = launcher._agent_args(
+        prompt=prompt,
+        mcp_config=mcp_config,
+        task_id=task.id,
+    )
+    command = launcher._sandbox_command(
+        "/usr/bin/bwrap",
+        "/usr/bin/pasta",
+        "/usr/bin/copilot",
+        args,
+        workdir=git_repo,
+        isolated_home=launcher._isolated_home(task.id),
+        trusted_config=config,
+        git_objects=git_repo / ".git" / "objects",
+        mcp_config=mcp_config,
+        review_input=review_input.path,
+    )
+
+    assert max(map(len, command)) < 128 * 1024
+    assert large_diff not in command
+    assert title not in command
+    assert body not in command
+    staged_payload = json.loads(review_input.path.read_text())
+    assert staged_payload["title"] == title
+    assert staged_payload["body"] == body
+    assert staged_payload["diff"] == large_diff
+    assert any(
+        command[index:index + 3]
+        == ["--ro-bind", str(review_input.path), str(review_input.path)]
+        for index in range(len(command) - 2)
+    )
+
+
+def test_launcher_verifies_issue_draft_before_exposing_signing_key(
+    config: Config,
+    board: Board,
+    git_repo: Path,
+) -> None:
+    title = "Launcher drops immutable review input"
+    body = "The issue body under independent review."
+    digest = issue_content_digest(title, body)
+    task = board.create(
+        title,
+        body=body,
+        kind="issue-review",
+        repo="JakubMifek/saturnin",
+        review_subject="draft-launcher-input",
+        review_author="code-worker",
+        review_issue_digest=digest,
+        review_destination_repo="JakubMifek/saturnin",
+    )
+    with board.edit(task.id) as stored:
+        stored.role = "issue-reviewer"
+        stored.unit = "assurance"
+    task = board.get(task.id)
+    launcher = AgentLauncher(config, board)
+    contract = launcher._contract(task, config)
+
+    verified_review_input = launcher._verified_review_input(task)
+    review_input = launcher._stage_review_input(task, verified_review_input)
+    prompt = launcher._prompt(task, contract, review_input=review_input)
+
+    assert review_input is not None
+    staged_payload = review_input.path.read_text()
+    assert str(review_input.path) in prompt
+    assert '"issue_digest": "' + digest + '"' in staged_payload
+    assert '"title": "' + title + '"' in staged_payload
+    assert '"body": "' + body + '"' in staged_payload
+    with pytest.raises(LauncherError, match="requires verified review input"):
+        launcher._worker_environment(
+            config,
+            contract,
+            task=task,
+            workdir=git_repo,
+        )
+
+    task.body = "A changed issue body."
+    with pytest.raises(LauncherError, match="does not match task review_issue_digest"):
+        launcher._verified_review_input(task)
+
+
+def test_launcher_keeps_large_verified_issue_body_out_of_prompt(
+    config: Config,
+    board: Board,
+) -> None:
+    title = "Review the bounded prompt issue"
+    body = "large immutable issue body\n" + ("x" * (2 * 1024 * 1024))
+    task = board.create(
+        title,
+        body=body,
+        kind="issue-review",
+        repo="JakubMifek/saturnin",
+        review_subject="large-draft-launcher-input",
+        review_issue_digest=issue_content_digest(title, body),
+        review_destination_repo="JakubMifek/saturnin",
+    )
+    with board.edit(task.id) as stored:
+        stored.role = "issue-reviewer"
+        stored.unit = "assurance"
+    task = board.get(task.id)
+    launcher = AgentLauncher(config, board)
+    contract = launcher._contract(task, config)
+    verified_review_input = launcher._verified_review_input(task)
+    review_input = launcher._stage_review_input(task, verified_review_input)
+
+    assert review_input is not None
+    prompt = launcher._prompt(task, contract, review_input=review_input)
+    staged_payload = json.loads(review_input.path.read_text())
+
+    assert len(prompt.encode()) < 128 * 1024
+    assert title not in prompt
+    assert body not in prompt
+    assert staged_payload["title"] == title
+    assert staged_payload["body"] == body
 
 
 def test_launcher_rejects_unverified_github_binary(
