@@ -62,6 +62,62 @@ def test_find_prevents_reinvention(config: Config) -> None:
     assert library.find("brew coffee for the narrator") == []
 
 
+@pytest.mark.parametrize(
+    ("dry_run_default", "override", "expected"),
+    [
+        (True, None, "worktree cleanup"),
+        (False, None, "worktree cleanup --apply"),
+        (False, "0", "worktree cleanup"),
+        (True, "1", "worktree cleanup --apply"),
+    ],
+)
+def test_cleanup_automation_uses_policy_default_with_explicit_override(
+    config: Config,
+    tmp_path: Path,
+    dry_run_default: bool,
+    override: str | None,
+    expected: str,
+) -> None:
+    policy_path = config.policies / "cleanup.yaml"
+    policy = yaml.safe_load(policy_path.read_text(encoding="utf-8"))
+    policy["safety"]["dry_run_default"] = dry_run_default
+    policy_path.write_text(yaml.safe_dump(policy), encoding="utf-8")
+    runtime = config.root / ".venv" / "bin"
+    runtime.mkdir(parents=True)
+    python = runtime / "python"
+    python.write_text(
+        f'#!/bin/sh\nexec "{sys.executable}" "$@"\n',
+        encoding="utf-8",
+    )
+    python.chmod(0o755)
+    marker = tmp_path / "cleanup-args"
+    executable = runtime / "saturnin"
+    executable.write_text(
+        '#!/bin/sh\nprintf "%s\\n" "$*" > "$CLEANUP_ARGS"\n',
+        encoding="utf-8",
+    )
+    executable.chmod(0o755)
+    env = {
+        **os.environ,
+        "SATURNIN_HOME": str(config.root),
+        "CLEANUP_ARGS": str(marker),
+    }
+    if override is None:
+        env.pop("APPLY", None)
+    else:
+        env["APPLY"] = override
+
+    subprocess.run(
+        ["bash", str(config.root / "automation" / "library" / "cleanup_worktrees.sh")],
+        check=True,
+        env=env,
+        capture_output=True,
+        text=True,
+    )
+
+    assert marker.read_text(encoding="utf-8").strip() == expected
+
+
 def test_detect_repeats(config: Config, board: Board) -> None:
     for _ in range(3):
         board.create("Rotate the deploy keys")

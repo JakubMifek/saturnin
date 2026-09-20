@@ -46,12 +46,22 @@ def test_cleanup_guidance_references_policy_without_copying_configurable_facts()
     runbook = (REPO_ROOT / "docs" / "runbooks" / "ops-safety.md").read_text(
         encoding="utf-8"
     )
+    startup = (REPO_ROOT / "docs" / "runbooks" / "day-1-startup.md").read_text(
+        encoding="utf-8"
+    )
     skill = (REPO_ROOT / "skills" / "worktree-session.md").read_text(
+        encoding="utf-8"
+    )
+    service = (REPO_ROOT / "systemd" / "saturnin-janitor.service").read_text(
+        encoding="utf-8"
+    )
+    installer = (REPO_ROOT / "scripts" / "install_user_units.sh").read_text(
         encoding="utf-8"
     )
 
     assert "policies/cleanup.yaml" in janitor
     assert "policies/cleanup.yaml:safety.keep_reflog_days" in runbook
+    assert "policies/cleanup.yaml" in startup
     for duplicated_fact in (
         "old *and* dirty",
         "repeated over-cap",
@@ -60,7 +70,9 @@ def test_cleanup_guidance_references_policy_without_copying_configurable_facts()
         "keep_reflog_days` (90)",
         "APPLY=1",
     ):
-        assert duplicated_fact not in f"{janitor}\n{runbook}"
+        assert duplicated_fact not in "\n".join(
+            (janitor, runbook, startup, service, installer)
+        )
     assert "saturnin worktree create <branch> [--task <id>]" in skill
     assert "--base main" not in skill
 

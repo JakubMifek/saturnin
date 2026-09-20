@@ -303,6 +303,16 @@ def test_invalid_reflog_retention_blocks_cleanup(
     ]
 
 
+def test_cleanup_policy_requires_boolean_dry_run_default(
+    manager: WorktreeManager,
+) -> None:
+    manager.policy["safety"]["dry_run_default"] = "yes"
+
+    assert manager.audit() == [
+        "cleanup safety.dry_run_default must be a boolean"
+    ]
+
+
 def test_janitor_log_uses_shared_data_root_from_linked_source(
     manager: WorktreeManager,
 ) -> None:

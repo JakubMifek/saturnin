@@ -82,8 +82,8 @@ scripts/install_user_units.sh          # user-scope systemd timers
 systemctl --user list-timers 'saturnin-*'
 ```
 
-- `saturnin-janitor.timer` - daily stale worktree/branch cleanup (dry run by
-  default; set `APPLY=1` in the unit's environment when you trust it).
+- `saturnin-janitor.timer` - daily cleanup governed by
+  `policies/cleanup.yaml` through `automation/library/cleanup_worktrees.sh`.
 - `saturnin-improve.timer` - hourly measure/detect/dispatch cycle.
 - `saturnin-poller.timer` - every five minutes, collects results for tasks whose
   answer cannot report back on its own, so nobody ever waits (rule 8).

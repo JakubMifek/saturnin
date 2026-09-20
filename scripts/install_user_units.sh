@@ -136,6 +136,6 @@ cat <<'MSG'
 
 Timers enabled. If Saturnin must run without an open login session:
   loginctl enable-linger "$USER"
-The janitor runs in dry-run mode; set APPLY=1 in saturnin-janitor.service once
-you trust its plans (see docs/runbooks/ops-safety.md).
+Janitor cleanup mode follows policies/cleanup.yaml; see
+docs/runbooks/ops-safety.md.
 MSG

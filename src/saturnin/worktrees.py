@@ -131,7 +131,11 @@ class WorktreeManager:
         self._lifecycle_depth = 0
 
     def audit(self) -> list[str]:
-        days = self.policy.get("safety", {}).get("keep_reflog_days")
+        safety = self.policy.get("safety", {})
+        dry_run_default = safety.get("dry_run_default")
+        if not isinstance(dry_run_default, bool):
+            return ["cleanup safety.dry_run_default must be a boolean"]
+        days = safety.get("keep_reflog_days")
         if isinstance(days, bool) or not isinstance(days, int) or days < 1:
             return ["cleanup safety.keep_reflog_days must be a positive integer"]
         return []
