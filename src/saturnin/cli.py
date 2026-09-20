@@ -88,6 +88,8 @@ def build_parser() -> argparse.ArgumentParser:
     add.add_argument("--review-author")
     add.add_argument("--review-head-sha")
     add.add_argument("--review-issue-digest")
+    add.add_argument("--review-issue-title")
+    add.add_argument("--review-issue-body")
     add.add_argument("--dispatch", action="store_true", help="route it immediately")
     add.add_argument("--no-launch", action="store_true", help="route without starting the worker")
 
@@ -713,7 +715,12 @@ def _provision_and_launch(
         worktree = None
         try:
             with manager.lifecycle_lock():
-                worktree = manager.create(branch)
+                review_base = (
+                    task.review_head_sha
+                    if task.kind == "pr-review" and task.review_head_sha
+                    else None
+                )
+                worktree = manager.create(branch, base=review_base)
                 with board.edit(task.id) as stored:
                     stored.branch = branch
                     stored.worktree = str(worktree.path)
@@ -1239,6 +1246,8 @@ def _run_task(args: argparse.Namespace, config: Config, board: Board, as_json: b
             review_author=args.review_author,
             review_head_sha=args.review_head_sha,
             review_issue_digest=args.review_issue_digest,
+            review_issue_title=args.review_issue_title,
+            review_issue_body=args.review_issue_body,
             review_destination_repo=args.repo,
         )
         if args.dispatch:

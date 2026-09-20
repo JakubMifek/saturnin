@@ -1170,6 +1170,41 @@ def test_review_task_intake_persists_trusted_scope(
     assert task["review_destination_repo"] == "JakubMifek/saturnin"
 
 
+def test_issue_review_task_intake_persists_exact_draft(
+    home: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    title = "Improve CI"
+    body = "Add the missing gate.\nPreserve exact whitespace."
+    digest = issue_content_digest(title, body)
+
+    code, out = run(
+        capsys,
+        "--json",
+        "task",
+        "add",
+        "Review issue draft",
+        "--kind",
+        "issue-review",
+        "--review-subject",
+        "draft-ci",
+        "--review-author",
+        "chief-of-staff",
+        "--review-issue-digest",
+        digest,
+        "--review-issue-title",
+        title,
+        "--review-issue-body",
+        body,
+    )
+
+    assert code == 0
+    task = json.loads(out)
+    assert task["review_issue_digest"] == digest
+    assert task["review_issue_title"] == title
+    assert task["review_issue_body"] == body
+
+
 def test_sandboxed_worker_fails_closed_for_unsupported_stateful_command(
     tmp_path: Path,
     capsys: pytest.CaptureFixture[str],
