@@ -462,7 +462,11 @@ class Governance:
         services = scope.get("services", {})
         packages = scope.get("packages", {})
         filesystem_decision = _check_filesystem_scope(
-            binary, parts[1:], scope.get("filesystem", {}), cwd=cwd
+            binary,
+            parts[1:],
+            scope.get("filesystem", {}),
+            runtime_root=self.config.data_root,
+            cwd=cwd,
         )
         if not filesystem_decision.allowed:
             return filesystem_decision
@@ -663,6 +667,7 @@ class Governance:
             filesystem = server_scope.get("filesystem", {})
             _trusted_executable_roots(filesystem)
             _trusted_runtime_executable(filesystem, self.config.data_root)
+            _writable_roots(filesystem, self.config.data_root)
         except ValueError as error:
             problems.append(f"{self.config.policies / 'server_scope.yaml'}: {error}")
         if self.delegation.get("ceo_may_wait_for_workers", False):
@@ -711,6 +716,7 @@ def _check_filesystem_scope(
     arguments: Sequence[str],
     filesystem: dict[str, Any],
     *,
+    runtime_root: Path,
     cwd: Path | None = None,
 ) -> Decision:
     forbidden_roots = _policy_roots(filesystem.get("forbidden_roots", []))
@@ -739,7 +745,12 @@ def _check_filesystem_scope(
             if arguments[1] == "saturnin":
                 targets = _saturnin_targets(arguments[2:])
                 if targets:
-                    return _check_filesystem_targets(targets, filesystem, cwd=cwd)
+                    return _check_filesystem_targets(
+                        targets,
+                        filesystem,
+                        runtime_root=runtime_root,
+                        cwd=cwd,
+                    )
         elif binary in _SHELL_BINARIES or binary in {"ruby", "perl", "node"}:
             if binary not in allowlist:
                 return Decision.deny(
@@ -753,7 +764,12 @@ def _check_filesystem_scope(
             )
         return Decision.ok("command has no explicit filesystem write target")
 
-    return _check_filesystem_targets(targets, filesystem, cwd=cwd)
+    return _check_filesystem_targets(
+        targets,
+        filesystem,
+        runtime_root=runtime_root,
+        cwd=cwd,
+    )
 
 
 def _check_executable_location(
@@ -896,10 +912,11 @@ def _check_filesystem_targets(
     targets: Sequence[str],
     filesystem: dict[str, Any],
     *,
+    runtime_root: Path,
     cwd: Path | None = None,
 ) -> Decision:
     forbidden_roots = _policy_roots(filesystem.get("forbidden_roots", []))
-    writable_roots = _policy_roots(filesystem.get("writable_roots", []))
+    writable_roots = _writable_roots(filesystem, runtime_root)
     for raw_path in targets:
         path = _resolve_command_path(raw_path, cwd=cwd)
         forbidden = _containing_root(path, forbidden_roots)
@@ -913,6 +930,26 @@ def _check_filesystem_targets(
                 f"filesystem write target {str(path)!r} is outside writable roots"
             )
     return Decision.ok("filesystem write targets are within writable roots")
+
+
+def _writable_roots(filesystem: dict[str, Any], runtime_root: Path) -> list[Path]:
+    sources = filesystem.get("writable_root_sources", [])
+    if not isinstance(sources, list) or any(
+        not isinstance(source, str) for source in sources
+    ):
+        raise ValueError("filesystem.writable_root_sources must be a list of strings")
+    unknown = sorted(set(sources) - {"user_home", "data_root"})
+    if unknown:
+        raise ValueError(
+            "filesystem.writable_root_sources contains unknown source(s): "
+            + ", ".join(unknown)
+        )
+    roots = _policy_roots(filesystem.get("writable_roots", []))
+    if "user_home" in sources:
+        roots.append(Path.home().resolve())
+    if "data_root" in sources:
+        roots.append(runtime_root.resolve())
+    return list(dict.fromkeys(roots))
 
 
 def _policy_roots(values: Iterable[Any]) -> list[Path]:

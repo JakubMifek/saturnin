@@ -7,9 +7,10 @@ blocked*. Execution is always somebody else's job, even when doing it directly
 would be faster in the moment. Fast dispatch beats fast execution, because a CEO
 that executes stops routing, and a queue forms behind it.
 
-Budget: **60 seconds and 3 deliberation steps** per dispatch
-(`policies/governance.yaml: delegation`). If a task cannot be classified in that
-time it goes to the chief of staff, who clarifies it - not to the CEO's own hands.
+The dispatch budget is defined by
+`policies/governance.yaml:delegation.max_dispatch_seconds` and
+`max_deliberation_steps`. If a task cannot be classified within that budget, it
+goes to the chief of staff, who clarifies it - not to the CEO's own hands.
 
 ## 2. Task lifecycle
 

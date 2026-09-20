@@ -11,10 +11,9 @@ mcp: [filesystem]
 ## The routine path is a script, not an agent
 Cleanup is deterministic, so it is code: `automation/library/cleanup_worktrees.sh`,
 driven by `saturnin worktree cleanup` and scheduled by the `saturnin-janitor`
-user timer. It runs unattended every night, plans before it acts, refuses dirty
-worktrees, never touches a branch with an open board task, and caps removals per
-run. **Nobody dispatches an agent for the happy path, and the CEO never watches
-it run.**
+user timer. It runs unattended and enforces `policies/cleanup.yaml`.
+**Nobody dispatches an agent for the happy path, and the CEO never watches it
+run.**
 
 ## Then what is the agent for?
 Only for what the script deliberately refuses to decide. The script reports and

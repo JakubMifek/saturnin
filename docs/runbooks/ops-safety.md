@@ -51,17 +51,10 @@ only after retiring or archiving records signed by the previous key.
 
 ## Cleanup safety model
 
-The janitor is dry-run by default and refuses to remove:
-
-- worktrees with uncommitted changes,
-- worktrees or branches attached to an open board task,
-- protected branches (`main`, `master`, `release`),
-- locked worktrees and paths matching `keep_globs`,
-- unmerged branches (reported only, never deleted).
-
-It also caps removals per run (`max_removals_per_run`); the surplus is deferred
-to the next run rather than silently dropped. Every action is logged with its
-reason in `var/logs/janitor.log`.
+The janitor applies the refusal conditions, protected branches, and per-run
+limits from `policies/cleanup.yaml` and `policies/governance.yaml`. Inspect its
+plan before applying it. Every action is logged with its reason in
+`var/logs/janitor.log`.
 
 ```bash
 saturnin worktree cleanup            # plan only

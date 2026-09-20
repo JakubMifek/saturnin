@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 # Shared helpers for every automation in the library.
 set -Eeuo pipefail
+umask 077
 
 SATURNIN_HOME="${SATURNIN_HOME:-$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)}"
 export SATURNIN_HOME

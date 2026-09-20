@@ -37,10 +37,10 @@ filesystem:
   # The supported bootstrap installs this one project runtime executable.
   # It is resolved only against the canonical main checkout, never a worker worktree.
   trusted_runtime_executable: .venv/bin/saturnin
-  writable_roots:
-    - /home/saturnin
-    - /home/saturnin/worktrees
-    - /home/saturnin/saturnin
+  # Runtime roots are resolved from the account running Saturnin and the
+  # canonical shared data root. Extra deployment-specific roots belong here.
+  writable_root_sources: [user_home, data_root]
+  writable_roots: []
   forbidden_roots:
     - /etc
     - /usr

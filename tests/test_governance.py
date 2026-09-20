@@ -56,6 +56,9 @@ def record_review(ledger: ReviewLedger, **kwargs):
 
 @pytest.fixture()
 def governance(config: Config) -> Governance:
+    filesystem = config.server_scope["filesystem"]
+    filesystem["writable_root_sources"] = []
+    filesystem["writable_roots"] = ["/home/saturnin"]
     return Governance(config)
 
 
@@ -2093,6 +2096,28 @@ def test_filesystem_writes_within_writable_roots_are_allowed(
     governance: Governance, command: str
 ) -> None:
     assert governance.check_server_command(command).allowed
+
+
+def test_default_writable_roots_follow_installation_and_user(
+    config: Config,
+) -> None:
+    governance = Governance(config)
+
+    assert governance.check_server_command(
+        f"touch {config.data_root / 'state'}"
+    ).allowed
+    assert governance.check_server_command(
+        f"touch {Path.home() / 'saturnin-state'}"
+    ).allowed
+    assert "/home/saturnin" not in config.server_scope["filesystem"]["writable_roots"]
+
+
+def test_unknown_writable_root_source_fails_policy_audit(config: Config) -> None:
+    config.server_scope["filesystem"]["writable_root_sources"] = ["data_root", "mystery"]
+
+    problems = Governance(config).audit()
+
+    assert any("unknown source(s): mystery" in problem for problem in problems)
 
 
 @pytest.mark.parametrize(

@@ -920,6 +920,25 @@ def test_common_saturnin_fails_closed_without_trusted_runtime(
     assert not marker.exists()
 
 
+def test_common_sets_private_umask_for_runtime_files(
+    config: Config,
+    tmp_path: Path,
+) -> None:
+    marker = tmp_path / "runtime-record"
+
+    subprocess.run(
+        [
+            "bash",
+            "-c",
+            f"source {config.root / 'automation/library/_common.sh'}; : > {marker}",
+        ],
+        check=True,
+        env={**os.environ, "SATURNIN_HOME": str(config.root)},
+    )
+
+    assert marker.stat().st_mode & 0o777 == 0o600
+
+
 def test_review_gate_rejects_pr_subject_for_another_repo(config: Config) -> None:
     result = subprocess.run(
         [

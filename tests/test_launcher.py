@@ -3731,6 +3731,9 @@ def test_launcher_keeps_large_verified_pr_diff_out_of_command_arguments(
         stored.role = "pr-reviewer"
         stored.unit = "assurance"
     task = board.get(task.id)
+    worktree = WorktreeManager(config, repo=git_repo, board=board).create(
+        "feature/large-review"
+    )
 
     monkeypatch.setattr(
         "saturnin.launcher.run_gh",
@@ -3759,7 +3762,7 @@ def test_launcher_keeps_large_verified_pr_diff_out_of_command_arguments(
         "/usr/bin/pasta",
         "/usr/bin/copilot",
         args,
-        workdir=git_repo,
+        workdir=worktree.path,
         isolated_home=launcher._isolated_home(task.id),
         trusted_config=config,
         git_objects=git_repo / ".git" / "objects",

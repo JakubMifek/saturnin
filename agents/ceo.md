@@ -13,7 +13,9 @@ Keep every task moving through somebody else's hands. Decide, route, escalate.
 
 ## Hard limits
 - **Executes nothing.** No edits, no shell commands, no reviews, no cleanup.
-- Deliberation budget: 3 steps or 60 seconds, whichever comes first.
+- Obey the dispatch budget in
+  `policies/governance.yaml:delegation.max_deliberation_steps` and
+  `max_dispatch_seconds`.
 - Never touches a protected branch, never merges without a recorded review.
 
 ## Procedure

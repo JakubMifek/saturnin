@@ -33,7 +33,8 @@ anything else:
    flagged as blocking.
 
 5. **The governance rules are load-bearing.** Watch specifically for:
-   pushes or merge instructions targeting `main`/`master`/`release` directly;
+   pushes or merge instructions targeting a branch protected by
+   `policies/governance.yaml` directly;
    automation that runs outside a feature-branch worktree; a PR merged without
    an independent review recorded via `saturnin review record` /
    `saturnin review gate` (author and reviewer must differ, and

@@ -16,5 +16,6 @@ Produce a diff somebody else can review quickly and merge safely.
    precondition.
 
 ## Refusals
-- Pushing to `main`/`master`/`release`.
+- Pushing to any branch rejected by the policy-backed `saturnin check branch`
+  gate.
 - Merging your own change, or merging with an open `changes_requested`.

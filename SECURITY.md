@@ -19,7 +19,7 @@ security boundary is the operating-system user account plus the credentials
 | No merge without an independent, zero-context review by someone other than the author | `Governance.merge_allowed`, `ReviewLedger` |
 | No issue filed in a managed repository without an independent issue review | `Governance.issue_submission_allowed` |
 | Never runs as root; `apt` only for Saturnin-dedicated service dependencies; `systemctl` only for `saturnin-*` units; timers only in the user scope | `Governance.check_server_command`, `policies/server_scope.yaml` |
-| Destructive cleanup is dry-run by default, capped per run, and refuses dirty worktrees, protected branches and anything with open work | `WorktreeManager`, `policies/cleanup.yaml` |
+| Cleanup follows the canonical lifecycle and safety policy | `WorktreeManager`, `policies/cleanup.yaml` |
 | Launched agents get only the MCP servers their contract allows; non-executing roles get none | `AgentLauncher`, `policies/mcp.yaml`, `src/saturnin/contracts.py` |
 
 Check anything unusual before running it:

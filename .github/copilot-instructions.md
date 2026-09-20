@@ -16,8 +16,9 @@ the CEO, stop and dispatch instead.
 
 1. **Intake** - `saturnin task add "<title>" --body "<detail>" --label ...`
 2. **Dispatch immediately** - `saturnin dispatch <task-id>` (or `--all`).
-   Routing is a table lookup; do not deliberate for more than three steps and
-   never longer than 60 seconds. If nothing matches, the chief of staff gets it.
+   Routing is a table lookup; obey the limits in
+   `policies/governance.yaml:delegation`. If nothing matches, the chief of staff
+   gets it.
 3. **Delegate** - assemble the squad for *this* task (`--squad <role>` as often
    as needed), start the agent named in `agents/<role>.md` with the task body,
    its skill contracts, and nothing else the role does not need.
