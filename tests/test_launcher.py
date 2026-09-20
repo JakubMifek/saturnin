@@ -3441,6 +3441,59 @@ def test_launcher_worker_environment_uses_allowlist_and_mcp_scoped_github_token(
     }
 
 
+def test_launcher_reads_systemd_credentials_without_exposing_master_to_worker(
+    config: Config,
+    board: Board,
+    git_repo: Path,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    task = board.create("Use systemd credentials")
+    Router(config).dispatch(board, task)
+    worktree = WorktreeManager(config, repo=git_repo, board=board).create(
+        "feature/systemd-credential"
+    )
+    with board.edit(task.id) as stored:
+        stored.branch = "feature/systemd-credential"
+        stored.worktree = str(worktree.path)
+    credentials = tmp_path / "credentials"
+    credentials.mkdir(mode=0o700)
+    (credentials / "saturnin-review-attestation-key").write_text(
+        "master-from-systemd", encoding="utf-8"
+    )
+    (credentials / "saturnin-github-mcp-token").write_text(
+        "mcp-from-systemd", encoding="utf-8"
+    )
+    for path in credentials.iterdir():
+        path.chmod(0o600)
+    monkeypatch.setenv("CREDENTIALS_DIRECTORY", str(credentials))
+    monkeypatch.delenv("SATURNIN_REVIEW_ATTESTATION_KEY", raising=False)
+    monkeypatch.delenv("SATURNIN_GITHUB_MCP_TOKEN", raising=False)
+
+    launcher = AgentLauncher(config, board)
+    worker_config = launcher._worker_config(worktree.path)
+    contract = launcher._contract(board.get(task.id), worker_config)
+    environment = launcher._worker_environment(
+        worker_config,
+        contract,
+        task=board.get(task.id),
+        workdir=worktree.path,
+    )
+    mcp_path = launcher._write_mcp_config(
+        board.get(task.id),
+        contract,
+        config=worker_config,
+        worktree_scope=worktree.path,
+    )
+    mcp = json.loads(mcp_path.read_text(encoding="utf-8"))
+
+    assert "SATURNIN_REVIEW_ATTESTATION_KEY" not in environment
+    assert "CREDENTIALS_DIRECTORY" not in environment
+    assert mcp["mcpServers"]["github"]["env"] == {
+        "GITHUB_PERSONAL_ACCESS_TOKEN": "mcp-from-systemd"
+    }
+
+
 def test_launcher_preserves_approved_config_path_under_isolated_home(
     config: Config,
     board: Board,

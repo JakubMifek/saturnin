@@ -27,10 +27,33 @@ Disable a misbehaving worker: `systemctl --user disable --now saturnin-<name>.ti
 
 ## Review attestation key
 
-Keep `SATURNIN_REVIEW_ATTESTATION_KEY` outside the checkout and outside worker
-unit environments. Only trusted supervisor processes (for example CI jobs or a
-dedicated supervisor shell profile) should load it. Worker launches derive
-role-scoped signing keys and pass them only to configured reviewer roles.
+Production user services load the attestation master and GitHub MCP token from
+systemd encrypted credential files. Generate the attestation key locally:
+
+```bash
+saturnin credential provision-attestation
+saturnin credential status review-attestation
+```
+
+The trusted launcher reads the systemd credential file only when needed.
+Worker launches derive role-scoped signing keys and pass them only to configured
+reviewer roles; ordinary workers never receive the master key.
+
+Create a dedicated fine-grained token at
+<https://github.com/settings/personal-access-tokens/new>. Select only
+`JakubMifek/saturnin`, choose read-only **Contents**, **Issues**, and
+**Pull requests** repository permissions (GitHub adds read-only **Metadata**),
+then ingest it from a no-echo prompt:
+
+```bash
+saturnin credential store-github-mcp
+saturnin credential status github-mcp
+```
+
+Do not reuse `gh auth token`. The encrypted files are stored under
+`~/.config/systemd/user/saturnin-credentials/`; their contents must never be
+printed or copied into an environment file. Once both validate, install the
+reviewed units with `scripts/install_user_units.sh`.
 
 To rotate the key, stop `saturnin-*` timers, retain the old master key as the
 previous verification key, and install the new current key:

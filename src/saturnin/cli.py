@@ -32,6 +32,12 @@ from .contracts import (
     mcp_authorization_problem,
     project_agent_path,
 )
+from .credentials import (
+    CredentialError,
+    provision_attestation_key,
+    store_github_mcp_token,
+    validate_encrypted_credential,
+)
 from .discovery import DiscoveryError, IssueDiscovery
 from . import docsync
 from .governance import Governance, github_repo_slug
@@ -364,6 +370,27 @@ def build_parser() -> argparse.ArgumentParser:
     docs_render = docs_cmd.add_parser("render", help="regenerate policy tables inside the docs")
     docs_render.add_argument(
         "--check", action="store_true", help="fail instead of writing when docs are stale"
+    )
+
+    credential = sub.add_parser(
+        "credential", help="manage systemd encrypted supervisor credentials"
+    ).add_subparsers(dest="credential_command", required=True)
+    credential.add_parser(
+        "provision-attestation",
+        help="generate and encrypt a new review attestation master key",
+    )
+    credential.add_parser(
+        "store-github-mcp",
+        help="prompt for and encrypt a dedicated fine-grained GitHub token",
+    )
+    credential_status = credential.add_parser(
+        "status", help="validate encrypted credentials without disclosing values"
+    )
+    credential_status.add_argument(
+        "kind",
+        choices=["review-attestation", "github-mcp", "all"],
+        default="all",
+        nargs="?",
     )
 
     sub.add_parser("doctor", help="validate policies and installation")
@@ -907,6 +934,41 @@ def _run(args: argparse.Namespace, config: Config) -> int:  # noqa: C901 - flat 
     as_json = args.json
     if args.command == "doctor":
         return _run_doctor(config, as_json)
+    if args.command == "credential":
+        try:
+            if args.credential_command == "provision-attestation":
+                path = provision_attestation_key()
+                _emit(
+                    {"credential": "review-attestation", "path": str(path)},
+                    as_json,
+                    f"provisioned review-attestation at {path}",
+                )
+                return 0
+            if args.credential_command == "store-github-mcp":
+                path = store_github_mcp_token()
+                _emit(
+                    {"credential": "github-mcp", "path": str(path)},
+                    as_json,
+                    f"provisioned github-mcp at {path}",
+                )
+                return 0
+            kinds = (
+                ["review-attestation", "github-mcp"]
+                if args.kind == "all"
+                else [args.kind]
+            )
+            paths = {
+                kind: str(validate_encrypted_credential(kind)) for kind in kinds
+            }
+            _emit(
+                paths,
+                as_json,
+                "\n".join(f"{kind}: valid ({path})" for kind, path in paths.items()),
+            )
+            return 0
+        except CredentialError as exc:
+            print(f"saturnin: {exc}", file=sys.stderr)
+            return 2
     board = Board(config)
 
     if args.command == "task":

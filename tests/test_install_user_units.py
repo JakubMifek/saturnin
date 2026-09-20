@@ -93,6 +93,14 @@ def test_install_user_units_installs_safe_checkout_path(tmp_path: Path) -> None:
         assert working_directory == str(saturnin_home)
         assert environment == str(saturnin_home)
         assert "EnvironmentFile=-" not in text
+    for unit in (
+        "saturnin-improve.service",
+        "saturnin-resume.service",
+        "saturnin-discovery.service",
+    ):
+        text = (installed_dir / unit).read_text(encoding="utf-8")
+        assert "LoadCredentialEncrypted=saturnin-review-attestation-key:" in text
+        assert "LoadCredentialEncrypted=saturnin-github-mcp-token:" in text
 
 
 def test_install_does_not_enable_unaccepted_mirror_timer(tmp_path: Path) -> None:

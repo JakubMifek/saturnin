@@ -20,6 +20,12 @@ from yaml import YAMLError
 from .board import Board, BoardError, Task, utcnow
 from .checkpoints import Checkpoint, CheckpointStore
 from .config import Config, default_config, load_yaml
+from .credentials import (
+    ATTESTATION_CREDENTIAL,
+    GITHUB_MCP_CREDENTIAL,
+    CredentialError,
+    credential_value,
+)
 from .contracts import (
     FRONT_MATTER,
     AgentContract,
@@ -1181,7 +1187,10 @@ class AgentLauncher:
                 raise LauncherError(
                     f"reviewer role {contract.role!r} requires verified review input"
                 )
-            master_key = os.environ.get(key_env, "")
+            try:
+                master_key = credential_value(key_env, ATTESTATION_CREDENTIAL)
+            except CredentialError as exc:
+                raise LauncherError(str(exc)) from exc
             if not master_key:
                 raise LauncherError(
                     f"reviewer role {contract.role!r} requires {key_env} in the launcher environment"
@@ -1638,7 +1647,10 @@ class AgentLauncher:
                     .get("launcher", {})
                     .get("github_read_token_env", "SATURNIN_GITHUB_MCP_TOKEN")
                 )
-                token = os.environ.get(token_name, "")
+                try:
+                    token = credential_value(token_name, GITHUB_MCP_CREDENTIAL)
+                except CredentialError as exc:
+                    raise LauncherError(str(exc)) from exc
                 if token:
                     server["env"] = {"GITHUB_PERSONAL_ACCESS_TOKEN": token}
             servers[name] = server

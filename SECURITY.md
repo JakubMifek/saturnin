@@ -37,6 +37,11 @@ keeping the rules as data.
 
 - Saturnin holds no tokens itself. GitHub access is delegated to the `gh` CLI,
   which owns its own credential storage.
+- Autonomous worker supervisors use systemd encrypted credentials. The
+  launcher reads the attestation master only to derive reviewer-role keys and
+  injects the dedicated read-only GitHub token only into the GitHub MCP server.
+  Provision and validate these through `saturnin credential`; the CLI never
+  accepts secret values as command-line arguments.
 - Nothing secret belongs in this repository. `board/tasks/`, `var/` and
   checkpoints are gitignored; private material belongs in the private
   companion repositories (ADR-0002).
