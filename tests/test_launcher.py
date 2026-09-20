@@ -290,17 +290,22 @@ def test_worker_command_uses_mandatory_os_sandbox(
         mcp_config=mcp_config,
     )
 
-    assert command[:8] == [
+    assert command[:13] == [
         "/usr/bin/pasta",
         "--quiet",
         "--foreground",
+        "--config-net",
         "--no-map-gw",
         "--tcp-ports=none",
         "--udp-ports=none",
+        "--dns-forward",
+        "169.254.1.1",
+        "--dns-host",
+        "127.0.0.53",
         "--",
         "/usr/bin/bwrap",
     ]
-    assert command[8:11] == ["--unshare-all", "--share-net", "--new-session"]
+    assert command[13:16] == ["--unshare-all", "--share-net", "--new-session"]
     assert ["--tmpfs", "/"] == command[
         command.index("--tmpfs"):command.index("--tmpfs") + 2
     ]
@@ -472,6 +477,59 @@ def test_worker_command_remounts_worktree_git_control_file_read_only(
     )
     assert (worktree.path / ".git").is_file()
     assert protected_index > writable_index
+
+
+def test_worker_command_can_mount_an_upstream_resolver_config(
+    config: Config,
+    board: Board,
+    git_repo: Path,
+) -> None:
+    resolver = config.root / "upstream-resolv.conf"
+    resolver.write_text("nameserver 192.0.2.53\n", encoding="utf-8")
+    config.policy("mcp")["launcher"]["sandbox"]["resolv_conf_source"] = str(resolver)
+    task = board.create("Use upstream resolver")
+    worktree = WorktreeManager(config, repo=git_repo, board=board).create(
+        "feature/upstream-resolver"
+    )
+    launcher = AgentLauncher(config, board)
+    home = launcher._isolated_home(task.id)
+    mcp_config = config.var_dir / "launches" / f"{task.id}.mcp.json"
+    mcp_config.write_text('{"mcpServers": {}}\n', encoding="utf-8")
+
+    command = launcher._sandbox_command(
+        "/usr/bin/bwrap",
+        "/usr/bin/pasta",
+        "/usr/bin/copilot",
+        ["--autopilot"],
+        workdir=worktree.path,
+        isolated_home=home,
+        trusted_config=config,
+        git_objects=git_repo / ".git" / "objects",
+        mcp_config=mcp_config,
+    )
+
+    resolver_mount = ["--ro-bind", str(resolver), "/etc/resolv.conf"]
+    assert any(
+        command[index:index + 3] == resolver_mount
+        for index in range(len(command) - 2)
+    )
+
+
+def test_copilot_mcp_config_is_passed_as_a_file_reference(
+    config: Config,
+    board: Board,
+) -> None:
+    launcher = AgentLauncher(config, board)
+    mcp_config = config.var_dir / "launches" / "task.mcp.json"
+
+    args = launcher._agent_args(
+        prompt="Inspect the repository",
+        mcp_config=mcp_config,
+        task_id="T-1",
+    )
+
+    option = args.index("--additional-mcp-config")
+    assert args[option + 1] == f"@{mcp_config}"
 
 
 def test_reconcile_applies_worker_callbacks_before_requeue(
@@ -3448,35 +3506,73 @@ def test_launcher_preserves_approved_config_path_under_isolated_home(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     real_home = tmp_path / "real-home"
-    gh_config = real_home / ".config" / "gh"
-    gh_config.mkdir(parents=True)
-    (gh_config / "hosts.yml").write_text("github.com: {}\n", encoding="utf-8")
+    tool_config = real_home / ".config" / "tool"
+    tool_config.mkdir(parents=True)
+    (tool_config / "preferences.yml").write_text("theme: dark\n", encoding="utf-8")
     monkeypatch.setenv("HOME", str(real_home))
-    config.policy("mcp")["launcher"]["approved_home_config"] = [str(gh_config)]
+    config.policy("mcp")["launcher"]["approved_home_config"] = [str(tool_config)]
 
     isolated = AgentLauncher(config, board)._isolated_home("nested-xdg")
 
-    assert (isolated / ".config" / "gh" / "hosts.yml").read_text(
+    assert (isolated / ".config" / "tool" / "preferences.yml").read_text(
         encoding="utf-8"
-    ) == "github.com: {}\n"
-    assert not (isolated / "gh").exists()
+    ) == "theme: dark\n"
+    assert not (isolated / "tool").exists()
 
 
 def test_launcher_supports_explicit_safe_approved_config_destination(
     config: Config,
     board: Board,
 ) -> None:
-    source = config.root / "approved-gh-hosts.yml"
-    source.write_text("github.com: {}\n", encoding="utf-8")
+    source = config.root / "approved-preferences.yml"
+    source.write_text("theme: dark\n", encoding="utf-8")
     config.policy("mcp")["launcher"]["approved_home_config"] = [
-        {"source": str(source), "destination": ".config/gh/hosts.yml"}
+        {"source": str(source), "destination": ".config/tool/preferences.yml"}
     ]
 
     isolated = AgentLauncher(config, board)._isolated_home("explicit-destination")
 
-    assert (isolated / ".config" / "gh" / "hosts.yml").read_text(
+    assert (isolated / ".config" / "tool" / "preferences.yml").read_text(
         encoding="utf-8"
-    ) == "github.com: {}\n"
+    ) == "theme: dark\n"
+
+
+def test_launcher_canonical_config_excludes_host_github_credentials(
+    config: Config,
+    board: Board,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    real_home = tmp_path / "real-home"
+    copilot_config = real_home / ".copilot" / "config.json"
+    copilot_config.parent.mkdir(parents=True)
+    copilot_config.write_text('{"theme": "dark"}\n', encoding="utf-8")
+    gh_hosts = real_home / ".config" / "gh" / "hosts.yml"
+    gh_hosts.parent.mkdir(parents=True)
+    gh_hosts.write_text(
+        "github.com:\n  oauth_token: host-oauth-secret\n",
+        encoding="utf-8",
+    )
+    (real_home / ".git-credentials").write_text(
+        "https://host-git-secret@github.com\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setenv("HOME", str(real_home))
+
+    isolated = AgentLauncher(config, board)._isolated_home("safe-canonical-config")
+
+    assert (isolated / ".copilot" / "config.json").read_text(
+        encoding="utf-8"
+    ) == '{"theme": "dark"}\n'
+    assert not (isolated / ".config" / "gh").exists()
+    assert not (isolated / ".git-credentials").exists()
+    copied = "\n".join(
+        path.read_text(encoding="utf-8")
+        for path in isolated.rglob("*")
+        if path.is_file()
+    )
+    assert "host-oauth-secret" not in copied
+    assert "host-git-secret" not in copied
 
 
 @pytest.mark.parametrize("destination", ["../outside", "/tmp/outside"])

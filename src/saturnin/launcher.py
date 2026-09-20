@@ -841,6 +841,18 @@ class AgentLauncher:
             raise LauncherError(
                 "mcp.launcher.sandbox.read_only_paths must be a list of absolute paths"
             )
+        resolver_source_value = sandbox_policy.get("resolv_conf_source")
+        resolver_source: Path | None = None
+        if resolver_source_value is not None:
+            resolver_source = Path(str(resolver_source_value)).expanduser()
+            if not resolver_source.is_absolute():
+                raise LauncherError(
+                    "mcp.launcher.sandbox.resolv_conf_source must be an absolute path"
+                )
+            if not resolver_source.is_file():
+                raise LauncherError(
+                    "mcp.launcher.sandbox.resolv_conf_source must be a regular file"
+                )
         command = [
             network_sandbox,
             *network_args,
@@ -872,9 +884,15 @@ class AgentLauncher:
             trusted_config.root / ".venv",
             trusted_config.var_dir / "bin",
         )
+        resolv_conf = Path("/etc/resolv.conf")
         read_only_mounts = [
-            (Path(path), Path(path)) for path in read_only_paths if Path(path).exists()
+            (Path(path), Path(path))
+            for path in read_only_paths
+            if Path(path).exists()
+            and not (resolver_source is not None and Path(path) == resolv_conf)
         ]
+        if resolver_source is not None:
+            read_only_mounts.append((resolver_source, resolv_conf))
         read_only_mounts.extend((path, path) for path in trusted_paths if path.exists())
         read_only_mounts.extend(
             (path, path) for path in (Path(executable), git_objects, mcp_config)
