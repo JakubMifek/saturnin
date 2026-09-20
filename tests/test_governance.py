@@ -2030,6 +2030,25 @@ def test_destructive_raw_git_worktree_commands_fail_closed(
     assert "saturnin worktree lifecycle commands" in decision.reasons[0]
 
 
+@pytest.mark.parametrize(
+    "command",
+    [
+        "git branch -D feature/unmerged",
+        "git branch --delete=feature/unmerged",
+        "git branch -M feature/old feature/new",
+        "git branch -f feature/existing HEAD",
+        "git branch -df feature/unmerged",
+    ],
+)
+def test_destructive_raw_git_branch_commands_fail_closed(
+    governance: Governance, command: str
+) -> None:
+    decision = governance.check_server_command(command)
+
+    assert not decision.allowed
+    assert "saturnin worktree lifecycle commands" in decision.reasons[0]
+
+
 def test_git_worktree_add_target_is_checked_after_global_options(
     governance: Governance,
 ) -> None:

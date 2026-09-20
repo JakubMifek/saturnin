@@ -279,6 +279,7 @@ def test_worker_command_uses_mandatory_os_sandbox(
 
     command = launcher._sandbox_command(
         "/usr/bin/bwrap",
+        "/usr/bin/pasta",
         "/usr/bin/copilot",
         ["--autopilot"],
         workdir=worktree.path,
@@ -288,8 +289,17 @@ def test_worker_command_uses_mandatory_os_sandbox(
         mcp_config=mcp_config,
     )
 
-    assert command[:2] == ["/usr/bin/bwrap", "--unshare-all"]
-    assert "--share-net" not in command
+    assert command[:8] == [
+        "/usr/bin/pasta",
+        "--quiet",
+        "--foreground",
+        "--no-map-gw",
+        "--tcp-ports=none",
+        "--udp-ports=none",
+        "--",
+        "/usr/bin/bwrap",
+    ]
+    assert command[8:11] == ["--unshare-all", "--share-net", "--new-session"]
     assert ["--tmpfs", "/"] == command[
         command.index("--tmpfs"):command.index("--tmpfs") + 2
     ]
@@ -1871,6 +1881,61 @@ def test_launcher_fails_closed_without_worker_sandbox(
         AgentLauncher(config, board).launch(task.id)
 
     assert board.get(task.id).state == "routed"
+
+
+def test_launcher_fails_closed_without_worker_network_sandbox(
+    config: Config, board: Board, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    config.policy("mcp")["launcher"]["enabled"] = True
+    task = board.create("Do not launch with host networking")
+    Router(config).dispatch(board, task)
+
+    def executable(name: str) -> str | None:
+        if name == "copilot":
+            return "/usr/bin/copilot"
+        if name == "bwrap":
+            return "/usr/bin/bwrap"
+        return None
+
+    monkeypatch.setattr("saturnin.launcher.shutil.which", executable)
+
+    with pytest.raises(LauncherError, match="required worker network sandbox executable"):
+        AgentLauncher(config, board).launch(task.id)
+
+    assert board.get(task.id).state == "routed"
+
+
+def test_sandbox_rejects_unconstrained_network_configuration(
+    config: Config, board: Board, git_repo: Path
+) -> None:
+    config.policy("mcp")["launcher"]["sandbox"]["network"]["args"].remove("--no-map-gw")
+    launcher = AgentLauncher(config, board)
+    task = board.create("Reject host network access")
+    worktree = WorktreeManager(config, repo=git_repo, board=board).create(
+        "feature/reject-host-network"
+    )
+    with board.edit(task.id) as stored:
+        stored.branch = "feature/reject-host-network"
+        stored.worktree = str(worktree.path)
+    home = launcher._isolated_home(task.id)
+    _, git_objects = launcher._isolated_git_environment(
+        board.get(task.id), worktree.path, home
+    )
+    mcp_config = config.var_dir / "launches" / f"{task.id}.mcp.json"
+    mcp_config.write_text('{"mcpServers": {}}\n', encoding="utf-8")
+
+    with pytest.raises(LauncherError, match="must disable host gateway"):
+        launcher._sandbox_command(
+            "/usr/bin/bwrap",
+            "/usr/bin/pasta",
+            "/usr/bin/copilot",
+            ["--autopilot"],
+            workdir=worktree.path,
+            isolated_home=home,
+            trusted_config=config,
+            git_objects=git_objects,
+            mcp_config=mcp_config,
+        )
 
 
 def test_launcher_intersects_role_mcp_with_project_allowlist(

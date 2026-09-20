@@ -57,6 +57,16 @@ launcher:
   sandbox:
     # Mandatory mount/user namespace isolation for every autonomous worker.
     command: bwrap
+    # pasta creates a separate user/network namespace with outbound connectivity.
+    # No host gateway is mapped and no host ports are forwarded into the worker.
+    network:
+      command: pasta
+      args:
+        - --quiet
+        - --foreground
+        - --no-map-gw
+        - --tcp-ports=none
+        - --udp-ports=none
     # The sandbox starts from an empty root. These host paths are the minimum
     # system runtime needed for executables, TLS, DNS and user lookup.
     read_only_paths:

@@ -1036,6 +1036,8 @@ def _git_targets(arguments: Sequence[str]) -> list[str]:
         )
     if subcommand == "remote":
         _check_git_remote_subcommand(subcommand_arguments)
+    if subcommand == "branch":
+        _check_git_branch_subcommand(subcommand_arguments)
     worktree_subcommand_index: int | None = None
     if subcommand == "worktree":
         worktree_subcommand_index = _check_git_worktree_subcommand(subcommand_arguments)
@@ -1063,6 +1065,34 @@ def _check_git_remote_subcommand(arguments: Sequence[str]) -> None:
                 "require a dedicated governed wrapper"
             )
         return
+
+
+def _check_git_branch_subcommand(arguments: Sequence[str]) -> None:
+    destructive = {
+        "-d",
+        "-D",
+        "--delete",
+        "-m",
+        "-M",
+        "--move",
+        "-c",
+        "-C",
+        "--copy",
+        "-f",
+        "--force",
+        "--edit-description",
+    }
+    for argument in arguments:
+        option = argument.split("=", 1)[0]
+        if option in destructive or (
+            argument.startswith("-")
+            and not argument.startswith("--")
+            and any(flag in argument[1:] for flag in ("d", "D", "m", "M", "c", "C", "f"))
+        ):
+            raise _WriteScopeError(
+                "destructive git branch operations are unsupported; "
+                "use saturnin worktree lifecycle commands"
+            )
 
 
 def _check_git_worktree_subcommand(arguments: Sequence[str]) -> int:

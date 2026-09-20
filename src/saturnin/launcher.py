@@ -110,6 +110,7 @@ class AgentLauncher:
             raise LauncherError(f"agent launcher executable not found: {executable}")
         executable_path = str(Path(executable_path).resolve())
         sandbox_path = self._sandbox_executable()
+        network_sandbox_path = self._network_sandbox_executable()
         mcp_path: Path | None = None
         log_path = self.dir / f"{task.id}.log"
         launch_error: LauncherError | None = None
@@ -208,6 +209,7 @@ class AgentLauncher:
                     self._stage_worker_board_context(claimed, home, worker_config)
                     command = self._sandbox_command(
                         sandbox_path,
+                        network_sandbox_path,
                         executable_path,
                         args,
                         workdir=workdir,
@@ -684,6 +686,21 @@ class AgentLauncher:
             raise LauncherError(f"required worker sandbox executable not found: {executable}")
         return str(Path(path).resolve())
 
+    def _network_sandbox_executable(self) -> str:
+        sandbox = self.policy.get("sandbox", {})
+        if not isinstance(sandbox, dict):
+            raise LauncherError("mcp.launcher.sandbox must be a mapping")
+        network = sandbox.get("network", {})
+        if not isinstance(network, dict):
+            raise LauncherError("mcp.launcher.sandbox.network must be a mapping")
+        executable = str(network.get("command", "pasta")).strip()
+        path = shutil.which(executable)
+        if path is None:
+            raise LauncherError(
+                f"required worker network sandbox executable not found: {executable}"
+            )
+        return str(Path(path).resolve())
+
     def _tighten_existing_logs(self) -> None:
         for path in self.dir.glob("*.log"):
             try:
@@ -728,6 +745,7 @@ class AgentLauncher:
     @staticmethod
     def _sandbox_command(
         sandbox: str,
+        network_sandbox: str,
         executable: str,
         args: list[str],
         *,
@@ -740,6 +758,36 @@ class AgentLauncher:
         sandbox_policy = trusted_config.policy("mcp").get("launcher", {}).get(
             "sandbox", {}
         )
+        network_policy = sandbox_policy.get("network", {})
+        if not isinstance(network_policy, dict):
+            raise LauncherError("mcp.launcher.sandbox.network must be a mapping")
+        network_args = network_policy.get(
+            "args",
+            [
+                "--quiet",
+                "--foreground",
+                "--no-map-gw",
+                "--tcp-ports=none",
+                "--udp-ports=none",
+            ],
+        )
+        if not isinstance(network_args, list) or not all(
+            isinstance(argument, str) and argument for argument in network_args
+        ):
+            raise LauncherError(
+                "mcp.launcher.sandbox.network.args must be a list of nonempty strings"
+            )
+        required_network_args = {
+            "--no-map-gw",
+            "--tcp-ports=none",
+            "--udp-ports=none",
+        }
+        missing_network_args = sorted(required_network_args - set(network_args))
+        if missing_network_args:
+            raise LauncherError(
+                "mcp.launcher.sandbox.network.args must disable host gateway and "
+                f"inbound port mappings (missing: {', '.join(missing_network_args)})"
+            )
         read_only_paths = sandbox_policy.get("read_only_paths", [])
         if not isinstance(read_only_paths, list) or not all(
             isinstance(path, str) and Path(path).is_absolute()
@@ -749,8 +797,12 @@ class AgentLauncher:
                 "mcp.launcher.sandbox.read_only_paths must be a list of absolute paths"
             )
         command = [
+            network_sandbox,
+            *network_args,
+            "--",
             sandbox,
             "--unshare-all",
+            "--share-net",
             "--new-session",
             "--cap-drop",
             "ALL",
