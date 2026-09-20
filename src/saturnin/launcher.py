@@ -2,8 +2,10 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
 import os
+import re
 import shutil
 import stat
 import subprocess
@@ -28,7 +30,12 @@ from .governance import Governance, github_repo_slug
 from .jsonlines import PRIVATE_FILE_MODE, atomic_replace_text
 from .locking import file_lock
 from .mcp import MCPError, server_process, verify_github_binary
-from .review import ReviewError, role_scoped_review_attestation_key, slugify as review_slugify
+from .review import (
+    ReviewError,
+    issue_content_digest,
+    role_scoped_review_attestation_key,
+    slugify as review_slugify,
+)
 from .worker_callbacks import (
     CALLBACKS_FILE,
     ENV_CALLBACK_DIR,
@@ -52,6 +59,15 @@ class LaunchResult:
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)
+
+
+@dataclass(frozen=True)
+class _VerifiedReviewInput:
+    task_id: str
+    role: str
+    kind: str
+    binding: str
+    prompt: str
 
 
 class AgentLauncher:
@@ -165,6 +181,12 @@ class AgentLauncher:
                     workdir = self._validated_workdir(claimed)
                     worker_config = self._worker_config(workdir)
                     contract = self._contract(claimed, worker_config)
+                    review_input = self._verified_review_input(
+                        claimed,
+                        contract,
+                        workdir,
+                        config=worker_config,
+                    )
                     mcp_path = self._write_mcp_config(
                         claimed,
                         contract,
@@ -176,6 +198,7 @@ class AgentLauncher:
                         contract,
                         config=worker_config,
                         checkpoint=checkpoint,
+                        review_input=review_input,
                     )
                     args = [
                         str(value).format(
@@ -198,6 +221,7 @@ class AgentLauncher:
                         contract,
                         task=claimed,
                         workdir=workdir,
+                        review_input=review_input,
                     )
                     home = Path(environment["HOME"])
                     git_environment, git_objects = self._isolated_git_environment(
@@ -1066,6 +1090,7 @@ class AgentLauncher:
         *,
         task: Task,
         workdir: Path,
+        review_input: _VerifiedReviewInput | None = None,
     ) -> dict[str, str]:
         trusted_config = self._trusted_config(config)
         token_name = str(
@@ -1116,6 +1141,10 @@ class AgentLauncher:
         source = str(config.root / "src")
         environment["PYTHONPATH"] = source
         if contract.role in self._review_attestation_roles(trusted_config):
+            if not self._review_input_matches(review_input, task, contract):
+                raise LauncherError(
+                    f"reviewer role {contract.role!r} requires verified immutable review input"
+                )
             master_key = os.environ.get(key_env, "")
             if not master_key:
                 raise LauncherError(
@@ -1421,6 +1450,7 @@ class AgentLauncher:
         *,
         config: Config | None = None,
         checkpoint: Checkpoint | None = None,
+        review_input: _VerifiedReviewInput | None = None,
     ) -> str:
         config = config or self.config
         sections = [
@@ -1428,6 +1458,14 @@ class AgentLauncher:
             json.dumps(task.to_dict(), indent=2),
             contract.path.read_text(encoding="utf-8"),
         ]
+        if contract.role in self._review_attestation_roles(
+            self._trusted_config(config)
+        ):
+            if not self._review_input_matches(review_input, task, contract):
+                raise LauncherError(
+                    f"reviewer role {contract.role!r} requires verified immutable review input"
+                )
+            sections.append(review_input.prompt)
         if task.worktree:
             worktree_root = Path(task.worktree).resolve(strict=False)
             manifest_path = (worktree_root / ".saturnin" / "repo.yaml").resolve(strict=False)
@@ -1444,6 +1482,193 @@ class AgentLauncher:
         if checkpoint is not None:
             sections.append(checkpoint.render())
         return "\n\n---\n\n".join(sections)
+
+    def _verified_review_input(
+        self,
+        task: Task,
+        contract: AgentContract,
+        workdir: Path,
+        *,
+        config: Config | None = None,
+    ) -> _VerifiedReviewInput | None:
+        trusted_config = self._trusted_config(config or self.config)
+        if contract.role not in self._review_attestation_roles(trusted_config):
+            return None
+        if not task.review_subject or not task.review_author:
+            raise LauncherError(
+                "review task requires review_subject and review_author"
+            )
+        if task.kind == "pr-review":
+            allowed = set(
+                trusted_config.governance.get("review", {})
+                .get("pr", {})
+                .get("allowed_reviewer_roles", [])
+            )
+            if contract.role not in allowed:
+                raise LauncherError(
+                    f"reviewer role {contract.role!r} cannot review PR tasks"
+                )
+            return self._verified_pr_review_input(task, workdir, trusted_config)
+        if task.kind == "issue-review":
+            allowed = set(
+                trusted_config.governance.get("review", {})
+                .get("issue", {})
+                .get("allowed_reviewer_roles", [])
+            )
+            if contract.role not in allowed:
+                raise LauncherError(
+                    f"reviewer role {contract.role!r} cannot review issue tasks"
+                )
+            return self._verified_issue_review_input(task)
+        raise LauncherError(
+            f"reviewer role {contract.role!r} requires a pr-review or issue-review task"
+        )
+
+    def _verified_pr_review_input(
+        self,
+        task: Task,
+        workdir: Path,
+        config: Config,
+    ) -> _VerifiedReviewInput:
+        expected = (task.review_head_sha or "").strip().lower()
+        if not re.fullmatch(r"[0-9a-f]{40}", expected):
+            raise LauncherError("PR review task requires a full 40-character review_head_sha")
+        head = self._git_output(
+            ["--no-replace-objects", "rev-parse", "--verify", "HEAD^{commit}"],
+            cwd=workdir,
+        ).lower()
+        if head != expected:
+            raise LauncherError(
+                f"PR review worktree HEAD {head} does not match review_head_sha {expected}"
+            )
+        base_ref = self._review_base_ref(task, workdir, config)
+        base = self._git_output(
+            ["--no-replace-objects", "rev-parse", "--verify", f"{base_ref}^{{commit}}"],
+            cwd=workdir,
+        ).lower()
+        merge_base = self._git_output(
+            ["--no-replace-objects", "merge-base", base, expected],
+            cwd=workdir,
+        ).lower()
+        diff = self._git_output(
+            [
+                "--no-replace-objects",
+                "diff",
+                "--binary",
+                "--no-ext-diff",
+                "--no-textconv",
+                "--find-renames",
+                merge_base,
+                expected,
+                "--",
+            ],
+            cwd=workdir,
+        )
+        identity = {
+            "kind": "pr",
+            "subject": task.review_subject,
+            "author": task.review_author,
+            "head_sha": expected,
+            "base_sha": base,
+            "merge_base_sha": merge_base,
+            "diff_sha256": hashlib.sha256(diff.encode("utf-8")).hexdigest(),
+        }
+        return _VerifiedReviewInput(
+            task_id=task.id,
+            role=str(task.role or ""),
+            kind=task.kind,
+            binding=expected,
+            prompt=(
+                "Verified immutable PR review input:\n"
+                + json.dumps(identity, indent=2)
+                + "\n\nDiff (merge base to exact review_head_sha):\n"
+                + diff
+            ),
+        )
+
+    def _review_base_ref(
+        self,
+        task: Task,
+        workdir: Path,
+        config: Config,
+    ) -> str:
+        for source in config.policy("repos").get("discovery", {}).get("sources", []) or []:
+            if (
+                isinstance(source, dict)
+                and str(source.get("slug", "")).casefold()
+                == str(task.repo or "").casefold()
+                and source.get("default_branch")
+            ):
+                return f"refs/heads/{source['default_branch']}"
+        remote_head = self._git_output(
+            ["symbolic-ref", "--quiet", "refs/remotes/origin/HEAD"],
+            cwd=workdir,
+            required=False,
+        )
+        if remote_head:
+            return remote_head
+        default_branch = str(
+            config.governance.get("git", {}).get("default_branch", "main")
+        )
+        return f"refs/heads/{default_branch}"
+
+    @staticmethod
+    def _verified_issue_review_input(task: Task) -> _VerifiedReviewInput:
+        expected = (task.review_issue_digest or "").strip().lower()
+        if not re.fullmatch(r"[0-9a-f]{64}", expected):
+            raise LauncherError(
+                "issue review task requires a full SHA-256 review_issue_digest"
+            )
+        if task.review_issue_title is None or task.review_issue_body is None:
+            raise LauncherError(
+                "issue review task requires review_issue_title and review_issue_body"
+            )
+        actual = issue_content_digest(
+            task.review_issue_title,
+            task.review_issue_body,
+        )
+        if actual != expected:
+            raise LauncherError(
+                "issue review title/body do not match review_issue_digest"
+            )
+        identity = {
+            "kind": "issue",
+            "subject": task.review_subject,
+            "author": task.review_author,
+            "issue_digest": expected,
+            "title": task.review_issue_title,
+            "body": task.review_issue_body,
+        }
+        return _VerifiedReviewInput(
+            task_id=task.id,
+            role=str(task.role or ""),
+            kind=task.kind,
+            binding=expected,
+            prompt="Verified immutable issue review input:\n"
+            + json.dumps(identity, indent=2),
+        )
+
+    @staticmethod
+    def _review_input_matches(
+        review_input: _VerifiedReviewInput | None,
+        task: Task,
+        contract: AgentContract,
+    ) -> bool:
+        if review_input is None:
+            return False
+        expected_binding = (
+            task.review_head_sha
+            if task.kind == "pr-review"
+            else task.review_issue_digest
+            if task.kind == "issue-review"
+            else None
+        )
+        return (
+            review_input.task_id == task.id
+            and review_input.role == contract.role
+            and review_input.kind == task.kind
+            and review_input.binding == (expected_binding or "").strip().lower()
+        )
 
 
 def load_yaml_front_matter(value: str, path: Path) -> dict[str, Any]:

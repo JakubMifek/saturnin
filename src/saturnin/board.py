@@ -95,6 +95,8 @@ class Task:
     review_author: str | None = None
     review_head_sha: str | None = None
     review_issue_digest: str | None = None
+    review_issue_title: str | None = None
+    review_issue_body: str | None = None
     review_destination_repo: str | None = None
     created_at: str = field(default_factory=utcnow)
     updated_at: str = field(default_factory=utcnow)
@@ -203,6 +205,8 @@ class Board:
         review_author: str | None = None,
         review_head_sha: str | None = None,
         review_issue_digest: str | None = None,
+        review_issue_title: str | None = None,
+        review_issue_body: str | None = None,
         review_destination_repo: str | None = None,
         source: str = "cli",
     ) -> Task:
@@ -219,6 +223,8 @@ class Board:
                 review_author=review_author,
                 review_head_sha=review_head_sha,
                 review_issue_digest=review_issue_digest,
+                review_issue_title=review_issue_title,
+                review_issue_body=review_issue_body,
                 review_destination_repo=review_destination_repo,
                 source=source,
             )
@@ -257,6 +263,8 @@ class Board:
         review_author: str | None = None,
         review_head_sha: str | None = None,
         review_issue_digest: str | None = None,
+        review_issue_title: str | None = None,
+        review_issue_body: str | None = None,
         review_destination_repo: str | None = None,
         source: str = "cli",
     ) -> Task:
@@ -284,6 +292,8 @@ class Board:
             review_author=review_author,
             review_head_sha=review_head_sha,
             review_issue_digest=review_issue_digest,
+            review_issue_title=review_issue_title,
+            review_issue_body=review_issue_body,
             review_destination_repo=review_destination_repo,
         )
         task.log("intake", actor=source)

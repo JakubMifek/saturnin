@@ -23,6 +23,7 @@ from saturnin.launcher import AgentLauncher, LauncherError
 from saturnin.mcp import MCPError
 from saturnin.review import (
     ReviewLedger,
+    issue_content_digest,
     review_attestation_signing_key,
     sign_review_attestation,
 )
@@ -3356,21 +3357,44 @@ def test_launcher_injects_role_scoped_attestation_key_only_for_reviewers(
     worktree = WorktreeManager(config, repo=git_repo, board=board).create(
         "feature/reviewer-key"
     )
+    (worktree.path / "reviewed.txt").write_text("review me\n", encoding="utf-8")
+    subprocess.run(["git", "add", "reviewed.txt"], cwd=worktree.path, check=True)
+    subprocess.run(
+        ["git", "commit", "-m", "reviewed change"],
+        cwd=worktree.path,
+        check=True,
+        capture_output=True,
+    )
+    head_sha = subprocess.run(
+        ["git", "rev-parse", "HEAD"],
+        cwd=worktree.path,
+        check=True,
+        capture_output=True,
+        text=True,
+    ).stdout.strip()
     with board.edit(task.id) as stored:
+        stored.kind = "pr-review"
         stored.state = "routed"
         stored.role = "pr-reviewer"
         stored.unit = "assurance"
         stored.branch = "feature/reviewer-key"
         stored.worktree = str(worktree.path)
+        stored.review_subject = "JakubMifek/saturnin#reviewer-key"
+        stored.review_author = "code-worker"
+        stored.review_head_sha = head_sha
 
     launcher = AgentLauncher(config, board)
     worker_config = launcher._worker_config(worktree.path)
     contract = launcher._contract(board.get(task.id), worker_config)
+    review_input = launcher._verified_review_input(
+        board.get(task.id), contract, worktree.path, config=worker_config
+    )
     environment = launcher._worker_environment(
         worker_config,
         contract,
         task=board.get(task.id),
         workdir=worktree.path,
+        review_input=review_input,
     )
 
     role_key = environment["SATURNIN_REVIEW_ATTESTATION_KEY"]
@@ -3412,17 +3436,31 @@ def test_launcher_refuses_reviewer_without_attestation_key(
     worktree = WorktreeManager(config, repo=git_repo, board=board).create(
         "feature/no-reviewer-key"
     )
+    head_sha = subprocess.run(
+        ["git", "rev-parse", "HEAD"],
+        cwd=worktree.path,
+        check=True,
+        capture_output=True,
+        text=True,
+    ).stdout.strip()
     with board.edit(task.id) as stored:
+        stored.kind = "pr-review"
         stored.state = "routed"
         stored.role = "pr-reviewer"
         stored.unit = "assurance"
         stored.branch = "feature/no-reviewer-key"
         stored.worktree = str(worktree.path)
+        stored.review_subject = "JakubMifek/saturnin#no-reviewer-key"
+        stored.review_author = "code-worker"
+        stored.review_head_sha = head_sha
     monkeypatch.delenv("SATURNIN_REVIEW_ATTESTATION_KEY", raising=False)
 
     launcher = AgentLauncher(config, board)
     worker_config = launcher._worker_config(worktree.path)
     contract = launcher._contract(board.get(task.id), worker_config)
+    review_input = launcher._verified_review_input(
+        board.get(task.id), contract, worktree.path, config=worker_config
+    )
 
     with pytest.raises(LauncherError, match="requires SATURNIN_REVIEW_ATTESTATION_KEY"):
         launcher._worker_environment(
@@ -3430,7 +3468,168 @@ def test_launcher_refuses_reviewer_without_attestation_key(
             contract,
             task=board.get(task.id),
             workdir=worktree.path,
+            review_input=review_input,
         )
+
+
+def test_pr_reviewer_prompt_contains_diff_bound_to_checked_out_head(
+    config: Config,
+    board: Board,
+    git_repo: Path,
+) -> None:
+    worktree = WorktreeManager(config, repo=git_repo, board=board).create(
+        "feature/review-input"
+    )
+    (worktree.path / "reviewed.txt").write_text("immutable change\n", encoding="utf-8")
+    subprocess.run(["git", "add", "reviewed.txt"], cwd=worktree.path, check=True)
+    subprocess.run(
+        ["git", "commit", "-m", "add reviewed input"],
+        cwd=worktree.path,
+        check=True,
+        capture_output=True,
+    )
+    head_sha = subprocess.run(
+        ["git", "rev-parse", "HEAD"],
+        cwd=worktree.path,
+        check=True,
+        capture_output=True,
+        text=True,
+    ).stdout.strip()
+    task = board.create(
+        "Review exact PR",
+        kind="pr-review",
+        repo="JakubMifek/saturnin",
+        review_subject="JakubMifek/saturnin#1",
+        review_author="code-worker",
+        review_head_sha=head_sha,
+    )
+    with board.edit(task.id) as stored:
+        stored.role = "pr-reviewer"
+        stored.branch = "feature/review-input"
+        stored.worktree = str(worktree.path)
+
+    launcher = AgentLauncher(config, board)
+    stored = board.get(task.id)
+    contract = launcher._contract(stored, launcher._worker_config(worktree.path))
+    review_input = launcher._verified_review_input(
+        stored, contract, worktree.path
+    )
+    prompt = launcher._prompt(stored, contract, review_input=review_input)
+
+    assert f'"head_sha": "{head_sha}"' in prompt
+    assert "diff --git a/reviewed.txt b/reviewed.txt" in prompt
+    assert "+immutable change" in prompt
+
+
+def test_pr_reviewer_rejects_head_mismatch_and_missing_verified_input(
+    config: Config,
+    board: Board,
+    git_repo: Path,
+) -> None:
+    worktree = WorktreeManager(config, repo=git_repo, board=board).create(
+        "feature/review-mismatch"
+    )
+    task = board.create(
+        "Review wrong PR head",
+        kind="pr-review",
+        review_subject="JakubMifek/saturnin#2",
+        review_author="code-worker",
+        review_head_sha="f" * 40,
+    )
+    with board.edit(task.id) as stored:
+        stored.role = "pr-reviewer"
+        stored.branch = "feature/review-mismatch"
+        stored.worktree = str(worktree.path)
+
+    launcher = AgentLauncher(config, board)
+    stored = board.get(task.id)
+    contract = launcher._contract(stored, launcher._worker_config(worktree.path))
+    with pytest.raises(LauncherError, match="does not match review_head_sha"):
+        launcher._verified_review_input(stored, contract, worktree.path)
+    with pytest.raises(LauncherError, match="verified immutable review input"):
+        launcher._worker_environment(
+            config,
+            contract,
+            task=stored,
+            workdir=worktree.path,
+        )
+
+
+def test_issue_reviewer_prompt_contains_digest_verified_exact_draft(
+    config: Config,
+    board: Board,
+    git_repo: Path,
+) -> None:
+    title = "Improve the review gate"
+    body = "Reject an approval when the immutable input is unavailable.\n"
+    digest = issue_content_digest(title, body)
+    worktree = WorktreeManager(config, repo=git_repo, board=board).create(
+        "feature/issue-review-input"
+    )
+    task = board.create(
+        "Review exact issue draft",
+        kind="issue-review",
+        review_subject="draft-review-gate",
+        review_author="chief-of-staff",
+        review_issue_digest=digest,
+        review_issue_title=title,
+        review_issue_body=body,
+    )
+    with board.edit(task.id) as stored:
+        stored.role = "issue-reviewer"
+        stored.branch = "feature/issue-review-input"
+        stored.worktree = str(worktree.path)
+
+    launcher = AgentLauncher(config, board)
+    stored = board.get(task.id)
+    contract = launcher._contract(stored, launcher._worker_config(worktree.path))
+    review_input = launcher._verified_review_input(
+        stored, contract, worktree.path
+    )
+    prompt = launcher._prompt(stored, contract, review_input=review_input)
+
+    assert f'"issue_digest": "{digest}"' in prompt
+    assert f'"title": "{title}"' in prompt
+    assert "Reject an approval when the immutable input is unavailable." in prompt
+
+
+@pytest.mark.parametrize(
+    ("title", "body", "message"),
+    [
+        (None, "body", "requires review_issue_title and review_issue_body"),
+        ("Changed title", "body", "do not match review_issue_digest"),
+    ],
+)
+def test_issue_reviewer_rejects_missing_or_mismatched_draft(
+    config: Config,
+    board: Board,
+    git_repo: Path,
+    title: str | None,
+    body: str,
+    message: str,
+) -> None:
+    worktree = WorktreeManager(config, repo=git_repo, board=board).create(
+        f"feature/issue-review-{len(list(board))}"
+    )
+    task = board.create(
+        "Review issue draft",
+        kind="issue-review",
+        review_subject="draft-issue",
+        review_author="chief-of-staff",
+        review_issue_digest=issue_content_digest("Original title", "body"),
+        review_issue_title=title,
+        review_issue_body=body,
+    )
+    with board.edit(task.id) as stored:
+        stored.role = "issue-reviewer"
+        stored.branch = worktree.branch
+        stored.worktree = str(worktree.path)
+
+    launcher = AgentLauncher(config, board)
+    stored = board.get(task.id)
+    contract = launcher._contract(stored, launcher._worker_config(worktree.path))
+    with pytest.raises(LauncherError, match=message):
+        launcher._verified_review_input(stored, contract, worktree.path)
 
 
 def test_launcher_rejects_unverified_github_binary(

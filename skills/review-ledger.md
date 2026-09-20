@@ -7,7 +7,12 @@ Make the independent-review requirement mechanical instead of aspirational.
 - Bind a launched review worker to one immutable draft at intake:
   `saturnin task add "Review <subject>" --kind pr-review|issue-review --repo <repo>
   --review-subject <subject> --review-author <role>
-  --review-head-sha <sha>|--review-issue-digest <digest> --dispatch`.
+  --review-head-sha <sha>|(--review-issue-digest <digest>
+  --review-issue-title <title> --review-issue-body <body>) --dispatch`.
+- A PR review worktree must have the recorded head SHA checked out. The launcher
+  derives the merge-base diff from local Git objects. Issue title/body values
+  must hash to the recorded digest. Reviewers receive that verified content,
+  and launch fails before a signing key is provided when verification fails.
 
 ### PR flow
 
