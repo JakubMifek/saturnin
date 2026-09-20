@@ -71,10 +71,10 @@ git reflog show --all --date=iso        # find the last commit SHA
 git branch <branch> <sha>             # recreate it
 ```
 
-Before destructive cleanup, Saturnin sets repository-local reflog and unreachable
-object expiry from `keep_reflog_days` (90). A deleted branch no longer has a
-named reflog, so use `git reflog --all`. Do not run `git gc --prune=now` while a
-recovery is in question.
+Before destructive cleanup, Saturnin applies the retention configured by
+`policies/cleanup.yaml:safety.keep_reflog_days`. A deleted branch no longer has
+a named reflog, so use `git reflog --all`. Do not run `git gc --prune=now` while
+a recovery is in question.
 
 **A worktree directory disappeared but git still lists it**
 
@@ -92,8 +92,8 @@ saturnin check command "git fsck --unreachable"
 git fsck --unreachable
 ```
 
-Uncommitted changes are gone, which is why the janitor never touches a dirty
-worktree.
+Uncommitted changes are not recoverable from Git metadata. Follow the current
+policy-backed cleanup plan and preserve work before any approved removal.
 
 **The board looks wrong**
 

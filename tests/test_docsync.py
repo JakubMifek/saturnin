@@ -41,6 +41,30 @@ def test_checked_in_docs_match_policy() -> None:
     assert "independently enforces the review gate" in runtime_block.group("body")
 
 
+def test_cleanup_guidance_references_policy_without_copying_configurable_facts() -> None:
+    janitor = (REPO_ROOT / "agents" / "janitor.md").read_text(encoding="utf-8")
+    runbook = (REPO_ROOT / "docs" / "runbooks" / "ops-safety.md").read_text(
+        encoding="utf-8"
+    )
+    skill = (REPO_ROOT / "skills" / "worktree-session.md").read_text(
+        encoding="utf-8"
+    )
+
+    assert "policies/cleanup.yaml" in janitor
+    assert "policies/cleanup.yaml:safety.keep_reflog_days" in runbook
+    for duplicated_fact in (
+        "old *and* dirty",
+        "repeated over-cap",
+        "unmerged branch",
+        "never touches a dirty",
+        "keep_reflog_days` (90)",
+        "APPLY=1",
+    ):
+        assert duplicated_fact not in f"{janitor}\n{runbook}"
+    assert "saturnin worktree create <branch> [--task <id>]" in skill
+    assert "--base main" not in skill
+
+
 def test_generated_blocks_are_found(docs_home: Config) -> None:
     names = {p.name for p in docsync.documents(docs_home)}
     assert {
