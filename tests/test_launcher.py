@@ -289,6 +289,7 @@ def test_worker_command_uses_mandatory_os_sandbox(
     )
 
     assert command[:2] == ["/usr/bin/bwrap", "--unshare-all"]
+    assert "--share-net" not in command
     assert ["--tmpfs", "/"] == command[
         command.index("--tmpfs"):command.index("--tmpfs") + 2
     ]
@@ -3137,7 +3138,7 @@ def test_launcher_keeps_engine_source_for_managed_repository(
     assert calls[0]["env"]["PYTHONPATH"].split(":")[0] == str(config.root / "src")
 
 
-def test_launcher_worker_environment_uses_allowlist_and_constrained_github_token(
+def test_launcher_worker_environment_uses_allowlist_and_mcp_scoped_github_token(
     config: Config, board: Board, git_repo: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     task = board.create("Constrain worker environment")
@@ -3157,12 +3158,19 @@ def test_launcher_worker_environment_uses_allowlist_and_constrained_github_token
     monkeypatch.setenv("PYTHONPATH", "/host/untrusted")
     monkeypatch.setenv("HOME", "/host/home")
     monkeypatch.setenv("SATURNIN_GITHUB_MCP_TOKEN", "scoped-read-token")
+    monkeypatch.setenv("GITHUB_PERSONAL_ACCESS_TOKEN", "host-personal-token")
     monkeypatch.setenv(
         "SATURNIN_REVIEW_ATTESTATION_PREVIOUS_KEY",
         "old-master-key",
     )
     config.policy("mcp")["launcher"]["env_allowlist"].append(
         "SATURNIN_REVIEW_ATTESTATION_KEY"
+    )
+    config.policy("mcp")["launcher"]["env_allowlist"].append(
+        "SATURNIN_GITHUB_MCP_TOKEN"
+    )
+    config.policy("mcp")["launcher"]["env_allowlist"].append(
+        "GITHUB_PERSONAL_ACCESS_TOKEN"
     )
 
     launcher = AgentLauncher(config, board)
@@ -3182,7 +3190,8 @@ def test_launcher_worker_environment_uses_allowlist_and_constrained_github_token
     assert Path(environment["HOME"]).is_dir()
     assert (Path(environment["HOME"]).stat().st_mode & 0o777) == 0o700
     assert environment["XDG_CONFIG_HOME"] == str(Path(environment["HOME"]) / ".config")
-    assert environment["GITHUB_PERSONAL_ACCESS_TOKEN"] == "scoped-read-token"
+    assert "SATURNIN_GITHUB_MCP_TOKEN" not in environment
+    assert "GITHUB_PERSONAL_ACCESS_TOKEN" not in environment
     assert "GH_TOKEN" not in environment
     assert "GITHUB_TOKEN" not in environment
     assert "SATURNIN_REVIEW_ATTESTATION_KEY" not in environment
@@ -3190,6 +3199,17 @@ def test_launcher_worker_environment_uses_allowlist_and_constrained_github_token
     assert environment["SATURNIN_AGENT_ROLE"] == contract.role
     assert "AWS_SECRET_ACCESS_KEY" not in environment
     assert "host" not in environment["PYTHONPATH"]
+    mcp_path = launcher._write_mcp_config(
+        board.get(task.id),
+        contract,
+        config=worker_config,
+        worktree_scope=worktree.path,
+    )
+    mcp = json.loads(mcp_path.read_text(encoding="utf-8"))
+    assert mcp_path.stat().st_mode & 0o777 == 0o600
+    assert mcp["mcpServers"]["github"]["env"] == {
+        "GITHUB_PERSONAL_ACCESS_TOKEN": "scoped-read-token"
+    }
 
 
 def test_launcher_preserves_approved_config_path_under_isolated_home(

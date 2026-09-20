@@ -751,7 +751,6 @@ class AgentLauncher:
         command = [
             sandbox,
             "--unshare-all",
-            "--share-net",
             "--new-session",
             "--cap-drop",
             "ALL",
@@ -1016,12 +1015,17 @@ class AgentLauncher:
         task: Task,
         workdir: Path,
     ) -> dict[str, str]:
+        trusted_config = self._trusted_config(config)
+        token_name = str(
+            trusted_config.policy("mcp")
+            .get("launcher", {})
+            .get("github_read_token_env", "SATURNIN_GITHUB_MCP_TOKEN")
+        )
         environment = {
             name: value
             for name in self._worker_env_allowlist()
             if (value := os.environ.get(name)) is not None
         }
-        trusted_config = self._trusted_config(config)
         home = self._isolated_home(task.id)
         environment["HOME"] = str(home)
         environment["XDG_CONFIG_HOME"] = str(home / ".config")
@@ -1050,6 +1054,10 @@ class AgentLauncher:
             previous_key_env,
             scope_env,
             role_env,
+            token_name,
+            "GH_TOKEN",
+            "GITHUB_TOKEN",
+            "GITHUB_PERSONAL_ACCESS_TOKEN",
         ):
             environment.pop(protected_name, None)
         environment[role_env] = contract.role
@@ -1066,13 +1074,6 @@ class AgentLauncher:
                 contract.role,
             )
             environment[scope_env] = "role"
-        if "github" in contract.mcp:
-            token_name = str(
-                self.policy.get("github_read_token_env", "SATURNIN_GITHUB_MCP_TOKEN")
-            )
-            token = os.environ.get(token_name, "")
-            if token:
-                environment["GITHUB_PERSONAL_ACCESS_TOKEN"] = token
         return environment
 
     @staticmethod
@@ -1338,13 +1339,27 @@ class AgentLauncher:
                     raise LauncherError(
                         "verified GitHub MCP executable does not match canonical path"
                     )
-            servers[name] = {
+            server: dict[str, Any] = {
                 "type": definition.get("transport", "stdio"),
                 "command": command,
                 "args": args,
             }
+            if name == "github":
+                token_name = str(
+                    trusted_config.policy("mcp")
+                    .get("launcher", {})
+                    .get("github_read_token_env", "SATURNIN_GITHUB_MCP_TOKEN")
+                )
+                token = os.environ.get(token_name, "")
+                if token:
+                    server["env"] = {"GITHUB_PERSONAL_ACCESS_TOKEN": token}
+            servers[name] = server
         path = self.dir / f"{task.id}.mcp.json"
-        path.write_text(json.dumps({"mcpServers": servers}, indent=2) + "\n", encoding="utf-8")
+        atomic_replace_text(
+            path,
+            json.dumps({"mcpServers": servers}, indent=2) + "\n",
+            mode=PRIVATE_FILE_MODE,
+        )
         return path
 
     def _prompt(
