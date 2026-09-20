@@ -21,6 +21,7 @@ from . import escalation
 from .board import Board, Task
 from .checkpoints import Checkpoint, CheckpointStore
 from .config import Config
+from .contracts import load_contracts
 from .governance import Governance, _git_targets, github_repo_slug
 from .jsonlines import PRIVATE_FILE_MODE, atomic_replace_text, durable_append_text, objects
 from .locking import file_lock
@@ -648,16 +649,28 @@ def _run_trusted_cli(
         if trusted_role != "improver":
             raise WorkerCallbackError("only improver may run the improvement loop")
     elif operation == "task_add":
+        trusted_config = (
+            config if config.root == config.data_root else Config(config.data_root)
+        )
+        contracts = {
+            contract.role: contract for contract in load_contracts(trusted_config)
+        }
+        contract = contracts.get(trusted_role)
+        if contract is None or "board-ops" not in contract.skills:
+            raise WorkerCallbackError(
+                f"task role {trusted_role!r} lacks the board-ops capability"
+            )
         expected_repo = task.repo or str(
-            config.governance.get("autonomy", {}).get("self_repo", "")
+            trusted_config.governance.get("autonomy", {}).get("self_repo", "")
         )
         if args.repo:
-            _require_task_repository(config, task, args.repo)
+            _require_task_repository(trusted_config, task, args.repo)
         args.repo = expected_repo
         if callback_marker not in args.label:
             args.label.append(callback_marker)
-        if _resume_replayed_task_add(config, board, args, callback_marker):
+        if _resume_replayed_task_add(trusted_config, board, args, callback_marker):
             return
+        config = trusted_config
     elif operation != "docs_render":  # pragma: no cover - classifier guards this
         raise WorkerCallbackError(f"unsupported trusted CLI callback {operation!r}")
     execution_config = config

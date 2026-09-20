@@ -320,6 +320,11 @@ def test_worker_command_uses_mandatory_os_sandbox(
     mcp_mount = ["--ro-bind", str(mcp_config), str(mcp_config)]
     staged_board_mount = ["--ro-bind", str(staged_board), str(config.board_dir)]
     worktree_mount = ["--bind", str(worktree.path), str(worktree.path)]
+    git_control_mount = [
+        "--ro-bind",
+        str(worktree.path / ".git"),
+        str(worktree.path / ".git"),
+    ]
     home_mount = ["--bind", str(home), str(home)]
     assert any(
         command[index:index + 3] == runtime_mount
@@ -341,6 +346,21 @@ def test_worker_command_uses_mandatory_os_sandbox(
         command[index:index + 3] == worktree_mount
         for index in range(len(command) - 2)
     )
+    assert any(
+        command[index:index + 3] == git_control_mount
+        for index in range(len(command) - 2)
+    )
+    worktree_mount_index = next(
+        index
+        for index in range(len(command) - 2)
+        if command[index:index + 3] == worktree_mount
+    )
+    git_control_mount_index = next(
+        index
+        for index in range(len(command) - 2)
+        if command[index:index + 3] == git_control_mount
+    )
+    assert git_control_mount_index > worktree_mount_index
     assert any(
         command[index:index + 3] == home_mount
         for index in range(len(command) - 2)
@@ -368,6 +388,43 @@ def test_worker_command_uses_mandatory_os_sandbox(
     assert str(credential) not in command
     assert git_environment["GIT_DIR"].startswith(str(home))
     assert command[-3:] == ["--", "/usr/bin/copilot", "--autopilot"]
+
+
+@pytest.mark.parametrize("replacement", ["missing", "directory"])
+def test_worker_sandbox_requires_regular_linked_worktree_git_control_file(
+    config: Config,
+    board: Board,
+    git_repo: Path,
+    replacement: str,
+) -> None:
+    task = board.create("Protect linked worktree metadata")
+    worktree = WorktreeManager(config, repo=git_repo, board=board).create(
+        f"feature/git-control-{replacement}"
+    )
+    git_control = worktree.path / ".git"
+    git_control.unlink()
+    if replacement == "directory":
+        git_control.mkdir()
+    launcher = AgentLauncher(config, board)
+    home = launcher._isolated_home(task.id)
+    mcp_config = config.var_dir / "launches" / f"{task.id}.mcp.json"
+    mcp_config.write_text('{"mcpServers": {}}\n', encoding="utf-8")
+
+    with pytest.raises(
+        LauncherError,
+        match="linked worktree Git control file is (missing|not a regular file)",
+    ):
+        launcher._sandbox_command(
+            "/usr/bin/bwrap",
+            "/usr/bin/pasta",
+            "/usr/bin/copilot",
+            ["--autopilot"],
+            workdir=worktree.path,
+            isolated_home=home,
+            trusted_config=config,
+            git_objects=git_repo / ".git" / "objects",
+            mcp_config=mcp_config,
+        )
 
 
 def test_reconcile_applies_worker_callbacks_before_requeue(
@@ -748,13 +805,14 @@ def test_reconcile_callback_failure_keeps_in_progress_task_for_retry(
     assert not queue_path.exists()
 
 
-def test_trusted_cli_callback_applies_task_add(
+def test_trusted_cli_callback_allows_board_ops_role_to_apply_task_add(
     config: Config,
     board: Board,
 ) -> None:
     task = board.create("File a follow-up")
-    Router(config).dispatch(board, task)
-    board.transition_id(task.id, "in_progress", actor="launcher")
+    with board.edit(task.id) as stored:
+        stored.role = "code-worker"
+        stored.state = "in_progress"
     callback_dir = AgentLauncher(config, board)._isolated_home(
         task.id
     ) / ".saturnin-callbacks"
@@ -817,6 +875,35 @@ def test_trusted_cli_task_add_cannot_escape_task_repository(
     )
 
     with pytest.raises(WorkerCallbackError, match="does not match task repository"):
+        apply_queued(config, board, task_id=task.id, callback_dir=str(callback_dir))
+
+    assert [item.id for item in board] == [task.id]
+
+
+def test_trusted_cli_task_add_rejects_role_without_board_ops(
+    config: Config,
+    board: Board,
+) -> None:
+    task = board.create("Review without board mutation")
+    with board.edit(task.id) as stored:
+        stored.role = "pr-reviewer"
+        stored.state = "in_progress"
+    callback_dir = AgentLauncher(config, board)._isolated_home(
+        task.id
+    ) / ".saturnin-callbacks"
+    callback_dir.mkdir(parents=True)
+    callback = {
+        "type": "trusted_cli",
+        "task_id": task.id,
+        "operation": "task_add",
+        "argv": ["task", "add", "Escalate privileges", "--dispatch"],
+    }
+    (callback_dir / CALLBACKS_FILE).write_text(
+        json.dumps(callback) + "\n",
+        encoding="utf-8",
+    )
+
+    with pytest.raises(WorkerCallbackError, match="lacks the board-ops capability"):
         apply_queued(config, board, task_id=task.id, callback_dir=str(callback_dir))
 
     assert [item.id for item in board] == [task.id]

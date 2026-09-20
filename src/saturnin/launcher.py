@@ -861,12 +861,25 @@ class AgentLauncher:
         staged_board = isolated_home / ".saturnin-board"
         if staged_board.exists():
             read_only_mounts.append((staged_board, trusted_config.board_dir))
+        worktree = workdir.resolve()
+        git_control = worktree / ".git"
+        try:
+            git_control_mode = git_control.lstat().st_mode
+        except OSError as exc:
+            raise LauncherError(
+                f"linked worktree Git control file is missing: {git_control}"
+            ) from exc
+        if not stat.S_ISREG(git_control_mode):
+            raise LauncherError(
+                f"linked worktree Git control file is not a regular file: {git_control}"
+            )
         mounts = [
             *[
                 ("--ro-bind", source, target)
                 for source, target in dict.fromkeys(read_only_mounts)
             ],
-            ("--bind", workdir.resolve(), workdir.resolve()),
+            ("--bind", worktree, worktree),
+            ("--ro-bind", git_control, git_control),
             ("--bind", isolated_home.resolve(), isolated_home.resolve()),
         ]
         created: set[Path] = set()
