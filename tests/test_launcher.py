@@ -3506,35 +3506,73 @@ def test_launcher_preserves_approved_config_path_under_isolated_home(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     real_home = tmp_path / "real-home"
-    gh_config = real_home / ".config" / "gh"
-    gh_config.mkdir(parents=True)
-    (gh_config / "hosts.yml").write_text("github.com: {}\n", encoding="utf-8")
+    tool_config = real_home / ".config" / "tool"
+    tool_config.mkdir(parents=True)
+    (tool_config / "preferences.yml").write_text("theme: dark\n", encoding="utf-8")
     monkeypatch.setenv("HOME", str(real_home))
-    config.policy("mcp")["launcher"]["approved_home_config"] = [str(gh_config)]
+    config.policy("mcp")["launcher"]["approved_home_config"] = [str(tool_config)]
 
     isolated = AgentLauncher(config, board)._isolated_home("nested-xdg")
 
-    assert (isolated / ".config" / "gh" / "hosts.yml").read_text(
+    assert (isolated / ".config" / "tool" / "preferences.yml").read_text(
         encoding="utf-8"
-    ) == "github.com: {}\n"
-    assert not (isolated / "gh").exists()
+    ) == "theme: dark\n"
+    assert not (isolated / "tool").exists()
 
 
 def test_launcher_supports_explicit_safe_approved_config_destination(
     config: Config,
     board: Board,
 ) -> None:
-    source = config.root / "approved-gh-hosts.yml"
-    source.write_text("github.com: {}\n", encoding="utf-8")
+    source = config.root / "approved-preferences.yml"
+    source.write_text("theme: dark\n", encoding="utf-8")
     config.policy("mcp")["launcher"]["approved_home_config"] = [
-        {"source": str(source), "destination": ".config/gh/hosts.yml"}
+        {"source": str(source), "destination": ".config/tool/preferences.yml"}
     ]
 
     isolated = AgentLauncher(config, board)._isolated_home("explicit-destination")
 
-    assert (isolated / ".config" / "gh" / "hosts.yml").read_text(
+    assert (isolated / ".config" / "tool" / "preferences.yml").read_text(
         encoding="utf-8"
-    ) == "github.com: {}\n"
+    ) == "theme: dark\n"
+
+
+def test_launcher_canonical_config_excludes_host_github_credentials(
+    config: Config,
+    board: Board,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    real_home = tmp_path / "real-home"
+    copilot_config = real_home / ".copilot" / "config.json"
+    copilot_config.parent.mkdir(parents=True)
+    copilot_config.write_text('{"theme": "dark"}\n', encoding="utf-8")
+    gh_hosts = real_home / ".config" / "gh" / "hosts.yml"
+    gh_hosts.parent.mkdir(parents=True)
+    gh_hosts.write_text(
+        "github.com:\n  oauth_token: host-oauth-secret\n",
+        encoding="utf-8",
+    )
+    (real_home / ".git-credentials").write_text(
+        "https://host-git-secret@github.com\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setenv("HOME", str(real_home))
+
+    isolated = AgentLauncher(config, board)._isolated_home("safe-canonical-config")
+
+    assert (isolated / ".copilot" / "config.json").read_text(
+        encoding="utf-8"
+    ) == '{"theme": "dark"}\n'
+    assert not (isolated / ".config" / "gh").exists()
+    assert not (isolated / ".git-credentials").exists()
+    copied = "\n".join(
+        path.read_text(encoding="utf-8")
+        for path in isolated.rglob("*")
+        if path.is_file()
+    )
+    assert "host-oauth-secret" not in copied
+    assert "host-git-secret" not in copied
 
 
 @pytest.mark.parametrize("destination", ["../outside", "/tmp/outside"])

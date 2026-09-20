@@ -52,13 +52,11 @@ rules:
 launcher:
   # Repository default is safety-first: routing/dispatch works everywhere,
   # launch is enabled per host once bwrap/copilot/npx/uvx are installed.
-  enabled: true
+  enabled: false
   command: copilot
   sandbox:
     # Mandatory mount/user namespace isolation for every autonomous worker.
     command: bwrap
-    # Use pasta's guest-side DNS proxy instead of systemd-resolved's host-only stub.
-    resolv_conf_source: ~/.config/saturnin/resolv.conf
     # pasta creates a separate user/network namespace with outbound connectivity.
     # No host gateway is mapped and no host ports are forwarded into the worker.
     network:
@@ -109,7 +107,6 @@ launcher:
     - SHELL
   approved_home_config:
     - ~/.copilot/config.json
-    - ~/.config/gh
   # Reviewers receive a role-scoped attestation key derived by the trusted
   # launcher from SATURNIN_REVIEW_ATTESTATION_KEY; authoring roles never receive
   # either the master key or a signing key.
