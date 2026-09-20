@@ -24,6 +24,7 @@ def home(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
     mcp_path = root / "policies" / "mcp.yaml"
     mcp_policy = yaml.safe_load(mcp_path.read_text(encoding="utf-8"))
     mcp_policy["launcher"]["enabled"] = False
+    mcp_policy["launcher"]["sandbox"].pop("resolv_conf_source", None)
     mcp_path.write_text(yaml.safe_dump(mcp_policy), encoding="utf-8")
     shutil.copytree(REPO_ROOT / "automation", root / "automation")
     shutil.copytree(REPO_ROOT / "scripts", root / "scripts")
