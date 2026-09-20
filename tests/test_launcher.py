@@ -405,6 +405,7 @@ def test_worker_sandbox_requires_regular_linked_worktree_git_control_file(
     git_control.unlink()
     if replacement == "directory":
         git_control.mkdir()
+
     launcher = AgentLauncher(config, board)
     home = launcher._isolated_home(task.id)
     mcp_config = config.var_dir / "launches" / f"{task.id}.mcp.json"
@@ -425,6 +426,52 @@ def test_worker_sandbox_requires_regular_linked_worktree_git_control_file(
             git_objects=git_repo / ".git" / "objects",
             mcp_config=mcp_config,
         )
+
+
+def test_worker_command_remounts_worktree_git_control_file_read_only(
+    config: Config,
+    board: Board,
+    git_repo: Path,
+) -> None:
+    task = board.create("Protect linked worktree metadata")
+    worktree = WorktreeManager(config, repo=git_repo, board=board).create(
+        "feature/protect-git-control"
+    )
+    launcher = AgentLauncher(config, board)
+    home = launcher._isolated_home(task.id)
+    mcp_config = config.var_dir / "launches" / f"{task.id}.mcp.json"
+    mcp_config.write_text('{"mcpServers": {}}\n', encoding="utf-8")
+
+    command = launcher._sandbox_command(
+        "/usr/bin/bwrap",
+        "/usr/bin/pasta",
+        "/usr/bin/copilot",
+        ["--autopilot"],
+        workdir=worktree.path,
+        isolated_home=home,
+        trusted_config=config,
+        git_objects=git_repo / ".git" / "objects",
+        mcp_config=mcp_config,
+    )
+
+    writable_worktree = ["--bind", str(worktree.path), str(worktree.path)]
+    protected_git_file = [
+        "--ro-bind",
+        str(worktree.path / ".git"),
+        str(worktree.path / ".git"),
+    ]
+    writable_index = next(
+        index
+        for index in range(len(command) - 2)
+        if command[index:index + 3] == writable_worktree
+    )
+    protected_index = next(
+        index
+        for index in range(len(command) - 2)
+        if command[index:index + 3] == protected_git_file
+    )
+    assert (worktree.path / ".git").is_file()
+    assert protected_index > writable_index
 
 
 def test_reconcile_applies_worker_callbacks_before_requeue(
@@ -897,6 +944,35 @@ def test_trusted_cli_task_add_rejects_role_without_board_ops(
         "task_id": task.id,
         "operation": "task_add",
         "argv": ["task", "add", "Escalate privileges", "--dispatch"],
+    }
+    (callback_dir / CALLBACKS_FILE).write_text(
+        json.dumps(callback) + "\n",
+        encoding="utf-8",
+    )
+
+    with pytest.raises(WorkerCallbackError, match="lacks the board-ops capability"):
+        apply_queued(config, board, task_id=task.id, callback_dir=str(callback_dir))
+
+    assert [item.id for item in board] == [task.id]
+
+
+def test_trusted_cli_task_add_requires_board_ops_skill(
+    config: Config,
+    board: Board,
+) -> None:
+    task = board.create("Reject unauthorized follow-up")
+    with board.edit(task.id) as stored:
+        stored.role = "janitor"
+        stored.state = "in_progress"
+    callback_dir = AgentLauncher(config, board)._isolated_home(
+        task.id
+    ) / ".saturnin-callbacks"
+    callback_dir.mkdir(parents=True)
+    callback = {
+        "type": "trusted_cli",
+        "task_id": task.id,
+        "operation": "task_add",
+        "argv": ["task", "add", "Unauthorized follow-up"],
     }
     (callback_dir / CALLBACKS_FILE).write_text(
         json.dumps(callback) + "\n",
