@@ -59,6 +59,23 @@ def governance(config: Config) -> Governance:
     return Governance(config)
 
 
+@pytest.fixture()
+def trusted_python3_lookup(
+    config: Config, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    original_which = shutil.which
+    trusted_roots = config.server_scope["filesystem"]["trusted_executable_roots"]
+    trusted_python3 = original_which("python3", path=os.pathsep.join(trusted_roots))
+    assert trusted_python3 is not None
+
+    def which(command: str, *args, **kwargs):
+        if command == "python3":
+            return trusted_python3
+        return original_which(command, *args, **kwargs)
+
+    monkeypatch.setattr("saturnin.governance.shutil.which", which)
+
+
 def test_policies_audit_clean(governance: Governance) -> None:
     assert governance.audit() == []
 
@@ -650,7 +667,7 @@ def test_issue_review_requires_sha256_issue_digest(config: Config) -> None:
 
 
 def test_python_allowlist_is_limited_to_configured_modules(
-    governance: Governance, config: Config
+    governance: Governance, config: Config, trusted_python3_lookup: None
 ) -> None:
     filesystem = config.server_scope["filesystem"]
 
@@ -1186,7 +1203,9 @@ def test_out_of_scope_server_commands(governance: Governance, command: str) -> N
         "python3 -m saturnin doctor",
     ],
 )
-def test_in_scope_server_commands(governance: Governance, command: str) -> None:
+def test_in_scope_server_commands(
+    governance: Governance, command: str, trusted_python3_lookup: None
+) -> None:
     assert governance.check_server_command(command).allowed
 
 
@@ -1857,7 +1876,10 @@ def test_shell_assignments_cannot_change_policy_home(
     ],
 )
 def test_filesystem_writes_outside_policy_are_rejected(
-    governance: Governance, command: str, reason: str
+    governance: Governance,
+    command: str,
+    reason: str,
+    trusted_python3_lookup: None,
 ) -> None:
     decision = governance.check_server_command(command)
 
