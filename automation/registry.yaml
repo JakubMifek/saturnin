@@ -1,0 +1,76 @@
+# Index of reusable automations. Search this (`saturnin automation find "<what>"`)
+# before writing any new script - reinvention is the most expensive habit here.
+version: 1
+
+automations:
+  - id: janitor-cleanup
+    description: Plan and optionally apply stale worktree/branch cleanup.
+    path: automation/library/cleanup_worktrees.sh
+    owner_role: janitor
+    triggers: [worktree, stale branch, cleanup, prune]
+
+  - id: improvement-cycle
+    description: Collect board metrics, detect bottlenecks and file improvement tasks.
+    path: automation/library/improvement_cycle.sh
+    owner_role: improver
+    triggers: [metrics, bottleneck, improve, throughput]
+
+  - id: dispatch-sweep
+    description: Route every task sitting in intake and print the resulting board.
+    path: automation/library/dispatch_sweep.sh
+    owner_role: chief-of-staff
+    triggers: [dispatch, intake, route, backlog]
+
+  - id: new-work-session
+    description: Create a feature branch worktree and bind it to a board task.
+    path: automation/library/new_work_session.sh
+    owner_role: code-worker
+    triggers: [worktree, feature branch, start work, session]
+
+  - id: review-gate
+    description: Check whether a PR may be merged or an issue may be filed.
+    path: automation/library/review_gate.sh
+    owner_role: pr-reviewer
+    triggers: [review, merge, gate, issue submission]
+
+  - id: issue-discovery
+    description: Adopt issues raised in managed repositories (alerts, CI, humans) as board tasks.
+    path: automation/library/discover_issues.sh
+    owner_role: chief-of-staff
+    triggers: [discover, inbound, alert, monitoring, issue intake]
+
+  - id: result-poller
+    description: Poll external signals for tasks whose result cannot report back on its own.
+    path: automation/library/result_poller.sh
+    owner_role: chief-of-staff
+    triggers: [poll, wait, watch, result, long running]
+
+  - id: checkpoint-resume
+    description: Launch fresh agents for delayed checkpoints whose resume time is due.
+    path: automation/library/resume_checkpoints.sh
+    owner_role: chief-of-staff
+    triggers: [checkpoint, resume, delayed, schedule, handoff]
+
+  - id: run-monitors
+    description: Run synthetic monitors of managed applications and file incidents.
+    path: automation/library/run_monitors.sh
+    owner_role: test-worker
+    triggers: [monitor, uptime, synthetic, e2e, health check]
+
+  - id: task-mirror
+    description: Mirror open board tasks as GitHub issues so nothing lives only locally.
+    path: automation/library/mirror_tasks.sh
+    owner_role: chief-of-staff
+    triggers: [mirror, issue, backup, sync board]
+
+  - id: bootstrap
+    description: Idempotent day-1 install - virtualenv, package, runtime dirs, doctor.
+    path: scripts/bootstrap.sh
+    owner_role: ops-worker
+    triggers: [bootstrap, install, setup, day-1]
+
+  - id: install-user-units
+    description: Install the user-scope systemd timers for the scheduled workers.
+    path: scripts/install_user_units.sh
+    owner_role: ops-worker
+    triggers: [systemd, timer, schedule, units]

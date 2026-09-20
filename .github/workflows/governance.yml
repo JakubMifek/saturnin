@@ -1,0 +1,44 @@
+name: governance
+
+# This workflow is loaded from the default branch. It only protects PRs after
+# the trusted governance runtime has already been seeded there.
+
+on:
+  pull_request_target:
+    types: [opened, reopened, synchronize]
+  pull_request_review:
+    types: [submitted, dismissed]
+
+permissions:
+  contents: read
+  pull-requests: read
+
+jobs:
+  governance:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out trusted base governance code
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.pull_request.base.sha }}
+          persist-credentials: false
+      - name: Require seeded base governance runtime
+        run: |
+          if [ ! -f pyproject.toml ] || [ ! -x automation/library/review_gate.sh ]; then
+            echo "::error::Base branch has no trusted Saturnin governance runtime; seed this workflow/runtime on the default branch or enforce the first scaffold approval outside this PR."
+            exit 1
+          fi
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Install trusted base governance
+        run: python -m pip install -e ".[dev]"
+      - name: PR head must be a feature branch (rules 1 and 2)
+        env:
+          HEAD_REF: ${{ github.event.pull_request.head.ref }}
+        run: saturnin check branch "$HEAD_REF"
+      - name: Independent review gate (rule 3)
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+          SATURNIN_REVIEW_ATTESTATION_KEY: ${{ github.token }}
+        run: automation/library/review_gate.sh pr "${{ github.event.pull_request.base.repo.full_name }}#${{ github.event.pull_request.number }}" "${{ github.event.pull_request.base.repo.full_name }}"

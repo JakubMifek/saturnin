@@ -1,0 +1,116 @@
+# MCP servers Saturnin's agents may connect to.
+#
+# Two layers of defence:
+#   1. `servers` lists what exists at all (mirrored in .mcp.json at repo root).
+#   2. each agent contract declares an `mcp:` allow-list; anything not listed is
+#      denied. `saturnin doctor` fails if an agent asks for an unknown server.
+version: 1
+
+servers:
+  github:
+    description: Issues, pull requests and review data for managed repositories.
+    transport: stdio
+    command: "{data_root}/var/bin/github-mcp-server"
+    args: [stdio, --read-only]
+    install:
+      repository: github/github-mcp-server
+      tag: v1.12.1
+      commit: 7d13a7ad6f2a17f351a6d77ce280c85ae1821f4d
+      assets:
+        linux-amd64:
+          archive: github-mcp-server_Linux_x86_64.tar.gz
+          archive_sha256: e45c73a26a3c4cd643b40360db06f442de1e73a60d4eaf9e8639204ec3b95d3b
+          binary_sha256: c5828d540a9dab4b7fe7cfa94d29cad321eeda170f9736b3b500f37e4622de4b
+        linux-arm64:
+          archive: github-mcp-server_Linux_arm64.tar.gz
+          archive_sha256: 0f613c61fa524b30278a249ae199220465ff051e79177e58866e5e677191fda9
+          binary_sha256: 972d05c038fa3021e0d1f78333c161c7b85076b9c29a671814f00787b9bb5310
+    # GitHub mutations must go through Saturnin's reviewed governance commands.
+    write_roles: []
+  fetch:
+    description: Read-only web fetch for research.
+    transport: stdio
+    command: uvx
+    args: ["mcp-server-fetch@2026.8.18"]
+    write_roles: []
+  filesystem:
+    description: Scoped filesystem access inside var/worktrees only.
+    transport: stdio
+    command: npx
+    args: ["-y", "@modelcontextprotocol/server-filesystem@2026.8.31", "{worktrees}"]
+    write_roles: [code-worker, test-worker, architect, scribe, automation-smith, janitor]
+
+rules:
+  # The zero-context reviewers get the diff and the requirement, nothing that
+  # could leak the authoring session.
+  deny_for_roles:
+    pr-reviewer: [fetch]
+    issue-reviewer: [fetch]
+  # A role that does not execute may not hold any MCP server at all.
+  non_executing_roles_get_none: true
+
+launcher:
+  # Repository default is safety-first: routing/dispatch works everywhere,
+  # launch is enabled per host once bwrap/copilot/npx/uvx are installed.
+  enabled: false
+  command: copilot
+  sandbox:
+    # Mandatory mount/user namespace isolation for every autonomous worker.
+    command: bwrap
+    # pasta creates a separate user/network namespace with outbound connectivity.
+    # No host gateway is mapped and no host ports are forwarded into the worker.
+    network:
+      command: pasta
+      args:
+        - --quiet
+        - --foreground
+        - --no-map-gw
+        - --tcp-ports=none
+        - --udp-ports=none
+    # The sandbox starts from an empty root. These host paths are the minimum
+    # system runtime needed for executables, TLS, DNS and user lookup.
+    read_only_paths:
+      - /bin
+      - /lib
+      - /lib64
+      - /usr
+      - /etc/alternatives
+      - /etc/ssl/certs
+      - /etc/ca-certificates
+      - /etc/ca-certificates.conf
+      - /etc/resolv.conf
+      - /etc/hosts
+      - /etc/nsswitch.conf
+      - /etc/gai.conf
+      - /etc/passwd
+      - /etc/group
+      - /etc/ld.so.cache
+  failure_grace_seconds: 1.0
+  # Worker subprocesses get only these inherited environment keys. Host
+  # credentials and host configuration (GH_TOKEN, GITHUB_TOKEN, HOME, cloud
+  # keys, PYTHONPATH, etc.) are not passed through by default; the launcher
+  # creates an isolated HOME/XDG tree and exposes only trusted runtime paths.
+  env_allowlist:
+    - PATH
+    - LANG
+    - LC_ALL
+    - LC_CTYPE
+    - TERM
+    - TMPDIR
+    - USER
+    - LOGNAME
+    - SHELL
+  approved_home_config: []
+  # Reviewers receive a role-scoped attestation key derived by the trusted
+  # launcher from SATURNIN_REVIEW_ATTESTATION_KEY; authoring roles never receive
+  # either the master key or a signing key.
+  # Optional source variable used to inject a constrained token for the
+  # read-only GitHub MCP server when a role declares `mcp: [github]`.
+  github_read_token_env: SATURNIN_GITHUB_MCP_TOKEN
+  args:
+    - --autopilot
+    - --no-ask-user
+    - --additional-mcp-config
+    - "{mcp_config}"
+    - -p
+    - "{prompt}"

@@ -1,0 +1,11 @@
+[Unit]
+Description=Hourly Saturnin improvement cycle
+
+[Timer]
+OnCalendar=hourly
+RandomizedDelaySec=5m
+Persistent=true
+Unit=saturnin-improve.service
+
+[Install]
+WantedBy=timers.target

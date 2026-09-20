@@ -1,0 +1,95 @@
+# Repository topology.
+#
+# This repository is the public engine. Anything private - the board, notes,
+# project context - lives in companion repositories, so that Saturnin's code can
+# be published without leaking operational detail.
+# See docs/adr/0001-system-of-record.md.
+version: 1
+
+repos:
+  # The engine: code, policies, agent contracts. Public.
+  engine:
+    slug: JakubMifek/saturnin
+    visibility: public
+    autonomous_merge: true
+
+  # Target system of record after optional mirroring is enabled. Until then,
+  # the local board plus configured backups are authoritative.
+  # Mirroring to this repo bypasses the issue-review gate (rule 5) by design:
+  # it is an automated durability mechanism, not a human filing an issue.
+  board:
+    slug: JakubMifek/saturnin-ops
+    visibility: private
+    # Issues carry the board metadata as labels.
+    label_prefix: "saturnin"
+
+  # Long-form notes, decisions and project context (wiki / Obsidian vault).
+  notes:
+    slug: JakubMifek/saturnin-notes
+    visibility: private
+    format: obsidian
+
+tracking:
+  # Optional until ADR-0002's repository topology is accepted and provisioned.
+  mirror_tasks_as_issues: false
+  # Improvement findings and automation proposals are mirrored too.
+  mirror_kinds: [objective, epic, feature, task, pr-review, issue-review, automation, improvement]
+  # Label scheme applied to the mirrored issue.
+  kind_label: "kind"
+  state_label: "state"
+  role_label: "role"
+  priority_label: "priority"
+
+# The inbound door. Anything that can open a GitHub issue - a Grafana alert via
+# Alertmanager, a failing pipeline, a human - becomes a board task here, which
+# is why Saturnin needs no bespoke ingestion path per source.
+# See docs/observability.md. Run with: saturnin discover
+discovery:
+  enabled: true
+  # Only issues carrying one of these labels are adopted; everything else in a
+  # managed repository stays that repository's business.
+  labels: [saturnin, alert, incident]
+  # Labels copied onto the board task, so the router can see what it is routing.
+  carry_labels: [alert, incident, security, bug, monitor]
+  # Priority is taken from the first matching entry in this ordered mapping.
+  priority_by_label:
+    incident: P0
+    alert: P0
+    security: P0
+    bug: P1
+  default_priority: P2
+  # Written onto the task so the same issue is never adopted twice.
+  source_label_prefix: "source"
+  # Repositories to watch. Each entry is a slug, or a mapping with per-repo
+  # labels and maintainer-applied trust labels:
+  #   - slug: JakubMifek/widget-api
+  #     checkout: /home/saturnin/projects/widget-api
+  #     default_branch: trunk  # optional when origin/HEAD is configured locally
+  #     labels: [alert, incident]
+  #     require_labels: [saturnin:trusted]
+  sources:
+    - slug: JakubMifek/saturnin
+      labels: ["saturnin"]
+      require_labels: ["saturnin:trusted"]
+
+# Contract every Saturnin-managed project repository must satisfy.
+# Validated with: saturnin repo check <path>
+managed_repo_contract:
+  required_files:
+    - .saturnin/repo.yaml
+    - .github/copilot-instructions.md
+  # Keys .saturnin/repo.yaml must define.
+  required_keys:
+    - project        # human name and one-line purpose
+    - context        # stack, entry points, how to run and test
+    - squad          # roles this project's work usually needs
+    - conventions    # style, testing and review expectations
+  optional_keys:
+    - lead           # project-local or global role that normally leads its work
+    - agents         # project-specific agent contracts (paths)
+    - mcp            # MCP servers this project's agents may use
+    - monitors       # hosted endpoints to watch, with SLOs
+  # A role that only makes sense inside one project ships with that project and
+  # is never added to the global catalog: it stays reviewable by the people who
+  # own the code it touches, and it disappears when the project does.
+  agents_dir: .saturnin/agents

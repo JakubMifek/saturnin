@@ -1,0 +1,32 @@
+# Worktree / feature branch lifecycle policy used by the janitor worker.
+version: 1
+
+worktree:
+  # A worktree is considered stale when it has been untouched for this long...
+  stale_after_days: 7
+  # ...and hard-stale (cleanable even with local commits) after this long.
+  hard_stale_after_days: 30
+  # Worktrees whose branch has been merged into the default branch can go earlier.
+  merged_stale_after_days: 1
+  # Never touch worktrees whose path matches these globs.
+  keep_globs:
+    - "*/pinned-*"
+
+branch:
+  # Delete local feature branches that are fully merged into the default branch.
+  delete_merged_local: true
+  merged_grace_days: 1
+  # Unmerged branches are never deleted automatically, only reported.
+  delete_unmerged: false
+  protect_with_open_tasks: true
+
+safety:
+  # Everything is a dry run unless the caller explicitly asks for --apply.
+  dry_run_default: true
+  # Refuse to clean if the worktree has uncommitted changes.
+  require_clean_worktree: true
+  # Cap on destructive actions per run; anything above becomes an escalation.
+  max_removals_per_run: 10
+  log_file: var/logs/janitor.log
+  # Recovery: see docs/runbooks/ops-safety.md ("Recovering a deleted branch").
+  keep_reflog_days: 90

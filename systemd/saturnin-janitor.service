@@ -1,0 +1,10 @@
+[Unit]
+Description=Saturnin janitor - stale worktree and branch cleanup
+Documentation=file://@SATURNIN_HOME@/docs/runbooks/ops-safety.md
+
+[Service]
+Type=oneshot
+WorkingDirectory=@SATURNIN_HOME@
+Environment=SATURNIN_HOME="@SATURNIN_HOME_ENV@"
+ExecStart=@SATURNIN_HOME@/automation/library/cleanup_worktrees.sh
+Nice=10

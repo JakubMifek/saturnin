@@ -1,0 +1,139 @@
+# Hard governance rules for Saturnin. Source of truth for generated governance docs.
+# Changing this file requires an independent reviewer approval (see review pipelines).
+version: 1
+
+documentation:
+  capability:
+    description: Governance gates (branches, merges, issues, server)
+    command: 'saturnin check branch\|command'
+  runtime_summary: |-
+    Primary runtime is the local Debian server, as an unprivileged user with
+    systemd **user** timers (`saturnin-janitor`, `saturnin-improve`). GitHub Actions
+    is only an integration helper: CI checks tests, policy health and PR branches,
+    while [the trusted governance workflow](.github/workflows/governance.yml)
+    independently enforces the review gate.
+
+# The canonical rule list. Documentation tables are GENERATED from this block
+# (`saturnin docs render`), so prose and policy cannot drift apart.
+rules:
+  - id: 1
+    summary: Never push to the default branch
+    enforced_by: "`saturnin push`"
+  - id: 2
+    summary: Feature branches plus one worktree per parallel worker
+    enforced_by: "`saturnin worktree create`"
+  - id: 3
+    summary: Every code PR is reviewed by an independent zero-context reviewer
+    enforced_by: "`saturnin review gate --kind pr --head-sha <sha>`"
+  - id: 4
+    summary: Autonomous PR flow in this repository once that review passed
+    enforced_by: "`saturnin review merge`"
+  - id: 5
+    summary: "Managed repos: issues allowed, each independently reviewed first"
+    enforced_by: "`saturnin review gate --kind issue`"
+  - id: 6
+    summary: Human escalation via a GitHub issue tagging `@jakubmifek`
+    enforced_by: "`saturnin escalate`"
+  - id: 7
+    summary: "Server: non-root; apt/systemctl only for Saturnin services; user-scope timers"
+    enforced_by: "`saturnin check command`"
+  - id: 8
+    summary: The CEO never waits for a worker; every dispatch names a result contract
+    enforced_by: "`Governance.check_result_contract`, `saturnin dispatch`"
+
+git:
+  default_branch: main
+  # Branches Saturnin must never commit to, push to, or delete.
+  protected_branches:
+    - main
+    - master
+    - release
+  # Every unit of work happens on a feature branch created from the default branch.
+  branch_prefixes:
+    - feature/
+    - fix/
+    - chore/
+    - docs/
+    - automation/
+    - experiment/
+  branch_name_pattern: '^(feature|fix|chore|docs|automation|experiment)/[a-z0-9._-]+$'
+  worktree_root: var/worktrees
+  trusted_github_proxy_hosts: ["localhost:26831"]
+
+review:
+  # Rule 3: every code PR needs an independent, zero-context reviewer.
+  pr:
+    required: true
+    independent: true
+    zero_context: true
+    min_approvals: 1
+    allowed_reviewer_roles: [pr-reviewer]
+    # Copilot approval reviews require the repository's approval-review setting.
+    # Only this bot is evidence of a zero-context agent review.
+    github_reviewer_logins: ["copilot-pull-request-reviewer[bot]"]
+    # The agent that authored the change may never review it.
+    author_may_review: false
+  # Rule 5: issues opened in other Saturnin-managed repos need an issue review.
+  issue:
+    required_for_external_repos: true
+    independent: true
+    author_may_review: false
+    allowed_reviewer_roles: [issue-reviewer]
+  attestation:
+    # Review records are accepted only with an HMAC-signed attestation produced
+    # by the reviewer execution, binding identity, subject, verdict and content.
+    required: true
+    role_scoped: true
+    key_env: SATURNIN_REVIEW_ATTESTATION_KEY
+    previous_key_env: SATURNIN_REVIEW_ATTESTATION_PREVIOUS_KEY
+    key_scope_env: SATURNIN_REVIEW_ATTESTATION_KEY_SCOPE
+    role_env: SATURNIN_AGENT_ROLE
+
+autonomy:
+  # Rule 4: in this repository Saturnin may merge on its own once review passed.
+  self_repo: JakubMifek/saturnin
+  self_repo_autonomous_merge: true
+  external_repos_allow_issue_creation: true
+  external_repos_allow_direct_push: false
+
+escalation:
+  # Rule 6: humans are reached through a GitHub issue, never silently.
+  channel: github_issue
+  mention: "@jakubmifek"
+  label: "saturnin:escalation"
+  # Escalation issues bypass the issue-review gate (rule 5) by design:
+  # blocking an escalation on a reviewer defeats the purpose of the safety
+  # valve.  The escalation itself is the review trigger for a human.
+  bypass_issue_review: true
+  required_sections:
+    - checklist
+    - urgency
+    - unblock_criteria
+  urgency_levels: [low, normal, high, critical]
+
+delegation:
+  # The CEO does no execution work at all - not even trivial work.
+  ceo_role: ceo
+  ceo_may_execute: false
+  max_dispatch_seconds: 60
+  max_deliberation_steps: 3
+  # Rule 8: the CEO never waits for a worker. Dispatch, agree how the result
+  # comes back, move on. Blocking on a worker is a governance violation.
+  ceo_may_wait_for_workers: false
+  # Every dispatched task must name one of these result contracts.
+  result_contracts:
+    # The worker moves the task to review/done itself; Saturnin sees it on the
+    # next board sweep.
+    - board-callback
+    # The worker opens a PR; the review gate reports back.
+    - pr-gate
+    # A polling automation watches an external signal and re-triggers Saturnin.
+    - poller
+    # A human is on the hook; an escalation issue tracks it.
+    - escalation
+  default_result_contract: board-callback
+
+tracking:
+  # Optional until ADR-0002's repository topology is accepted and provisioned.
+  mirror_tasks_as_issues: false
+  policy_file: repos

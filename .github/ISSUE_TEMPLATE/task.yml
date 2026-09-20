@@ -1,0 +1,19 @@
+name: Task for Saturnin
+description: Something Saturnin should get done. It will be routed, not done by the CEO.
+labels: ["saturnin"]
+body:
+  - type: markdown
+    attributes:
+      value: Maintainers add `saturnin:trusted` after validating the report.
+  - type: input
+    id: title
+    attributes:
+      label: One-line intent
+      placeholder: Fix the failing nightly deploy
+    validations: {required: true}
+  - type: textarea
+    id: detail
+    attributes:
+      label: Detail
+      description: What is wrong or wanted, and how you will know it is done.
+    validations: {required: true}

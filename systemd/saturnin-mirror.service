@@ -1,0 +1,11 @@
+[Unit]
+Description=Saturnin task mirror - keeps GitHub issues in step with the board
+Documentation=file://@SATURNIN_HOME@/docs/adr/0001-system-of-record.md
+
+[Service]
+Type=oneshot
+WorkingDirectory=@SATURNIN_HOME@
+Environment=SATURNIN_HOME="@SATURNIN_HOME_ENV@"
+Environment=PUSH=1
+ExecStart=@SATURNIN_HOME@/automation/library/mirror_tasks.sh
+Nice=10

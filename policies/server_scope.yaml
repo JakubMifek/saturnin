@@ -1,0 +1,82 @@
+# Rule 7: what Saturnin may do on the local Debian server.
+version: 1
+
+user:
+  # Saturnin runs as a dedicated, unprivileged user.
+  dedicated_user: saturnin
+  allow_root: false
+  # Commands must never be run through these.
+  forbidden_prefixes: [sudo, su, doas, pkexec]
+
+packages:
+  # apt is only allowed for packages that belong to a Saturnin-dedicated service.
+  apt_allowed: true
+  apt_requires_dedicated_service: true
+  apt_allowed_subcommands: [install, update, list, show]
+
+services:
+  # systemctl is limited to units owned by Saturnin.
+  systemctl_allowed: true
+  journalctl_allowed: true
+  unit_prefix: saturnin-
+  allowed_subcommands: [start, stop, restart, status, enable, disable, list-timers, daemon-reload]
+  # Timers live in the Saturnin user scope only.
+  scheduling_scope: user
+  allowed_schedulers: [systemd-user-timer]
+
+filesystem:
+  # Basename-specific command rules only apply to executables resolved from
+  # administrator-controlled system locations.
+  trusted_executable_roots:
+    - /bin
+    - /sbin
+    - /usr/bin
+    - /usr/sbin
+    - /usr/local/bin
+    - /usr/local/sbin
+  # The supported bootstrap installs this one project runtime executable.
+  # It is resolved only against the canonical main checkout, never a worker worktree.
+  trusted_runtime_executable: .venv/bin/saturnin
+  # Runtime roots are resolved from the account running Saturnin and the
+  # canonical shared data root. Extra deployment-specific roots belong here.
+  writable_root_sources: [user_home, data_root]
+  writable_roots: []
+  forbidden_roots:
+    - /etc
+    - /usr
+    - /var/lib
+    - /root
+  # Executables that are allowed even though their write targets cannot be
+  # statically determined. Commands not in this list and not handled by the
+  # built-in binary recogniser will be denied (see governance.py for details).
+  python_module_allowlist: [saturnin]
+  executable_allowlist:
+    - saturnin
+    - git
+    - gh
+    - curl
+    - jq
+    - grep
+    - find
+    - cat
+    - head
+    - tail
+    - ls
+    - date
+    - echo
+    - printf
+    - true
+    - false
+    - test
+    - wc
+    - sort
+    - uniq
+    - tr
+    - cut
+    - basename
+    - dirname
+    - mkdir
+    - sleep
+    - systemctl
+    - journalctl
+    - apt

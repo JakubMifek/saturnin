@@ -1,0 +1,25 @@
+__pycache__/
+*.py[cod]
+*.egg-info/
+.pytest_cache/
+build/
+dist/
+.venv/
+
+# Runtime state (worktrees, logs, reports, local secrets) never belongs in git.
+# While issue mirroring is disabled, the local board plus configured backups are
+# authoritative. Mirrored GitHub issues become the durable copy only after
+# mirroring is explicitly enabled.
+var/
+board/tasks/*.json
+board/tasks/*.lock
+board/checkpoints/*.jsonl
+board/reviews/*.jsonl
+
+# Cooperative lock sidecars.
+*.lock
+
+# Coverage artefacts.
+.coverage
+coverage.xml
+htmlcov/
