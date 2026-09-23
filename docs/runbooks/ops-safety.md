@@ -137,12 +137,17 @@ which is the backup that survives losing the machine entirely.
 The engine is meant to be public; the operational detail is not
 ([ADR-0002](../adr/0002-repository-topology.md)). Before flipping visibility:
 
-1. `git log -p | grep -iE "token|secret|password|api[_-]?key"` - history, not
-   just the working tree.
-2. Confirm nothing under `board/tasks/`, `board/checkpoints/`, `board/reviews/`
+1. Run `automation/library/disclosure_gate.sh . .`. It scans only the current
+   Git-tracked tree with the pinned scanner and repository disclosure policy;
+   findings identify locations without printing matched values.
+2. Inspect history separately with a maintained history-capable secret scanner.
+   The PR gate intentionally evaluates the merge candidate, not already-public
+   history.
+3. Confirm nothing under `board/tasks/`, `board/checkpoints/`, `board/reviews/`
    or `var/` was ever committed: `git log --all --name-only -- board var`.
-3. `saturnin doctor` exits 0 and `pre-commit run --all-files` is clean.
-4. Check `policies/*.yaml` for hostnames, paths under `/home/<someone>`,
+4. `saturnin doctor` exits 0 and `pre-commit run --all-files` is clean.
+5. Check `policies/*.yaml` for hostnames, paths under `/home/<someone>`,
    internal URLs and repository names that should stay private.
-5. Move anything private that is left into the notes or board repository, then
+6. Move anything private that is left through the governed generic private-store
+   abstraction, then
    make the switch. If something was leaked, rotate first, rewrite second.

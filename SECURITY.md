@@ -21,6 +21,7 @@ security boundary is the operating-system user account plus the credentials
 | Never runs as root; `apt` only for Saturnin-dedicated service dependencies; `systemctl` only for `saturnin-*` units; timers only in the user scope | `Governance.check_server_command`, `policies/server_scope.yaml` |
 | Cleanup follows the canonical lifecycle and safety policy | `WorktreeManager`, `policies/cleanup.yaml` |
 | Launched agents get only the MCP servers their contract allows; non-executing roles get none | `AgentLauncher`, `policies/mcp.yaml`, `src/saturnin/contracts.py` |
+| Public PRs scan an archive of Git-tracked candidate content with a checksum-pinned Gitleaks release and exact repository markers, using scanner code and allowlists from the trusted base | `disclosure_gate.sh`, `policies/disclosure.yaml`, `policies/gitleaks.toml` |
 
 Check anything unusual before running it:
 
@@ -40,9 +41,17 @@ keeping the rules as data.
 - Nothing secret belongs in this repository. `board/tasks/`, `var/` and
   checkpoints are gitignored; private material belongs in the private
   companion repositories (ADR-0002).
-- `.pre-commit-config.yaml` blocks committed private keys and malformed files.
-  Run a full secret scan before pushing changes; if it fires, rotate first and
-  clean the history second.
+- `.pre-commit-config.yaml` runs the same tracked-content disclosure gate used
+  by required governance CI. It reports only rule, a path digest and line:
+  candidate-controlled paths, matched values and raw scanner output are never
+  printed.
+- Disclosure exceptions are limited to exact line digests under
+  `tests/fixtures/disclosure/`. A PR may propose scanner or allowlist changes,
+  but `pull_request_target` executes the base branch copies and treats the PR
+  checkout as data, so the proposal cannot exempt itself.
+- Private/runtime state stays under ignored `board/` and `var/` paths. External
+  private stores are referenced through the generic topology abstractions in
+  policy and ADR-0002, never through committed private names or contents.
 
 ## Reporting a problem
 

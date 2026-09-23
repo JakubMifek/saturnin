@@ -16,6 +16,10 @@ board/tasks/*.lock
 board/checkpoints/*.jsonl
 board/reviews/*.jsonl
 
+# Scanner downloads and reports are runtime-only and may contain sensitive metadata.
+.disclosure-tools/
+.disclosure-scan/
+
 # Cooperative lock sidecars.
 *.lock
 

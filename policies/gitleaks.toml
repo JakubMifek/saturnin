@@ -1,0 +1,17 @@
+title = "Saturnin public repository disclosure policy"
+
+[extend]
+useDefault = true
+
+[[rules]]
+id = "saturnin-synthetic-token"
+description = "Synthetic token shape used to exercise disclosure enforcement"
+regex = '''SATURNIN_SYNTHETIC_TOKEN_[A-Z0-9]{24}'''
+keywords = ["SATURNIN_SYNTHETIC_TOKEN_"]
+
+[[rules.allowlists]]
+description = "One reviewed synthetic fixture; path and exact value must both match"
+condition = "AND"
+paths = ['''(?:^|/)tests/fixtures/disclosure/synthetic-allowed\.txt$''']
+regexTarget = "match"
+regexes = ['''^SATURNIN_SYNTHETIC_TOKEN_4Q7W9E2R5T8Y1U3I6O0P2A4S$''']

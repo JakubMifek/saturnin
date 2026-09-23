@@ -21,8 +21,17 @@ jobs:
         uses: actions/checkout@v4
         with:
           ref: ${{ github.event.pull_request.base.sha }}
+          path: trusted
+          persist-credentials: false
+      - name: Check out candidate as data only
+        uses: actions/checkout@v4
+        with:
+          repository: ${{ github.event.pull_request.base.repo.full_name }}
+          ref: ${{ github.event.pull_request.head.sha }}
+          path: candidate
           persist-credentials: false
       - name: Require seeded base governance runtime
+        working-directory: trusted
         run: |
           if [ ! -f pyproject.toml ] || [ ! -x automation/library/review_gate.sh ]; then
             echo "::error::Base branch has no trusted Saturnin governance runtime; seed this workflow/runtime on the default branch or enforce the first scaffold approval outside this PR."
@@ -32,13 +41,19 @@ jobs:
         with:
           python-version: "3.12"
       - name: Install trusted base governance
-        run: python -m pip install -e ".[dev]"
+        run: python -m pip install -e "./trusted[dev]"
+      - name: Public repository disclosure gate
+        env:
+          GITLEAKS_BIN: ""
+        run: trusted/automation/library/disclosure_gate.sh candidate trusted
       - name: PR head must be a feature branch (rules 1 and 2)
         env:
           HEAD_REF: ${{ github.event.pull_request.head.ref }}
+        working-directory: trusted
         run: saturnin check branch "$HEAD_REF"
       - name: Independent review gate (rule 3)
         env:
           GITHUB_TOKEN: ${{ github.token }}
           SATURNIN_REVIEW_ATTESTATION_KEY: ${{ github.token }}
+        working-directory: trusted
         run: automation/library/review_gate.sh pr "${{ github.event.pull_request.base.repo.full_name }}#${{ github.event.pull_request.number }}" "${{ github.event.pull_request.base.repo.full_name }}"
