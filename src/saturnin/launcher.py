@@ -27,7 +27,12 @@ from .contracts import (
     mcp_authorization_problem,
     project_agent_path,
 )
-from .governance import Governance, github_repo_slug
+from .governance import (
+    ExecutableTrustError,
+    Governance,
+    github_repo_slug,
+    resolve_trusted_executable,
+)
 from .issues import MirrorError, run_gh
 from .jsonlines import PRIVATE_FILE_MODE, atomic_replace_text
 from .launcher_host import host_launcher_enabled
@@ -132,11 +137,7 @@ class AgentLauncher:
     ) -> LaunchResult | None:
         metadata_path = self.dir / f"{task.id}.json"
         checkpoint = CheckpointStore(self.config, self.board).latest(task.id)
-        executable = str(self.policy.get("command", "copilot"))
-        executable_path = shutil.which(executable)
-        if executable_path is None:
-            raise LauncherError(f"agent launcher executable not found: {executable}")
-        executable_path = str(Path(executable_path).resolve())
+        executable_path = self._launcher_executable()
         sandbox_path = self._sandbox_executable()
         network_sandbox_path = self._network_sandbox_executable()
         mcp_path: Path | None = None
@@ -709,7 +710,14 @@ class AgentLauncher:
         path = shutil.which(executable)
         if path is None:
             raise LauncherError(f"required worker sandbox executable not found: {executable}")
-        return str(Path(path).resolve())
+        return self._validate_required_executable(path, "bwrap")
+
+    def _launcher_executable(self) -> str:
+        executable = str(self.policy.get("command", "copilot")).strip()
+        path = shutil.which(executable)
+        if path is None:
+            raise LauncherError(f"agent launcher executable not found: {executable}")
+        return self._validate_required_executable(path, "copilot")
 
     def _agent_args(self, *, prompt: str, mcp_config: Path, task_id: str) -> list[str]:
         return [
@@ -744,7 +752,19 @@ class AgentLauncher:
             raise LauncherError(
                 f"required worker network sandbox executable not found: {executable}"
             )
-        return str(Path(path).resolve())
+        return self._validate_required_executable(path, "pasta")
+
+    def _validate_required_executable(self, path: str, name: str) -> str:
+        try:
+            return str(
+                resolve_trusted_executable(
+                    self._trusted_config(self.config),
+                    path,
+                    expected_binary=name,
+                )
+            )
+        except ExecutableTrustError as exc:
+            raise LauncherError(f"untrusted {name} executable: {exc}") from exc
 
     def _tighten_existing_logs(self) -> None:
         for path in self.dir.glob("*.log"):
@@ -1619,6 +1639,22 @@ class AgentLauncher:
                 trusted_config,
                 worktree_scope=worktree_scope,
             )
+            command_name = Path(command).name
+            if command_name in trusted_config.server_scope.get(
+                "prerequisite_checks", {}
+            ):
+                try:
+                    command = str(
+                        resolve_trusted_executable(
+                            trusted_config,
+                            command,
+                            expected_binary=command_name,
+                        )
+                    )
+                except ExecutableTrustError as exc:
+                    raise LauncherError(
+                        f"untrusted MCP executable {command_name}: {exc}"
+                    ) from exc
             canonical_github = (
                 config.var_dir / "bin" / "github-mcp-server"
             ).resolve(strict=False)

@@ -20,6 +20,7 @@ from saturnin.checkpoints import Checkpoint, CheckpointStore
 from saturnin.cli import main
 from saturnin.config import Config
 from saturnin.launcher import AgentLauncher, LauncherError
+from saturnin.governance import resolve_trusted_executable
 from saturnin.mcp import MCPError
 from saturnin.review import (
     ReviewLedger,
@@ -53,6 +54,12 @@ def verified_github_mcp(monkeypatch: pytest.MonkeyPatch) -> None:
         AgentLauncher,
         "_process_start_time",
         staticmethod(lambda pid: 123456),
+    )
+    monkeypatch.setattr(
+        "saturnin.launcher.resolve_trusted_executable",
+        lambda config, path, **kwargs: (
+            Path(path) if "/" in path else Path("/usr/bin") / path
+        ),
     )
 
 
@@ -106,6 +113,7 @@ def test_launcher_starts_routed_role_with_filtered_mcp(
     )
     assert mcp["mcpServers"]["github"]["args"] == ["stdio", "--read-only"]
     assert mcp["mcpServers"]["filesystem"]["args"][-1] == str(worktree.path)
+    assert mcp["mcpServers"]["filesystem"]["command"] == "/usr/bin/npx"
     command = calls[0][0]
     assert "--no-ask-user" in command
     assert "Implement a small fix" in command[-1]
@@ -121,6 +129,43 @@ def test_launcher_starts_routed_role_with_filtered_mcp(
         (config.var_dir / "launches" / f"{task.id}.json").read_text()
     )
     assert metadata["process_start_time_ticks"] == 123456
+
+
+def test_launcher_rejects_required_executables_from_worktree_path(
+    config: Config,
+    board: Board,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    worktree_bin = tmp_path / "worktree" / "bin"
+    worktree_bin.mkdir(parents=True)
+    for name in ("bwrap", "pasta", "copilot"):
+        path = worktree_bin / name
+        path.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+        path.chmod(0o755)
+    monkeypatch.setattr(
+        "saturnin.launcher.shutil.which",
+        lambda name: str(worktree_bin / name),
+    )
+    monkeypatch.setattr(
+        "saturnin.launcher.resolve_trusted_executable",
+        resolve_trusted_executable,
+    )
+    launcher = AgentLauncher(config, board)
+
+    with pytest.raises(LauncherError, match="untrusted copilot executable"):
+        launcher._launcher_executable()
+    with pytest.raises(LauncherError, match="untrusted bwrap executable"):
+        launcher._sandbox_executable()
+    with pytest.raises(LauncherError, match="untrusted pasta executable"):
+        launcher._network_sandbox_executable()
+
+    config.server_scope["filesystem"]["trusted_executable_roots"].append(
+        str(worktree_bin)
+    )
+    assert launcher._launcher_executable() == str(worktree_bin / "copilot")
+    assert launcher._sandbox_executable() == str(worktree_bin / "bwrap")
+    assert launcher._network_sandbox_executable() == str(worktree_bin / "pasta")
 
 
 def test_launcher_relaunches_only_deferred_in_progress_task(

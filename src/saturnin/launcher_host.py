@@ -4,12 +4,12 @@ from __future__ import annotations
 
 import json
 import os
-import shutil
 import subprocess
 from pathlib import Path
 from typing import Any
 
 from .config import Config
+from .governance import ExecutableTrustError, resolve_trusted_executable
 from .jsonlines import PRIVATE_FILE_MODE, atomic_replace_text
 from .mcp import MCPError, verify_github_binary
 
@@ -58,7 +58,8 @@ def set_host_launcher_enabled(config: Config, enabled: bool) -> Path:
 
 
 def launcher_health(config: Config) -> list[dict[str, Any]]:
-    checks = [_executable_health(name) for name in REQUIRED_EXECUTABLES]
+    config = _trusted_config(config)
+    checks = [_executable_health(config, name) for name in REQUIRED_EXECUTABLES]
     try:
         path = verify_github_binary(config)
     except (MCPError, OSError, subprocess.SubprocessError) as exc:
@@ -83,6 +84,7 @@ def launcher_health(config: Config) -> list[dict[str, Any]]:
 
 
 def launcher_status(config: Config) -> dict[str, Any]:
+    config = _trusted_config(config)
     repository_enabled = bool(
         config.policy("mcp").get("launcher", {}).get("enabled", False)
     )
@@ -103,16 +105,25 @@ def launcher_status(config: Config) -> dict[str, Any]:
     }
 
 
-def _executable_health(name: str) -> dict[str, Any]:
-    executable = shutil.which(name)
-    if executable is None:
+def _trusted_config(config: Config) -> Config:
+    return config if config.root == config.data_root else Config(config.data_root)
+
+
+def _executable_health(config: Config, name: str) -> dict[str, Any]:
+    try:
+        executable = resolve_trusted_executable(
+            config,
+            name,
+            expected_binary=name,
+        )
+    except ExecutableTrustError as exc:
         return {
             "name": name,
             "healthy": False,
             "path": None,
-            "detail": "executable not found on PATH",
+            "detail": str(exc),
         }
-    path = str(Path(executable).resolve())
+    path = str(executable)
     try:
         result = subprocess.run(
             [path, "--version"],

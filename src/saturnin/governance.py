@@ -154,6 +154,10 @@ class _WriteScopeError(ValueError):
     pass
 
 
+class ExecutableTrustError(RuntimeError):
+    pass
+
+
 @dataclass
 class Decision:
     allowed: bool
@@ -714,6 +718,41 @@ class Governance:
         return problems
 
 
+def resolve_trusted_executable(
+    config: Config,
+    executable: str,
+    *,
+    expected_binary: str | None = None,
+) -> Path:
+    """Resolve an executable once and enforce the server-scope trust policy."""
+    executable = executable.strip()
+    if not executable:
+        raise ExecutableTrustError("executable name must not be empty")
+    requested_binary = Path(executable).name
+    binary = expected_binary or requested_binary
+    if not _is_classified_executable(binary, config.server_scope):
+        raise ExecutableTrustError(
+            f"executable {binary!r} has no server-scope trust policy"
+        )
+    if "/" in executable:
+        selected = Path(executable).expanduser()
+    else:
+        found = shutil.which(executable)
+        if found is None:
+            raise ExecutableTrustError(f"required executable not found: {executable}")
+        selected = Path(found)
+    selected = Path(os.path.abspath(selected))
+    decision = _check_executable_location(
+        str(selected),
+        binary,
+        config.server_scope,
+        runtime_root=config.data_root,
+    )
+    if not decision.allowed:
+        raise ExecutableTrustError("; ".join(decision.reasons))
+    return selected
+
+
 def _unsafe_shell_syntax(command: str) -> str | None:
     if "\\\n" in command or "\\\r\n" in command:
         return "backslash-newline continuation"
@@ -816,15 +855,7 @@ def _check_executable_location(
     cwd: Path | None = None,
 ) -> Decision:
     filesystem = scope.get("filesystem", {})
-    classified = (
-        binary in _SPECIAL_EXECUTABLES
-        or binary in set(filesystem.get("executable_allowlist", []))
-        or binary in set(scope.get("prerequisite_checks", {}))
-        or binary in set(scope.get("user", {}).get("forbidden_prefixes", []))
-        or binary == "apt"
-        or binary.startswith("apt-")
-    )
-    if not classified:
+    if not _is_classified_executable(binary, scope):
         return Decision.ok("executable does not receive basename-specific privileges")
 
     if "/" in executable:
@@ -920,6 +951,18 @@ def _check_executable_location(
             f"executable {str(resolved)!r} is outside trusted system executable roots"
         )
     return Decision.ok(f"executable {str(resolved)!r} is under a trusted system root")
+
+
+def _is_classified_executable(binary: str, scope: dict[str, Any]) -> bool:
+    filesystem = scope.get("filesystem", {})
+    return (
+        binary in _SPECIAL_EXECUTABLES
+        or binary in set(filesystem.get("executable_allowlist", []))
+        or binary in set(scope.get("prerequisite_checks", {}))
+        or binary in set(scope.get("user", {}).get("forbidden_prefixes", []))
+        or binary == "apt"
+        or binary.startswith("apt-")
+    )
 
 
 def _trusted_executable_roots(

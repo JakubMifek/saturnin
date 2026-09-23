@@ -13,6 +13,7 @@ from saturnin.launcher_host import (
     LauncherHostError,
     host_config_path,
     host_launcher_enabled,
+    launcher_health,
 )
 from saturnin.mcp import MCPError
 
@@ -27,6 +28,10 @@ def _healthy_prerequisites(
         path.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
         path.chmod(0o755)
     monkeypatch.setenv("PATH", str(binary_dir))
+    monkeypatch.setattr(
+        "saturnin.launcher_host.resolve_trusted_executable",
+        lambda _, name, **kwargs: binary_dir / name,
+    )
     github = config.var_dir / "bin" / "github-mcp-server"
     monkeypatch.setattr(
         "saturnin.launcher_host.verify_github_binary", lambda _: github
@@ -94,3 +99,35 @@ def test_launcher_rejects_host_configuration_with_extra_data(config: Config) -> 
 
     with pytest.raises(LauncherHostError, match="must contain only"):
         host_launcher_enabled(config)
+
+
+def test_launcher_health_does_not_execute_untrusted_path_entries(
+    config: Config,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    worktree_bin = tmp_path / "worktree" / "bin"
+    worktree_bin.mkdir(parents=True)
+    for name in ("bwrap", "pasta", "copilot", "npx", "uvx"):
+        path = worktree_bin / name
+        path.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+        path.chmod(0o755)
+    monkeypatch.setenv("PATH", str(worktree_bin))
+    calls: list[list[str]] = []
+    monkeypatch.setattr(
+        "saturnin.launcher_host.subprocess.run",
+        lambda command, **kwargs: calls.append(command),
+    )
+    monkeypatch.setattr(
+        "saturnin.launcher_host.verify_github_binary",
+        lambda _: config.var_dir / "bin" / "github-mcp-server",
+    )
+
+    checks = launcher_health(config)
+
+    assert all(not check["healthy"] for check in checks[:5])
+    assert all(
+        "outside trusted system executable roots" in check["detail"]
+        for check in checks[:5]
+    )
+    assert calls == []
