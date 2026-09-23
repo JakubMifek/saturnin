@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import os
+import shutil
 import subprocess
 import sys
 import threading
@@ -143,6 +144,8 @@ def test_launcher_rejects_required_executables_from_worktree_path(
         path = worktree_bin / name
         path.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
         path.chmod(0o755)
+    system_executable = shutil.which("true", path="/usr/bin:/bin")
+    assert system_executable is not None
     monkeypatch.setattr(
         "saturnin.launcher.shutil.which",
         lambda name: str(worktree_bin / name),
@@ -163,9 +166,21 @@ def test_launcher_rejects_required_executables_from_worktree_path(
     config.server_scope["filesystem"]["trusted_executable_roots"].append(
         str(worktree_bin)
     )
-    assert launcher._launcher_executable() == str(worktree_bin / "copilot")
-    assert launcher._sandbox_executable() == str(worktree_bin / "bwrap")
-    assert launcher._network_sandbox_executable() == str(worktree_bin / "pasta")
+    with pytest.raises(LauncherError, match="must be owned by root"):
+        launcher._launcher_executable()
+
+    trusted_system_executable = str(Path(system_executable).resolve())
+    monkeypatch.setattr(
+        "saturnin.launcher.shutil.which",
+        lambda name: system_executable,
+    )
+    assert launcher._launcher_executable() == trusted_system_executable
+    assert launcher._sandbox_executable() == trusted_system_executable
+    assert launcher._network_sandbox_executable() == trusted_system_executable
+    assert launcher._sandbox_visible_executable(Path("/usr/bin/npx"), config)
+    assert not launcher._sandbox_visible_executable(
+        Path("/opt/pipx/venvs/uv/bin/uvx"), config
+    )
 
 
 def test_launcher_relaunches_only_deferred_in_progress_task(

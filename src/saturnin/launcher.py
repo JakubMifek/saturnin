@@ -766,6 +766,21 @@ class AgentLauncher:
         except ExecutableTrustError as exc:
             raise LauncherError(f"untrusted {name} executable: {exc}") from exc
 
+    def _sandbox_visible_executable(self, path: Path, config: Config) -> bool:
+        sandbox = self.policy.get("sandbox", {})
+        read_only_paths = sandbox.get("read_only_paths", []) if isinstance(sandbox, dict) else []
+        visible_roots = [
+            Path(value).resolve(strict=False)
+            for value in read_only_paths
+            if isinstance(value, str) and Path(value).is_absolute()
+        ]
+        visible_roots.append((config.var_dir / "bin").resolve(strict=False))
+        resolved = path.resolve(strict=False)
+        return any(
+            resolved == root or resolved.is_relative_to(root)
+            for root in visible_roots
+        )
+
     def _tighten_existing_logs(self) -> None:
         for path in self.dir.glob("*.log"):
             try:
@@ -1664,6 +1679,12 @@ class AgentLauncher:
                     raise LauncherError(
                         "verified GitHub MCP executable does not match canonical path"
                     )
+            if Path(command).is_absolute() and not self._sandbox_visible_executable(
+                Path(command), trusted_config
+            ):
+                raise LauncherError(
+                    f"MCP executable is outside sandbox read-only mounts: {command}"
+                )
             server: dict[str, Any] = {
                 "type": definition.get("transport", "stdio"),
                 "command": command,

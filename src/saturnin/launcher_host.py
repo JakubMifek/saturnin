@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import os
+import stat
 import subprocess
 from pathlib import Path
 from typing import Any
@@ -27,14 +28,41 @@ def host_config_path(config: Config) -> Path:
 
 def host_launcher_enabled(config: Config) -> bool:
     path = host_config_path(config)
-    if not path.exists():
-        return False
-    if path.is_symlink() or not path.is_file():
-        raise LauncherHostError(f"launcher host configuration is not a regular file: {path}")
+    flags = os.O_RDONLY | os.O_CLOEXEC | os.O_NOFOLLOW
     try:
-        data = json.loads(path.read_text(encoding="utf-8"))
+        descriptor = os.open(path, flags)
+    except FileNotFoundError:
+        return False
+    except OSError as exc:
+        raise LauncherHostError(f"invalid launcher host configuration {path}: {exc}") from exc
+    try:
+        parent_problem = _host_config_parent_problem(config, path)
+        if parent_problem:
+            raise LauncherHostError(parent_problem)
+        metadata = os.fstat(descriptor)
+        if not stat.S_ISREG(metadata.st_mode):
+            raise LauncherHostError(
+                f"launcher host configuration is not a regular file: {path}"
+            )
+        if metadata.st_uid != os.geteuid():
+            raise LauncherHostError(
+                f"launcher host configuration must be owned by uid {os.geteuid()}: {path}"
+            )
+        if metadata.st_mode & (stat.S_IRWXG | stat.S_IRWXO):
+            raise LauncherHostError(
+                f"launcher host configuration permissions must not grant group/other access: {path}"
+            )
+        with os.fdopen(descriptor, encoding="utf-8") as handle:
+            descriptor = -1
+            content = handle.read(4097)
+        if len(content) > 4096:
+            raise LauncherHostError(f"launcher host configuration is too large: {path}")
+        data = json.loads(content)
     except (OSError, json.JSONDecodeError) as exc:
         raise LauncherHostError(f"invalid launcher host configuration {path}: {exc}") from exc
+    finally:
+        if descriptor >= 0:
+            os.close(descriptor)
     expected = {"version": 1, "launcher": {"enabled": True}}
     if data != expected:
         raise LauncherHostError(
@@ -48,7 +76,10 @@ def set_host_launcher_enabled(config: Config, enabled: bool) -> Path:
     if not enabled:
         path.unlink(missing_ok=True)
         return path
-    path.parent.mkdir(parents=True, exist_ok=True)
+    path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+    parent_problem = _host_config_parent_problem(config, path)
+    if parent_problem:
+        raise LauncherHostError(parent_problem)
     atomic_replace_text(
         path,
         json.dumps({"version": 1, "launcher": {"enabled": True}}, indent=2) + "\n",
@@ -107,6 +138,33 @@ def launcher_status(config: Config) -> dict[str, Any]:
 
 def _trusted_config(config: Config) -> Config:
     return config if config.root == config.data_root else Config(config.data_root)
+
+
+def _host_config_parent_problem(config: Config, path: Path) -> str | None:
+    data_root = config.data_root.resolve()
+    current = path.parent
+    while True:
+        try:
+            metadata = current.lstat()
+        except OSError as exc:
+            return f"launcher host configuration parent cannot be inspected: {current}: {exc}"
+        if not stat.S_ISDIR(metadata.st_mode):
+            return f"launcher host configuration parent is not a directory: {current}"
+        if metadata.st_uid not in {0, os.geteuid()}:
+            return (
+                f"launcher host configuration parent has unexpected owner "
+                f"uid {metadata.st_uid}: {current}"
+            )
+        if metadata.st_mode & (stat.S_IWGRP | stat.S_IWOTH):
+            return (
+                f"launcher host configuration parent must not be group/world-writable: "
+                f"{current}"
+            )
+        if current == data_root:
+            return None
+        if current.parent == current or not current.is_relative_to(data_root):
+            return f"launcher host configuration escapes data root: {path}"
+        current = current.parent
 
 
 def _executable_health(config: Config, name: str) -> dict[str, Any]:

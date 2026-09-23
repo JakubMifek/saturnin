@@ -3,17 +3,24 @@ from __future__ import annotations
 import json
 import os
 import shutil
+import stat
 import threading
 from contextlib import contextmanager
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Iterator
 
 import pytest
 
 from saturnin import review
 from saturnin.config import Config
-from saturnin.governance import Governance, _curl_targets, _git_targets
+from saturnin.governance import (
+    Governance,
+    _curl_targets,
+    _git_targets,
+    _trusted_system_path_problem,
+)
 from saturnin.jsonlines import durable_append_text
 from saturnin.review import (
     ReviewLedger,
@@ -1221,14 +1228,12 @@ def test_prerequisite_checks_are_narrowly_governed(
     trusted = tmp_path / "trusted-bin"
     trusted.mkdir()
     commands = ("bwrap", "pasta", "copilot", "npx", "uvx")
-    for name in commands:
-        executable = trusted / name
-        executable.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
-        executable.chmod(0o755)
     config.server_scope["filesystem"]["trusted_executable_roots"].append(str(trusted))
+    system_executable = shutil.which("true", path="/usr/bin:/bin")
+    assert system_executable is not None
     monkeypatch.setattr(
         "saturnin.governance.shutil.which",
-        lambda command: str(trusted / command),
+        lambda command: system_executable,
     )
 
     for command in commands:
@@ -1239,9 +1244,12 @@ def test_prerequisite_checks_are_narrowly_governed(
     relocated = tmp_path / "relocated-npx"
     relocated.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
     relocated.chmod(0o755)
-    (trusted / "npx").unlink()
     (trusted / "npx").symlink_to(relocated)
-    assert governance.check_server_command("npx --version").allowed
+    monkeypatch.setattr(
+        "saturnin.governance.shutil.which",
+        lambda command: str(trusted / command),
+    )
+    assert not governance.check_server_command("npx --version").allowed
     assert not governance.check_server_command("npx run arbitrary-package").allowed
 
     github = config.var_dir / "bin" / "github-mcp-server"
@@ -1253,6 +1261,27 @@ def test_prerequisite_checks_are_narrowly_governed(
     assert not governance.check_server_command(
         f"{trusted / 'github-mcp-server'} --version"
     ).allowed
+
+
+@pytest.mark.parametrize("writable_part", ["leaf", "ancestor"])
+def test_trusted_executable_rejects_writable_path_components(
+    monkeypatch: pytest.MonkeyPatch,
+    writable_part: str,
+) -> None:
+    executable = Path("/trusted/bin/tool")
+    writable = executable if writable_part == "leaf" else executable.parent
+
+    def fake_stat(path: Path, *, follow_symlinks: bool = True) -> SimpleNamespace:
+        mode = stat.S_IFREG | 0o755 if path == executable else stat.S_IFDIR | 0o755
+        if path == writable:
+            mode |= stat.S_IWGRP
+        return SimpleNamespace(st_uid=0, st_mode=mode)
+
+    monkeypatch.setattr(Path, "stat", fake_stat)
+
+    assert "group/world-writable" in (
+        _trusted_system_path_problem(executable) or ""
+    )
 
 
 def test_bootstrap_runtime_saturnin_executable_is_trusted(

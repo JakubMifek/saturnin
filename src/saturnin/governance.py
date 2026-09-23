@@ -11,6 +11,7 @@ import os
 import re
 import shlex
 import shutil
+import stat
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Iterable, Sequence
@@ -750,7 +751,12 @@ def resolve_trusted_executable(
     )
     if not decision.allowed:
         raise ExecutableTrustError("; ".join(decision.reasons))
-    return selected
+    try:
+        return selected.resolve(strict=True)
+    except (OSError, RuntimeError, ValueError) as exc:
+        raise ExecutableTrustError(
+            f"trusted executable {str(selected)!r} could not be resolved: {exc}"
+        ) from exc
 
 
 def _unsafe_shell_syntax(command: str) -> str | None:
@@ -942,14 +948,15 @@ def _check_executable_location(
             f"classified executable {str(resolved)!r} is not executable"
         )
 
-    if binary in set(scope.get("prerequisite_checks", {})):
-        return Decision.ok(
-            f"prerequisite executable {str(selected)!r} is selected from a trusted system root"
-        )
-    if _containing_root(resolved, trusted_roots) is None:
+    trusted_root = _containing_root(resolved, trusted_roots)
+    if trusted_root is None:
         return Decision.deny(
             f"executable {str(resolved)!r} is outside trusted system executable roots"
         )
+    if binary in set(scope.get("prerequisite_checks", {})):
+        permission_problem = _trusted_system_path_problem(resolved)
+        if permission_problem:
+            return Decision.deny(permission_problem)
     return Decision.ok(f"executable {str(resolved)!r} is under a trusted system root")
 
 
@@ -963,6 +970,24 @@ def _is_classified_executable(binary: str, scope: dict[str, Any]) -> bool:
         or binary == "apt"
         or binary.startswith("apt-")
     )
+
+
+def _trusted_system_path_problem(executable: Path) -> str | None:
+    current = executable
+    while True:
+        try:
+            metadata = current.stat(follow_symlinks=False)
+        except OSError as exc:
+            return f"trusted executable path {str(current)!r} cannot be inspected: {exc}"
+        if metadata.st_uid != 0:
+            return f"trusted executable path {str(current)!r} must be owned by root"
+        if metadata.st_mode & (stat.S_IWGRP | stat.S_IWOTH):
+            return (
+                f"trusted executable path {str(current)!r} must not be group/world-writable"
+            )
+        if current.parent == current:
+            return None
+        current = current.parent
 
 
 def _trusted_executable_roots(

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import os
 import stat
 from pathlib import Path
 
@@ -14,13 +15,20 @@ from saturnin.launcher_host import (
     host_config_path,
     host_launcher_enabled,
     launcher_health,
+    set_host_launcher_enabled,
 )
 from saturnin.mcp import MCPError
+
+
+def _secure_host_config_parents(config: Config) -> None:
+    config.data_root.chmod(0o755)
+    config.var_dir.chmod(0o700)
 
 
 def _healthy_prerequisites(
     config: Config, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> Path:
+    _secure_host_config_parents(config)
     binary_dir = tmp_path / "bin"
     binary_dir.mkdir()
     for name in ("bwrap", "pasta", "copilot", "npx", "uvx"):
@@ -90,12 +98,14 @@ def test_launcher_enable_reports_every_failed_prerequisite(
 
 
 def test_launcher_rejects_host_configuration_with_extra_data(config: Config) -> None:
+    _secure_host_config_parents(config)
     path = host_config_path(config)
-    path.parent.mkdir(parents=True)
+    path.parent.mkdir(parents=True, mode=0o700)
     path.write_text(
         '{"version": 1, "launcher": {"enabled": true}, "token": "forbidden"}\n',
         encoding="utf-8",
     )
+    path.chmod(0o600)
 
     with pytest.raises(LauncherHostError, match="must contain only"):
         host_launcher_enabled(config)
@@ -131,3 +141,57 @@ def test_launcher_health_does_not_execute_untrusted_path_entries(
         for check in checks[:5]
     )
     assert calls == []
+
+
+def test_launcher_host_config_rejects_symlink(
+    config: Config, tmp_path: Path
+) -> None:
+    _secure_host_config_parents(config)
+    path = host_config_path(config)
+    path.parent.mkdir(parents=True, mode=0o700)
+    target = tmp_path / "launcher.json"
+    target.write_text(
+        '{"version": 1, "launcher": {"enabled": true}}\n',
+        encoding="utf-8",
+    )
+    target.chmod(0o600)
+    path.symlink_to(target)
+
+    with pytest.raises(LauncherHostError, match="invalid launcher host configuration"):
+        host_launcher_enabled(config)
+
+
+def test_launcher_host_config_rejects_group_access(config: Config) -> None:
+    _secure_host_config_parents(config)
+    path = set_host_launcher_enabled(config, True)
+    path.chmod(0o640)
+
+    with pytest.raises(LauncherHostError, match="group/other access"):
+        host_launcher_enabled(config)
+
+
+def test_launcher_host_config_rejects_unsafe_parent(config: Config) -> None:
+    _secure_host_config_parents(config)
+    path = set_host_launcher_enabled(config, True)
+    path.parent.chmod(0o770)
+
+    with pytest.raises(LauncherHostError, match="group/world-writable"):
+        host_launcher_enabled(config)
+
+
+def test_launcher_host_config_rejects_wrong_owner(
+    config: Config, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _secure_host_config_parents(config)
+    set_host_launcher_enabled(config, True)
+    real_fstat = os.fstat
+
+    def wrong_owner(descriptor: int) -> os.stat_result:
+        values = list(real_fstat(descriptor))
+        values[4] = os.geteuid() + 1
+        return os.stat_result(values)
+
+    monkeypatch.setattr("saturnin.launcher_host.os.fstat", wrong_owner)
+
+    with pytest.raises(LauncherHostError, match="must be owned by uid"):
+        host_launcher_enabled(config)
