@@ -15,7 +15,6 @@ from .jsonlines import PRIVATE_FILE_MODE, atomic_replace_text
 from .mcp import MCPError, verify_github_binary
 
 HOST_CONFIG = Path("var/config/launcher.json")
-REQUIRED_EXECUTABLES = ("bwrap", "pasta", "copilot", "npx", "uvx")
 
 
 class LauncherHostError(RuntimeError):
@@ -90,27 +89,24 @@ def set_host_launcher_enabled(config: Config, enabled: bool) -> Path:
 
 def launcher_health(config: Config) -> list[dict[str, Any]]:
     config = _trusted_config(config)
-    checks = [_executable_health(config, name) for name in REQUIRED_EXECUTABLES]
-    try:
-        path = verify_github_binary(config)
-    except (MCPError, OSError, subprocess.SubprocessError) as exc:
-        checks.append(
-            {
-                "name": "github-mcp-server",
-                "healthy": False,
-                "path": str(config.var_dir / "bin" / "github-mcp-server"),
-                "detail": str(exc),
-            }
-        )
-    else:
-        checks.append(
-            {
-                "name": "github-mcp-server",
-                "healthy": True,
-                "path": str(path),
-                "detail": "pinned release and checksum verified",
-            }
-        )
+    definitions = config.server_scope.get("prerequisite_checks", {})
+    if not isinstance(definitions, dict):
+        raise LauncherHostError("server prerequisite_checks must be a mapping")
+    checks = []
+    for name, definition in definitions.items():
+        if not isinstance(definition, dict):
+            raise LauncherHostError(f"invalid prerequisite definition for {name!r}")
+        arguments = definition.get("args")
+        if not isinstance(arguments, list) or not all(
+            isinstance(value, str) for value in arguments
+        ):
+            raise LauncherHostError(f"invalid prerequisite arguments for {name!r}")
+        if definition.get("type") == "pinned-github-mcp":
+            checks.append(_github_mcp_health(config, name, arguments))
+        elif definition.get("type") == "system-executable":
+            checks.append(_executable_health(config, name, arguments))
+        else:
+            raise LauncherHostError(f"invalid prerequisite type for {name!r}")
     return checks
 
 
@@ -167,7 +163,29 @@ def _host_config_parent_problem(config: Config, path: Path) -> str | None:
         current = current.parent
 
 
-def _executable_health(config: Config, name: str) -> dict[str, Any]:
+def _github_mcp_health(
+    config: Config, name: str, arguments: list[str]
+) -> dict[str, Any]:
+    try:
+        path = verify_github_binary(config, version_args=arguments)
+    except (MCPError, OSError, subprocess.SubprocessError) as exc:
+        return {
+            "name": name,
+            "healthy": False,
+            "path": str(config.var_dir / "bin" / "github-mcp-server"),
+            "detail": str(exc),
+        }
+    return {
+        "name": name,
+        "healthy": True,
+        "path": str(path),
+        "detail": "pinned release and checksum verified",
+    }
+
+
+def _executable_health(
+    config: Config, name: str, arguments: list[str]
+) -> dict[str, Any]:
     try:
         executable = resolve_trusted_executable(
             config,
@@ -184,7 +202,7 @@ def _executable_health(config: Config, name: str) -> dict[str, Any]:
     path = str(executable)
     try:
         result = subprocess.run(
-            [path, "--version"],
+            [path, *arguments],
             stdin=subprocess.DEVNULL,
             stdout=subprocess.DEVNULL,
             stderr=subprocess.DEVNULL,

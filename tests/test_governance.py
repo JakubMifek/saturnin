@@ -90,6 +90,27 @@ def test_policies_audit_clean(governance: Governance) -> None:
     assert governance.audit() == []
 
 
+@pytest.mark.parametrize(
+    "mutation",
+    [
+        lambda checks: checks.__setitem__("bwrap", ["--version"]),
+        lambda checks: checks["bwrap"].__setitem__("type", "unknown"),
+        lambda checks: checks["github-mcp-server"].__setitem__(
+            "type", "system-executable"
+        ),
+        lambda checks: checks["bwrap"].__setitem__("extra", True),
+    ],
+)
+def test_prerequisite_policy_schema_rejects_drift(
+    governance: Governance,
+    config: Config,
+    mutation,
+) -> None:
+    mutation(config.server_scope["prerequisite_checks"])
+
+    assert any("prerequisite" in problem for problem in governance.audit())
+
+
 def test_review_attestation_key_environments_must_be_distinct(config: Config) -> None:
     attestation = config.governance["review"]["attestation"]
     attestation["previous_key_env"] = attestation["key_env"]
@@ -1256,6 +1277,10 @@ def test_prerequisite_checks_are_narrowly_governed(
     github.parent.mkdir(parents=True)
     github.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
     github.chmod(0o755)
+    monkeypatch.setattr(
+        "saturnin.mcp.verify_github_binary",
+        lambda config: github,
+    )
     assert governance.check_server_command(f"{github} --version").allowed
     assert not governance.check_server_command(f"{github} serve").allowed
     assert not governance.check_server_command(

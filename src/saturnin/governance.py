@@ -466,13 +466,16 @@ class Governance:
         scope = self.config.server_scope
         prerequisite_checks = scope.get("prerequisite_checks", {})
         if binary in prerequisite_checks:
-            allowed_arguments = prerequisite_checks[binary]
-            if not isinstance(allowed_arguments, list) or not all(
-                isinstance(value, str) for value in allowed_arguments
-            ):
+            definition = prerequisite_checks[binary]
+            if not isinstance(definition, dict):
                 return Decision.deny(
                     f"invalid prerequisite check policy for {binary!r}"
                 )
+            allowed_arguments = definition.get("args")
+            if not isinstance(allowed_arguments, list) or not all(
+                isinstance(value, str) for value in allowed_arguments
+            ):
+                return Decision.deny(f"invalid prerequisite arguments for {binary!r}")
             if parts[1:] != allowed_arguments:
                 return Decision.deny(
                     f"{binary} is limited to the prerequisite check: "
@@ -697,19 +700,34 @@ class Governance:
             allowlist = set(
                 server_scope.get("filesystem", {}).get("executable_allowlist", [])
             )
-            for binary, arguments in prerequisite_checks.items():
+            pinned = []
+            for binary, definition in prerequisite_checks.items():
+                check_type = (
+                    definition.get("type") if isinstance(definition, dict) else None
+                )
+                arguments = (
+                    definition.get("args") if isinstance(definition, dict) else None
+                )
                 if (
                     not isinstance(binary, str)
                     or not binary
                     or "/" in binary
                     or binary not in allowlist
+                    or check_type not in {"system-executable", "pinned-github-mcp"}
                     or not isinstance(arguments, list)
                     or not arguments
                     or not all(isinstance(value, str) and value for value in arguments)
+                    or set(definition or {}) != {"type", "args"}
                 ):
                     problems.append(
                         f"invalid server prerequisite check for {binary!r}"
                     )
+                if check_type == "pinned-github-mcp":
+                    pinned.append(binary)
+            if pinned != ["github-mcp-server"]:
+                problems.append(
+                    "server scope requires exactly one pinned GitHub MCP prerequisite"
+                )
         if self.delegation.get("ceo_may_wait_for_workers", False):
             problems.append("CEO is allowed to wait for workers; dispatch must be non-blocking")
         if not self.result_contracts:
@@ -897,18 +915,14 @@ def _check_executable_location(
                 f"GitHub MCP prerequisite check must use canonical executable {expected}"
             )
         try:
-            resolved = selected.resolve(strict=True)
-        except (OSError, RuntimeError, ValueError):
-            return Decision.deny(
-                f"classified executable {executable!r} does not resolve to an existing file"
-            )
-        if resolved != selected:
-            return Decision.deny("canonical GitHub MCP executable must not be a symlink")
-        if not resolved.is_file() or not os.access(resolved, os.X_OK):
-            return Decision.deny(
-                f"canonical GitHub MCP executable {str(resolved)!r} must be executable"
-            )
-        return Decision.ok("executable is the canonical pinned GitHub MCP server")
+            from .mcp import verify_github_binary
+
+            verified = verify_github_binary(Config(runtime_root))
+        except (OSError, RuntimeError, ValueError) as exc:
+            return Decision.deny(f"canonical GitHub MCP executable is untrusted: {exc}")
+        if verified != selected:
+            return Decision.deny("verified GitHub MCP executable path changed")
+        return Decision.ok("executable is the verified pinned GitHub MCP server")
     if binary == "saturnin":
         try:
             runtime_executable = _trusted_runtime_executable(filesystem, runtime_root)

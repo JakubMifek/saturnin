@@ -47,9 +47,15 @@ _REAL_PROCESS_START_TIME = AgentLauncher._process_start_time
 
 @pytest.fixture(autouse=True)
 def verified_github_mcp(monkeypatch: pytest.MonkeyPatch) -> None:
+    def fake_stage(config: Config, destination: Path) -> Path:
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        destination.write_text("synthetic MCP binary\n", encoding="utf-8")
+        destination.chmod(0o500)
+        return destination
+
     monkeypatch.setattr(
-        "saturnin.launcher.verify_github_binary",
-        lambda config: config.var_dir / "bin" / "github-mcp-server",
+        "saturnin.launcher.stage_github_binary",
+        fake_stage,
     )
     monkeypatch.setattr(
         AgentLauncher,
@@ -110,7 +116,7 @@ def test_launcher_starts_routed_role_with_filtered_mcp(
     mcp = json.loads((config.var_dir / "launches" / f"{task.id}.mcp.json").read_text())
     assert set(mcp["mcpServers"]) == {"github", "filesystem"}
     assert mcp["mcpServers"]["github"]["command"] == str(
-        config.data_root / "var/bin/github-mcp-server"
+        config.var_dir / "launches" / f"{task.id}.runtime" / "github-mcp-server"
     )
     assert mcp["mcpServers"]["github"]["args"] == ["stdio", "--read-only"]
     assert mcp["mcpServers"]["filesystem"]["args"][-1] == str(worktree.path)
@@ -3946,12 +3952,12 @@ def test_launcher_rejects_unverified_github_binary(
     monkeypatch.setattr("saturnin.launcher.shutil.which", lambda _: "/usr/bin/copilot")
     verification_roots: list[Path] = []
 
-    def reject_binary(trusted: Config) -> Path:
+    def reject_binary(trusted: Config, destination: Path) -> Path:
         verification_roots.append(trusted.root)
         raise MCPError("checksum mismatch")
 
     monkeypatch.setattr(
-        "saturnin.launcher.verify_github_binary",
+        "saturnin.launcher.stage_github_binary",
         reject_binary,
     )
 

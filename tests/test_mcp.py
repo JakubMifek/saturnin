@@ -2,13 +2,21 @@ from __future__ import annotations
 
 import hashlib
 import io
+import stat
 import tarfile
 from pathlib import Path
 
 import pytest
 
 from saturnin.config import Config
-from saturnin.mcp import MCPError, install_github, probe_github_stdio, server_process
+from saturnin.mcp import (
+    MCPError,
+    install_github,
+    probe_github_stdio,
+    server_process,
+    stage_github_binary,
+    verify_github_binary,
+)
 
 
 def _fake_server(path: Path) -> str:
@@ -26,6 +34,12 @@ def _fake_server(path: Path) -> str:
     )
     path.chmod(0o755)
     return hashlib.sha256(path.read_bytes()).hexdigest()
+
+
+def _secure_runtime_path(config: Config) -> None:
+    config.data_root.chmod(0o755)
+    config.var_dir.chmod(0o700)
+    (config.var_dir / "bin").chmod(0o700)
 
 
 def test_github_mcp_uses_pinned_local_official_binary(config: Config) -> None:
@@ -114,6 +128,7 @@ def test_github_mcp_stdio_startup_handshake(config: Config) -> None:
     definition["install"]["tag"] = "v1.0"
     for asset in definition["install"]["assets"].values():
         asset["binary_sha256"] = checksum
+    _secure_runtime_path(config)
 
     probe_github_stdio(config, timeout=2)
 
@@ -138,9 +153,64 @@ def test_github_mcp_stdio_rejects_non_server_executable(config: Config) -> None:
     checksum = hashlib.sha256(script.read_bytes()).hexdigest()
     for asset in definition["install"]["assets"].values():
         asset["binary_sha256"] = checksum
+    _secure_runtime_path(config)
 
     with pytest.raises(MCPError, match="stdio handshake"):
         probe_github_stdio(config, timeout=1)
+
+
+@pytest.mark.parametrize("unsafe", ["file", "parent"])
+def test_github_mcp_rejects_writable_runtime_paths(
+    config: Config,
+    unsafe: str,
+) -> None:
+    script = config.var_dir / "bin" / "github-mcp-server"
+    script.parent.mkdir(parents=True)
+    checksum = _fake_server(script)
+    definition = config.policy("mcp")["servers"]["github"]
+    definition["install"]["tag"] = "v1.0"
+    for asset in definition["install"]["assets"].values():
+        asset["binary_sha256"] = checksum
+    _secure_runtime_path(config)
+    target = script if unsafe == "file" else script.parent
+    target.chmod(stat.S_IMODE(target.stat().st_mode) | stat.S_IWGRP)
+
+    with pytest.raises(MCPError, match="group/world-writable"):
+        verify_github_binary(config)
+
+
+def test_github_mcp_rejects_symlink(config: Config, tmp_path: Path) -> None:
+    script = config.var_dir / "bin" / "github-mcp-server"
+    script.parent.mkdir(parents=True)
+    target = tmp_path / "github-mcp-server"
+    _fake_server(target)
+    script.symlink_to(target)
+    _secure_runtime_path(config)
+
+    with pytest.raises(MCPError, match="securely opened"):
+        verify_github_binary(config)
+
+
+def test_github_mcp_stages_verified_inode_before_path_replacement(
+    config: Config,
+) -> None:
+    script = config.var_dir / "bin" / "github-mcp-server"
+    script.parent.mkdir(parents=True)
+    checksum = _fake_server(script)
+    definition = config.policy("mcp")["servers"]["github"]
+    definition["install"]["tag"] = "v1.0"
+    for asset in definition["install"]["assets"].values():
+        asset["binary_sha256"] = checksum
+    _secure_runtime_path(config)
+    destination = config.var_dir / "launches" / "task.runtime" / "github-mcp-server"
+
+    staged = stage_github_binary(config, destination)
+    original = staged.read_bytes()
+    script.write_text("replacement\n", encoding="utf-8")
+
+    assert staged.read_bytes() == original
+    assert stat.S_IMODE(staged.stat().st_mode) == 0o500
+    assert staged.stat().st_ino != script.stat().st_ino
 
 
 def test_github_mcp_installer_verifies_archive_and_handshake(

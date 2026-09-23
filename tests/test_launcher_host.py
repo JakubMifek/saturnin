@@ -4,6 +4,7 @@ import json
 import os
 import stat
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
@@ -42,7 +43,8 @@ def _healthy_prerequisites(
     )
     github = config.var_dir / "bin" / "github-mcp-server"
     monkeypatch.setattr(
-        "saturnin.launcher_host.verify_github_binary", lambda _: github
+        "saturnin.launcher_host.verify_github_binary",
+        lambda _, **kwargs: github,
     )
     return github
 
@@ -85,7 +87,7 @@ def test_launcher_enable_reports_every_failed_prerequisite(
     monkeypatch.setenv("PATH", "")
     monkeypatch.setattr(
         "saturnin.launcher_host.verify_github_binary",
-        lambda _: (_ for _ in ()).throw(
+        lambda _, **kwargs: (_ for _ in ()).throw(
             MCPError("pinned GitHub MCP server is unavailable")
         ),
     )
@@ -130,7 +132,7 @@ def test_launcher_health_does_not_execute_untrusted_path_entries(
     )
     monkeypatch.setattr(
         "saturnin.launcher_host.verify_github_binary",
-        lambda _: config.var_dir / "bin" / "github-mcp-server",
+        lambda _, **kwargs: config.var_dir / "bin" / "github-mcp-server",
     )
 
     checks = launcher_health(config)
@@ -141,6 +143,50 @@ def test_launcher_health_does_not_execute_untrusted_path_entries(
         for check in checks[:5]
     )
     assert calls == []
+
+
+def test_launcher_health_is_derived_from_typed_policy(
+    config: Config,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    config.server_scope["prerequisite_checks"] = {
+        "custom-check": {
+            "type": "system-executable",
+            "args": ["--health"],
+        },
+        "github-mcp-server": {
+            "type": "pinned-github-mcp",
+            "args": ["--release"],
+        },
+    }
+    calls: list[list[str]] = []
+    pinned_arguments: list[list[str]] = []
+    monkeypatch.setattr(
+        "saturnin.launcher_host.resolve_trusted_executable",
+        lambda config, name, **kwargs: Path("/usr/bin/custom-check"),
+    )
+    monkeypatch.setattr(
+        "saturnin.launcher_host.subprocess.run",
+        lambda command, **kwargs: (
+            calls.append(command) or SimpleNamespace(returncode=0)
+        ),
+    )
+    monkeypatch.setattr(
+        "saturnin.launcher_host.verify_github_binary",
+        lambda config, **kwargs: (
+            pinned_arguments.append(kwargs["version_args"])
+            or config.var_dir / "bin" / "github-mcp-server"
+        ),
+    )
+
+    checks = launcher_health(config)
+
+    assert [check["name"] for check in checks] == [
+        "custom-check",
+        "github-mcp-server",
+    ]
+    assert calls == [["/usr/bin/custom-check", "--health"]]
+    assert pinned_arguments == [["--release"]]
 
 
 def test_launcher_host_config_rejects_symlink(

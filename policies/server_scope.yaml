@@ -90,9 +90,9 @@ filesystem:
 # These executables receive no general host-command capability. Only their
 # non-mutating version probes are accepted by `saturnin check command`.
 prerequisite_checks:
-  bwrap: [--version]
-  pasta: [--version]
-  copilot: [--version]
-  npx: [--version]
-  uvx: [--version]
-  github-mcp-server: [--version]
+  bwrap: {type: system-executable, args: [--version]}
+  pasta: {type: system-executable, args: [--version]}
+  copilot: {type: system-executable, args: [--version]}
+  npx: {type: system-executable, args: [--version]}
+  uvx: {type: system-executable, args: [--version]}
+  github-mcp-server: {type: pinned-github-mcp, args: [--version]}

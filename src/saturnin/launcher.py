@@ -37,7 +37,7 @@ from .issues import MirrorError, run_gh
 from .jsonlines import PRIVATE_FILE_MODE, atomic_replace_text
 from .launcher_host import host_launcher_enabled
 from .locking import file_lock
-from .mcp import MCPError, server_process, verify_github_binary
+from .mcp import MCPError, server_process, stage_github_binary
 from .review import (
     ReviewError,
     issue_content_digest,
@@ -775,11 +775,29 @@ class AgentLauncher:
             if isinstance(value, str) and Path(value).is_absolute()
         ]
         visible_roots.append((config.var_dir / "bin").resolve(strict=False))
+        private_stage = (self.dir / path.parent.name).resolve(strict=False)
         resolved = path.resolve(strict=False)
+        if resolved == private_stage or resolved.is_relative_to(private_stage):
+            return True
         return any(
             resolved == root or resolved.is_relative_to(root)
             for root in visible_roots
         )
+
+    @staticmethod
+    def _mcp_executable_paths(mcp_config: Path) -> list[Path]:
+        try:
+            payload = json.loads(mcp_config.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError) as exc:
+            raise LauncherError(f"cannot read generated MCP configuration: {exc}") from exc
+        paths: list[Path] = []
+        for definition in payload.get("mcpServers", {}).values():
+            if not isinstance(definition, dict):
+                continue
+            command = Path(str(definition.get("command", "")))
+            if command.is_absolute():
+                paths.append(command)
+        return paths
 
     def _tighten_existing_logs(self) -> None:
         for path in self.dir.glob("*.log"):
@@ -914,6 +932,10 @@ class AgentLauncher:
         read_only_mounts.extend((path, path) for path in trusted_paths if path.exists())
         read_only_mounts.extend(
             (path, path) for path in (Path(executable), git_objects, mcp_config)
+        )
+        read_only_mounts.extend(
+            (path, path)
+            for path in AgentLauncher._mcp_executable_paths(mcp_config)
         )
         if review_input is not None:
             read_only_mounts.append((review_input, review_input))
@@ -1674,11 +1696,11 @@ class AgentLauncher:
                 config.var_dir / "bin" / "github-mcp-server"
             ).resolve(strict=False)
             if Path(command).resolve(strict=False) == canonical_github:
-                verified = verify_github_binary(trusted_config).resolve()
-                if verified != canonical_github:
-                    raise LauncherError(
-                        "verified GitHub MCP executable does not match canonical path"
-                    )
+                private_stage = self.dir / f"{task.id}.runtime" / "github-mcp-server"
+                try:
+                    command = str(stage_github_binary(trusted_config, private_stage))
+                except MCPError as exc:
+                    raise LauncherError(f"cannot stage GitHub MCP executable: {exc}") from exc
             if Path(command).is_absolute() and not self._sandbox_visible_executable(
                 Path(command), trusted_config
             ):
