@@ -80,3 +80,19 @@ filesystem:
     - systemctl
     - journalctl
     - apt
+    - bwrap
+    - pasta
+    - copilot
+    - npx
+    - uvx
+    - github-mcp-server
+
+# These executables receive no general host-command capability. Only their
+# non-mutating version probes are accepted by `saturnin check command`.
+prerequisite_checks:
+  bwrap: [--version]
+  pasta: [--version]
+  copilot: [--version]
+  npx: [--version]
+  uvx: [--version]
+  github-mcp-server: [--version]

@@ -30,6 +30,7 @@ from .contracts import (
 from .governance import Governance, github_repo_slug
 from .issues import MirrorError, run_gh
 from .jsonlines import PRIVATE_FILE_MODE, atomic_replace_text
+from .launcher_host import host_launcher_enabled
 from .locking import file_lock
 from .mcp import MCPError, server_process, verify_github_binary
 from .review import (
@@ -95,7 +96,7 @@ class AgentLauncher:
 
     @property
     def enabled(self) -> bool:
-        return bool(self.policy.get("enabled", True))
+        return bool(self.policy.get("enabled", False)) or host_launcher_enabled(self.config)
 
     def launch(
         self,

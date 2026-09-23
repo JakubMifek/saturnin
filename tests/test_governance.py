@@ -1212,6 +1212,49 @@ def test_in_scope_server_commands(
     assert governance.check_server_command(command).allowed
 
 
+def test_prerequisite_checks_are_narrowly_governed(
+    governance: Governance,
+    config: Config,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    trusted = tmp_path / "trusted-bin"
+    trusted.mkdir()
+    commands = ("bwrap", "pasta", "copilot", "npx", "uvx")
+    for name in commands:
+        executable = trusted / name
+        executable.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+        executable.chmod(0o755)
+    config.server_scope["filesystem"]["trusted_executable_roots"].append(str(trusted))
+    monkeypatch.setattr(
+        "saturnin.governance.shutil.which",
+        lambda command: str(trusted / command),
+    )
+
+    for command in commands:
+        assert governance.check_server_command(f"{command} --version").allowed
+        assert not governance.check_server_command(f"{command} run").allowed
+        assert not governance.check_server_command(command).allowed
+
+    relocated = tmp_path / "relocated-npx"
+    relocated.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+    relocated.chmod(0o755)
+    (trusted / "npx").unlink()
+    (trusted / "npx").symlink_to(relocated)
+    assert governance.check_server_command("npx --version").allowed
+    assert not governance.check_server_command("npx run arbitrary-package").allowed
+
+    github = config.var_dir / "bin" / "github-mcp-server"
+    github.parent.mkdir(parents=True)
+    github.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+    github.chmod(0o755)
+    assert governance.check_server_command(f"{github} --version").allowed
+    assert not governance.check_server_command(f"{github} serve").allowed
+    assert not governance.check_server_command(
+        f"{trusted / 'github-mcp-server'} --version"
+    ).allowed
+
+
 def test_bootstrap_runtime_saturnin_executable_is_trusted(
     governance: Governance,
     config: Config,

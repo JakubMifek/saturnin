@@ -459,6 +459,21 @@ class Governance:
             )
 
         scope = self.config.server_scope
+        prerequisite_checks = scope.get("prerequisite_checks", {})
+        if binary in prerequisite_checks:
+            allowed_arguments = prerequisite_checks[binary]
+            if not isinstance(allowed_arguments, list) or not all(
+                isinstance(value, str) for value in allowed_arguments
+            ):
+                return Decision.deny(
+                    f"invalid prerequisite check policy for {binary!r}"
+                )
+            if parts[1:] != allowed_arguments:
+                return Decision.deny(
+                    f"{binary} is limited to the prerequisite check: "
+                    + " ".join([binary, *allowed_arguments])
+                )
+            return Decision.ok(f"{binary}: non-mutating prerequisite check")
         services = scope.get("services", {})
         packages = scope.get("packages", {})
         filesystem_decision = _check_filesystem_scope(
@@ -670,6 +685,26 @@ class Governance:
             _writable_roots(filesystem, self.config.data_root)
         except ValueError as error:
             problems.append(f"{self.config.policies / 'server_scope.yaml'}: {error}")
+        prerequisite_checks = server_scope.get("prerequisite_checks")
+        if not isinstance(prerequisite_checks, dict) or not prerequisite_checks:
+            problems.append("server scope prerequisite_checks must be a non-empty mapping")
+        else:
+            allowlist = set(
+                server_scope.get("filesystem", {}).get("executable_allowlist", [])
+            )
+            for binary, arguments in prerequisite_checks.items():
+                if (
+                    not isinstance(binary, str)
+                    or not binary
+                    or "/" in binary
+                    or binary not in allowlist
+                    or not isinstance(arguments, list)
+                    or not arguments
+                    or not all(isinstance(value, str) and value for value in arguments)
+                ):
+                    problems.append(
+                        f"invalid server prerequisite check for {binary!r}"
+                    )
         if self.delegation.get("ceo_may_wait_for_workers", False):
             problems.append("CEO is allowed to wait for workers; dispatch must be non-blocking")
         if not self.result_contracts:
@@ -784,6 +819,7 @@ def _check_executable_location(
     classified = (
         binary in _SPECIAL_EXECUTABLES
         or binary in set(filesystem.get("executable_allowlist", []))
+        or binary in set(scope.get("prerequisite_checks", {}))
         or binary in set(scope.get("user", {}).get("forbidden_prefixes", []))
         or binary == "apt"
         or binary.startswith("apt-")
@@ -817,6 +853,25 @@ def _check_executable_location(
         return Decision.deny(
             f"classified executable {executable!r} does not resolve to an existing file"
         )
+    if binary == "github-mcp-server":
+        expected = runtime_root / "var" / "bin" / "github-mcp-server"
+        if selected != expected:
+            return Decision.deny(
+                f"GitHub MCP prerequisite check must use canonical executable {expected}"
+            )
+        try:
+            resolved = selected.resolve(strict=True)
+        except (OSError, RuntimeError, ValueError):
+            return Decision.deny(
+                f"classified executable {executable!r} does not resolve to an existing file"
+            )
+        if resolved != selected:
+            return Decision.deny("canonical GitHub MCP executable must not be a symlink")
+        if not resolved.is_file() or not os.access(resolved, os.X_OK):
+            return Decision.deny(
+                f"canonical GitHub MCP executable {str(resolved)!r} must be executable"
+            )
+        return Decision.ok("executable is the canonical pinned GitHub MCP server")
     if binary == "saturnin":
         try:
             runtime_executable = _trusted_runtime_executable(filesystem, runtime_root)
@@ -856,6 +911,10 @@ def _check_executable_location(
             f"classified executable {str(resolved)!r} is not executable"
         )
 
+    if binary in set(scope.get("prerequisite_checks", {})):
+        return Decision.ok(
+            f"prerequisite executable {str(selected)!r} is selected from a trusted system root"
+        )
     if _containing_root(resolved, trusted_roots) is None:
         return Decision.deny(
             f"executable {str(resolved)!r} is outside trusted system executable roots"
