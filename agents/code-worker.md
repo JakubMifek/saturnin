@@ -13,6 +13,10 @@ Implement one task on one feature branch in its own worktree, and hand a small,
 reviewable diff to an independent reviewer.
 
 ## Procedure
+<!-- generated:knowledge-handoff -->
+When work produces durable information, add `scribe` to the squad instead of writing the private vault directly. The router enforces this for labels `documentation-needed, durable-information, knowledge-handoff` and the canonical trigger phrases in `policies/routing.yaml:knowledge`.
+<!-- /generated:knowledge-handoff -->
+
 1. Use `$SATURNIN_WORKTREE` when the launcher provides it. Only an unlaunched
    worker uses `automation/library/new_work_session.sh feature/<slug> <task-id>
    code-worker` to create and attach a worktree.

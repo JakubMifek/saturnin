@@ -41,7 +41,7 @@ roles:
     unit: assurance
     executes: true
     zero_context: true
-    description: Reviews a diff with no prior context of the authoring session.
+    description: Reviews a diff with no prior context, including private-vault integrity checks.
   issue-reviewer:
     name: Independent Issue Reviewer
     unit: assurance
@@ -72,7 +72,7 @@ roles:
     name: Scribe
     unit: platform
     executes: true
-    description: Docs, runbooks, checkpoints and handoff notes.
+    description: Sole writer and curator of the private notes vault; owns durable documentation.
   researcher:
     name: Researcher
     unit: platform
@@ -86,6 +86,26 @@ default_route:
 
 # Applied when a rule does not name one. See governance.delegation.result_contracts.
 default_result_contract: board-callback
+
+# Durable knowledge is a collaboration concern, not a new permanent team.
+# The router adds the scribe when these signals appear even when another role
+# remains accountable for the underlying engineering, research or operations.
+knowledge:
+  scribe_role: scribe
+  durable_information_triggers:
+    labels: [documentation-needed, durable-information, knowledge-handoff]
+    keywords:
+      - process
+      - solution
+      - decision
+      - research result
+      - investigation result
+      - durable information
+  private_notes_changes:
+    labels: [notes-write, vault-change, notes-curation]
+    repository_policy: notes
+    writer_role: scribe
+    result_contract: pr-gate
 
 rules:
   # The CEO only decides that an escalation is needed; the chief of staff files it.

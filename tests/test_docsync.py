@@ -8,6 +8,11 @@ import pytest
 from saturnin import docsync
 from saturnin.cli import main
 from saturnin.config import Config
+from saturnin.review import (
+    ReviewLedger,
+    review_attestation_signing_key,
+    sign_review_attestation,
+)
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 
@@ -39,6 +44,11 @@ def test_checked_in_docs_match_policy() -> None:
     )
     assert ".github/workflows/governance.yml" in runtime_block.group("body")
     assert "independently enforces the review gate" in runtime_block.group("body")
+    topology = (REPO_ROOT / "docs" / "adr" / "0002-repository-topology.md").read_text(
+        encoding="utf-8"
+    )
+    assert "Status: **Accepted**" in topology
+    assert "<!-- generated:notes-governance -->" in topology
 
 
 def test_cleanup_guidance_references_policy_without_copying_configurable_facts() -> None:
@@ -119,6 +129,51 @@ def test_review_flow_blocks_are_policy_rendered(docs_home: Config) -> None:
     docsync.render(docs_home)
     rendered = (docs_home.root / "skills" / "review-ledger.md").read_text(encoding="utf-8")
     assert "--reviewer review-bot" in rendered
+
+
+def test_generated_notes_review_flow_matches_ledger_contract(config: Config) -> None:
+    notes = config.policy("repos")["repos"]["notes"]
+    review = notes["change_review"]
+    repo = notes["slug"]
+    flow = docsync._notes_review_flow(config)
+    for option in (
+        f"--repo {repo}",
+        f"--profile {review['profile']}",
+        f"--method {review['method']}",
+        *(f"--check {check}" for check in review["required_checks"]),
+    ):
+        assert flow.count(option) >= 2
+
+    subject = f"{repo}#42"
+    head_sha = "d" * 40
+    attestation = sign_review_attestation(
+        key=review_attestation_signing_key(config, "pr-reviewer"),
+        subject=subject,
+        kind="pr",
+        author="scribe",
+        reviewer="pr-reviewer",
+        verdict="approved",
+        head_sha=head_sha,
+        destination_repo=repo,
+        review_profile=review["profile"],
+        review_method=review["method"],
+        review_checks=review["required_checks"],
+    )
+    record = ReviewLedger(config).record(
+        subject=subject,
+        kind="pr",
+        author="scribe",
+        reviewer="pr-reviewer",
+        verdict="approved",
+        head_sha=head_sha,
+        destination_repo=repo,
+        review_profile=review["profile"],
+        review_method=review["method"],
+        review_checks=review["required_checks"],
+        attestation=attestation,
+    )
+
+    assert record.review_profile == review["profile"]
 
 
 def test_audit_checks_generated_blocks_in_skills(docs_home: Config) -> None:

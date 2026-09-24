@@ -170,6 +170,44 @@ def _issue_review_flow(config: Config) -> str:
     return _review_flow(config, "issue")
 
 
+def _notes_review_flow(config: Config) -> str:
+    notes = config.policy("repos").get("repos", {}).get("notes", {})
+    review = notes.get("change_review", {})
+    repo = notes.get("slug", "<owner/repo>")
+    writers = notes.get("access", {}).get("writer_roles", [])
+    reviewers = review.get("allowed_reviewer_roles", [])
+    checks = review.get("required_checks", [])
+    if not writers or not reviewers or not checks:
+        raise GeneratedBlockError("canonical notes review policy is incomplete")
+    check_args = " ".join(f"--check {check}" for check in checks)
+    author = writers[0]
+    reviewer = reviewers[0]
+    profile = review.get("profile")
+    method = review.get("method")
+    return "\n".join(
+        [
+            "```bash",
+            f'HEAD_SHA="$(gh pr view <N> --repo {repo} --json headRefOid --jq .headRefOid)"',
+            "VERDICT=approved",
+            f'attestation="$(saturnin review attest {repo}#<N> --kind pr \\',
+            f"  --repo {repo} --author {author} --reviewer {reviewer} \\",
+            f'  --verdict "$VERDICT" --head-sha "$HEAD_SHA" \\',
+            f"  --profile {profile} --method {method} {check_args})\"",
+            f"saturnin review record {repo}#<N> --kind pr \\",
+            f"  --repo {repo} --author {author} --reviewer {reviewer} \\",
+            f'  --verdict "$VERDICT" --head-sha "$HEAD_SHA" \\',
+            f'  --profile {profile} --method {method} {check_args} \\',
+            '  --attestation "$attestation"',
+            f"saturnin review gate {repo}#<N> --kind pr \\",
+            f"  --repo {repo} --author {author} --head-sha \"$HEAD_SHA\"",
+            "```",
+            "",
+            "Use this flow for notes changes; every profile field and completed "
+            "check is covered by the signed attestation and persisted ledger record.",
+        ]
+    )
+
+
 def _runtime_summary(config: Config) -> str:
     return _governance_documentation(config, "runtime_summary")
 
@@ -204,6 +242,69 @@ def _routing_table(config: Config) -> str:
     return "\n".join(lines)
 
 
+def _repository_topology(config: Config) -> str:
+    repositories = config.policy("repos").get("repos", {})
+    lines = [
+        "| Repository | Visibility | Purpose |",
+        "| --- | --- | --- |",
+    ]
+    purposes = {
+        "engine": "Public engine, policies, contracts and public runbooks",
+        "board": "Private operational board and escalation issues",
+        "notes": "Private long-form context and Obsidian notes",
+    }
+    for name, repository in repositories.items():
+        lines.append(
+            f"| `{repository.get('slug')}` | {repository.get('visibility')} | "
+            f"{purposes.get(name, name)} |"
+        )
+    return "\n".join(lines)
+
+
+def _notes_governance(config: Config) -> str:
+    notes = config.policy("repos").get("repos", {}).get("notes", {})
+    access = notes.get("access", {})
+    curation = notes.get("curation", {})
+    review = notes.get("change_review", {})
+    enabled_curation = [
+        key.replace("_", " ")
+        for key, enabled in curation.items()
+        if enabled is True
+    ]
+    checks = [
+        str(check).replace("_", " ")
+        for check in review.get("required_checks", [])
+    ]
+    reviewers = review.get("allowed_reviewer_roles", [])
+    return "\n".join(
+        [
+            f"- Sole writer: `{', '.join(access.get('writer_roles', []))}`.",
+            f"- Every other role: {access.get('non_writer_access')}; secrets allowed: "
+            f"{str(access.get('secrets_allowed', False)).lower()}.",
+            "- Curation requirements: " + ", ".join(enabled_curation) + ".",
+            f"- Public bootstrap packages may only be applied by "
+            f"`{curation.get('public_bootstrap_application_role')}`.",
+            f"- Every change requires an independent, zero-context "
+            f"{review.get('method')} "
+            f"`{reviewers[0] if reviewers else ''}` review using the "
+            f"`{review.get('profile')}` profile. Its signed attestation and ledger "
+            f"record must include: {', '.join(checks)}.",
+        ]
+    )
+
+
+def _knowledge_handoff(config: Config) -> str:
+    knowledge = config.routing.get("knowledge", {})
+    triggers = knowledge.get("durable_information_triggers", {})
+    return (
+        f"When work produces durable information, add `{knowledge.get('scribe_role')}` "
+        "to the squad instead of writing the private vault directly. The router "
+        "enforces this for labels "
+        f"`{', '.join(triggers.get('labels', []))}` and the canonical trigger phrases "
+        "in `policies/routing.yaml:knowledge`."
+    )
+
+
 def _backlog_table(config: Config) -> str:
     items = config.policy("improvement").get("backlog", [])
     lines = ["| Gap | Severity | Fix |", "| --- | --- | --- |"]
@@ -224,9 +325,13 @@ GENERATORS: dict[str, Callable[[Config], str]] = {
     "capabilities": _capabilities_table,
     "runtime-summary": _runtime_summary,
     "pr-review-flow": _pr_review_flow,
+    "notes-review-flow": _notes_review_flow,
     "issue-review-flow": _issue_review_flow,
     "roles": _roles_table,
     "routing": _routing_table,
+    "repository-topology": _repository_topology,
+    "notes-governance": _notes_governance,
+    "knowledge-handoff": _knowledge_handoff,
     "backlog": _backlog_table,
 }
 

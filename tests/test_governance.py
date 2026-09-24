@@ -23,6 +23,7 @@ from saturnin.review import (
     review_attestation_signing_key,
     role_scoped_review_attestation_key,
     sign_review_attestation,
+    notes_review_settings,
 )
 
 SELF_REPO = "JakubMifek/saturnin"
@@ -46,6 +47,9 @@ def record_review(ledger: ReviewLedger, **kwargs):
         head_sha=kwargs.get("head_sha", ""),
         issue_digest=kwargs.get("issue_digest", ""),
         destination_repo=destination_repo,
+        review_profile=kwargs.get("review_profile", ""),
+        review_method=kwargs.get("review_method", ""),
+        review_checks=kwargs.get("review_checks", []),
     )
     return ledger.record(
         attestation=attestation,
@@ -81,6 +85,32 @@ def trusted_python3_lookup(
 
 def test_policies_audit_clean(governance: Governance) -> None:
     assert governance.audit() == []
+
+
+def test_private_notes_review_contract_is_mandatory_and_independent(
+    config: Config,
+) -> None:
+    reference = config.governance["review"]["notes"]
+    review = notes_review_settings(config)
+
+    assert reference == {"policy_ref": "repos.repos.notes.change_review"}
+    assert review["required"] is True
+    assert review["independent"] is True
+    assert review["zero_context"] is True
+    assert review["author_may_review"] is False
+    assert review["allowed_reviewer_roles"] == ["pr-reviewer"]
+    assert review["profile"] == "notes-review"
+
+
+def test_private_notes_review_reference_must_resolve(config: Config) -> None:
+    config.governance["review"]["notes"]["policy_ref"] = (
+        "repos.repos.notes.missing"
+    )
+
+    assert any(
+        "policy reference is invalid" in problem
+        for problem in Governance(config).audit()
+    )
 
 
 def test_review_attestation_key_environments_must_be_distinct(config: Config) -> None:
@@ -157,6 +187,114 @@ def test_merge_requires_independent_zero_context_review(
     )
     assert governance.merge_allowed(
         repo=SELF_REPO, author="code-worker", records=ledger.for_subject(subject, "pr"),
+        head_sha=TEST_HEAD_SHA,
+    ).allowed
+
+
+def test_notes_review_gate_requires_signed_profile_and_all_checks(
+    governance: Governance, config: Config
+) -> None:
+    ledger = ReviewLedger(config)
+    repo = config.policy("repos")["repos"]["notes"]["slug"]
+    subject = f"{repo}#7"
+    settings = notes_review_settings(config)
+    record_review(
+        ledger,
+        subject=subject,
+        kind="pr",
+        author="scribe",
+        reviewer="pr-reviewer",
+        verdict="approved",
+        head_sha=TEST_HEAD_SHA,
+        destination_repo=repo,
+        review_profile=settings["profile"],
+        review_method=settings["method"],
+        review_checks=settings["required_checks"],
+    )
+
+    decision = governance.pr_review_allowed(
+        repo=repo,
+        author="scribe",
+        records=ledger.for_subject(subject, "pr"),
+        head_sha=TEST_HEAD_SHA,
+    )
+
+    assert decision.allowed
+
+
+@pytest.mark.parametrize(
+    ("profile", "method", "checks", "message"),
+    [
+        ("", "", [], "require profile"),
+        ("pr", "rubber-duck", [], "require profile"),
+        ("notes-review", "", [], "require method"),
+        (
+            "notes-review",
+            "rubber-duck",
+            ["factual_integrity"],
+            "require exactly these checks",
+        ),
+    ],
+)
+def test_notes_review_record_rejects_missing_or_wrong_profile_checks(
+    config: Config,
+    profile: str,
+    method: str,
+    checks: list[str],
+    message: str,
+) -> None:
+    ledger = ReviewLedger(config)
+    repo = config.policy("repos")["repos"]["notes"]["slug"]
+    subject = f"{repo}#8"
+    attestation = sign_review_attestation(
+        key=review_attestation_signing_key(config, "pr-reviewer"),
+        subject=subject,
+        kind="pr",
+        author="scribe",
+        reviewer="pr-reviewer",
+        verdict="approved",
+        head_sha=TEST_HEAD_SHA,
+        destination_repo=repo,
+        review_profile=profile,
+        review_method=method,
+        review_checks=checks,
+    )
+
+    with pytest.raises(ReviewError, match=message):
+        ledger.record(
+            subject=subject,
+            kind="pr",
+            author="scribe",
+            reviewer="pr-reviewer",
+            verdict="approved",
+            head_sha=TEST_HEAD_SHA,
+            destination_repo=repo,
+            review_profile=profile,
+            review_method=method,
+            review_checks=checks,
+            attestation=attestation,
+        )
+
+
+def test_ordinary_pr_attestation_needs_no_notes_profile(
+    governance: Governance, config: Config
+) -> None:
+    ledger = ReviewLedger(config)
+    subject = f"{SELF_REPO}#ordinary"
+    record_review(
+        ledger,
+        subject=subject,
+        kind="pr",
+        author="code-worker",
+        reviewer="pr-reviewer",
+        verdict="approved",
+        head_sha=TEST_HEAD_SHA,
+    )
+
+    assert governance.pr_review_allowed(
+        repo=SELF_REPO,
+        author="code-worker",
+        records=ledger.for_subject(subject, "pr"),
         head_sha=TEST_HEAD_SHA,
     ).allowed
 

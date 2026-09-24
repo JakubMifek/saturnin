@@ -22,6 +22,7 @@ from saturnin.review import (
     issue_content_digest,
     review_attestation_signing_key,
     sign_review_attestation,
+    notes_review_settings,
 )
 from saturnin.routing import Router
 from saturnin.worktrees import CleanupPlan, WorktreeManager
@@ -37,17 +38,20 @@ def run(capsys: pytest.CaptureFixture[str], *argv: str) -> tuple[int, str]:
     return code, capsys.readouterr().out
 
 
-def review_attestation_args(**kwargs: str) -> tuple[str, str]:
+def review_attestation_args(**kwargs: object) -> tuple[str, str]:
     attestation = sign_review_attestation(
         key=review_attestation_signing_key(Config.load(), kwargs["reviewer"]),
-        subject=kwargs["subject"],
-        kind=kwargs["kind"],
-        author=kwargs["author"],
-        reviewer=kwargs["reviewer"],
-        verdict=kwargs["verdict"],
-        head_sha=kwargs.get("head_sha", ""),
-        issue_digest=kwargs.get("issue_digest", ""),
-        destination_repo=kwargs.get("repo", ""),
+        subject=str(kwargs["subject"]),
+        kind=str(kwargs["kind"]),
+        author=str(kwargs["author"]),
+        reviewer=str(kwargs["reviewer"]),
+        verdict=str(kwargs["verdict"]),
+        head_sha=str(kwargs.get("head_sha", "")),
+        issue_digest=str(kwargs.get("issue_digest", "")),
+        destination_repo=str(kwargs.get("repo", "")),
+        review_profile=str(kwargs.get("profile", "")),
+        review_method=str(kwargs.get("method", "")),
+        review_checks=list(kwargs.get("checks", [])),
     )
     return ("--attestation", attestation)
 
@@ -729,6 +733,80 @@ def test_dispatch_squad_override_survives_project_preparation(
     assert Board().get(task["id"]).squad == ["pr-reviewer"]
 
 
+def test_notes_project_squad_cannot_discard_mandatory_collaborators(
+    home: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    config = Config.load()
+    repo = config.policy("repos")["repos"]["notes"]["slug"]
+    worktree = home / "var" / "worktrees" / "notes-squad"
+    (worktree / ".saturnin").mkdir(parents=True)
+    (worktree / ".saturnin" / "repo.yaml").write_text(
+        "project: Notes\nsquad: [code-worker]\n",
+        encoding="utf-8",
+    )
+    task = json.loads(
+        run(
+            capsys,
+            "--json",
+            "task",
+            "add",
+            "Provision notes structure",
+            "--repo",
+            repo,
+            "--dispatch",
+        )[1]
+    )
+    with Board().edit(task["id"]) as stored:
+        stored.worktree = str(worktree)
+
+    code, out = run(
+        capsys,
+        "--json",
+        "dispatch",
+        task["id"],
+        "--no-launch",
+    )
+
+    assert code == 0
+    assert json.loads(out)[0]["role"] == "scribe"
+    assert Board().get(task["id"]).squad == [
+        "code-worker",
+        "scribe",
+        "pr-reviewer",
+    ]
+
+
+def test_notes_project_manifest_cannot_select_non_scribe_lead(
+    home: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    config = Config.load()
+    repo = config.policy("repos")["repos"]["notes"]["slug"]
+    worktree = home / "var" / "worktrees" / "notes-lead"
+    (worktree / ".saturnin").mkdir(parents=True)
+    (worktree / ".saturnin" / "repo.yaml").write_text(
+        "project: Notes\nlead: code-worker\nsquad: [code-worker]\n",
+        encoding="utf-8",
+    )
+    task = json.loads(
+        run(
+            capsys,
+            "--json",
+            "task",
+            "add",
+            "Provision notes structure",
+            "--repo",
+            repo,
+            "--dispatch",
+        )[1]
+    )
+    with Board().edit(task["id"]) as stored:
+        stored.worktree = str(worktree)
+
+    assert main(["dispatch", task["id"], "--no-launch"]) == 1
+    assert "only be led by the configured scribe" in capsys.readouterr().err
+    assert Board().get(task["id"]).role == "scribe"
+
+
 def test_task_reroute_adds_labels_and_routes_current_task(
     home: Path, capsys: pytest.CaptureFixture[str]
 ) -> None:
@@ -1291,6 +1369,76 @@ def test_review_gate_flow(home: Path, capsys: pytest.CaptureFixture[str]) -> Non
     )
     assert code == 0
     assert "ALLOWED" in out
+
+
+def test_notes_review_cli_binds_profile_method_and_checks(
+    home: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    config = Config.load()
+    repo = config.policy("repos")["repos"]["notes"]["slug"]
+    settings = notes_review_settings(config)
+    subject = f"{repo}#42"
+    head_sha = "b" * 40
+    profile_args = [
+        "--repo",
+        repo,
+        "--profile",
+        settings["profile"],
+        "--method",
+        settings["method"],
+        *[
+            item
+            for check in settings["required_checks"]
+            for item in ("--check", check)
+        ],
+    ]
+    assert run(
+        capsys,
+        "review",
+        "record",
+        subject,
+        "--kind",
+        "pr",
+        "--author",
+        "scribe",
+        "--reviewer",
+        "pr-reviewer",
+        "--verdict",
+        "approved",
+        "--head-sha",
+        head_sha,
+        *profile_args,
+        *review_attestation_args(
+            subject=subject,
+            kind="pr",
+            author="scribe",
+            reviewer="pr-reviewer",
+            verdict="approved",
+            head_sha=head_sha,
+            repo=repo,
+            profile=settings["profile"],
+            method=settings["method"],
+            checks=settings["required_checks"],
+        ),
+    )[0] == 0
+
+    code, out = run(
+        capsys,
+        "review",
+        "gate",
+        subject,
+        "--kind",
+        "pr",
+        "--repo",
+        repo,
+        "--author",
+        "scribe",
+        "--head-sha",
+        head_sha,
+    )
+
+    assert code == 0
+    assert "notes review" in out
 
 
 def test_review_cli_resolves_omitted_pr_head(

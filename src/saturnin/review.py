@@ -51,6 +51,9 @@ class ReviewRecord:
     head_sha: str = ""
     issue_digest: str = ""
     destination_repo: str = ""
+    review_profile: str = ""
+    review_method: str = ""
+    review_checks: list[str] = field(default_factory=list)
     notes: str = ""
     attestation_id: str = ""
     attestation_signature: str = ""
@@ -61,13 +64,20 @@ class ReviewRecord:
 
     @classmethod
     def from_dict(cls, data: dict[str, Any]) -> "ReviewRecord":
+        data = {
+            "review_profile": "",
+            "review_method": "",
+            "review_checks": [],
+            **data,
+        }
         cls.validate_dict(data)
         return cls(**data)
 
     @classmethod
     def validate_dict(cls, data: dict[str, Any]) -> None:
         known = set(cls.__dataclass_fields__)  # noqa: SLF001 - dataclass API
-        missing = sorted(known - set(data))
+        optional = {"review_profile", "review_method", "review_checks"}
+        missing = sorted(known - optional - set(data))
         if missing:
             raise TypeError(f"review record is missing field(s): {', '.join(missing)}")
         unknown = sorted(set(data) - known)
@@ -82,13 +92,23 @@ class ReviewRecord:
             "head_sha",
             "issue_digest",
             "destination_repo",
+            "review_profile",
+            "review_method",
             "notes",
             "attestation_id",
             "attestation_signature",
             "created_at",
         ):
-            if not isinstance(data[name], str):
+            value = data.get(name, "") if name in optional else data[name]
+            if not isinstance(value, str):
                 raise TypeError(f"review record field {name!r} must be a string")
+        checks = data.get("review_checks", [])
+        if not isinstance(checks, list) or not all(
+            isinstance(check, str) and check.strip() for check in checks
+        ):
+            raise TypeError("review record field 'review_checks' must be a list of strings")
+        if len(checks) != len(set(checks)):
+            raise ValueError("review record review_checks must not contain duplicates")
         for name in ("subject", "author", "reviewer", "created_at"):
             if not data[name].strip():
                 raise ValueError(f"review record field {name!r} must not be empty")
@@ -132,8 +152,13 @@ class ReviewRecord:
             raise ValueError("review record created_at must include a timezone")
 
 
-REQUIRED_FIELDS = tuple(ReviewRecord.__dataclass_fields__)  # noqa: SLF001 - dataclass API
-ATTESTED_FIELDS = (
+OPTIONAL_PROFILE_FIELDS = ("review_profile", "review_method", "review_checks")
+REQUIRED_FIELDS = tuple(
+    field
+    for field in ReviewRecord.__dataclass_fields__  # noqa: SLF001 - dataclass API
+    if field not in OPTIONAL_PROFILE_FIELDS
+)
+LEGACY_ATTESTED_FIELDS = (
     "subject",
     "kind",
     "author",
@@ -143,6 +168,12 @@ ATTESTED_FIELDS = (
     "head_sha",
     "issue_digest",
     "destination_repo",
+)
+ATTESTED_FIELDS = (
+    *LEGACY_ATTESTED_FIELDS,
+    "review_profile",
+    "review_method",
+    "review_checks",
 )
 ROLE_SCOPED_KEY_CONTEXT = "saturnin-review-attestation"
 ROTATION_MANIFEST_KEY_CONTEXT = "saturnin-review-rotation-manifest:v1"
@@ -172,8 +203,23 @@ def normalize_repository_slug(repo: str) -> str:
     return slug.casefold()
 
 
-def _canonical_attestation_payload(payload: dict[str, Any]) -> bytes:
-    covered = {field: payload[field] for field in ATTESTED_FIELDS}
+def notes_review_settings(config: Config) -> dict[str, Any]:
+    """Return the canonical notes review contract referenced by governance."""
+    reference = (
+        config.governance.get("review", {}).get("notes", {}).get("policy_ref")
+    )
+    if not isinstance(reference, str) or not reference:
+        raise ReviewError("notes review policy reference is not configured")
+    settings = config.policy_reference(reference)
+    if not isinstance(settings, dict):
+        raise ReviewError("notes review policy reference must resolve to a mapping")
+    return settings
+
+
+def _canonical_attestation_payload(
+    payload: dict[str, Any], fields: tuple[str, ...] = ATTESTED_FIELDS
+) -> bytes:
+    covered = {field: payload[field] for field in fields}
     covered["attestation_id"] = payload["attestation_id"]
     if "key_id" in payload:
         covered["key_id"] = payload["key_id"]
@@ -192,6 +238,9 @@ def sign_review_attestation(
     head_sha: str = "",
     issue_digest: str = "",
     destination_repo: str = "",
+    review_profile: str = "",
+    review_method: str = "",
+    review_checks: list[str] | None = None,
     attestation_id: str | None = None,
 ) -> str:
     """Return a signed review attestation for the exact reviewed subject."""
@@ -215,6 +264,9 @@ def sign_review_attestation(
         "head_sha": head_sha.strip(),
         "issue_digest": issue_digest.strip(),
         "destination_repo": normalized_destination,
+        "review_profile": review_profile.strip(),
+        "review_method": review_method.strip(),
+        "review_checks": sorted(review_checks or []),
         "attestation_id": attestation_id or secrets.token_hex(16),
         "key_id": hashlib.sha256(key.encode("utf-8")).hexdigest(),
     }
@@ -330,7 +382,9 @@ def _verify_review_attestation(
         raise ReviewError(f"invalid review attestation JSON: {exc}") from exc
     if not isinstance(payload, dict):
         raise ReviewError("review attestation must be a JSON object")
-    required = {*ATTESTED_FIELDS, "attestation_id", "signature"}
+    legacy_shape = not any(field in payload for field in OPTIONAL_PROFILE_FIELDS)
+    signed_fields = LEGACY_ATTESTED_FIELDS if legacy_shape else ATTESTED_FIELDS
+    required = {*signed_fields, "attestation_id", "signature"}
     if historical_identity is None:
         required.add("key_id")
     missing = sorted(required - set(payload))
@@ -339,12 +393,22 @@ def _verify_review_attestation(
     signature = payload.get("signature")
     if not isinstance(signature, str) or not re.fullmatch(r"[0-9a-fA-F]{64}", signature):
         raise ReviewError("review attestation signature must be a SHA-256 HMAC")
-    for field_name in (*ATTESTED_FIELDS, "attestation_id", "key_id"):
+    for field_name in (*signed_fields, "attestation_id", "key_id"):
         if field_name not in payload:
             continue
-        expected_type = bool if field_name == "zero_context" else str
+        expected_type = (
+            bool
+            if field_name == "zero_context"
+            else list
+            if field_name == "review_checks"
+            else str
+        )
         if type(payload[field_name]) is not expected_type:
             raise ReviewError(f"review attestation field {field_name!r} has the wrong type")
+        if field_name == "review_checks" and not all(
+            isinstance(check, str) and check.strip() for check in payload[field_name]
+        ):
+            raise ReviewError("review attestation review_checks must contain strings")
     include_previous = historical_identity is not None
     verification_keys = _verification_keys(
         config, str(payload["reviewer"]), include_previous=include_previous
@@ -361,16 +425,27 @@ def _verify_review_attestation(
             hashlib.sha256(candidate.encode("utf-8")).hexdigest(),
         )
     ]
+    payloads = [_canonical_attestation_payload(payload, signed_fields)]
+    if (
+        signed_fields == ATTESTED_FIELDS
+        and not payload.get("review_profile")
+        and not payload.get("review_method")
+        and not payload.get("review_checks")
+    ):
+        payloads.append(_canonical_attestation_payload(payload, LEGACY_ATTESTED_FIELDS))
     verified_keys = [
         candidate
         for candidate in matching_keys
-        if hmac.compare_digest(
-            signature,
-            hmac.new(
-                candidate.encode("utf-8"),
-                _canonical_attestation_payload(payload),
-                hashlib.sha256,
-            ).hexdigest(),
+        if any(
+            hmac.compare_digest(
+                signature,
+                hmac.new(
+                    candidate.encode("utf-8"),
+                    canonical_payload,
+                    hashlib.sha256,
+                ).hexdigest(),
+            )
+            for canonical_payload in payloads
         )
     ]
     if not verified_keys:
@@ -382,6 +457,9 @@ def _verify_review_attestation(
     if uses_previous:
         assert historical_identity is not None
         _require_sealed_previous_attestation(config, historical_identity)
+    payload.setdefault("review_profile", "")
+    payload.setdefault("review_method", "")
+    payload.setdefault("review_checks", [])
     return payload
 
 
@@ -468,6 +546,9 @@ class ReviewLedger:
         head_sha: str = "",
         issue_digest: str = "",
         destination_repo: str = "",
+        review_profile: str = "",
+        review_method: str = "",
+        review_checks: list[str] | None = None,
         notes: str = "",
         attestation: str = "",
     ) -> ReviewRecord:
@@ -485,6 +566,17 @@ class ReviewLedger:
             )
         except ValueError as exc:
             raise ReviewError(f"invalid destination repository: {exc}") from exc
+        profile = review_profile.strip()
+        method = review_method.strip()
+        checks = sorted(review_checks or [])
+        self._validate_profile(
+            subject=subject,
+            kind=kind,
+            destination_repo=destination,
+            review_profile=profile,
+            review_method=method,
+            review_checks=checks,
+        )
         if kind == "pr" and not head:
             raise ReviewError(
                 "PR reviews require --head-sha (pass the same SHA to review record and review gate)"
@@ -522,6 +614,9 @@ class ReviewLedger:
                 "head_sha": head,
                 "issue_digest": digest,
                 "destination_repo": destination,
+                "review_profile": profile,
+                "review_method": method,
+                "review_checks": checks,
             }
             for field_name, supplied_value in supplied.items():
                 if payload[field_name] != supplied_value:
@@ -542,6 +637,9 @@ class ReviewLedger:
             head_sha=head,
             issue_digest=digest,
             destination_repo=destination,
+            review_profile=profile,
+            review_method=method,
+            review_checks=checks,
             notes=notes,
             attestation_id=attestation_id,
             attestation_signature=attestation_signature,
@@ -575,6 +673,54 @@ class ReviewLedger:
                     self._reject_replayed_attestation(path, attestation_id, raw)
                 durable_append_text(path, serialized)
         return entry
+
+    def _validate_profile(
+        self,
+        *,
+        subject: str,
+        kind: str,
+        destination_repo: str,
+        review_profile: str,
+        review_method: str,
+        review_checks: list[str],
+    ) -> None:
+        notes_repo = self.config.policy("repos").get("repos", {}).get("notes", {})
+        notes_slug = normalize_repository_slug(str(notes_repo.get("slug", "")))
+        subject_repo = subject.rsplit("#", 1)[0] if "#" in subject else ""
+        try:
+            subject_slug = (
+                normalize_repository_slug(subject_repo) if subject_repo else ""
+            )
+        except ValueError:
+            subject_slug = ""
+        is_notes_review = kind == "pr" and (
+            destination_repo == notes_slug or subject_slug == notes_slug
+        )
+        if not is_notes_review:
+            return
+        settings = notes_review_settings(self.config)
+        expected_profile = str(settings.get("profile", ""))
+        expected_method = str(settings.get("method", ""))
+        expected_checks = sorted(
+            str(check) for check in settings.get("required_checks", [])
+        )
+        if destination_repo != notes_slug:
+            raise ReviewError(
+                "notes review records must bind the canonical notes repository"
+            )
+        if review_profile != expected_profile:
+            raise ReviewError(
+                f"notes review records require profile {expected_profile!r}"
+            )
+        if review_method != expected_method:
+            raise ReviewError(
+                f"notes review records require method {expected_method!r}"
+            )
+        if review_checks != expected_checks:
+            raise ReviewError(
+                "notes review records require exactly these checks: "
+                + ", ".join(expected_checks)
+            )
 
     def for_subject(self, subject: str, kind: str) -> list[ReviewRecord]:
         path = self.dir / f"{kind}-{slugify(subject)}.jsonl"
@@ -673,12 +819,20 @@ class ReviewLedger:
             payload["key_id"] = key_id
         else:
             signature = stored_signature
-        expected = hmac.new(
-            key.encode("utf-8"),
-            _canonical_attestation_payload(payload),
-            hashlib.sha256,
-        ).hexdigest()
-        return hmac.compare_digest(signature, expected)
+        payloads = [_canonical_attestation_payload(payload)]
+        if not record.review_profile and not record.review_method and not record.review_checks:
+            payloads.append(_canonical_attestation_payload(payload, LEGACY_ATTESTED_FIELDS))
+        return any(
+            hmac.compare_digest(
+                signature,
+                hmac.new(
+                    key.encode("utf-8"),
+                    canonical_payload,
+                    hashlib.sha256,
+                ).hexdigest(),
+            )
+            for canonical_payload in payloads
+        )
 
     def _records(self, path: Path) -> Iterator[ReviewRecord]:
         with file_lock(path, exclusive=False):

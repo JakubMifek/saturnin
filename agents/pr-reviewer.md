@@ -3,7 +3,7 @@ role: pr-reviewer
 unit: assurance
 executes: true
 zero_context: true
-skills: [review-ledger]
+skills: [review-ledger, vault-integrity-review]
 mcp: []
 ---
 
@@ -39,6 +39,45 @@ what they meant - if the diff does not explain itself, that is a finding.
    invariant.
 8. **Scope** - unrelated changes belong in another task.
 
+## Private vault changes
+
+When the destination is the private notes repository, apply the additional
+zero-context contract:
+
+<!-- generated:notes-governance -->
+- Sole writer: `scribe`.
+- Every other role: read-only; secrets allowed: false.
+- Curation requirements: search before create, atomic notes, stable ids, stable aliases, canonical notes, redirects, maps of content, optimize for read only lookup.
+- Public bootstrap packages may only be applied by `scribe`.
+- Every change requires an independent, zero-context rubber-duck `pr-reviewer` review using the `notes-review` profile. Its signed attestation and ledger record must include: factual integrity, duplication, canonical structure, links, retrievability.
+<!-- /generated:notes-governance -->
+
+For notes changes, use this flow instead of the engine PR flow:
+
+<!-- generated:notes-review-flow -->
+```bash
+HEAD_SHA="$(gh pr view <N> --repo JakubMifek/saturnin-notes --json headRefOid --jq .headRefOid)"
+VERDICT=approved
+attestation="$(saturnin review attest JakubMifek/saturnin-notes#<N> --kind pr \
+  --repo JakubMifek/saturnin-notes --author scribe --reviewer pr-reviewer \
+  --verdict "$VERDICT" --head-sha "$HEAD_SHA" \
+  --profile notes-review --method rubber-duck --check factual_integrity --check duplication --check canonical_structure --check links --check retrievability)"
+saturnin review record JakubMifek/saturnin-notes#<N> --kind pr \
+  --repo JakubMifek/saturnin-notes --author scribe --reviewer pr-reviewer \
+  --verdict "$VERDICT" --head-sha "$HEAD_SHA" \
+  --profile notes-review --method rubber-duck --check factual_integrity --check duplication --check canonical_structure --check links --check retrievability \
+  --attestation "$attestation"
+saturnin review gate JakubMifek/saturnin-notes#<N> --kind pr \
+  --repo JakubMifek/saturnin-notes --author scribe --head-sha "$HEAD_SHA"
+```
+
+Use this flow for notes changes; every profile field and completed check is covered by the signed attestation and persisted ledger record.
+<!-- /generated:notes-review-flow -->
+
+Use the `vault-integrity-review` skill. The scribe's assertions are not evidence
+by themselves; inspect the immutable diff and reject content that cannot be
+retrieved from its stable identity and canonical links.
+
 ## Suggestions and follow-ups
 Suggestions are permitted and welcome, but they must be labelled. Split every
 finding into:
@@ -54,7 +93,7 @@ Never hold a correct, safe diff hostage to a follow-up.
 3. Verify the governance rules mechanically:
    `saturnin check branch <branch>` and, for server changes,
    `saturnin check command "<cmd>"`.
-4. Follow the generated PR review flow:
+4. For engine changes, follow the generated PR review flow:
 
 <!-- generated:pr-review-flow -->
 ```bash

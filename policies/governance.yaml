@@ -79,6 +79,9 @@ review:
     independent: true
     author_may_review: false
     allowed_reviewer_roles: [issue-reviewer]
+  # Private notes changes are ordinary PRs, plus this stricter content contract.
+  notes:
+    policy_ref: repos.repos.notes.change_review
   attestation:
     # Review records are accepted only with an HMAC-signed attestation produced
     # by the reviewer execution, binding identity, subject, verdict and content.

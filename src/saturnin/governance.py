@@ -16,8 +16,8 @@ from pathlib import Path
 from typing import Any, Iterable, Sequence
 from urllib.parse import urlsplit
 
-from .config import Config, default_config
-from .review import ReviewRecord
+from .config import Config, ConfigError, default_config
+from .review import ReviewError, ReviewRecord, notes_review_settings
 
 _MAX_COMMAND_DEPTH = 8
 _WRAPPERS = {"env", "nice", "ionice", "stdbuf", "timeout", "exec", "command"}
@@ -222,9 +222,27 @@ class Governance:
         records = [r for r in records if r.author.strip().lower() == author_lower]
         if self.review.get("attestation", {}).get("required", False):
             records = [r for r in records if r.attestation_id and r.attestation_signature]
-        allowed = _allowed_reviewer_roles(kind, self.config) if kind else set()
+        configured_roles = settings.get("allowed_reviewer_roles")
+        allowed = (
+            {str(role).strip().lower() for role in configured_roles}
+            if isinstance(configured_roles, list)
+            else _allowed_reviewer_roles(kind, self.config)
+            if kind
+            else set()
+        )
         if kind:
             records = [r for r in records if r.reviewer.strip().lower() in allowed]
+        required_profile = str(settings.get("profile", ""))
+        if required_profile:
+            records = [r for r in records if r.review_profile == required_profile]
+        required_method = str(settings.get("method", ""))
+        if required_method:
+            records = [r for r in records if r.review_method == required_method]
+        required_checks = set(settings.get("required_checks", []))
+        if required_checks:
+            records = [
+                r for r in records if set(r.review_checks) == required_checks
+            ]
         latest_by_reviewer: dict[str, ReviewRecord] = {}
         for record in records:
             latest_by_reviewer[record.reviewer.strip().lower()] = record
@@ -254,10 +272,10 @@ class Governance:
         reasons.append(f"{subject}: {len(approvals)} independent approval(s)")
         return Decision(True, reasons)
 
-    def merge_allowed(
+    def pr_review_allowed(
         self, *, repo: str, author: str, records: Iterable[ReviewRecord], head_sha: str
     ) -> Decision:
-        """Rule 3 + 4: merge only after an independent zero-context review."""
+        """Check the repository-specific PR review contract at the current head."""
         records = [r for r in records if r.kind == "pr"]
         if not head_sha:
             return Decision.deny(
@@ -270,14 +288,57 @@ class Governance:
                 f"no review records match the current head SHA ({head_sha[:12]}); "
                 "new commits may have been pushed after the last review"
             )
-        settings = self.review.get("pr", {})
+        notes_repo = (
+            self.config.policy("repos")
+            .get("repos", {})
+            .get("notes", {})
+            .get("slug", "")
+        )
+        is_notes_repo = _repo_slug_key(repo) == _repo_slug_key(notes_repo)
+        settings = (
+            notes_review_settings(self.config)
+            if is_notes_repo
+            else self.review.get("pr", {})
+        )
+        if is_notes_repo:
+            writer_roles = (
+                self.config.policy("repos")
+                .get("repos", {})
+                .get("notes", {})
+                .get("access", {})
+                .get("writer_roles", [])
+            )
+            if author.strip().lower() not in {
+                str(role).strip().lower() for role in writer_roles
+            }:
+                return Decision.deny(
+                    f"notes review: author {author!r} is not an authorized notes writer"
+                )
+            records = [
+                r
+                for r in records
+                if r.destination_repo == _repo_slug_key(notes_repo)
+            ]
         if settings.get("required", True):
-            decision = self._review_gate(records, author, settings, "pr review", kind="pr")
+            subject = "notes review" if is_notes_repo else "pr review"
+            decision = self._review_gate(records, author, settings, subject, kind="pr")
             if not decision.allowed:
                 return decision
             reasons = list(decision.reasons)
         else:  # pragma: no cover - defensive
             reasons = ["pr review not required by policy"]
+        return Decision(True, reasons)
+
+    def merge_allowed(
+        self, *, repo: str, author: str, records: Iterable[ReviewRecord], head_sha: str
+    ) -> Decision:
+        """Rule 3 + 4: merge only after an independent zero-context review."""
+        decision = self.pr_review_allowed(
+            repo=repo, author=author, records=records, head_sha=head_sha
+        )
+        if not decision.allowed:
+            return decision
+        reasons = list(decision.reasons)
         if _repo_slug_key(repo) == _repo_slug_key(self.autonomy.get("self_repo")):
             if not self.autonomy.get("self_repo_autonomous_merge", False):
                 return Decision.deny(f"{repo}: autonomous merge disabled by policy")
@@ -627,6 +688,50 @@ class Governance:
             if unknown:
                 problems.append(
                     f"{kind} review policy names unknown reviewer role(s): {', '.join(unknown)}"
+                )
+        notes_reference = self.review.get("notes", {}).get("policy_ref")
+        try:
+            notes_review = notes_review_settings(self.config)
+        except (ConfigError, ReviewError) as exc:
+            problems.append(f"private notes review policy reference is invalid: {exc}")
+            notes_review = {}
+        if not all(
+            notes_review.get(key) is True
+            for key in ("required", "independent", "zero_context")
+        ):
+            problems.append("private notes review must be required, independent and zero-context")
+        if notes_review.get("author_may_review", True):
+            problems.append("private notes authors are allowed to review themselves")
+        if notes_review.get("method") != "rubber-duck":
+            problems.append("private notes review must use the rubber-duck method")
+        if not notes_review.get("profile"):
+            problems.append("private notes review requires a distinct review profile")
+        elif notes_review.get("profile") in {
+            self.review.get("pr", {}).get("profile", "pr"),
+            self.review.get("issue", {}).get("profile", "issue"),
+        }:
+            problems.append("private notes review profile must be distinct")
+        if not isinstance(notes_reference, str) or not notes_reference:
+            problems.append("private notes review policy must name its canonical reference")
+        required_checks = notes_review.get("required_checks", [])
+        if not isinstance(required_checks, list) or not required_checks or not all(
+            isinstance(check, str) and check.strip() for check in required_checks
+        ):
+            problems.append("private notes review requires non-empty integrity checks")
+        notes_reviewers = notes_review.get("allowed_reviewer_roles", [])
+        if not isinstance(notes_reviewers, list) or not notes_reviewers or not all(
+            isinstance(role, str) and role.strip() for role in notes_reviewers
+        ):
+            problems.append("private notes review requires reviewer roles")
+        else:
+            unknown = sorted(
+                {role.strip() for role in notes_reviewers}
+                - set(self.config.routing.get("roles", {}))
+            )
+            if unknown:
+                problems.append(
+                    "private notes review names unknown reviewer role(s): "
+                    + ", ".join(unknown)
                 )
         github_reviewers = self.review.get("pr", {}).get("github_reviewer_logins", [])
         if not isinstance(github_reviewers, list) or not github_reviewers or not all(

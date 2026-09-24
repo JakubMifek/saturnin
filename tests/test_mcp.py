@@ -56,6 +56,16 @@ def test_registry_mcp_servers_use_pinned_packages(config: Config) -> None:
     ]
 
 
+def test_private_notes_mcp_is_declared_but_dormant(config: Config) -> None:
+    policy = config.policy("mcp")
+    integration = policy["future_integrations"]["notes"]
+
+    assert "notes" not in policy["servers"]
+    assert integration["enabled"] is False
+    assert integration["non_scribe_access"] == "read-only"
+    assert integration["write_roles"] == []
+
+
 @pytest.mark.parametrize(
     ("server_id", "args"),
     [

@@ -13,13 +13,13 @@ nothing else in the system has to move.
 | `code-worker` | engineering | yes | Implements changes on a feature branch inside its own worktree. |
 | `test-worker` | engineering | yes | Writes and repairs tests, reproduces bugs, owns e2e suites and monitors. |
 | `architect` | engineering | yes | Looks across many surgical changes, spots structural drift (scattered APIs, duplicated features, bespoke code where an industry-standard library belongs) and files follow-up tasks for the code worker. |
-| `pr-reviewer` | assurance | yes | Reviews a diff with no prior context of the authoring session. |
+| `pr-reviewer` | assurance | yes | Reviews a diff with no prior context, including private-vault integrity checks. |
 | `issue-reviewer` | assurance | yes | Reviews issue drafts before they are filed in managed repos. |
 | `ops-worker` | operations | yes | Non-root Debian server work inside the Saturnin user scope. |
 | `janitor` | operations | yes | Worktree/branch lifecycle, stale cleanup, disk hygiene. |
 | `automation-smith` | platform | yes | Turns repeated work into reusable scripts in the automation library. |
 | `improver` | platform | yes | Measures throughput, finds bottlenecks, proposes topology/policy upgrades. |
-| `scribe` | platform | yes | Docs, runbooks, checkpoints and handoff notes. |
+| `scribe` | platform | yes | Sole writer and curator of the private notes vault; owns durable documentation. |
 | `researcher` | platform | yes | Investigates options and reports back; no repository writes. |
 <!-- /generated:roles -->
 
