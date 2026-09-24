@@ -79,6 +79,20 @@ review:
     independent: true
     author_may_review: false
     allowed_reviewer_roles: [issue-reviewer]
+  # Private notes changes are ordinary PRs, plus this stricter content contract.
+  notes:
+    required: true
+    independent: true
+    zero_context: true
+    method: rubber-duck
+    author_may_review: false
+    allowed_reviewer_roles: [pr-reviewer]
+    required_checks:
+      - factual_integrity
+      - duplication
+      - canonical_structure
+      - links
+      - retrievability
   attestation:
     # Review records are accepted only with an HMAC-signed attestation produced
     # by the reviewer execution, binding identity, subject, verdict and content.

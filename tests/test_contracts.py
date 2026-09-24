@@ -78,3 +78,46 @@ def test_duplicate_role_contracts_are_rejected(config: Config) -> None:
         encoding="utf-8",
     )
     assert any("duplicate agent contracts declare role 'code-worker'" in problem for problem in audit(config))
+
+
+def test_private_notes_policy_has_one_writer_and_independent_review(
+    config: Config,
+) -> None:
+    notes = config.policy("repos")["repos"]["notes"]
+
+    assert notes["access"]["writer_roles"] == ["scribe"]
+    assert notes["access"]["non_writer_access"] == "read-only"
+    assert notes["change_review"]["reviewer_role"] == "pr-reviewer"
+    assert notes["change_review"]["independent"] is True
+    assert audit(config) == []
+
+
+def test_private_notes_non_scribe_writer_is_rejected(config: Config) -> None:
+    config.policy("repos")["repos"]["notes"]["access"]["writer_roles"].append(
+        "code-worker"
+    )
+
+    assert any("sole writer" in problem for problem in audit(config))
+
+
+def test_public_bootstrap_cannot_authorize_non_scribe_application(
+    config: Config,
+) -> None:
+    config.policy("repos")["repos"]["notes"]["curation"][
+        "public_bootstrap_application_role"
+    ] = "code-worker"
+
+    assert any("bootstrap packages" in problem for problem in audit(config))
+
+
+def test_notes_mcp_stays_disabled_read_only_and_write_free(config: Config) -> None:
+    integration = config.policy("mcp")["future_integrations"]["notes"]
+
+    assert integration == {
+        "enabled": False,
+        "repository": "notes",
+        "non_scribe_access": "read-only",
+        "write_roles": [],
+    }
+    integration["write_roles"] = ["scribe"]
+    assert any("disabled and write-free" in problem for problem in audit(config))

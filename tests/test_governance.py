@@ -83,6 +83,18 @@ def test_policies_audit_clean(governance: Governance) -> None:
     assert governance.audit() == []
 
 
+def test_private_notes_review_contract_is_mandatory_and_independent(
+    config: Config,
+) -> None:
+    review = config.governance["review"]["notes"]
+
+    assert review["required"] is True
+    assert review["independent"] is True
+    assert review["zero_context"] is True
+    assert review["author_may_review"] is False
+    assert review["allowed_reviewer_roles"] == ["pr-reviewer"]
+
+
 def test_review_attestation_key_environments_must_be_distinct(config: Config) -> None:
     attestation = config.governance["review"]["attestation"]
     attestation["previous_key_env"] = attestation["key_env"]

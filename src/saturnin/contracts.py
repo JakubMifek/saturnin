@@ -191,4 +191,45 @@ def audit(config: Config | None = None) -> list[str]:
             )
             if problem:
                 problems.append(f"{contract.path.name}: {problem}")
+    notes = config.policy("repos").get("repos", {}).get("notes", {})
+    access = notes.get("access", {})
+    writers = access.get("writer_roles", [])
+    scribe = config.routing.get("knowledge", {}).get("scribe_role")
+    if writers != [scribe]:
+        problems.append("private notes repository must declare the scribe as its sole writer")
+    if access.get("non_writer_access") != "read-only":
+        problems.append("private notes access for non-scribe roles must be read-only")
+    if access.get("secrets_allowed") is not False:
+        problems.append("private notes repository must forbid secrets")
+    curation = notes.get("curation", {})
+    required_curation = {
+        "search_before_create",
+        "atomic_notes",
+        "stable_ids",
+        "stable_aliases",
+        "canonical_notes",
+        "redirects",
+        "maps_of_content",
+        "optimize_for_read_only_lookup",
+    }
+    if any(curation.get(key) is not True for key in required_curation):
+        problems.append("private notes curation policy is incomplete")
+    if curation.get("public_bootstrap_application_role") != scribe:
+        problems.append("public notes bootstrap packages may only be applied by the scribe")
+    review = notes.get("change_review", {})
+    if not all(
+        review.get(key) is True for key in ("required", "independent", "zero_context")
+    ):
+        problems.append("private notes changes require independent zero-context review")
+    if review.get("method") != "rubber-duck":
+        problems.append("private notes changes require the rubber-duck review method")
+    if review.get("reviewer_role") not in roles:
+        problems.append("private notes reviewer must be a known role")
+    if review.get("reviewer_role") == scribe:
+        problems.append("private notes reviewer must be independent from the scribe")
+    integration = config.policy("mcp").get("future_integrations", {}).get("notes", {})
+    if integration.get("enabled") is not False or integration.get("write_roles") != []:
+        problems.append("private notes MCP integration must remain disabled and write-free")
+    if integration.get("non_scribe_access") != "read-only":
+        problems.append("future non-scribe notes MCP access must be read-only")
     return problems

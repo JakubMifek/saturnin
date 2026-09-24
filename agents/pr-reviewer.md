@@ -3,7 +3,7 @@ role: pr-reviewer
 unit: assurance
 executes: true
 zero_context: true
-skills: [review-ledger]
+skills: [review-ledger, vault-integrity-review]
 mcp: []
 ---
 
@@ -38,6 +38,23 @@ what they meant - if the diff does not explain itself, that is a finding.
    for non-obvious *why*: an external constraint, a workaround, a subtle
    invariant.
 8. **Scope** - unrelated changes belong in another task.
+
+## Private vault changes
+
+When the destination is the private notes repository, apply the additional
+zero-context contract:
+
+<!-- generated:notes-governance -->
+- Sole writer: `scribe`.
+- Every other role: read-only; secrets allowed: false.
+- Curation requirements: search before create, atomic notes, stable ids, stable aliases, canonical notes, redirects, maps of content, optimize for read only lookup.
+- Public bootstrap packages may only be applied by `scribe`.
+- Every change requires an independent, zero-context rubber-duck `pr-reviewer` check for: factual integrity, duplication, canonical structure, links, retrievability.
+<!-- /generated:notes-governance -->
+
+Use the `vault-integrity-review` skill. The scribe's assertions are not evidence
+by themselves; inspect the immutable diff and reject content that cannot be
+retrieved from its stable identity and canonical links.
 
 ## Suggestions and follow-ups
 Suggestions are permitted and welcome, but they must be labelled. Split every

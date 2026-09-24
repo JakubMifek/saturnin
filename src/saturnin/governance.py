@@ -611,7 +611,7 @@ class Governance:
                 "governance requires task mirroring but repos policy disables "
                 "tracking.mirror_tasks_as_issues"
             )
-        for kind in ("pr", "issue"):
+        for kind in ("pr", "issue", "notes"):
             reviewers = self.review.get(kind, {}).get("allowed_reviewer_roles", [])
             if not isinstance(reviewers, list) or not reviewers or not all(
                 isinstance(role, str) and role.strip() for role in reviewers
@@ -628,6 +628,34 @@ class Governance:
                 problems.append(
                     f"{kind} review policy names unknown reviewer role(s): {', '.join(unknown)}"
                 )
+        notes_review = self.review.get("notes", {})
+        if not all(
+            notes_review.get(key) is True
+            for key in ("required", "independent", "zero_context")
+        ):
+            problems.append("private notes review must be required, independent and zero-context")
+        if notes_review.get("author_may_review", True):
+            problems.append("private notes authors are allowed to review themselves")
+        if notes_review.get("method") != "rubber-duck":
+            problems.append("private notes review must use the rubber-duck method")
+        repository_review = (
+            self.config.policy("repos")
+            .get("repos", {})
+            .get("notes", {})
+            .get("change_review", {})
+        )
+        if repository_review.get("reviewer_role") not in notes_review.get(
+            "allowed_reviewer_roles", []
+        ):
+            problems.append(
+                "private notes reviewer must agree with repository access policy"
+            )
+        if set(repository_review.get("checks", [])) != set(
+            notes_review.get("required_checks", [])
+        ):
+            problems.append(
+                "private notes integrity checks must agree with repository policy"
+            )
         github_reviewers = self.review.get("pr", {}).get("github_reviewer_logins", [])
         if not isinstance(github_reviewers, list) or not github_reviewers or not all(
             isinstance(login, str) and login.strip() for login in github_reviewers
