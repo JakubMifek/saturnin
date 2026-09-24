@@ -65,8 +65,8 @@ jobs:
       - name: PR head must be a feature branch (rules 1 and 2)
         env:
           HEAD_REF: ${{ github.event.pull_request.head.ref }}
-        working-directory: trusted
-        run: saturnin check branch "$HEAD_REF"
+          SATURNIN_HOME: trusted
+        run: trusted/.venv/bin/saturnin check branch "$HEAD_REF"
       - name: Independent review gate (rule 3)
         env:
           GITHUB_TOKEN: ${{ github.token }}
