@@ -37,17 +37,20 @@ def run(capsys: pytest.CaptureFixture[str], *argv: str) -> tuple[int, str]:
     return code, capsys.readouterr().out
 
 
-def review_attestation_args(**kwargs: str) -> tuple[str, str]:
+def review_attestation_args(**kwargs: object) -> tuple[str, str]:
     attestation = sign_review_attestation(
         key=review_attestation_signing_key(Config.load(), kwargs["reviewer"]),
-        subject=kwargs["subject"],
-        kind=kwargs["kind"],
-        author=kwargs["author"],
-        reviewer=kwargs["reviewer"],
-        verdict=kwargs["verdict"],
-        head_sha=kwargs.get("head_sha", ""),
-        issue_digest=kwargs.get("issue_digest", ""),
-        destination_repo=kwargs.get("repo", ""),
+        subject=str(kwargs["subject"]),
+        kind=str(kwargs["kind"]),
+        author=str(kwargs["author"]),
+        reviewer=str(kwargs["reviewer"]),
+        verdict=str(kwargs["verdict"]),
+        head_sha=str(kwargs.get("head_sha", "")),
+        issue_digest=str(kwargs.get("issue_digest", "")),
+        destination_repo=str(kwargs.get("repo", "")),
+        review_profile=str(kwargs.get("profile", "")),
+        review_method=str(kwargs.get("method", "")),
+        review_checks=list(kwargs.get("checks", [])),
     )
     return ("--attestation", attestation)
 
@@ -1291,6 +1294,76 @@ def test_review_gate_flow(home: Path, capsys: pytest.CaptureFixture[str]) -> Non
     )
     assert code == 0
     assert "ALLOWED" in out
+
+
+def test_notes_review_cli_binds_profile_method_and_checks(
+    home: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    config = Config.load()
+    repo = config.policy("repos")["repos"]["notes"]["slug"]
+    settings = config.governance["review"]["notes"]
+    subject = f"{repo}#42"
+    head_sha = "b" * 40
+    profile_args = [
+        "--repo",
+        repo,
+        "--profile",
+        settings["profile"],
+        "--method",
+        settings["method"],
+        *[
+            item
+            for check in settings["required_checks"]
+            for item in ("--check", check)
+        ],
+    ]
+    assert run(
+        capsys,
+        "review",
+        "record",
+        subject,
+        "--kind",
+        "pr",
+        "--author",
+        "scribe",
+        "--reviewer",
+        "pr-reviewer",
+        "--verdict",
+        "approved",
+        "--head-sha",
+        head_sha,
+        *profile_args,
+        *review_attestation_args(
+            subject=subject,
+            kind="pr",
+            author="scribe",
+            reviewer="pr-reviewer",
+            verdict="approved",
+            head_sha=head_sha,
+            repo=repo,
+            profile=settings["profile"],
+            method=settings["method"],
+            checks=settings["required_checks"],
+        ),
+    )[0] == 0
+
+    code, out = run(
+        capsys,
+        "review",
+        "gate",
+        subject,
+        "--kind",
+        "pr",
+        "--repo",
+        repo,
+        "--author",
+        "scribe",
+        "--head-sha",
+        head_sha,
+    )
+
+    assert code == 0
+    assert "notes review" in out
 
 
 def test_review_cli_resolves_omitted_pr_head(

@@ -81,6 +81,7 @@ review:
     allowed_reviewer_roles: [issue-reviewer]
   # Private notes changes are ordinary PRs, plus this stricter content contract.
   notes:
+    profile: notes-review
     required: true
     independent: true
     zero_context: true

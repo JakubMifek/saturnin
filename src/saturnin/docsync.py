@@ -244,7 +244,9 @@ def _notes_governance(config: Config) -> str:
             f"`{curation.get('public_bootstrap_application_role')}`.",
             f"- Every change requires an independent, zero-context "
             f"{review.get('method')} "
-            f"`{review.get('reviewer_role')}` check for: {', '.join(checks)}.",
+            f"`{review.get('reviewer_role')}` review using the "
+            f"`{review.get('profile')}` profile. Its signed attestation and ledger "
+            f"record must include: {', '.join(checks)}.",
         ]
     )
 

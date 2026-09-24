@@ -182,6 +182,58 @@ def test_private_notes_change_rejects_non_scribe_lead(
         Router(config).resolve(task, lead_role="code-worker")
 
 
+def test_unlabelled_notes_repository_task_routes_only_to_scribe(
+    config: Config, board: Board
+) -> None:
+    task = board.create(
+        "Apply repository bootstrap",
+        repo=config.policy("repos")["repos"]["notes"]["slug"],
+    )
+
+    route = Router(config).dispatch(board, task)
+
+    assert route.role == "scribe"
+    assert route.rule == "private-notes-change"
+    assert board.get(task.id).squad == ["scribe", "pr-reviewer"]
+
+
+@pytest.mark.parametrize("lead_role", ["code-worker", "bootstrap-worker"])
+def test_notes_repository_rejects_lead_overrides(
+    config: Config, board: Board, lead_role: str
+) -> None:
+    task = board.create(
+        "Apply managed repository manifest",
+        repo=config.policy("repos")["repos"]["notes"]["slug"].upper(),
+    )
+    additional_roles = (
+        {"bootstrap-worker": {"unit": "engineering", "executes": True}}
+        if lead_role == "bootstrap-worker"
+        else None
+    )
+
+    with pytest.raises(RoutingError, match="only be led"):
+        Router(config).resolve(
+            task,
+            lead_role=lead_role,
+            additional_roles=additional_roles,
+        )
+
+
+def test_notes_repository_squad_override_cannot_remove_scribe_lead(
+    config: Config, board: Board
+) -> None:
+    task = board.create(
+        "Apply generic bootstrap",
+        repo=config.policy("repos")["repos"]["notes"]["slug"],
+    )
+
+    route = Router(config).dispatch(board, task, squad=["code-worker"])
+
+    assert route.role == "scribe"
+    assert board.get(task.id).role == "scribe"
+    assert board.get(task.id).squad == ["code-worker", "scribe", "pr-reviewer"]
+
+
 @pytest.mark.parametrize(
     ("squad", "message"),
     [(["ceo"], "CEO never executes"), (["ghost"], "unknown squad")],
