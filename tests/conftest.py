@@ -30,6 +30,10 @@ def home(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
     shutil.copytree(REPO_ROOT / "scripts", root / "scripts")
     shutil.copytree(REPO_ROOT / "agents", root / "agents")
     shutil.copytree(REPO_ROOT / "skills", root / "skills")
+    shutil.copytree(
+        REPO_ROOT / "tests" / "fixtures" / "disclosure",
+        root / "tests" / "fixtures" / "disclosure",
+    )
     monkeypatch.setenv("SATURNIN_HOME", str(root))
     monkeypatch.setenv("SATURNIN_REVIEW_ATTESTATION_KEY", "test-review-attestation-key")
     return root

@@ -137,9 +137,12 @@ which is the backup that survives losing the machine entirely.
 The engine is meant to be public; the operational detail is not
 ([ADR-0002](../adr/0002-repository-topology.md)). Before flipping visibility:
 
-1. Run `automation/library/disclosure_gate.sh . .`. It scans only the current
-   Git-tracked tree with the pinned scanner and repository disclosure policy;
-   findings identify locations without printing matched values.
+1. Stage the intended candidate and run
+   `automation/library/disclosure_gate.sh . .`. It archives the Git index
+   rather than reading mutable worktree bytes, scans text and binary bytes with
+   the pinned scanner and repository disclosure policy, and identifies
+   locations without printing matched values. Governance CI passes the full PR
+   commit SHA to scan that immutable tree instead.
 2. Inspect history separately with a maintained history-capable secret scanner.
    The PR gate intentionally evaluates the merge candidate, not already-public
    history.

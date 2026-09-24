@@ -21,3 +21,10 @@ allowlist:
   - rule: private-material
     path: tests/fixtures/disclosure/synthetic-allowed.txt
     line_sha256: 98c1bdabbc1f92018cacbf9dd88ed9e103374e5cb60aa0f613306070ae3478c4
+
+# Gitleaks exceptions are bound to one rule, one literal fixture path, and the
+# complete synthetic match digest. The trusted validator rejects regex variants.
+scanner_allowlist:
+  - rule: saturnin-synthetic-token
+    path: tests/fixtures/disclosure/synthetic-allowed.txt
+    match_sha256: fcecc9e6f35f18df3fb5594841b8929f1c297228f1cce1dff527cabbfaee4b58

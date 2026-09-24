@@ -73,12 +73,17 @@ def test_ci_governance_uses_base_controlled_workflow_and_code() -> None:
     assert "github.event.pull_request.base.sha" in workflow
     assert "persist-credentials: false" in workflow
     assert "ref: ${{ github.event.pull_request.head.sha }}" in workflow
+    assert "repository: ${{ github.event.pull_request.head.repo.full_name }}" in workflow
     assert "path: trusted" in workflow
     assert "path: candidate" in workflow
-    assert "trusted/automation/library/disclosure_gate.sh candidate trusted" in workflow
-    assert 'GITLEAKS_BIN: ""' in workflow
+    assert "candidate trusted \"$CANDIDATE_SHA\"" in workflow
+    assert "--policy candidate/policies/disclosure.yaml" in workflow
+    assert "trusted/.venv/bin/python" in workflow
+    assert "--require-hashes" in workflow
+    assert "./trusted[dev]" not in workflow
+    assert "actions/checkout@v4" not in workflow
+    assert "actions/setup-python@v5" not in workflow
     assert "candidate/automation/library/disclosure_gate.sh" not in workflow
-    assert "candidate/policies/" not in workflow
     assert "TRUSTED_BOOTSTRAP_BASE_SHA" not in workflow
     assert "Require seeded base governance runtime" in workflow
     assert "seed this workflow/runtime on the default branch" in workflow
