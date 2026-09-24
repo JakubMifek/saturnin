@@ -52,6 +52,8 @@ def test_ci_runs_untrusted_tests_only_for_push_and_pull_request() -> None:
     assert "pull_request:" in workflow
     assert "pull_request_target:" not in workflow
     assert "review_gate.sh" not in workflow
+    assert "github.event.pull_request.head.sha || github.sha" in workflow
+    assert 'disclosure_gate.sh . . "$TARGET_SHA"' in workflow
 
 
 def test_ci_review_gate_does_not_claim_a_fixed_author_role() -> None:

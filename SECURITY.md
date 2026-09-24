@@ -55,7 +55,8 @@ keeping the rules as data.
   the fork or same-repository PR checkout strictly as data.
   Inline `gitleaks:allow` annotations, candidate `.gitleaksignore` files and
   baseline reports cannot suppress findings; only the trusted, digest-bound
-  fixture exceptions are active.
+  fixture exceptions are active. Custom scanner rules must match the trusted
+  rule-ID set and exact definition digests, preventing built-in rule shadowing.
 - Private/runtime state stays under ignored `board/` and `var/` paths. External
   private stores are referenced through the generic topology abstractions in
   policy and ADR-0002, never through committed private names or contents.

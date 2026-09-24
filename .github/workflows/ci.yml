@@ -16,6 +16,8 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
       - uses: actions/setup-python@v5
         with:
           python-version: "3.12"
@@ -23,6 +25,10 @@ jobs:
         run: python -m pip install -e ".[dev]"
       - name: Policy health check
         run: saturnin doctor
+      - name: Exact commit disclosure self-scan
+        env:
+          TARGET_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
+        run: automation/library/disclosure_gate.sh . . "$TARGET_SHA"
       - name: Tests (with the 80% branch-coverage floor)
         run: python -m pytest --cov=saturnin --cov-branch --cov-report=term-missing --cov-fail-under=80
       - name: Docs must agree with policy

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import argparse
 import hashlib
+import json
 import re
 import tomllib
 from dataclasses import dataclass
@@ -11,6 +12,12 @@ from pathlib import Path, PurePosixPath
 from typing import Any, Iterator
 
 import yaml
+
+TRUSTED_CUSTOM_RULE_DIGESTS = {
+    "saturnin-synthetic-token": (
+        "32fd28a36d29b0b679afb141f9fcc05308a9f2964bb08850a5fc49d8062e20c1"
+    )
+}
 
 
 @dataclass(frozen=True)
@@ -186,6 +193,8 @@ def audit(root: Path, policy: dict[str, Any]) -> list[str]:
         config = tomllib.loads(config_path.read_text(encoding="utf-8"))
     except (OSError, tomllib.TOMLDecodeError) as error:
         return [f"invalid gitleaks config: {error}"]
+    if set(config) != {"title", "extend", "rules"}:
+        problems.append("gitleaks config permits only title, extend, and rules")
     if config.get("extend") != {"useDefault": True}:
         problems.append("gitleaks config must extend the pinned built-in rules")
     if "allowlist" in config or "allowlists" in config:
@@ -199,11 +208,30 @@ def audit(root: Path, policy: dict[str, Any]) -> list[str]:
     rules = config.get("rules", [])
     if not isinstance(rules, list):
         return problems + ["gitleaks rules must be a list"]
+    custom_rule_ids = [
+        rule.get("id") for rule in rules if isinstance(rule, dict)
+    ]
+    if (
+        len(custom_rule_ids) != len(set(custom_rule_ids))
+        or set(custom_rule_ids) != set(TRUSTED_CUSTOM_RULE_DIGESTS)
+    ):
+        problems.append("gitleaks custom rule ids must match the trusted rule set")
     for rule in rules:
         if not isinstance(rule, dict):
             problems.append("each gitleaks rule must be a mapping")
             continue
         rule_id = rule.get("id")
+        definition = json.dumps(
+            rule, sort_keys=True, separators=(",", ":")
+        ).encode("utf-8")
+        if (
+            not isinstance(rule_id, str)
+            or hashlib.sha256(definition).hexdigest()
+            != TRUSTED_CUSTOM_RULE_DIGESTS.get(rule_id)
+        ):
+            problems.append(
+                "gitleaks custom rule definition does not match its trusted digest"
+            )
         entries = rule.get("allowlists", [])
         if not isinstance(entries, list):
             problems.append("gitleaks rule allowlists must be a list")

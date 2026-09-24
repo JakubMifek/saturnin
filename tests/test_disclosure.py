@@ -177,6 +177,30 @@ def test_gitleaks_allowlist_rejects_regex_equivalents(
     assert "gitleaks allowlist is not an exact governed fixture exception" in problems
 
 
+def test_gitleaks_builtin_rule_shadowing_is_rejected(tmp_path: Path) -> None:
+    shutil.copytree(REPO_ROOT / "policies", tmp_path / "policies")
+    shutil.copytree(
+        REPO_ROOT / "tests" / "fixtures",
+        tmp_path / "tests" / "fixtures",
+    )
+    config = tmp_path / "policies" / "gitleaks.toml"
+    config.write_text(
+        config.read_text(encoding="utf-8")
+        + "\n[[rules]]\n"
+        + 'id = "aws-access-token"\n'
+        + 'description = "candidate shadow"\n'
+        + "regex = '''a^'''\n",
+        encoding="utf-8",
+    )
+
+    problems = audit(
+        tmp_path, yaml.safe_load(POLICY.read_text(encoding="utf-8"))
+    )
+
+    assert "gitleaks custom rule ids must match the trusted rule set" in problems
+    assert any("trusted digest" in problem for problem in problems)
+
+
 def _git(repo: Path, *args: str) -> None:
     subprocess.run(["git", *args], cwd=repo, check=True, capture_output=True)
 
@@ -195,29 +219,31 @@ def _add_disclosure_policy(repo: Path) -> None:
 def _fake_gitleaks(path: Path) -> None:
     path.write_text(
         """#!/usr/bin/env python3
-import json, pathlib, sys
+import json, pathlib, re, sys
 root = pathlib.Path(sys.argv[2])
 report = pathlib.Path(sys.argv[sys.argv.index("--report-path") + 1])
 ignore_annotations = "--ignore-gitleaks-allow" not in sys.argv
 ignore_path = pathlib.Path(sys.argv[sys.argv.index("--gitleaks-ignore-path") + 1])
 candidate_ignore_active = ignore_path != pathlib.Path("/dev/null") and ignore_path.exists()
-leak = next(
-    (
-        path
-        for path in root.rglob("*")
-        if path.is_file()
-        and b"RAW-SYNTHETIC-SECRET" in path.read_bytes()
-        and not (
-            ignore_annotations and b"gitleaks:allow" in path.read_bytes()
-        )
-        and not candidate_ignore_active
-    ),
-    None,
-)
-if leak is not None:
-    print("RAW-SYNTHETIC-SECRET", file=sys.stderr)
-    report.write_text(json.dumps([{"RuleID": "fake-token", "File": str(leak),
-                                   "StartLine": 1, "Secret": "RAW-SYNTHETIC-SECRET"}]))
+finding = None
+for path in root.rglob("*"):
+    if not path.is_file() or candidate_ignore_active:
+        continue
+    content = path.read_bytes()
+    if ignore_annotations and b"gitleaks:allow" in content:
+        continue
+    if b"RAW-SYNTHETIC-SECRET" in content:
+        finding = (path, "fake-token", "RAW-SYNTHETIC-SECRET")
+        break
+    match = re.search(rb"AKIA[A-Z0-9]{16}", content)
+    if match:
+        finding = (path, "aws-access-token", match.group().decode())
+        break
+if finding is not None:
+    leak, rule, secret = finding
+    print(secret, file=sys.stderr)
+    report.write_text(json.dumps([{"RuleID": rule, "File": str(leak),
+                                   "StartLine": 1, "Secret": secret}]))
     raise SystemExit(1)
 report.write_text("[]")
 """,
@@ -382,7 +408,7 @@ def test_gate_scans_exact_commit_tree_despite_index_changes(tmp_path: Path) -> N
 @pytest.mark.parametrize(
     ("blob", "expected_rule"),
     [
-        ("SATURNIN-DISCLOSURE:PRIVATE hidden", "private-material"),
+        ("SATURNIN-DISCLOSURE:" + "PRIVATE hidden", "private-material"),
         ("RAW-SYNTHETIC-SECRET", "fake-token"),
     ],
 )
@@ -499,6 +525,67 @@ def test_gate_fails_closed_when_selected_tree_policy_audit_fails(
 
     assert result.returncode == 2
     assert "rejected selected-tree policy" in result.stdout
+
+
+def test_gate_detects_aws_shape_and_rejects_builtin_rule_shadowing(
+    tmp_path: Path,
+) -> None:
+    repo = tmp_path / "candidate"
+    repo.mkdir()
+    _git(repo, "init", "-b", "feature/test")
+    _add_disclosure_policy(repo)
+    secret = "AKIA" + "Z3N7Q2M8R5T1V6W9"
+    (repo / "credentials.txt").write_text(secret + "\n", encoding="utf-8")
+    _git(repo, "add", "credentials.txt")
+    fake = tmp_path / "gitleaks"
+    _fake_gitleaks(fake)
+
+    detected = _run_gate(repo, fake)
+
+    assert detected.returncode == 1
+    assert "rule=aws-access-token" in detected.stdout
+    assert secret not in detected.stdout + detected.stderr
+
+    config = repo / "policies" / "gitleaks.toml"
+    config.write_text(
+        config.read_text(encoding="utf-8")
+        + "\n[[rules]]\n"
+        + 'id = "aws-access-token"\n'
+        + 'description = "candidate shadow"\n'
+        + "regex = '''a^'''\n",
+        encoding="utf-8",
+    )
+    _git(repo, "add", "policies/gitleaks.toml")
+
+    shadowed = _run_gate(repo, fake)
+
+    assert shadowed.returncode == 2
+    assert "rejected selected-tree policy" in shadowed.stdout
+    assert secret not in shadowed.stdout + shadowed.stderr
+
+
+def test_actual_gitleaks_detects_synthetic_aws_access_key(tmp_path: Path) -> None:
+    repo = tmp_path / "candidate"
+    repo.mkdir()
+    _git(repo, "init", "-b", "feature/test")
+    _add_disclosure_policy(repo)
+    secret = "AKIA" + "Z3N7Q2M8R5T1V6W9"
+    (repo / "credentials.txt").write_text(secret + "\n", encoding="utf-8")
+    _git(repo, "add", "credentials.txt")
+    env = os.environ.copy()
+    env.pop("GITLEAKS_BIN", None)
+    env.pop("SATURNIN_HOME", None)
+
+    result = subprocess.run(
+        [str(GATE), str(repo), str(REPO_ROOT), "index"],
+        text=True,
+        capture_output=True,
+        env=env,
+    )
+
+    assert result.returncode == 1
+    assert "rule=aws-access-token" in result.stdout
+    assert secret not in result.stdout + result.stderr
 
 
 @pytest.mark.parametrize("immutable", [False, True], ids=["index", "commit"])
