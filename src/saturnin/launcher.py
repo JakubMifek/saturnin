@@ -7,6 +7,7 @@ import hmac
 import json
 import os
 import re
+import secrets
 import shutil
 import stat
 import subprocess
@@ -1696,7 +1697,11 @@ class AgentLauncher:
                 config.var_dir / "bin" / "github-mcp-server"
             ).resolve(strict=False)
             if Path(command).resolve(strict=False) == canonical_github:
-                private_stage = self.dir / f"{task.id}.runtime" / "github-mcp-server"
+                private_stage = (
+                    self.dir
+                    / f"{task.id}.runtime-{secrets.token_hex(16)}"
+                    / "github-mcp-server"
+                )
                 try:
                     command = str(stage_github_binary(trusted_config, private_stage))
                 except MCPError as exc:

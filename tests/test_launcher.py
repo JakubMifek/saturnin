@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -115,8 +116,12 @@ def test_launcher_starts_routed_role_with_filtered_mcp(
     assert launched_task.launch_deferred_reason is None
     mcp = json.loads((config.var_dir / "launches" / f"{task.id}.mcp.json").read_text())
     assert set(mcp["mcpServers"]) == {"github", "filesystem"}
-    assert mcp["mcpServers"]["github"]["command"] == str(
-        config.var_dir / "launches" / f"{task.id}.runtime" / "github-mcp-server"
+    github_command = Path(mcp["mcpServers"]["github"]["command"])
+    assert github_command.name == "github-mcp-server"
+    assert github_command.parent.parent == config.var_dir / "launches"
+    assert re.fullmatch(
+        rf"{re.escape(task.id)}\.runtime-[0-9a-f]{{32}}",
+        github_command.parent.name,
     )
     assert mcp["mcpServers"]["github"]["args"] == ["stdio", "--read-only"]
     assert mcp["mcpServers"]["filesystem"]["args"][-1] == str(worktree.path)
@@ -2449,6 +2454,34 @@ def test_launcher_rolls_back_claim_when_spawn_fails(
     assert stored.history[-1]["event"] == "agent:launch_failed"
     assert not any(entry["event"] == "state:in_progress" for entry in stored.history)
 
+    first_stage = Path(
+        json.loads(
+            (config.var_dir / "launches" / f"{task.id}.mcp.json").read_text()
+        )["mcpServers"]["github"]["command"]
+    )
+    monkeypatch.setattr(
+        "saturnin.launcher.subprocess.Popen",
+        lambda command, **kwargs: (
+            real_popen(command, **kwargs)
+            if command[0] == "git"
+            else SimpleNamespace(pid=4242)
+        ),
+    )
+
+    AgentLauncher(config, board).launch(
+        task.id, resumed_checkpoint="checkpoint-1"
+    )
+
+    second_stage = Path(
+        json.loads(
+            (config.var_dir / "launches" / f"{task.id}.mcp.json").read_text()
+        )["mcpServers"]["github"]["command"]
+    )
+    assert second_stage != first_stage
+    assert first_stage.exists()
+    assert second_stage.exists()
+    assert board.get(task.id).checkpoint_resumed_at == "checkpoint-1"
+
 
 def test_launcher_terminates_and_rolls_back_when_metadata_persistence_fails(
     config: Config, board: Board, git_repo: Path, monkeypatch: pytest.MonkeyPatch
@@ -3341,6 +3374,27 @@ def test_reconcile_records_failure_when_pid_belongs_to_different_process(
 
     assert board.get(task.id).state == "in_progress"
     assert not launch_file.exists()
+
+    contract = launcher._contract(board.get(task.id), config)
+    stale = config.var_dir / "launches" / f"{task.id}.runtime"
+    stale.mkdir()
+    outside = config.root / "unrelated-runtime-target"
+    outside.write_text("do not replace\n", encoding="utf-8")
+    (stale / "github-mcp-server").symlink_to(outside)
+    first_config = launcher._write_mcp_config(board.get(task.id), contract)
+    first_stage = Path(
+        json.loads(first_config.read_text())["mcpServers"]["github"]["command"]
+    )
+    second_config = launcher._write_mcp_config(board.get(task.id), contract)
+    second_stage = Path(
+        json.loads(second_config.read_text())["mcpServers"]["github"]["command"]
+    )
+
+    assert first_stage != second_stage
+    assert first_stage.exists()
+    assert second_stage.exists()
+    assert (stale / "github-mcp-server").is_symlink()
+    assert outside.read_text() == "do not replace\n"
 
 
 @pytest.mark.parametrize(

@@ -4,6 +4,7 @@ import hashlib
 import io
 import stat
 import tarfile
+import threading
 from pathlib import Path
 
 import pytest
@@ -211,6 +212,42 @@ def test_github_mcp_stages_verified_inode_before_path_replacement(
     assert staged.read_bytes() == original
     assert stat.S_IMODE(staged.stat().st_mode) == 0o500
     assert staged.stat().st_ino != script.stat().st_ino
+
+
+def test_github_mcp_concurrent_stage_never_replaces_existing_inode(
+    config: Config,
+) -> None:
+    script = config.var_dir / "bin" / "github-mcp-server"
+    script.parent.mkdir(parents=True)
+    checksum = _fake_server(script)
+    definition = config.policy("mcp")["servers"]["github"]
+    definition["install"]["tag"] = "v1.0"
+    for asset in definition["install"]["assets"].values():
+        asset["binary_sha256"] = checksum
+    _secure_runtime_path(config)
+    destination = (
+        config.var_dir / "launches" / "collision.runtime" / "github-mcp-server"
+    )
+    barrier = threading.Barrier(2)
+    outcomes: list[Path | MCPError] = []
+
+    def stage() -> None:
+        barrier.wait()
+        try:
+            outcomes.append(stage_github_binary(config, destination))
+        except MCPError as exc:
+            outcomes.append(exc)
+
+    workers = [threading.Thread(target=stage) for _ in range(2)]
+    for worker in workers:
+        worker.start()
+    for worker in workers:
+        worker.join()
+
+    assert sum(isinstance(outcome, Path) for outcome in outcomes) == 1
+    assert sum(isinstance(outcome, MCPError) for outcome in outcomes) == 1
+    assert hashlib.sha256(destination.read_bytes()).hexdigest() == checksum
+    assert stat.S_IMODE(destination.stat().st_mode) == 0o500
 
 
 def test_github_mcp_installer_verifies_archive_and_handshake(
