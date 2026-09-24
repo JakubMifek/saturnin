@@ -55,22 +55,30 @@ Do not reuse `gh auth token`. The encrypted files are stored under
 printed or copied into an environment file. Once both validate, install the
 reviewed units with `scripts/install_user_units.sh`.
 
-To rotate the key, stop `saturnin-*` timers, retain the old master key as the
-previous verification key, and install the new current key:
+To rotate the key, stop `saturnin-*` timers, rotate the encrypted current key
+into the encrypted previous-key slot, and seal the retained attestations:
 
 ```bash
-export SATURNIN_REVIEW_ATTESTATION_PREVIOUS_KEY='old-secret'
-export SATURNIN_REVIEW_ATTESTATION_KEY='new-secret'
-saturnin review seal-rotation
+saturnin credential rotate-attestation
+saturnin credential seal-attestation-rotation
+saturnin credential status review-attestation
 ```
 
 Run the sealing command before restarting timers. It writes a manifest
 authenticated by a dedicated derivation of the current master key and seals
 the exact reviewer, attestation ID, and signature tuples retained from the old
-key. Previous-key records fail closed if this manifest is absent, malformed,
+key. The rotation command never prints either key, and the transient plaintext
+credentials are held by systemd in the service credential directory rather
+than written to disk. Previous-key records fail closed if this manifest is absent, malformed,
 or altered; newly minted old-key attestations are never accepted. Keep master
-and previous keys only in the trusted supervisor environment. Rotate again
-only after retiring or archiving records signed by the previous key.
+and previous keys only in the trusted supervisor credential boundary. Rotate
+again only after retiring or archiving records signed by the previous key.
+
+To revoke a compromised credential, stop the `saturnin-*` timers first, run
+`saturnin credential revoke review-attestation` or
+`saturnin credential revoke github-mcp`, and leave supervisors stopped until a
+replacement is provisioned and validated. Revocation removes the encrypted
+files and does not print their contents.
 
 ## Cleanup safety model
 

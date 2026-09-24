@@ -34,7 +34,10 @@ from .contracts import (
 )
 from .credentials import (
     CredentialError,
+    attestation_rotation_values,
     provision_attestation_key,
+    revoke_credential,
+    rotate_attestation_key,
     store_github_mcp_token,
     validate_encrypted_credential,
 )
@@ -380,6 +383,14 @@ def build_parser() -> argparse.ArgumentParser:
         help="generate and encrypt a new review attestation master key",
     )
     credential.add_parser(
+        "rotate-attestation",
+        help="retain the encrypted previous key and generate a new current key",
+    )
+    credential.add_parser(
+        "seal-attestation-rotation",
+        help="seal previous-key review records using encrypted credentials",
+    )
+    credential.add_parser(
         "store-github-mcp",
         help="prompt for and encrypt a dedicated fine-grained GitHub token",
     )
@@ -391,6 +402,12 @@ def build_parser() -> argparse.ArgumentParser:
         choices=["review-attestation", "github-mcp", "all"],
         default="all",
         nargs="?",
+    )
+    credential_revoke = credential.add_parser(
+        "revoke", help="remove an encrypted credential after stopping supervisors"
+    )
+    credential_revoke.add_argument(
+        "kind", choices=["review-attestation", "github-mcp"]
     )
 
     sub.add_parser("doctor", help="validate policies and installation")
@@ -950,6 +967,56 @@ def _run(args: argparse.Namespace, config: Config) -> int:  # noqa: C901 - flat 
                     {"credential": "github-mcp", "path": str(path)},
                     as_json,
                     f"provisioned github-mcp at {path}",
+                )
+                return 0
+            if args.credential_command == "rotate-attestation":
+                path = rotate_attestation_key()
+                _emit(
+                    {"credential": "review-attestation", "path": str(path)},
+                    as_json,
+                    f"rotated review-attestation at {path}",
+                )
+                return 0
+            if args.credential_command == "seal-attestation-rotation":
+                current, previous = attestation_rotation_values()
+                settings = config.governance.get("review", {}).get(
+                    "attestation", {}
+                )
+                current_env = str(
+                    settings.get("key_env", "SATURNIN_REVIEW_ATTESTATION_KEY")
+                )
+                previous_env = str(
+                    settings.get(
+                        "previous_key_env",
+                        "SATURNIN_REVIEW_ATTESTATION_PREVIOUS_KEY",
+                    )
+                )
+                saved = {
+                    current_env: os.environ.get(current_env),
+                    previous_env: os.environ.get(previous_env),
+                }
+                try:
+                    os.environ[current_env] = current
+                    os.environ[previous_env] = previous
+                    manifest = ReviewLedger(config).seal_rotation_manifest()
+                finally:
+                    for name, value in saved.items():
+                        if value is None:
+                            os.environ.pop(name, None)
+                        else:
+                            os.environ[name] = value
+                _emit(
+                    {"rotation_manifest": str(manifest)},
+                    as_json,
+                    f"sealed attestation rotation in {manifest}",
+                )
+                return 0
+            if args.credential_command == "revoke":
+                paths = revoke_credential(args.kind)
+                _emit(
+                    {"credential": args.kind, "removed": [str(path) for path in paths]},
+                    as_json,
+                    f"revoked {args.kind}",
                 )
                 return 0
             kinds = (

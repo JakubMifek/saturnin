@@ -12,9 +12,11 @@ from pathlib import Path
 from .jsonlines import PRIVATE_FILE_MODE, atomic_replace_text
 
 ATTESTATION_CREDENTIAL = "saturnin-review-attestation-key"
+PREVIOUS_ATTESTATION_CREDENTIAL = "saturnin-review-attestation-previous-key"
 GITHUB_MCP_CREDENTIAL = "saturnin-github-mcp-token"
 KNOWN_CREDENTIALS = {
     "review-attestation": ATTESTATION_CREDENTIAL,
+    "review-attestation-previous": PREVIOUS_ATTESTATION_CREDENTIAL,
     "github-mcp": GITHUB_MCP_CREDENTIAL,
 }
 MAX_CREDENTIAL_BYTES = 16 * 1024
@@ -41,55 +43,112 @@ def encrypted_credential_path(kind: str) -> Path:
 
 def _secure_directory(path: Path) -> None:
     path.mkdir(parents=True, exist_ok=True, mode=0o700)
-    path.chmod(0o700)
-    metadata = path.stat(follow_symlinks=False)
-    if not stat.S_ISDIR(metadata.st_mode) or metadata.st_uid != os.getuid():
-        raise CredentialError("credential directory is not an owner-controlled directory")
-    if metadata.st_mode & 0o077:
-        raise CredentialError("credential directory is accessible by group or other users")
+    try:
+        descriptor = os.open(path, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+    except OSError as exc:
+        raise CredentialError(
+            "credential directory is not an owner-controlled directory"
+        ) from exc
+    try:
+        metadata = os.fstat(descriptor)
+        if metadata.st_uid != os.getuid():
+            raise CredentialError(
+                "credential directory is not an owner-controlled directory"
+            )
+        os.fchmod(descriptor, 0o700)
+        if os.fstat(descriptor).st_mode & 0o077:
+            raise CredentialError(
+                "credential directory is accessible by group or other users"
+            )
+    finally:
+        os.close(descriptor)
 
 
 def _encrypt(name: str, value: str, destination: Path) -> None:
     if not value or "\x00" in value:
         raise CredentialError("credential value must be non-empty text")
+    encoded = value.encode("utf-8")
+    if len(encoded) > MAX_CREDENTIAL_BYTES:
+        raise CredentialError("credential value is too large")
     _secure_directory(destination.parent)
-    staging = destination.parent / f".{name}.input.{os.getpid()}"
-    descriptor = os.open(staging, os.O_WRONLY | os.O_CREAT | os.O_EXCL, PRIVATE_FILE_MODE)
     try:
-        with os.fdopen(descriptor, "wb") as handle:
-            handle.write(value.encode("utf-8"))
-            handle.flush()
-            os.fsync(handle.fileno())
         result = subprocess.run(
             [
                 "systemd-creds",
                 "encrypt",
                 "--user",
                 f"--name={name}",
-                str(staging),
+                "-",
                 "-",
             ],
             check=False,
             capture_output=True,
+            input=encoded,
         )
-        if result.returncode != 0 or not result.stdout:
-            raise CredentialError("systemd-creds could not encrypt the credential")
-        try:
-            encrypted = result.stdout.decode("utf-8")
-        except UnicodeDecodeError as exc:
-            raise CredentialError("systemd-creds returned an invalid encrypted credential") from exc
-        atomic_replace_text(destination, encrypted, mode=PRIVATE_FILE_MODE)
-    finally:
-        try:
-            staging.unlink()
-        except FileNotFoundError:
-            pass
+    except OSError as exc:
+        raise CredentialError("systemd-creds could not encrypt the credential") from exc
+    if result.returncode != 0 or not result.stdout:
+        raise CredentialError("systemd-creds could not encrypt the credential")
+    try:
+        encrypted = result.stdout.decode("utf-8")
+    except UnicodeDecodeError as exc:
+        raise CredentialError("systemd-creds returned an invalid encrypted credential") from exc
+    atomic_replace_text(destination, encrypted, mode=PRIVATE_FILE_MODE)
 
 
 def provision_attestation_key() -> Path:
     destination = encrypted_credential_path("review-attestation")
+    if destination.exists():
+        raise CredentialError(
+            "review-attestation is already provisioned; use rotate-attestation"
+        )
+    _encrypt(
+        PREVIOUS_ATTESTATION_CREDENTIAL,
+        secrets.token_hex(32),
+        encrypted_credential_path("review-attestation-previous"),
+    )
     _encrypt(ATTESTATION_CREDENTIAL, secrets.token_hex(32), destination)
     return destination
+
+
+def rotate_attestation_key() -> Path:
+    current = _decrypt_encrypted_credential("review-attestation")
+    _encrypt(
+        PREVIOUS_ATTESTATION_CREDENTIAL,
+        current,
+        encrypted_credential_path("review-attestation-previous"),
+    )
+    destination = encrypted_credential_path("review-attestation")
+    _encrypt(ATTESTATION_CREDENTIAL, secrets.token_hex(32), destination)
+    return destination
+
+
+def attestation_rotation_values() -> tuple[str, str]:
+    return (
+        _decrypt_encrypted_credential("review-attestation"),
+        _decrypt_encrypted_credential("review-attestation-previous"),
+    )
+
+
+def revoke_credential(kind: str) -> list[Path]:
+    kinds = (
+        ["review-attestation", "review-attestation-previous"]
+        if kind == "review-attestation"
+        else [kind]
+    )
+    removed: list[Path] = []
+    for credential_kind in kinds:
+        path = encrypted_credential_path(credential_kind)
+        try:
+            path.unlink()
+        except FileNotFoundError:
+            continue
+        except OSError as exc:
+            raise CredentialError(f"could not revoke encrypted credential: {kind}") from exc
+        removed.append(path)
+    if not removed:
+        raise CredentialError(f"encrypted credential is not provisioned: {kind}")
+    return removed
 
 
 def store_github_mcp_token() -> Path:
@@ -134,7 +193,7 @@ def credential_value(env_name: str, credential_name: str) -> str:
     return os.environ.get(env_name, "") or systemd_credential(credential_name)
 
 
-def validate_encrypted_credential(kind: str) -> Path:
+def _decrypt_encrypted_credential(kind: str) -> str:
     path = encrypted_credential_path(kind)
     try:
         metadata = path.stat(follow_symlinks=False)
@@ -146,18 +205,40 @@ def validate_encrypted_credential(kind: str) -> Path:
         or metadata.st_mode & 0o077
     ):
         raise CredentialError(f"encrypted credential has unsafe ownership or mode: {kind}")
-    result = subprocess.run(
-        [
-            "systemd-creds",
-            "decrypt",
-            "--user",
-            f"--name={KNOWN_CREDENTIALS[kind]}",
-            str(path),
-            "-",
-        ],
-        check=False,
-        capture_output=True,
-    )
+    try:
+        result = subprocess.run(
+            [
+                "systemd-creds",
+                "decrypt",
+                "--user",
+                f"--name={KNOWN_CREDENTIALS[kind]}",
+                str(path),
+                "-",
+            ],
+            check=False,
+            capture_output=True,
+        )
+    except OSError as exc:
+        raise CredentialError(
+            f"encrypted credential cannot be decrypted: {kind}"
+        ) from exc
     if result.returncode != 0 or not result.stdout:
         raise CredentialError(f"encrypted credential cannot be decrypted: {kind}")
-    return path
+    if len(result.stdout) > MAX_CREDENTIAL_BYTES or b"\x00" in result.stdout:
+        raise CredentialError(f"encrypted credential cannot be decrypted: {kind}")
+    try:
+        value = result.stdout.decode("utf-8").rstrip("\n")
+    except UnicodeDecodeError as exc:
+        raise CredentialError(
+            f"encrypted credential cannot be decrypted: {kind}"
+        ) from exc
+    if not value:
+        raise CredentialError(f"encrypted credential cannot be decrypted: {kind}")
+    return value
+
+
+def validate_encrypted_credential(kind: str) -> Path:
+    _decrypt_encrypted_credential(kind)
+    if kind == "review-attestation":
+        _decrypt_encrypted_credential("review-attestation-previous")
+    return encrypted_credential_path(kind)

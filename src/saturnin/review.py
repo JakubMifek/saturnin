@@ -19,6 +19,12 @@ from typing import Any, Iterator
 
 from .board import utcnow
 from .config import Config, default_config
+from .credentials import (
+    ATTESTATION_CREDENTIAL,
+    PREVIOUS_ATTESTATION_CREDENTIAL,
+    CredentialError,
+    credential_value,
+)
 from .jsonlines import (
     JSONLinesError,
     atomic_replace_text,
@@ -251,7 +257,10 @@ def _rotation_manifest_key(master_key: str) -> bytes:
 def _load_attestation_key(config: Config) -> str:
     settings = config.governance.get("review", {}).get("attestation", {})
     env_name = str(settings.get("key_env", "SATURNIN_REVIEW_ATTESTATION_KEY"))
-    key = os.environ.get(env_name, "")
+    try:
+        key = credential_value(env_name, ATTESTATION_CREDENTIAL)
+    except CredentialError as exc:
+        raise ReviewError(str(exc)) from exc
     if not key:
         raise ReviewError(f"review attestation key is not configured in {env_name}")
     return key
@@ -310,7 +319,12 @@ def _verification_keys(
         previous_env = str(
             settings.get("previous_key_env", "SATURNIN_REVIEW_ATTESTATION_PREVIOUS_KEY")
         )
-        previous = os.environ.get(previous_env, "")
+        try:
+            previous = credential_value(
+                previous_env, PREVIOUS_ATTESTATION_CREDENTIAL
+            )
+        except CredentialError as exc:
+            raise ReviewError(str(exc)) from exc
         if previous and previous != key:
             masters.append(previous)
     if settings.get("role_scoped", True):
@@ -608,7 +622,12 @@ class ReviewLedger:
             previous_env = str(
                 settings.get("previous_key_env", "SATURNIN_REVIEW_ATTESTATION_PREVIOUS_KEY")
             )
-            previous_master = os.environ.get(previous_env, "")
+            try:
+                previous_master = credential_value(
+                    previous_env, PREVIOUS_ATTESTATION_CREDENTIAL
+                )
+            except CredentialError as exc:
+                raise ReviewError(str(exc)) from exc
             if not previous_master:
                 raise ReviewError(f"rotation manifest requires {previous_env}")
             current_master = _load_attestation_key(self.config)
