@@ -689,6 +689,8 @@ class Governance:
         try:
             filesystem = server_scope.get("filesystem", {})
             _trusted_executable_roots(filesystem)
+            _trusted_system_path(filesystem)
+            _trusted_path_requirements(filesystem)
             _trusted_runtime_executable(filesystem, self.config.data_root)
             _writable_roots(filesystem, self.config.data_root)
         except ValueError as error:
@@ -708,6 +710,28 @@ class Governance:
                 arguments = (
                     definition.get("args") if isinstance(definition, dict) else None
                 )
+                expected_keys = {"type", "args"}
+                if check_type == "system-executable":
+                    expected_keys |= {"target_roots", "script_interpreters"}
+                    try:
+                        _prerequisite_target_roots(server_scope, binary)
+                    except ValueError as error:
+                        problems.append(
+                            f"invalid server prerequisite check for {binary!r}: {error}"
+                        )
+                    interpreters = definition.get("script_interpreters", [])
+                    if (
+                        not isinstance(interpreters, list)
+                        or not all(
+                            isinstance(value, str)
+                            and value
+                            and "/" not in value
+                            for value in interpreters
+                        )
+                    ):
+                        problems.append(
+                            f"invalid server prerequisite interpreters for {binary!r}"
+                        )
                 if (
                     not isinstance(binary, str)
                     or not binary
@@ -717,7 +741,7 @@ class Governance:
                     or not isinstance(arguments, list)
                     or not arguments
                     or not all(isinstance(value, str) and value for value in arguments)
-                    or set(definition or {}) != {"type", "args"}
+                    or set(definition or {}) != expected_keys
                 ):
                     problems.append(
                         f"invalid server prerequisite check for {binary!r}"
@@ -899,11 +923,6 @@ def _check_executable_location(
     try:
         configured_roots = _trusted_executable_roots(filesystem, resolve=False)
         trusted_roots = _trusted_executable_roots(filesystem)
-        prerequisite_target_roots = _trusted_executable_roots(
-            filesystem,
-            key="trusted_prerequisite_target_roots",
-            required=False,
-        )
     except ValueError as error:
         return Decision.deny(f"invalid executable trust policy: {error}")
 
@@ -969,14 +988,24 @@ def _check_executable_location(
 
     resolved_roots = trusted_roots
     if binary in set(scope.get("prerequisite_checks", {})):
-        resolved_roots = [*trusted_roots, *prerequisite_target_roots]
+        try:
+            resolved_roots = [
+                *trusted_roots,
+                *_prerequisite_target_roots(scope, binary),
+            ]
+        except ValueError as error:
+            return Decision.deny(f"invalid executable trust policy: {error}")
     trusted_root = _containing_root(resolved, resolved_roots)
     if trusted_root is None:
         return Decision.deny(
             f"executable {str(resolved)!r} is outside trusted system executable roots"
         )
     if binary in set(scope.get("prerequisite_checks", {})):
-        permission_problem = _trusted_system_path_problem(resolved)
+        try:
+            requirements = _trusted_path_requirements(filesystem)
+        except ValueError as error:
+            return Decision.deny(f"invalid executable trust policy: {error}")
+        permission_problem = _trusted_system_path_problem(resolved, requirements)
         if permission_problem:
             return Decision.deny(permission_problem)
     return Decision.ok(f"executable {str(resolved)!r} is under a trusted system root")
@@ -994,16 +1023,27 @@ def _is_classified_executable(binary: str, scope: dict[str, Any]) -> bool:
     )
 
 
-def _trusted_system_path_problem(executable: Path) -> str | None:
+def _trusted_system_path_problem(
+    executable: Path, requirements: dict[str, Any] | None = None
+) -> str | None:
+    requirements = requirements or {
+        "owner": "root",
+        "forbid_group_writable": True,
+        "forbid_world_writable": True,
+    }
     current = executable
     while True:
         try:
             metadata = current.stat(follow_symlinks=False)
         except OSError as exc:
             return f"trusted executable path {str(current)!r} cannot be inspected: {exc}"
-        if metadata.st_uid != 0:
+        if requirements["owner"] == "root" and metadata.st_uid != 0:
             return f"trusted executable path {str(current)!r} must be owned by root"
-        if metadata.st_mode & (stat.S_IWGRP | stat.S_IWOTH):
+        forbidden_write_bits = (
+            (stat.S_IWGRP if requirements["forbid_group_writable"] else 0)
+            | (stat.S_IWOTH if requirements["forbid_world_writable"] else 0)
+        )
+        if metadata.st_mode & forbidden_write_bits:
             return (
                 f"trusted executable path {str(current)!r} must not be group/world-writable"
             )
@@ -1048,6 +1088,44 @@ def _trusted_executable_roots(
                 f"(invalid entry at index {index}: {value!r})"
             ) from error
     return roots
+
+
+def _prerequisite_target_roots(
+    scope: dict[str, Any], binary: str, *, resolve: bool = True
+) -> list[Path]:
+    definition = scope.get("prerequisite_checks", {}).get(binary)
+    if not isinstance(definition, dict):
+        raise ValueError(f"prerequisite_checks.{binary} must be a mapping")
+    try:
+        return _trusted_executable_roots(
+            definition,
+            resolve=resolve,
+            key="target_roots",
+            required=False,
+        )
+    except ValueError as error:
+        raise ValueError(
+            str(error).replace("filesystem.target_roots", f"prerequisite_checks.{binary}.target_roots")
+        ) from error
+
+
+def _trusted_system_path(filesystem: dict[str, Any]) -> list[Path]:
+    return _trusted_executable_roots(filesystem, key="trusted_system_path")
+
+
+def _trusted_path_requirements(filesystem: dict[str, Any]) -> dict[str, Any]:
+    requirements = filesystem.get("trusted_path_requirements")
+    expected = {
+        "owner": "root",
+        "forbid_group_writable": True,
+        "forbid_world_writable": True,
+    }
+    if requirements != expected:
+        raise ValueError(
+            "filesystem.trusted_path_requirements must require root ownership "
+            "and forbid group/world writes"
+        )
+    return requirements
 
 
 def _trusted_runtime_executable(filesystem: dict[str, Any], runtime_root: Path) -> Path:

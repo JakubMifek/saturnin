@@ -99,6 +99,10 @@ def test_policies_audit_clean(governance: Governance) -> None:
             "type", "system-executable"
         ),
         lambda checks: checks["bwrap"].__setitem__("extra", True),
+        lambda checks: checks["npx"].__setitem__("target_roots", ["relative"]),
+        lambda checks: checks["npx"].__setitem__(
+            "script_interpreters", ["/usr/bin/node"]
+        ),
     ],
 )
 def test_prerequisite_policy_schema_rejects_drift(
@@ -1305,23 +1309,55 @@ def test_prerequisite_target_roots_allow_only_safe_governed_targets(
     selected.symlink_to(target)
     filesystem = config.server_scope["filesystem"]
     filesystem["trusted_executable_roots"] = [str(selected_root)]
-    filesystem["trusted_prerequisite_target_roots"] = [str(target_root)]
+    config.server_scope["prerequisite_checks"]["npx"]["target_roots"] = [
+        str(target_root)
+    ]
     monkeypatch.setattr("saturnin.governance.shutil.which", lambda _: str(selected))
     monkeypatch.setattr(
         "saturnin.governance._trusted_system_path_problem",
-        lambda _: None,
+        lambda *_: None,
     )
 
     assert governance.check_server_command("npx --version").allowed
 
     monkeypatch.setattr(
         "saturnin.governance._trusted_system_path_problem",
-        lambda _: "trusted executable path is group/world-writable",
+        lambda *_: "trusted executable path is group/world-writable",
     )
     decision = governance.check_server_command("npx --version")
 
     assert not decision.allowed
     assert "group/world-writable" in decision.reasons[0]
+
+
+def test_prerequisite_target_roots_do_not_cross_binary_boundaries(
+    governance: Governance,
+    config: Config,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    selected_root = tmp_path / "system-bin"
+    npx_root = tmp_path / "npx-root"
+    uvx_root = tmp_path / "uvx-root"
+    selected_root.mkdir()
+    npx_root.mkdir()
+    uvx_root.mkdir()
+    uvx_target = uvx_root / "npx-cli.js"
+    uvx_target.write_text("#!/bin/sh\n", encoding="utf-8")
+    uvx_target.chmod(0o755)
+    selected = selected_root / "npx"
+    selected.symlink_to(uvx_target)
+    filesystem = config.server_scope["filesystem"]
+    filesystem["trusted_executable_roots"] = [str(selected_root)]
+    checks = config.server_scope["prerequisite_checks"]
+    checks["npx"]["target_roots"] = [str(npx_root)]
+    checks["uvx"]["target_roots"] = [str(uvx_root)]
+    monkeypatch.setattr("saturnin.governance.shutil.which", lambda _: str(selected))
+
+    decision = governance.check_server_command("npx --version")
+
+    assert not decision.allowed
+    assert "outside trusted system executable roots" in decision.reasons[0]
 
 
 @pytest.mark.parametrize("writable_part", ["leaf", "ancestor"])

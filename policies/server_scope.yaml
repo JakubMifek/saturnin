@@ -34,11 +34,18 @@ filesystem:
     - /usr/sbin
     - /usr/local/bin
     - /usr/local/sbin
-  # Some root-managed command shims resolve into package-specific trees.
-  # Only prerequisite probes may use these resolved target roots.
-  trusted_prerequisite_target_roots:
-    - /usr/share/nodejs/npm
-    - /opt/pipx/venvs/uv
+  # Script interpreters are resolved only from this fixed system path.
+  trusted_system_path:
+    - /usr/local/sbin
+    - /usr/local/bin
+    - /usr/sbin
+    - /usr/bin
+    - /sbin
+    - /bin
+  trusted_path_requirements:
+    owner: root
+    forbid_group_writable: true
+    forbid_world_writable: true
   # The supported bootstrap installs this one project runtime executable.
   # It is resolved only against the canonical main checkout, never a worker worktree.
   trusted_runtime_executable: .venv/bin/saturnin
@@ -95,9 +102,17 @@ filesystem:
 # These executables receive no general host-command capability. Only their
 # non-mutating version probes are accepted by `saturnin check command`.
 prerequisite_checks:
-  bwrap: {type: system-executable, args: [--version]}
-  pasta: {type: system-executable, args: [--version]}
-  copilot: {type: system-executable, args: [--version]}
-  npx: {type: system-executable, args: [--version]}
-  uvx: {type: system-executable, args: [--version]}
+  bwrap: {type: system-executable, args: [--version], target_roots: [], script_interpreters: []}
+  pasta: {type: system-executable, args: [--version], target_roots: [], script_interpreters: []}
+  copilot: {type: system-executable, args: [--version], target_roots: [], script_interpreters: []}
+  npx:
+    type: system-executable
+    args: [--version]
+    target_roots: [/usr/share/nodejs/npm]
+    script_interpreters: [node]
+  uvx:
+    type: system-executable
+    args: [--version]
+    target_roots: [/opt/pipx/venvs/uv]
+    script_interpreters: []
   github-mcp-server: {type: pinned-github-mcp, args: [--version]}

@@ -48,14 +48,24 @@ saturnin launcher enable
 
 Enablement succeeds only after version probes pass for `bwrap`, `pasta`,
 `copilot`, `npx` and `uvx`, and the installed GitHub MCP server matches the
-pinned release and checksum. The host-local file contains only the enablement
+pinned release and checksum.
 
-Root-managed `npx` may resolve below `/usr/share/nodejs/npm`; a pipx-managed
-`uvx` may resolve below `/opt/pipx/venvs/uv`. These package-specific locations
-are authorized only as resolved targets of the corresponding prerequisite
-probes. Every component must remain root-owned and not group/world-writable. The host-local file contains only the enablement
-boolean, lives under `var/config/`, and is not a credential store. To return to
-the safe default, run `saturnin launcher disable`.
+<!-- generated:server-prerequisites -->
+| Executable | Additional resolved target roots | Script interpreters |
+| --- | --- | --- |
+| `bwrap` | none | none |
+| `pasta` | none | none |
+| `copilot` | none | none |
+| `npx` | `/usr/share/nodejs/npm` | `node` |
+| `uvx` | `/opt/pipx/venvs/uv` | none |
+
+Selected executables, resolved targets, and script interpreters must be owned by **root**; group-writable paths are **forbidden** and world-writable paths are **forbidden**.
+Script interpreters are resolved from the fixed system path: `/usr/local/sbin`, `/usr/local/bin`, `/usr/sbin`, `/usr/bin`, `/sbin`, `/bin`.
+<!-- /generated:server-prerequisites -->
+
+The host-local file contains only the enablement boolean, lives under
+`var/config/`, and is not a credential store. To return to the safe default,
+run `saturnin launcher disable`.
 
 The equivalent individually governed probes are:
 

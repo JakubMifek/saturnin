@@ -41,6 +41,13 @@ def _healthy_prerequisites(
         "saturnin.launcher_host.resolve_trusted_executable",
         lambda _, name, **kwargs: binary_dir / name,
     )
+    monkeypatch.setattr(
+        "saturnin.launcher_host._prerequisite_command",
+        lambda _, executable, arguments, definition: (
+            ["/bin/sh", str(executable), *arguments],
+            "/usr/bin:/bin",
+        ),
+    )
     github = config.var_dir / "bin" / "github-mcp-server"
     monkeypatch.setattr(
         "saturnin.launcher_host.verify_github_binary",
@@ -147,12 +154,18 @@ def test_launcher_health_does_not_execute_untrusted_path_entries(
 
 def test_launcher_health_is_derived_from_typed_policy(
     config: Config,
+    tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    custom = tmp_path / "custom-check"
+    custom.write_bytes(b"\x7fELF")
+    custom.chmod(0o755)
     config.server_scope["prerequisite_checks"] = {
         "custom-check": {
             "type": "system-executable",
             "args": ["--health"],
+            "target_roots": [],
+            "script_interpreters": [],
         },
         "github-mcp-server": {
             "type": "pinned-github-mcp",
@@ -163,7 +176,7 @@ def test_launcher_health_is_derived_from_typed_policy(
     pinned_arguments: list[list[str]] = []
     monkeypatch.setattr(
         "saturnin.launcher_host.resolve_trusted_executable",
-        lambda config, name, **kwargs: Path("/usr/bin/custom-check"),
+        lambda config, name, **kwargs: custom,
     )
     monkeypatch.setattr(
         "saturnin.launcher_host.subprocess.run",
@@ -185,8 +198,67 @@ def test_launcher_health_is_derived_from_typed_policy(
         "custom-check",
         "github-mcp-server",
     ]
-    assert calls == [["/usr/bin/custom-check", "--health"]]
+    assert calls == [[str(custom), "--health"]]
     assert pinned_arguments == [["--release"]]
+
+
+def test_launcher_health_uses_trusted_interpreter_not_ambient_path(
+    config: Config,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    script = tmp_path / "npx-cli.js"
+    script.write_text("#!/usr/bin/env node\n", encoding="utf-8")
+    script.chmod(0o755)
+    shadow = tmp_path / "shadow"
+    shadow.mkdir()
+    attacker_node = shadow / "node"
+    attacker_node.write_text("#!/bin/sh\nexit 99\n", encoding="utf-8")
+    attacker_node.chmod(0o755)
+    monkeypatch.setenv("PATH", str(shadow))
+    monkeypatch.setattr(
+        "saturnin.launcher_host.resolve_trusted_executable",
+        lambda *_args, **_kwargs: script,
+    )
+    calls: list[tuple[list[str], dict[str, str]]] = []
+    monkeypatch.setattr(
+        "saturnin.launcher_host.subprocess.run",
+        lambda command, **kwargs: (
+            calls.append((command, kwargs["env"]))
+            or SimpleNamespace(returncode=0)
+        ),
+    )
+    check = launcher_health(config)[3]
+
+    assert check["healthy"]
+    command, environment = calls[0]
+    assert command[0] != str(attacker_node)
+    assert Path(command[0]).name == "node"
+    assert command[1:] == [str(script), "--version"]
+    assert str(shadow) not in environment["PATH"]
+
+
+def test_launcher_health_rejects_unauthorized_script_interpreter(
+    config: Config,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    script = tmp_path / "npx-cli.js"
+    script.write_text("#!/usr/bin/env python3\n", encoding="utf-8")
+    script.chmod(0o755)
+    monkeypatch.setattr(
+        "saturnin.launcher_host.resolve_trusted_executable",
+        lambda *_args, **_kwargs: script,
+    )
+    monkeypatch.setattr(
+        "saturnin.launcher_host.verify_github_binary",
+        lambda *_args, **_kwargs: config.var_dir / "bin" / "github-mcp-server",
+    )
+
+    check = launcher_health(config)[3]
+
+    assert not check["healthy"]
+    assert "not authorized" in check["detail"]
 
 
 def test_launcher_host_config_rejects_symlink(

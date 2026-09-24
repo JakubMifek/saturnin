@@ -4,13 +4,22 @@ from __future__ import annotations
 
 import json
 import os
+import shlex
+import shutil
 import stat
 import subprocess
 from pathlib import Path
 from typing import Any
 
 from .config import Config
-from .governance import ExecutableTrustError, resolve_trusted_executable
+from .governance import (
+    ExecutableTrustError,
+    _containing_root,
+    _trusted_path_requirements,
+    _trusted_system_path,
+    _trusted_system_path_problem,
+    resolve_trusted_executable,
+)
 from .jsonlines import PRIVATE_FILE_MODE, atomic_replace_text
 from .mcp import MCPError, verify_github_binary
 
@@ -183,7 +192,7 @@ def launcher_health(config: Config) -> list[dict[str, Any]]:
         if definition.get("type") == "pinned-github-mcp":
             checks.append(_github_mcp_health(config, name, arguments))
         elif definition.get("type") == "system-executable":
-            checks.append(_executable_health(config, name, arguments))
+            checks.append(_executable_health(config, name, arguments, definition))
         else:
             raise LauncherHostError(f"invalid prerequisite type for {name!r}")
     return checks
@@ -263,7 +272,10 @@ def _github_mcp_health(
 
 
 def _executable_health(
-    config: Config, name: str, arguments: list[str]
+    config: Config,
+    name: str,
+    arguments: list[str],
+    definition: dict[str, Any],
 ) -> dict[str, Any]:
     try:
         executable = resolve_trusted_executable(
@@ -280,20 +292,26 @@ def _executable_health(
         }
     path = str(executable)
     try:
+        command, system_path = _prerequisite_command(
+            config, executable, arguments, definition
+        )
         result = subprocess.run(
-            [path, *arguments],
+            command,
             stdin=subprocess.DEVNULL,
             stdout=subprocess.DEVNULL,
             stderr=subprocess.DEVNULL,
             timeout=10,
             check=False,
             env={
-                key: value
-                for key, value in os.environ.items()
-                if key in {"PATH", "LANG", "LC_ALL", "LC_CTYPE"}
+                **{
+                    key: value
+                    for key, value in os.environ.items()
+                    if key in {"LANG", "LC_ALL", "LC_CTYPE"}
+                },
+                "PATH": system_path,
             },
         )
-    except (OSError, subprocess.SubprocessError) as exc:
+    except (ExecutableTrustError, OSError, subprocess.SubprocessError) as exc:
         return {
             "name": name,
             "healthy": False,
@@ -310,3 +328,56 @@ def _executable_health(
             else f"version check exited {result.returncode}"
         ),
     }
+
+
+def _prerequisite_command(
+    config: Config,
+    executable: Path,
+    arguments: list[str],
+    definition: dict[str, Any],
+) -> tuple[list[str], str]:
+    roots = _trusted_system_path(config.server_scope.get("filesystem", {}))
+    system_path = os.pathsep.join(str(root) for root in roots)
+    try:
+        with executable.open("rb") as handle:
+            first_line = handle.readline(512)
+    except OSError as exc:
+        raise ExecutableTrustError(
+            f"trusted executable script header cannot be read: {exc}"
+        ) from exc
+    if not first_line.startswith(b"#!"):
+        return [str(executable), *arguments], system_path
+    try:
+        shebang = shlex.split(first_line[2:].decode("utf-8").strip())
+    except (UnicodeDecodeError, ValueError) as exc:
+        raise ExecutableTrustError(f"invalid trusted executable shebang: {exc}") from exc
+    allowed = definition.get("script_interpreters")
+    if not isinstance(allowed, list):
+        raise ExecutableTrustError("script_interpreters policy must be a list")
+    if len(shebang) == 2 and shebang[0] == "/usr/bin/env":
+        interpreter_name = shebang[1]
+    elif len(shebang) == 1 and Path(shebang[0]).is_absolute():
+        interpreter_name = Path(shebang[0]).name
+    else:
+        raise ExecutableTrustError("trusted executable has an unsupported shebang")
+    if interpreter_name not in allowed:
+        raise ExecutableTrustError(
+            f"script interpreter {interpreter_name!r} is not authorized for this prerequisite"
+        )
+    found = shutil.which(interpreter_name, path=system_path)
+    if found is None:
+        raise ExecutableTrustError(
+            f"required script interpreter not found in trusted system PATH: {interpreter_name}"
+        )
+    interpreter = Path(found).resolve(strict=True)
+    if _containing_root(interpreter, roots) is None:
+        raise ExecutableTrustError(
+            f"script interpreter {str(interpreter)!r} is outside trusted system PATH"
+        )
+    requirements = _trusted_path_requirements(
+        config.server_scope.get("filesystem", {})
+    )
+    problem = _trusted_system_path_problem(interpreter, requirements)
+    if problem:
+        raise ExecutableTrustError(problem)
+    return [str(interpreter), str(executable), *arguments], system_path
