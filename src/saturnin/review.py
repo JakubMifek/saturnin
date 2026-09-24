@@ -151,6 +151,7 @@ ATTESTED_FIELDS = (
     "destination_repo",
 )
 ROLE_SCOPED_KEY_CONTEXT = "saturnin-review-attestation"
+EXECUTION_SCOPED_KEY_CONTEXT = "saturnin-review-attestation-execution:v1"
 ROTATION_MANIFEST_KEY_CONTEXT = "saturnin-review-rotation-manifest:v1"
 
 
@@ -244,6 +245,53 @@ def role_scoped_review_attestation_key(master_key: str, reviewer: str) -> str:
         f"{ROLE_SCOPED_KEY_CONTEXT}:{reviewer_name}".encode("utf-8"),
         hashlib.sha256,
     ).hexdigest()
+
+
+def execution_scoped_review_attestation_key(
+    master_key: str,
+    reviewer: str,
+    task_id: str,
+    nonce: str,
+    subject: str,
+    head_sha: str,
+    issue_digest: str,
+) -> str:
+    if not master_key or not reviewer or not task_id or not nonce:
+        raise ReviewError("complete execution scope is required for attestation key derivation")
+    payload = json.dumps(
+        {
+            "context": EXECUTION_SCOPED_KEY_CONTEXT,
+            "reviewer": reviewer.strip().lower(),
+            "task_id": task_id,
+            "nonce": nonce,
+            "subject": subject,
+            "head_sha": head_sha,
+            "issue_digest": issue_digest,
+        },
+        sort_keys=True,
+        separators=(",", ":"),
+    )
+    return hmac.new(
+        master_key.encode("utf-8"), payload.encode("utf-8"), hashlib.sha256
+    ).hexdigest()
+
+
+def _execution_key_for_payload(master_key: str, payload: dict[str, Any]) -> str:
+    try:
+        task_id, nonce = str(payload["attestation_id"]).split(":", 1)
+    except (KeyError, ValueError):
+        return role_scoped_review_attestation_key(
+            master_key, str(payload["reviewer"])
+        )
+    return execution_scoped_review_attestation_key(
+        master_key,
+        str(payload["reviewer"]),
+        task_id,
+        nonce,
+        str(payload["subject"]),
+        str(payload["head_sha"]),
+        str(payload["issue_digest"]),
+    )
 
 
 def _rotation_manifest_key(master_key: str) -> bytes:
@@ -360,9 +408,50 @@ def _verify_review_attestation(
         if type(payload[field_name]) is not expected_type:
             raise ReviewError(f"review attestation field {field_name!r} has the wrong type")
     include_previous = historical_identity is not None
-    verification_keys = _verification_keys(
-        config, str(payload["reviewer"]), include_previous=include_previous
+    settings = config.governance.get("review", {}).get("attestation", {})
+    scope_env = str(
+        settings.get(
+            "key_scope_env", "SATURNIN_REVIEW_ATTESTATION_KEY_SCOPE"
+        )
     )
+    if os.environ.get(scope_env) == "role":
+        verification_keys = _verification_keys(
+            config,
+            str(payload["reviewer"]),
+            include_previous=include_previous,
+        )
+    else:
+        try:
+            masters = [_load_attestation_key(config)]
+            if include_previous:
+                previous_env = str(
+                    settings.get(
+                        "previous_key_env",
+                        "SATURNIN_REVIEW_ATTESTATION_PREVIOUS_KEY",
+                    )
+                )
+                previous = credential_value(
+                    previous_env, PREVIOUS_ATTESTATION_CREDENTIAL
+                )
+                if previous and previous != masters[0]:
+                    masters.append(previous)
+            verification_keys = [
+                _execution_key_for_payload(master, payload) for master in masters
+            ]
+        except (ReviewError, CredentialError):
+            from .attestation_service import AttestationServiceError, verify_with_service
+
+            try:
+                verified = verify_with_service(config, attestation)
+            except (AttestationServiceError, OSError) as exc:
+                raise ReviewError(str(exc)) from exc
+            if historical_identity is None and verified.get("previous") is True:
+                raise ReviewError(
+                    "previous-key attestation cannot authorize a new review record"
+                )
+            if historical_identity is not None and verified.get("previous") is True:
+                _require_sealed_previous_attestation(config, historical_identity)
+            return payload
     key_id = payload.get("key_id")
     if key_id is not None and not re.fullmatch(r"[0-9a-f]{64}", key_id):
         raise ReviewError("review attestation key_id must be a SHA-256 digest")
@@ -389,7 +478,7 @@ def _verify_review_attestation(
     ]
     if not verified_keys:
         raise ReviewError("review attestation signature does not match")
-    current_key = _verification_keys(config, str(payload["reviewer"]))[0]
+    current_key = verification_keys[0]
     uses_previous = not any(
         hmac.compare_digest(candidate, current_key) for candidate in verified_keys
     )
@@ -443,13 +532,28 @@ def _load_rotation_manifest(config: Config) -> set[tuple[str, str, str]]:
         key=lambda item: (item["reviewer"], item["attestation_id"], item["signature"]),
     ):
         raise ReviewError("previous-key rotation manifest entries are not canonical")
-    expected = hmac.new(
-        _rotation_manifest_key(_load_attestation_key(config)),
-        _manifest_payload(normalized),
-        hashlib.sha256,
-    ).hexdigest()
-    if not hmac.compare_digest(signature, expected):
-        raise ReviewError("previous-key rotation manifest signature does not match")
+    try:
+        expected = hmac.new(
+            _rotation_manifest_key(_load_attestation_key(config)),
+            _manifest_payload(normalized),
+            hashlib.sha256,
+        ).hexdigest()
+        if not hmac.compare_digest(signature, expected):
+            raise ReviewError(
+                "previous-key rotation manifest signature does not match"
+            )
+    except ReviewError as exc:
+        if "not configured" not in str(exc):
+            raise
+        from .attestation_service import (
+            AttestationServiceError,
+            verify_manifest_with_service,
+        )
+
+        try:
+            verify_manifest_with_service(config, normalized, signature)
+        except (AttestationServiceError, OSError) as service_exc:
+            raise ReviewError(str(service_exc)) from service_exc
     return {
         (entry["reviewer"], entry["attestation_id"], entry["signature"])
         for entry in normalized
@@ -701,9 +805,12 @@ class ReviewLedger:
 
     @staticmethod
     def _record_matches_master(record: ReviewRecord, master_key: str) -> bool:
-        key = role_scoped_review_attestation_key(master_key, record.reviewer)
         payload = {field: getattr(record, field) for field in ATTESTED_FIELDS}
         payload["attestation_id"] = record.attestation_id
+        try:
+            key = _execution_key_for_payload(master_key, payload)
+        except ReviewError:
+            key = role_scoped_review_attestation_key(master_key, record.reviewer)
         stored_signature = record.attestation_signature
         if ":" in stored_signature:
             key_id, signature = stored_signature.split(":", 1)

@@ -71,48 +71,38 @@ Status decrypts only into captured process memory and prints status and paths,
 never values. Encrypted files are owner-owned `0600` files in an owner-owned
 `0700` directory.
 
-Create a dedicated fine-grained token at
-<https://github.com/settings/personal-access-tokens/new>. Select only
-`JakubMifek/saturnin`, choose read-only **Contents**, **Issues**, and
-**Pull requests** repository permissions (GitHub adds read-only **Metadata**),
-then ingest it from a no-echo prompt:
-
-```bash
-saturnin credential store-github-mcp
-saturnin credential status github-mcp
-```
-
-The token prompt uses `getpass`; paste it only there. Do not put it in a shell
-assignment, pipeline, argv, task, board item, log, or environment file, and do
-not reuse `gh auth token`. The encrypted files are stored under
-`~/.config/systemd/user/saturnin-credentials/`. Once both statuses are valid:
+Once status is valid:
 
 ```bash
 scripts/install_user_units.sh
 systemctl --user daemon-reload
+systemctl --user restart saturnin-attestation.service
 systemctl --user restart saturnin-improve.timer saturnin-resume.timer saturnin-discovery.timer
+systemctl --user status saturnin-attestation.service
 ```
 
-The units use private mount namespaces. Systemd decrypts credentials into the
-service credential directory in protected runtime memory. The launcher derives
-attestation keys only for configured reviewer roles. The reusable GitHub token
-stays in a host-side broker outside the worker sandbox and process namespace.
-The worker receives only a task-scoped capability and owner-only Unix socket
-for the constrained read-only API. Normal completion, launch failure, and
-recovery reconciliation terminate the broker and remove its socket. The token
-never enters worker file, environment, descriptor, argv, task, board, Git, or
-log content.
+<!-- generated:attestation-boundary -->
+During autonomous operation, the master and previous keys are loaded only by `saturnin-attestation.service` in its private mount, network, runtime, and credential namespace. Supervisor and worker units do not load either credential. Explicit owner lifecycle commands may decrypt them in bounded process memory only while the signer and supervisors are stopped.
+
+For a routed reviewer task, the trusted launcher asks the service for a session bound to task, role, author, subject, immutable head or issue digest, a random nonce, and the launched process identity. The session expires after 900 seconds, accepts one signature, and verifies that the connecting process descends from that exact launch. Its Unix socket is bind-mounted only into that reviewer's sandbox; `/run` and `/proc` remain isolated for all workers.
+
+No worker receives a master or derived key in argv, environment, files, descriptors, logs, board data, or Git. Ordinary workers do not receive the session socket. The signed ledger retains only scope, key identifier, nonce, and signature, never plaintext key material.
+<!-- /generated:attestation-boundary -->
+
+GitHub MCP credential storage and injection are deliberately not part of this
+bootstrap. GitHub access requires a separately reviewed external-broker design.
 
 ### Rotation, sealing, and rollback
 
 Stop supervisors and verify a clean starting state:
 
 ```bash
-systemctl --user stop saturnin-improve.timer saturnin-resume.timer saturnin-discovery.timer
+systemctl --user stop saturnin-improve.timer saturnin-resume.timer saturnin-discovery.timer saturnin-attestation.service
 saturnin credential status review-attestation
 saturnin credential rotate-attestation
 saturnin credential seal-attestation-rotation
 saturnin credential status review-attestation
+systemctl --user start saturnin-attestation.service
 systemctl --user start saturnin-improve.timer saturnin-resume.timer saturnin-discovery.timer
 ```
 
@@ -202,11 +192,10 @@ If the identity or machine ID differs, do not overwrite it merely to recover a
 credential. Provision fresh credentials and treat old attestations as an
 explicit governance recovery requiring human review.
 
-To revoke a compromised credential, stop the `saturnin-*` timers first, run
-`saturnin credential revoke review-attestation` or
-`saturnin credential revoke github-mcp`, and leave supervisors stopped until a
-replacement is provisioned and validated. Revocation removes the encrypted
-files and does not print their contents.
+To revoke a compromised credential, stop the `saturnin-*` timers and signer,
+run `saturnin credential revoke review-attestation`, and leave them stopped
+until a replacement is provisioned and validated. Revocation removes the
+encrypted files and does not print their contents.
 
 ## Cleanup safety model
 

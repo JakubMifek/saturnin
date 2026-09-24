@@ -247,6 +247,47 @@ def _credential_admin_recovery(config: Config) -> str:
     )
 
 
+def _attestation_boundary(config: Config) -> str:
+    policy = config.governance.get("review", {}).get("attestation", {})
+    if (
+        policy.get("required") is not True
+        or policy.get("execution_scoped") is not True
+        or not isinstance(policy.get("service_socket"), str)
+    ):
+        raise GeneratedBlockError(
+            "governance review.attestation must require execution-scoped service signing"
+        )
+    ttl = policy.get("session_ttl_seconds")
+    if not isinstance(ttl, int) or ttl <= 0:
+        raise GeneratedBlockError(
+            "governance review.attestation.session_ttl_seconds must be positive"
+        )
+    return "\n".join(
+        [
+            "During autonomous operation, the master and previous keys are loaded only by "
+            "`saturnin-attestation.service` in its private mount, network, "
+            "runtime, and credential namespace. Supervisor and worker units do "
+            "not load either credential. Explicit owner lifecycle commands may "
+            "decrypt them in bounded process memory only while the signer and "
+            "supervisors are stopped.",
+            "",
+            "For a routed reviewer task, the trusted launcher asks the service "
+            "for a session bound to task, role, author, subject, immutable head "
+            "or issue digest, a random nonce, and the launched process identity. "
+            f"The session expires after {ttl} seconds, accepts one signature, "
+            "and verifies that the connecting process descends from that exact "
+            "launch. Its Unix socket is bind-mounted only into that reviewer's "
+            "sandbox; `/run` and `/proc` remain isolated for all workers.",
+            "",
+            "No worker receives a master or derived key in argv, environment, "
+            "files, descriptors, logs, board data, or Git. Ordinary workers do "
+            "not receive the session socket. The signed ledger retains only "
+            "scope, key identifier, nonce, and signature, never plaintext key "
+            "material.",
+        ]
+    )
+
+
 def _roles_table(config: Config) -> str:
     roles: dict[str, dict[str, Any]] = config.routing.get("roles", {})
     lines = ["| Role | Unit | Executes | Purpose |", "| --- | --- | --- | --- |"]
@@ -300,6 +341,7 @@ GENERATORS: dict[str, Callable[[Config], str]] = {
     "issue-review-flow": _issue_review_flow,
     "credential-admin-setup": _credential_admin_setup,
     "credential-admin-recovery": _credential_admin_recovery,
+    "attestation-boundary": _attestation_boundary,
     "roles": _roles_table,
     "routing": _routing_table,
     "backlog": _backlog_table,

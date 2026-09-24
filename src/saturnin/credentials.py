@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import getpass
 import base64
 import json
 import os
@@ -20,11 +19,9 @@ from .jsonlines import PRIVATE_FILE_MODE, atomic_replace_text
 
 ATTESTATION_CREDENTIAL = "saturnin-review-attestation-key"
 PREVIOUS_ATTESTATION_CREDENTIAL = "saturnin-review-attestation-previous-key"
-GITHUB_MCP_CREDENTIAL = "saturnin-github-mcp-token"
 KNOWN_CREDENTIALS = {
     "review-attestation": ATTESTATION_CREDENTIAL,
     "review-attestation-previous": PREVIOUS_ATTESTATION_CREDENTIAL,
-    "github-mcp": GITHUB_MCP_CREDENTIAL,
 }
 MAX_CREDENTIAL_BYTES = 16 * 1024
 MINIMUM_SYSTEMD_CREDS_VERSION = 256
@@ -33,6 +30,7 @@ ROTATION_STATE = ".attestation-rotation.json"
 ROTATION_CURRENT_BACKUP = ".saturnin-review-attestation-key.rollback.cred"
 ROTATION_PREVIOUS_BACKUP = ".saturnin-review-attestation-previous-key.rollback.cred"
 LIFECYCLE_LOCK = ".lifecycle"
+CREDENTIAL_GENERATION = ".generation"
 HOST_SCOPED_CREDENTIAL_ID = bytes.fromhex("55b9ed1d38594d43a8319d2ebb332ac6")
 
 
@@ -227,6 +225,18 @@ def _rotation_paths() -> tuple[Path, Path, Path]:
     )
 
 
+def credential_generation() -> str:
+    return _read_private_file(encrypted_credential_dir() / CREDENTIAL_GENERATION).strip()
+
+
+def _advance_generation() -> None:
+    atomic_replace_text(
+        encrypted_credential_dir() / CREDENTIAL_GENERATION,
+        secrets.token_bytes(32).hex() + "\n",
+        mode=PRIVATE_FILE_MODE,
+    )
+
+
 def _read_private_file(path: Path) -> str:
     try:
         descriptor = os.open(path, os.O_RDONLY | os.O_NOFOLLOW)
@@ -290,6 +300,7 @@ def _provision_attestation_key() -> Path:
         encrypted_credential_path("review-attestation-previous"),
     )
     _encrypt(ATTESTATION_CREDENTIAL, current, destination)
+    _advance_generation()
     return destination
 
 
@@ -344,6 +355,7 @@ def _rotate_attestation_key(
         _new_attestation_key(excluding={current, previous}),
         destination,
     )
+    _advance_generation()
     return destination
 
 
@@ -412,6 +424,7 @@ def _rollback_attestation_rotation() -> Path:
     atomic_replace_text(previous, _read_private_file(previous_backup), mode=PRIVATE_FILE_MODE)
     _decrypt_encrypted_credential("review-attestation")
     _decrypt_encrypted_credential("review-attestation-previous")
+    _advance_generation()
     for path in (state_path, current_backup, previous_backup):
         path.unlink(missing_ok=True)
     return current
@@ -441,20 +454,10 @@ def _revoke_credential(kind: str) -> list[Path]:
     if kind == "review-attestation":
         for path in _rotation_paths():
             path.unlink(missing_ok=True)
+        (encrypted_credential_dir() / CREDENTIAL_GENERATION).unlink(missing_ok=True)
     if not removed:
         raise CredentialError(f"encrypted credential is not provisioned: {kind}")
     return removed
-
-
-def store_github_mcp_token() -> Path:
-    token = getpass.getpass("Dedicated fine-grained GitHub token: ")
-    confirmation = getpass.getpass("Confirm token: ")
-    if not token or not secrets.compare_digest(token, confirmation):
-        raise CredentialError("credential entries did not match")
-    with _lifecycle_lock(exclusive=True):
-        destination = encrypted_credential_path("github-mcp")
-        _encrypt(GITHUB_MCP_CREDENTIAL, token, destination)
-        return destination
 
 
 def systemd_credential(name: str) -> str:
@@ -543,6 +546,7 @@ def _validate_encrypted_credential(kind: str) -> Path:
     _decrypt_encrypted_credential(kind)
     if kind == "review-attestation":
         _decrypt_encrypted_credential("review-attestation-previous")
+        credential_generation()
     return encrypted_credential_path(kind)
 
 

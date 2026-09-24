@@ -101,6 +101,12 @@ def test_install_user_units_installs_safe_checkout_path(tmp_path: Path) -> None:
         text = (installed_dir / unit).read_text(encoding="utf-8")
         assert "PrivateMounts=yes" in text
         assert "LoadCredentialEncrypted=" not in text
+    signer = (installed_dir / "saturnin-attestation.service").read_text(
+        encoding="utf-8"
+    )
+    assert signer.count("LoadCredentialEncrypted=") == 2
+    assert "PrivateNetwork=yes" in signer
+    assert "ProtectProc=invisible" in signer
 
 
 def test_install_user_units_rejects_incomplete_attestation_pair_before_replacement(

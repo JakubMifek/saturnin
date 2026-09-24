@@ -38,8 +38,11 @@ def _write_attestation_credentials(credential_dir: Path) -> tuple[Path, Path]:
     previous = credential_dir / f"{PREVIOUS_ATTESTATION_CREDENTIAL}.cred"
     current.write_bytes(_ciphertext(b"current"))
     previous.write_bytes(_ciphertext(b"previous"))
+    generation = credential_dir / ".generation"
+    generation.write_text("fixture-generation\n", encoding="utf-8")
     current.chmod(0o600)
     previous.chmod(0o600)
+    generation.chmod(0o600)
     return current, previous
 
 

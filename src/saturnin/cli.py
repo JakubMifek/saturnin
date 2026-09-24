@@ -23,6 +23,7 @@ import yaml
 from . import escalation as escalation_mod
 from . import telemetry
 from .automation import AutomationLibrary
+from .attestation_service import AttestationServiceError, sign_from_session
 from .board import CONTAINER_KINDS, TRANSITIONS, Board, BoardError, Task
 from .checkpoints import Checkpoint, CheckpointStore
 from .config import Config, ConfigError, find_root, load_yaml
@@ -42,7 +43,6 @@ from .credentials import (
     rollback_attestation_rotation,
     rotate_attestation_key,
     seal_attestation_rotation,
-    store_github_mcp_token,
 )
 from .discovery import DiscoveryError, IssueDiscovery
 from . import docsync
@@ -57,7 +57,6 @@ from .review import (
     ReviewLedger,
     issue_content_digest,
     review_attestation_signing_key,
-    sign_review_attestation,
 )
 from .routing import Router, RoutingError
 from .worktrees import CleanupPlan, GitError, WorktreeManager
@@ -401,16 +400,12 @@ def build_parser() -> argparse.ArgumentParser:
         "prerequisites",
         help="check systemd user credential prerequisites without changing the host",
     )
-    credential.add_parser(
-        "store-github-mcp",
-        help="prompt for and encrypt a dedicated fine-grained GitHub token",
-    )
     credential_status = credential.add_parser(
         "status", help="validate encrypted credentials without disclosing values"
     )
     credential_status.add_argument(
         "kind",
-        choices=["review-attestation", "github-mcp", "all"],
+        choices=["review-attestation", "all"],
         default="all",
         nargs="?",
     )
@@ -418,7 +413,7 @@ def build_parser() -> argparse.ArgumentParser:
         "revoke", help="remove an encrypted credential after stopping supervisors"
     )
     credential_revoke.add_argument(
-        "kind", choices=["review-attestation", "github-mcp"]
+        "kind", choices=["review-attestation"]
     )
 
     sub.add_parser("doctor", help="validate policies and installation")
@@ -972,14 +967,6 @@ def _run(args: argparse.Namespace, config: Config) -> int:  # noqa: C901 - flat 
                     f"provisioned review-attestation at {path}",
                 )
                 return 0
-            if args.credential_command == "store-github-mcp":
-                path = store_github_mcp_token()
-                _emit(
-                    {"credential": "github-mcp", "path": str(path)},
-                    as_json,
-                    f"provisioned github-mcp at {path}",
-                )
-                return 0
             if args.credential_command == "rotate-attestation":
                 ledger = ReviewLedger(config)
                 path = rotate_attestation_key(
@@ -1038,11 +1025,7 @@ def _run(args: argparse.Namespace, config: Config) -> int:  # noqa: C901 - flat 
                     f"revoked {args.kind}",
                 )
                 return 0
-            kinds = (
-                ["review-attestation", "github-mcp"]
-                if args.kind == "all"
-                else [args.kind]
-            )
+            kinds = ["review-attestation"] if args.kind == "all" else [args.kind]
             paths = {kind: credential_status(kind) for kind in kinds}
             _emit(
                 paths,
@@ -1836,18 +1819,22 @@ def _run_review(args: argparse.Namespace, config: Config, as_json: bool) -> int:
         )
         return 0
     if args.review_command == "attest":
-        attestation = sign_review_attestation(
-            key=_review_attestation_key(config, args.reviewer),
-            subject=args.subject,
-            kind=args.kind,
-            author=args.author,
-            reviewer=args.reviewer,
-            verdict=args.verdict,
-            zero_context=not args.with_context,
-            head_sha=args.head_sha,
-            issue_digest=args.issue_digest,
-            destination_repo=args.repo,
-        )
+        try:
+            attestation = sign_from_session(
+                {
+                    "subject": args.subject,
+                    "kind": args.kind,
+                    "author": args.author,
+                    "reviewer": args.reviewer,
+                    "verdict": args.verdict,
+                    "zero_context": not args.with_context,
+                    "head_sha": args.head_sha,
+                    "issue_digest": args.issue_digest,
+                    "destination_repo": args.repo,
+                }
+            )
+        except AttestationServiceError as exc:
+            raise ReviewError(str(exc)) from exc
         _emit({"attestation": attestation}, as_json, attestation)
         return 0
     if args.review_command == "record":

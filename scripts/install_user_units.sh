@@ -88,34 +88,20 @@ trap on_exit EXIT
 CREDENTIAL_DIR="${XDG_CONFIG_HOME:-$HOME/.config}/systemd/user/saturnin-credentials"
 current="$CREDENTIAL_DIR/saturnin-review-attestation-key.cred"
 previous="$CREDENTIAL_DIR/saturnin-review-attestation-previous-key.cred"
-github="$CREDENTIAL_DIR/saturnin-github-mcp-token.cred"
-CREDENTIAL_LOADS=""
+INSTALL_ATTESTATION_SERVICE=0
 if [[ -e "$current" || -e "$previous" ]]; then
   if [[ ! -f "$current" || -L "$current" || ! -f "$previous" || -L "$previous" ]]; then
     echo "Attestation credential pair is incomplete or unsafe; refusing unit replacement." >&2
     exit 1
   fi
   "$SATURNIN_HOME/.venv/bin/saturnin" credential status review-attestation >/dev/null
-  CREDENTIAL_LOADS+=$'LoadCredentialEncrypted=saturnin-review-attestation-key:%h/.config/systemd/user/saturnin-credentials/saturnin-review-attestation-key.cred\n'
-  CREDENTIAL_LOADS+='LoadCredentialEncrypted=saturnin-review-attestation-previous-key:%h/.config/systemd/user/saturnin-credentials/saturnin-review-attestation-previous-key.cred'
-fi
-if [[ -e "$github" ]]; then
-  if [[ ! -f "$github" || -L "$github" ]]; then
-    echo "GitHub MCP credential is unsafe; refusing unit replacement." >&2
-    exit 1
-  fi
-  "$SATURNIN_HOME/.venv/bin/saturnin" credential status github-mcp >/dev/null
-  if [[ -n "$CREDENTIAL_LOADS" ]]; then
-    CREDENTIAL_LOADS+=$'\n'
-  fi
-  CREDENTIAL_LOADS+='LoadCredentialEncrypted=saturnin-github-mcp-token:%h/.config/systemd/user/saturnin-credentials/saturnin-github-mcp-token.cred'
+  INSTALL_ATTESTATION_SERVICE=1
 fi
 
 for unit in "$SATURNIN_HOME"/systemd/saturnin-*; do
   name="$(basename "$unit")"
   MANAGED_UNITS+=("$name")
   SATURNIN_HOME_ESCAPED="$SATURNIN_HOME" SATURNIN_HOME_ENV_ESCAPED="$SATURNIN_HOME" \
-    SATURNIN_CREDENTIAL_LOADS="$CREDENTIAL_LOADS" \
     TEMPLATE="$unit" DEST="$STAGE_DIR/$name" python3 -c '
 from pathlib import Path
 import os
@@ -123,7 +109,6 @@ template = Path(os.environ["TEMPLATE"]).read_text()
 Path(os.environ["DEST"]).write_text(
     template.replace("@SATURNIN_HOME@", os.environ["SATURNIN_HOME_ESCAPED"])
     .replace("@SATURNIN_HOME_ENV@", os.environ["SATURNIN_HOME_ENV_ESCAPED"])
-    .replace("@SATURNIN_CREDENTIAL_LOADS@", os.environ["SATURNIN_CREDENTIAL_LOADS"])
 )
 '
   if command -v systemd-analyze >/dev/null 2>&1; then
@@ -165,6 +150,11 @@ for staged in "$STAGE_DIR"/saturnin-*; do
 done
 
 systemctl --user daemon-reload
+if [[ "$INSTALL_ATTESTATION_SERVICE" -eq 1 ]]; then
+  systemctl --user enable --now saturnin-attestation.service
+else
+  systemctl --user disable --now saturnin-attestation.service 2>/dev/null || true
+fi
 systemctl --user enable --now "${ENABLED_TIMERS[@]}"
 installing=0
 systemctl --user list-timers 'saturnin-*' || true
