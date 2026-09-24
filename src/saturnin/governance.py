@@ -899,6 +899,11 @@ def _check_executable_location(
     try:
         configured_roots = _trusted_executable_roots(filesystem, resolve=False)
         trusted_roots = _trusted_executable_roots(filesystem)
+        prerequisite_target_roots = _trusted_executable_roots(
+            filesystem,
+            key="trusted_prerequisite_target_roots",
+            required=False,
+        )
     except ValueError as error:
         return Decision.deny(f"invalid executable trust policy: {error}")
 
@@ -962,7 +967,10 @@ def _check_executable_location(
             f"classified executable {str(resolved)!r} is not executable"
         )
 
-    trusted_root = _containing_root(resolved, trusted_roots)
+    resolved_roots = trusted_roots
+    if binary in set(scope.get("prerequisite_checks", {})):
+        resolved_roots = [*trusted_roots, *prerequisite_target_roots]
+    trusted_root = _containing_root(resolved, resolved_roots)
     if trusted_root is None:
         return Decision.deny(
             f"executable {str(resolved)!r} is outside trusted system executable roots"
@@ -1005,22 +1013,27 @@ def _trusted_system_path_problem(executable: Path) -> str | None:
 
 
 def _trusted_executable_roots(
-    filesystem: dict[str, Any], *, resolve: bool = True
+    filesystem: dict[str, Any],
+    *,
+    resolve: bool = True,
+    key: str = "trusted_executable_roots",
+    required: bool = True,
 ) -> list[Path]:
-    values = filesystem.get("trusted_executable_roots")
-    if not isinstance(values, list) or not values:
-        raise ValueError("filesystem.trusted_executable_roots must be a non-empty list")
+    values = filesystem.get(key)
+    if not isinstance(values, list) or (required and not values):
+        qualifier = "a non-empty list" if required else "a list"
+        raise ValueError(f"filesystem.{key} must be {qualifier}")
     roots: list[Path] = []
     for index, value in enumerate(values):
         if not isinstance(value, str) or not value.strip():
             raise ValueError(
-                "filesystem.trusted_executable_roots entries must be nonempty strings "
+                f"filesystem.{key} entries must be nonempty strings "
                 f"(invalid entry at index {index})"
             )
         path = Path(value)
         if not path.is_absolute():
             raise ValueError(
-                "filesystem.trusted_executable_roots entries must be absolute paths "
+                f"filesystem.{key} entries must be absolute paths "
                 f"(invalid entry at index {index}: {value!r})"
             )
         try:
@@ -1031,7 +1044,7 @@ def _trusted_executable_roots(
             )
         except (OSError, RuntimeError, ValueError) as error:
             raise ValueError(
-                "filesystem.trusted_executable_roots entry cannot be resolved "
+                f"filesystem.{key} entry cannot be resolved "
                 f"(invalid entry at index {index}: {value!r})"
             ) from error
     return roots

@@ -14,6 +14,7 @@ import sys
 import tarfile
 import urllib.request
 from contextlib import contextmanager
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Iterator, Sequence
 
@@ -22,6 +23,31 @@ from .config import Config, default_config
 
 class MCPError(RuntimeError):
     pass
+
+
+@dataclass
+class StagedGithubBinary:
+    path: Path
+    descriptor: int
+    device: int
+    inode: int
+    runtime_device: int
+    runtime_inode: int
+
+    def close(self) -> None:
+        if self.descriptor >= 0:
+            os.close(self.descriptor)
+            self.descriptor = -1
+
+    def metadata(self) -> dict[str, Any]:
+        return {
+            "directory": str(self.path.parent),
+            "directory_device": self.runtime_device,
+            "directory_inode": self.runtime_inode,
+            "file": self.path.name,
+            "file_device": self.device,
+            "file_inode": self.inode,
+        }
 
 
 def _validate_github_read_only(args: Sequence[str]) -> None:
@@ -215,47 +241,90 @@ def verify_github_binary(
         return target
 
 
-def stage_github_binary(config: Config, destination: Path) -> Path:
+def stage_github_binary(config: Config, destination: Path) -> StagedGithubBinary:
     destination.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
     _prepare_private_runtime_path(destination.parent)
-    flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_CLOEXEC | os.O_NOFOLLOW
-    with _verified_github_descriptor(config) as (source, _, install):
-        try:
-            staged = os.open(destination, flags, 0o500)
-        except OSError as exc:
-            raise MCPError(
-                f"private GitHub MCP stage cannot be created: {destination}: {exc}"
-            ) from exc
-        try:
-            os.fchmod(staged, 0o500)
-            while chunk := os.read(source, 1024 * 1024):
-                view = memoryview(chunk)
-                while view:
-                    written = os.write(staged, view)
-                    view = view[written:]
-            os.fsync(staged)
-        except Exception:
-            destination.unlink(missing_ok=True)
-            raise
-        finally:
-            os.close(staged)
+    expected_runtime = destination.parent.stat(follow_symlinks=False)
+    flags = os.O_RDWR | os.O_CREAT | os.O_EXCL | os.O_CLOEXEC | os.O_NOFOLLOW
+    staged = -1
+    runtime = os.open(
+        destination.parent,
+        os.O_RDONLY | os.O_DIRECTORY | os.O_CLOEXEC | os.O_NOFOLLOW,
+    )
     try:
-        descriptor = os.open(
-            destination,
-            os.O_RDONLY | os.O_CLOEXEC | os.O_NOFOLLOW,
-        )
+        runtime_metadata = os.fstat(runtime)
+        if (
+            runtime_metadata.st_dev,
+            runtime_metadata.st_ino,
+        ) != (
+            expected_runtime.st_dev,
+            expected_runtime.st_ino,
+        ):
+            raise MCPError("private GitHub MCP runtime directory identity changed")
+        if (
+            runtime_metadata.st_uid != os.geteuid()
+            or runtime_metadata.st_mode & (stat.S_IWGRP | stat.S_IWOTH)
+        ):
+            raise MCPError("private GitHub MCP runtime directory is unsafe")
+        with _verified_github_descriptor(config) as (source, _, install):
+            try:
+                staged = os.open(destination.name, flags, 0o500, dir_fd=runtime)
+            except OSError as exc:
+                raise MCPError(
+                    f"private GitHub MCP stage cannot be created: {destination}: {exc}"
+                ) from exc
+            try:
+                os.fchmod(staged, 0o500)
+                while chunk := os.read(source, 1024 * 1024):
+                    view = memoryview(chunk)
+                    while view:
+                        written = os.write(staged, view)
+                        view = view[written:]
+                os.fsync(staged)
+                written_metadata = os.fstat(staged)
+                os.close(staged)
+                staged = os.open(
+                    destination.name,
+                    os.O_RDONLY | os.O_CLOEXEC | os.O_NOFOLLOW,
+                    dir_fd=runtime,
+                )
+                reopened_metadata = os.fstat(staged)
+                if (
+                    written_metadata.st_dev,
+                    written_metadata.st_ino,
+                ) != (
+                    reopened_metadata.st_dev,
+                    reopened_metadata.st_ino,
+                ):
+                    raise MCPError("private GitHub MCP staged inode changed")
+            except Exception:
+                if staged >= 0:
+                    os.close(staged)
+                staged = -1
+                os.unlink(destination.name, dir_fd=runtime)
+                raise
         try:
+            staged_metadata = os.fstat(staged)
             _verify_github_version(
-                descriptor,
+                staged,
                 install,
                 _github_version_args(config),
             )
-        finally:
-            os.close(descriptor)
-    except Exception:
-        destination.unlink(missing_ok=True)
-        raise
-    return destination
+        except Exception:
+            os.close(staged)
+            staged = -1
+            os.unlink(destination.name, dir_fd=runtime)
+            raise
+    finally:
+        os.close(runtime)
+    return StagedGithubBinary(
+        path=destination,
+        descriptor=staged,
+        device=staged_metadata.st_dev,
+        inode=staged_metadata.st_ino,
+        runtime_device=runtime_metadata.st_dev,
+        runtime_inode=runtime_metadata.st_ino,
+    )
 
 
 def _prepare_private_runtime_path(path: Path) -> None:

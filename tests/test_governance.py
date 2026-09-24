@@ -1288,6 +1288,42 @@ def test_prerequisite_checks_are_narrowly_governed(
     ).allowed
 
 
+def test_prerequisite_target_roots_allow_only_safe_governed_targets(
+    governance: Governance,
+    config: Config,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    selected_root = tmp_path / "system-bin"
+    target_root = tmp_path / "package-root"
+    selected_root.mkdir()
+    target_root.mkdir()
+    target = target_root / "npx-cli.js"
+    target.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+    target.chmod(0o755)
+    selected = selected_root / "npx"
+    selected.symlink_to(target)
+    filesystem = config.server_scope["filesystem"]
+    filesystem["trusted_executable_roots"] = [str(selected_root)]
+    filesystem["trusted_prerequisite_target_roots"] = [str(target_root)]
+    monkeypatch.setattr("saturnin.governance.shutil.which", lambda _: str(selected))
+    monkeypatch.setattr(
+        "saturnin.governance._trusted_system_path_problem",
+        lambda _: None,
+    )
+
+    assert governance.check_server_command("npx --version").allowed
+
+    monkeypatch.setattr(
+        "saturnin.governance._trusted_system_path_problem",
+        lambda _: "trusted executable path is group/world-writable",
+    )
+    decision = governance.check_server_command("npx --version")
+
+    assert not decision.allowed
+    assert "group/world-writable" in decision.reasons[0]
+
+
 @pytest.mark.parametrize("writable_part", ["leaf", "ancestor"])
 def test_trusted_executable_rejects_writable_path_components(
     monkeypatch: pytest.MonkeyPatch,

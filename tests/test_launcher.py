@@ -23,7 +23,7 @@ from saturnin.cli import main
 from saturnin.config import Config
 from saturnin.launcher import AgentLauncher, LauncherError
 from saturnin.governance import resolve_trusted_executable
-from saturnin.mcp import MCPError
+from saturnin.mcp import MCPError, StagedGithubBinary
 from saturnin.review import (
     ReviewLedger,
     issue_content_digest,
@@ -48,11 +48,22 @@ _REAL_PROCESS_START_TIME = AgentLauncher._process_start_time
 
 @pytest.fixture(autouse=True)
 def verified_github_mcp(monkeypatch: pytest.MonkeyPatch) -> None:
-    def fake_stage(config: Config, destination: Path) -> Path:
-        destination.parent.mkdir(parents=True, exist_ok=True)
+    def fake_stage(config: Config, destination: Path) -> StagedGithubBinary:
+        destination.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+        destination.parent.chmod(0o700)
         destination.write_text("synthetic MCP binary\n", encoding="utf-8")
         destination.chmod(0o500)
-        return destination
+        descriptor = os.open(destination, os.O_RDONLY | os.O_CLOEXEC)
+        file_metadata = os.fstat(descriptor)
+        runtime_metadata = destination.parent.stat()
+        return StagedGithubBinary(
+            path=destination,
+            descriptor=descriptor,
+            device=file_metadata.st_dev,
+            inode=file_metadata.st_ino,
+            runtime_device=runtime_metadata.st_dev,
+            runtime_inode=runtime_metadata.st_ino,
+        )
 
     monkeypatch.setattr(
         "saturnin.launcher.stage_github_binary",
@@ -102,7 +113,8 @@ def test_launcher_starts_routed_role_with_filtered_mcp(
 
     monkeypatch.setattr("saturnin.launcher.subprocess.Popen", fake_popen)
 
-    result = AgentLauncher(config, board).launch(task.id)
+    launcher = AgentLauncher(config, board)
+    result = launcher.launch(task.id)
 
     assert result is not None
     assert result.pid == 4242
@@ -141,6 +153,70 @@ def test_launcher_starts_routed_role_with_filtered_mcp(
         (config.var_dir / "launches" / f"{task.id}.json").read_text()
     )
     assert metadata["process_start_time_ticks"] == 123456
+    inherited = calls[0][1]["pass_fds"]
+    assert len(inherited) == 1
+    assert [
+        "--ro-bind",
+        f"/proc/self/fd/{inherited[0]}",
+        str(github_command),
+    ] == command[
+        command.index(f"/proc/self/fd/{inherited[0]}") - 1:
+        command.index(f"/proc/self/fd/{inherited[0]}") + 2
+    ]
+    assert github_command.exists()
+
+    monkeypatch.setattr(launcher, "_process_start_time", lambda pid: None)
+    assert launcher.reconcile_exited_launches() == [task.id]
+    assert not github_command.parent.exists()
+
+
+def test_launcher_binds_verified_mcp_descriptor_after_path_substitution(
+    config: Config,
+    board: Board,
+) -> None:
+    task = board.create("Retain verified MCP inode")
+    Router(config).dispatch(board, task)
+    launcher = AgentLauncher(config, board)
+    contract = launcher._contract(board.get(task.id), config)
+    mcp_launch = launcher._write_mcp_config(board.get(task.id), contract)
+    assert mcp_launch.github_stage is not None
+    stage = mcp_launch.github_stage
+    verified_content = os.pread(stage.descriptor, 4096, 0)
+    replacement = config.root / "replacement-mcp"
+    replacement.write_text("malicious replacement\n", encoding="utf-8")
+    os.replace(replacement, stage.path)
+    workdir = config.root / "race-worktree"
+    workdir.mkdir()
+    (workdir / ".git").write_text("gitdir: elsewhere\n", encoding="utf-8")
+    isolated_home = config.var_dir / "race-home"
+    isolated_home.mkdir()
+    git_objects = config.root / "race-objects"
+    git_objects.mkdir()
+
+    command = launcher._sandbox_command(
+        "/usr/bin/bwrap",
+        "/usr/bin/pasta",
+        "/usr/bin/copilot",
+        [],
+        workdir=workdir,
+        isolated_home=isolated_home,
+        trusted_config=config,
+        git_objects=git_objects,
+        mcp_config=mcp_launch.path,
+        github_stage=stage,
+    )
+
+    source = f"/proc/self/fd/{stage.descriptor}"
+    mount_index = command.index(source)
+    assert command[mount_index - 1:mount_index + 2] == [
+        "--ro-bind",
+        source,
+        str(stage.path),
+    ]
+    assert os.pread(stage.descriptor, 4096, 0) == verified_content
+    cleanup_problem = launcher._cleanup_mcp_launch(mcp_launch, task.id)
+    assert cleanup_problem == "GitHub MCP staged executable identity changed"
+    assert stage.path.read_text() == "malicious replacement\n"
 
 
 def test_launcher_rejects_required_executables_from_worktree_path(
@@ -189,7 +265,7 @@ def test_launcher_rejects_required_executables_from_worktree_path(
     assert launcher._sandbox_executable() == trusted_system_executable
     assert launcher._network_sandbox_executable() == trusted_system_executable
     assert launcher._sandbox_visible_executable(Path("/usr/bin/npx"), config)
-    assert not launcher._sandbox_visible_executable(
+    assert launcher._sandbox_visible_executable(
         Path("/opt/pipx/venvs/uv/bin/uvx"), config
     )
 
@@ -2478,7 +2554,7 @@ def test_launcher_rolls_back_claim_when_spawn_fails(
         )["mcpServers"]["github"]["command"]
     )
     assert second_stage != first_stage
-    assert first_stage.exists()
+    assert not first_stage.parent.exists()
     assert second_stage.exists()
     assert board.get(task.id).checkpoint_resumed_at == "checkpoint-1"
 
@@ -3218,6 +3294,13 @@ def test_reconcile_exited_launch_keeps_legal_task_state(
     board.transition(board.get(task.id), "in_progress")
     launch_file = config.var_dir / "launches" / f"{task.id}.json"
     launch_file.parent.mkdir(parents=True, exist_ok=True)
+    runtime = launch_file.parent / f"{task.id}.runtime-{'a' * 32}"
+    runtime.mkdir(mode=0o700)
+    staged = runtime / "github-mcp-server"
+    staged.write_text("verified\n", encoding="utf-8")
+    staged.chmod(0o500)
+    runtime_metadata = runtime.stat()
+    staged_metadata = staged.stat()
     launch_file.write_text(
         json.dumps(
             {
@@ -3229,6 +3312,14 @@ def test_reconcile_exited_launch_keeps_legal_task_state(
                 "cwd": str(config.root),
                 "mcp_config": str(config.root / ".mcp.json"),
                 "log": str(config.var_dir / "launches" / f"{task.id}.log"),
+                "github_runtime": {
+                    "directory": str(runtime),
+                    "directory_device": runtime_metadata.st_dev,
+                    "directory_inode": runtime_metadata.st_ino,
+                    "file": staged.name,
+                    "file_device": staged_metadata.st_dev,
+                    "file_inode": staged_metadata.st_ino,
+                },
             }
         ),
         encoding="utf-8",
@@ -3250,6 +3341,7 @@ def test_reconcile_exited_launch_keeps_legal_task_state(
     )
     assert restored.history[-1]["event"] == "agent:launch_failed"
     assert not launch_file.exists()
+    assert not runtime.exists()
 
 
 def test_reconcile_exited_poller_launch_keeps_waiting_task(
@@ -3383,12 +3475,16 @@ def test_reconcile_records_failure_when_pid_belongs_to_different_process(
     (stale / "github-mcp-server").symlink_to(outside)
     first_config = launcher._write_mcp_config(board.get(task.id), contract)
     first_stage = Path(
-        json.loads(first_config.read_text())["mcpServers"]["github"]["command"]
+        json.loads(first_config.path.read_text())["mcpServers"]["github"]["command"]
     )
     second_config = launcher._write_mcp_config(board.get(task.id), contract)
     second_stage = Path(
-        json.loads(second_config.read_text())["mcpServers"]["github"]["command"]
+        json.loads(second_config.path.read_text())["mcpServers"]["github"]["command"]
     )
+    assert first_config.github_stage is not None
+    assert second_config.github_stage is not None
+    first_config.github_stage.close()
+    second_config.github_stage.close()
 
     assert first_stage != second_stage
     assert first_stage.exists()
@@ -3548,17 +3644,20 @@ def test_launcher_worker_environment_uses_allowlist_and_mcp_scoped_github_token(
     assert environment["SATURNIN_AGENT_ROLE"] == contract.role
     assert "AWS_SECRET_ACCESS_KEY" not in environment
     assert "host" not in environment["PYTHONPATH"]
-    mcp_path = launcher._write_mcp_config(
+    mcp_launch = launcher._write_mcp_config(
         board.get(task.id),
         contract,
         config=worker_config,
         worktree_scope=worktree.path,
     )
+    mcp_path = mcp_launch.path
     mcp = json.loads(mcp_path.read_text(encoding="utf-8"))
     assert mcp_path.stat().st_mode & 0o777 == 0o600
     assert mcp["mcpServers"]["github"]["env"] == {
         "GITHUB_PERSONAL_ACCESS_TOKEN": "scoped-read-token"
     }
+    assert mcp_launch.github_stage is not None
+    mcp_launch.github_stage.close()
 
 
 def test_launcher_preserves_approved_config_path_under_isolated_home(

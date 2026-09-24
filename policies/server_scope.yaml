@@ -34,6 +34,11 @@ filesystem:
     - /usr/sbin
     - /usr/local/bin
     - /usr/local/sbin
+  # Some root-managed command shims resolve into package-specific trees.
+  # Only prerequisite probes may use these resolved target roots.
+  trusted_prerequisite_target_roots:
+    - /usr/share/nodejs/npm
+    - /opt/pipx/venvs/uv
   # The supported bootstrap installs this one project runtime executable.
   # It is resolved only against the canonical main checkout, never a worker worktree.
   trusted_runtime_executable: .venv/bin/saturnin

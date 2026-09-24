@@ -73,7 +73,7 @@ def host_launcher_enabled(config: Config) -> bool:
 def set_host_launcher_enabled(config: Config, enabled: bool) -> Path:
     path = host_config_path(config)
     if not enabled:
-        path.unlink(missing_ok=True)
+        _secure_unlink_host_config(config, path)
         return path
     path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
     parent_problem = _host_config_parent_problem(config, path)
@@ -85,6 +85,85 @@ def set_host_launcher_enabled(config: Config, enabled: bool) -> Path:
         mode=PRIVATE_FILE_MODE,
     )
     return path
+
+
+def _secure_unlink_host_config(config: Config, path: Path) -> None:
+    parent = _open_host_config_parent(config, path)
+    if parent is None:
+        return
+    descriptor = -1
+    try:
+        try:
+            descriptor = os.open(
+                path.name,
+                os.O_RDONLY | os.O_CLOEXEC | os.O_NOFOLLOW,
+                dir_fd=parent,
+            )
+        except FileNotFoundError:
+            return
+        metadata = os.fstat(descriptor)
+        current = os.stat(path.name, dir_fd=parent, follow_symlinks=False)
+        if (
+            not stat.S_ISREG(metadata.st_mode)
+            or metadata.st_uid != os.geteuid()
+            or metadata.st_mode & (stat.S_IRWXG | stat.S_IRWXO)
+            or (metadata.st_dev, metadata.st_ino) != (current.st_dev, current.st_ino)
+        ):
+            raise LauncherHostError(
+                f"launcher host configuration cannot be safely removed: {path}"
+            )
+        os.unlink(path.name, dir_fd=parent)
+    except OSError as exc:
+        raise LauncherHostError(
+            f"launcher host configuration cannot be safely removed: {path}: {exc}"
+        ) from exc
+    finally:
+        if descriptor >= 0:
+            os.close(descriptor)
+        os.close(parent)
+
+
+def _open_host_config_parent(config: Config, path: Path) -> int | None:
+    data_root = Path(os.path.abspath(config.data_root))
+    parent_path = Path(os.path.abspath(path.parent))
+    if not parent_path.is_relative_to(data_root):
+        raise LauncherHostError(f"launcher host configuration escapes data root: {path}")
+    descriptor = os.open("/", os.O_RDONLY | os.O_DIRECTORY | os.O_CLOEXEC)
+    current = Path("/")
+    try:
+        for component in parent_path.parts[1:]:
+            try:
+                child = os.open(
+                    component,
+                    os.O_RDONLY | os.O_DIRECTORY | os.O_CLOEXEC | os.O_NOFOLLOW,
+                    dir_fd=descriptor,
+                )
+            except FileNotFoundError:
+                os.close(descriptor)
+                return None
+            metadata = os.fstat(child)
+            current /= component
+            sticky_root = (
+                metadata.st_uid == 0
+                and bool(metadata.st_mode & stat.S_ISVTX)
+            )
+            if (
+                metadata.st_uid not in {0, os.geteuid()}
+                or (
+                    metadata.st_mode & (stat.S_IWGRP | stat.S_IWOTH)
+                    and not sticky_root
+                )
+            ):
+                os.close(child)
+                raise LauncherHostError(
+                    f"launcher host configuration parent is unsafe: {current}"
+                )
+            os.close(descriptor)
+            descriptor = child
+    except Exception:
+        os.close(descriptor)
+        raise
+    return descriptor
 
 
 def launcher_health(config: Config) -> list[dict[str, Any]]:

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import io
+import os
 import stat
 import tarfile
 import threading
@@ -12,6 +13,7 @@ import pytest
 from saturnin.config import Config
 from saturnin.mcp import (
     MCPError,
+    StagedGithubBinary,
     install_github,
     probe_github_stdio,
     server_process,
@@ -206,12 +208,14 @@ def test_github_mcp_stages_verified_inode_before_path_replacement(
     destination = config.var_dir / "launches" / "task.runtime" / "github-mcp-server"
 
     staged = stage_github_binary(config, destination)
-    original = staged.read_bytes()
+    original = staged.path.read_bytes()
     script.write_text("replacement\n", encoding="utf-8")
 
-    assert staged.read_bytes() == original
-    assert stat.S_IMODE(staged.stat().st_mode) == 0o500
-    assert staged.stat().st_ino != script.stat().st_ino
+    assert staged.path.read_bytes() == original
+    assert stat.S_IMODE(staged.path.stat().st_mode) == 0o500
+    assert staged.path.stat().st_ino != script.stat().st_ino
+    assert os.fstat(staged.descriptor).st_ino == staged.inode
+    staged.close()
 
 
 def test_github_mcp_concurrent_stage_never_replaces_existing_inode(
@@ -229,7 +233,7 @@ def test_github_mcp_concurrent_stage_never_replaces_existing_inode(
         config.var_dir / "launches" / "collision.runtime" / "github-mcp-server"
     )
     barrier = threading.Barrier(2)
-    outcomes: list[Path | MCPError] = []
+    outcomes: list[StagedGithubBinary | MCPError] = []
 
     def stage() -> None:
         barrier.wait()
@@ -244,10 +248,13 @@ def test_github_mcp_concurrent_stage_never_replaces_existing_inode(
     for worker in workers:
         worker.join()
 
-    assert sum(isinstance(outcome, Path) for outcome in outcomes) == 1
+    assert sum(isinstance(outcome, StagedGithubBinary) for outcome in outcomes) == 1
     assert sum(isinstance(outcome, MCPError) for outcome in outcomes) == 1
     assert hashlib.sha256(destination.read_bytes()).hexdigest() == checksum
     assert stat.S_IMODE(destination.stat().st_mode) == 0o500
+    for outcome in outcomes:
+        if isinstance(outcome, StagedGithubBinary):
+            outcome.close()
 
 
 def test_github_mcp_installer_verifies_archive_and_handshake(

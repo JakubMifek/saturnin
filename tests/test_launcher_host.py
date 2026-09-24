@@ -241,3 +241,36 @@ def test_launcher_host_config_rejects_wrong_owner(
 
     with pytest.raises(LauncherHostError, match="must be owned by uid"):
         host_launcher_enabled(config)
+
+
+def test_launcher_disable_uses_open_parent_when_ancestor_is_replaced(
+    config: Config,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _secure_host_config_parents(config)
+    original = set_host_launcher_enabled(config, True)
+    outside = config.root / "outside-var"
+    outside_config = outside / "config"
+    outside_config.mkdir(parents=True)
+    outside_target = outside_config / "launcher.json"
+    outside_target.write_text("must survive\n", encoding="utf-8")
+    outside_target.chmod(0o600)
+    moved_var = config.root / "original-var"
+    real_open = os.open
+    swapped = False
+
+    def racing_open(path, flags, mode=0o777, *, dir_fd=None):
+        nonlocal swapped
+        if path == "launcher.json" and dir_fd is not None and not swapped:
+            swapped = True
+            config.var_dir.rename(moved_var)
+            config.var_dir.symlink_to(outside, target_is_directory=True)
+        return real_open(path, flags, mode, dir_fd=dir_fd)
+
+    monkeypatch.setattr("saturnin.launcher_host.os.open", racing_open)
+
+    set_host_launcher_enabled(config, False)
+
+    assert swapped
+    assert not (moved_var / "config" / original.name).exists()
+    assert outside_target.read_text() == "must survive\n"
