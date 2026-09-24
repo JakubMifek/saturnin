@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 # Install the Saturnin systemd *user* units (rule 7: user scope only, no root).
 set -Eeuo pipefail
+umask 077
 
 SATURNIN_HOME="${SATURNIN_HOME:-$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)}"
 UNIT_DIR="${XDG_CONFIG_HOME:-$HOME/.config}/systemd/user"
@@ -29,11 +30,19 @@ ERR
 fi
 
 mkdir -p "$UNIT_DIR"
-STAGE_DIR="$(mktemp -d "${TMPDIR:-/tmp}/saturnin-units.XXXXXX")"
-BACKUP_DIR="$(mktemp -d "${TMPDIR:-/tmp}/saturnin-units-backup.XXXXXX")"
+if [[ -L "$SATURNIN_HOME/var" ]]; then
+  echo "Refusing symlinked Saturnin transaction directory." >&2
+  exit 1
+fi
+mkdir -p "$SATURNIN_HOME/var"
+TRANSACTION_DIR="$SATURNIN_HOME/var/install-user-units.$$.$RANDOM"
+mkdir -m 0700 "$TRANSACTION_DIR"
+STAGE_DIR="$TRANSACTION_DIR/stage"
+BACKUP_DIR="$TRANSACTION_DIR/backup"
+mkdir -m 0700 "$STAGE_DIR" "$BACKUP_DIR"
 installing=0
 cleanup() {
-  rm -rf "$STAGE_DIR" "$BACKUP_DIR"
+  rm -rf "$TRANSACTION_DIR"
 }
 rollback() {
   set +e
@@ -76,10 +85,37 @@ on_exit() {
 }
 trap on_exit EXIT
 
+CREDENTIAL_DIR="${XDG_CONFIG_HOME:-$HOME/.config}/systemd/user/saturnin-credentials"
+current="$CREDENTIAL_DIR/saturnin-review-attestation-key.cred"
+previous="$CREDENTIAL_DIR/saturnin-review-attestation-previous-key.cred"
+github="$CREDENTIAL_DIR/saturnin-github-mcp-token.cred"
+CREDENTIAL_LOADS=""
+if [[ -e "$current" || -e "$previous" ]]; then
+  if [[ ! -f "$current" || -L "$current" || ! -f "$previous" || -L "$previous" ]]; then
+    echo "Attestation credential pair is incomplete or unsafe; refusing unit replacement." >&2
+    exit 1
+  fi
+  "$SATURNIN_HOME/.venv/bin/saturnin" credential status review-attestation >/dev/null
+  CREDENTIAL_LOADS+=$'LoadCredentialEncrypted=saturnin-review-attestation-key:%h/.config/systemd/user/saturnin-credentials/saturnin-review-attestation-key.cred\n'
+  CREDENTIAL_LOADS+='LoadCredentialEncrypted=saturnin-review-attestation-previous-key:%h/.config/systemd/user/saturnin-credentials/saturnin-review-attestation-previous-key.cred'
+fi
+if [[ -e "$github" ]]; then
+  if [[ ! -f "$github" || -L "$github" ]]; then
+    echo "GitHub MCP credential is unsafe; refusing unit replacement." >&2
+    exit 1
+  fi
+  "$SATURNIN_HOME/.venv/bin/saturnin" credential status github-mcp >/dev/null
+  if [[ -n "$CREDENTIAL_LOADS" ]]; then
+    CREDENTIAL_LOADS+=$'\n'
+  fi
+  CREDENTIAL_LOADS+='LoadCredentialEncrypted=saturnin-github-mcp-token:%h/.config/systemd/user/saturnin-credentials/saturnin-github-mcp-token.cred'
+fi
+
 for unit in "$SATURNIN_HOME"/systemd/saturnin-*; do
   name="$(basename "$unit")"
   MANAGED_UNITS+=("$name")
   SATURNIN_HOME_ESCAPED="$SATURNIN_HOME" SATURNIN_HOME_ENV_ESCAPED="$SATURNIN_HOME" \
+    SATURNIN_CREDENTIAL_LOADS="$CREDENTIAL_LOADS" \
     TEMPLATE="$unit" DEST="$STAGE_DIR/$name" python3 -c '
 from pathlib import Path
 import os
@@ -87,6 +123,7 @@ template = Path(os.environ["TEMPLATE"]).read_text()
 Path(os.environ["DEST"]).write_text(
     template.replace("@SATURNIN_HOME@", os.environ["SATURNIN_HOME_ESCAPED"])
     .replace("@SATURNIN_HOME_ENV@", os.environ["SATURNIN_HOME_ENV_ESCAPED"])
+    .replace("@SATURNIN_CREDENTIAL_LOADS@", os.environ["SATURNIN_CREDENTIAL_LOADS"])
 )
 '
   if command -v systemd-analyze >/dev/null 2>&1; then

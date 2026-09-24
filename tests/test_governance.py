@@ -1177,6 +1177,8 @@ def test_push_rules(governance: Governance) -> None:
     "command",
     [
         "sudo systemctl restart nginx",
+        "sudo systemd-creds setup",
+        "sudo install -m 0400 credential.secret /var/lib/systemd/credential.secret",
         "systemctl restart nginx",
         "systemctl restart",
         "apt remove python3",

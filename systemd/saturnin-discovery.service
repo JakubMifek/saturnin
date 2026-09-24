@@ -7,8 +7,6 @@ Type=oneshot
 PrivateMounts=yes
 WorkingDirectory=@SATURNIN_HOME@
 Environment=SATURNIN_HOME="@SATURNIN_HOME_ENV@"
-LoadCredentialEncrypted=saturnin-review-attestation-key:%h/.config/systemd/user/saturnin-credentials/saturnin-review-attestation-key.cred
-LoadCredentialEncrypted=saturnin-review-attestation-previous-key:%h/.config/systemd/user/saturnin-credentials/saturnin-review-attestation-previous-key.cred
-LoadCredentialEncrypted=saturnin-github-mcp-token:%h/.config/systemd/user/saturnin-credentials/saturnin-github-mcp-token.cred
+@SATURNIN_CREDENTIAL_LOADS@
 ExecStart=@SATURNIN_HOME@/automation/library/discover_issues.sh
 Nice=10

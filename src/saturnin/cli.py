@@ -34,7 +34,6 @@ from .contracts import (
 )
 from .credentials import (
     CredentialError,
-    attestation_rotation_values,
     complete_attestation_rotation,
     credential_prerequisites,
     credential_status,
@@ -42,6 +41,7 @@ from .credentials import (
     revoke_credential,
     rollback_attestation_rotation,
     rotate_attestation_key,
+    seal_attestation_rotation,
     store_github_mcp_token,
 )
 from .discovery import DiscoveryError, IssueDiscovery
@@ -1001,12 +1001,13 @@ def _run(args: argparse.Namespace, config: Config) -> int:  # noqa: C901 - flat 
                         "completed sealed attestation rotation cleanup",
                     )
                     return 0
-                current, previous = attestation_rotation_values()
-                manifest = ReviewLedger(config).seal_rotation_manifest(
-                    current_master=current,
-                    previous_master=previous,
+                ledger = ReviewLedger(config)
+                manifest = seal_attestation_rotation(
+                    lambda current, previous: ledger.seal_rotation_manifest(
+                        current_master=current,
+                        previous_master=previous,
+                    )
                 )
-                complete_attestation_rotation()
                 _emit(
                     {"rotation_manifest": str(manifest)},
                     as_json,

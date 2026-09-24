@@ -100,11 +100,8 @@ def test_launcher_starts_routed_role_with_filtered_mcp(
     assert launched_task.launch_deferred_at is None
     assert launched_task.launch_deferred_reason is None
     mcp = json.loads((config.var_dir / "launches" / f"{task.id}.mcp.json").read_text())
-    assert set(mcp["mcpServers"]) == {"github", "filesystem"}
-    assert mcp["mcpServers"]["github"]["command"] == str(
-        config.data_root / "var/bin/github-mcp-server"
-    )
-    assert mcp["mcpServers"]["github"]["args"] == ["stdio", "--read-only"]
+    assert set(mcp["mcpServers"]) == {"filesystem"}
+    assert "GITHUB_PERSONAL_ACCESS_TOKEN" not in json.dumps(mcp)
     assert mcp["mcpServers"]["filesystem"]["args"][-1] == str(worktree.path)
     command = calls[0][0]
     assert "--no-ask-user" in command
@@ -3104,10 +3101,7 @@ def test_launcher_uses_trusted_source_for_linked_saturnin_worktree(
     generated = json.loads(
         (config.var_dir / "launches" / f"{task.id}.mcp.json").read_text()
     )
-    assert generated["mcpServers"]["github"]["args"] == [
-        "stdio",
-        "--read-only",
-    ]
+    assert "github" not in generated["mcpServers"]
     assert (config.var_dir / "launches" / f"{task.id}.json").is_file()
 
 
@@ -3374,7 +3368,7 @@ def test_launcher_keeps_engine_source_for_managed_repository(
     assert calls[0]["env"]["PYTHONPATH"].split(":")[0] == str(config.root / "src")
 
 
-def test_launcher_worker_environment_uses_allowlist_and_mcp_scoped_github_token(
+def test_launcher_worker_environment_never_exposes_github_token(
     config: Config, board: Board, git_repo: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     task = board.create("Constrain worker environment")
@@ -3443,9 +3437,8 @@ def test_launcher_worker_environment_uses_allowlist_and_mcp_scoped_github_token(
     )
     mcp = json.loads(mcp_path.read_text(encoding="utf-8"))
     assert mcp_path.stat().st_mode & 0o777 == 0o600
-    assert mcp["mcpServers"]["github"]["env"] == {
-        "GITHUB_PERSONAL_ACCESS_TOKEN": "scoped-read-token"
-    }
+    assert "github" not in mcp["mcpServers"]
+    assert "scoped-read-token" not in mcp_path.read_text(encoding="utf-8")
 
 
 def test_launcher_reads_systemd_credentials_without_exposing_master_to_worker(
@@ -3496,9 +3489,8 @@ def test_launcher_reads_systemd_credentials_without_exposing_master_to_worker(
 
     assert "SATURNIN_REVIEW_ATTESTATION_KEY" not in environment
     assert "CREDENTIALS_DIRECTORY" not in environment
-    assert mcp["mcpServers"]["github"]["env"] == {
-        "GITHUB_PERSONAL_ACCESS_TOKEN": "mcp-from-systemd"
-    }
+    assert "github" not in mcp["mcpServers"]
+    assert "mcp-from-systemd" not in mcp_path.read_text(encoding="utf-8")
 
 
 def test_launcher_preserves_approved_config_path_under_isolated_home(
@@ -3943,6 +3935,7 @@ def test_launcher_rejects_unverified_github_binary(
     with board.edit(task.id) as stored:
         stored.branch = "feature/checksum-validation"
         stored.worktree = str(worktree.path)
+    monkeypatch.setenv("SATURNIN_GITHUB_MCP_TOKEN", "test-only-token")
     monkeypatch.setattr("saturnin.launcher.shutil.which", lambda _: "/usr/bin/copilot")
     verification_roots: list[Path] = []
 

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import getpass
+import base64
 import json
 import os
 import secrets
@@ -10,7 +11,10 @@ import shutil
 import stat
 import subprocess
 from pathlib import Path
+from contextlib import contextmanager
 from typing import Callable
+
+import fcntl
 
 from .jsonlines import PRIVATE_FILE_MODE, atomic_replace_text
 
@@ -28,10 +32,40 @@ HOST_CREDENTIAL_SECRET = Path("/var/lib/systemd/credential.secret")
 ROTATION_STATE = ".attestation-rotation.json"
 ROTATION_CURRENT_BACKUP = ".saturnin-review-attestation-key.rollback.cred"
 ROTATION_PREVIOUS_BACKUP = ".saturnin-review-attestation-previous-key.rollback.cred"
+LIFECYCLE_LOCK = ".lifecycle"
+HOST_SCOPED_CREDENTIAL_ID = bytes.fromhex("55b9ed1d38594d43a8319d2ebb332ac6")
 
 
 class CredentialError(RuntimeError):
     pass
+
+
+@contextmanager
+def _lifecycle_lock(*, exclusive: bool) -> object:
+    directory = encrypted_credential_dir()
+    _secure_directory(directory)
+    path = directory / LIFECYCLE_LOCK
+    descriptor = os.open(
+        path,
+        os.O_RDWR | os.O_CREAT | os.O_NOFOLLOW,
+        PRIVATE_FILE_MODE,
+    )
+    try:
+        metadata = os.fstat(descriptor)
+        if (
+            not stat.S_ISREG(metadata.st_mode)
+            or metadata.st_uid != os.getuid()
+        ):
+            raise CredentialError("credential lifecycle lock is unsafe")
+        os.fchmod(descriptor, PRIVATE_FILE_MODE)
+        fcntl.flock(
+            descriptor,
+            fcntl.LOCK_EX if exclusive else fcntl.LOCK_SH,
+        )
+        yield
+    finally:
+        fcntl.flock(descriptor, fcntl.LOCK_UN)
+        os.close(descriptor)
 
 
 def encrypted_credential_dir() -> Path:
@@ -85,6 +119,7 @@ def _encrypt(name: str, value: str, destination: Path) -> None:
                 "systemd-creds",
                 "encrypt",
                 "--user",
+                "--with-key=host",
                 f"--name={name}",
                 "-",
                 "-",
@@ -101,7 +136,34 @@ def _encrypt(name: str, value: str, destination: Path) -> None:
         encrypted = result.stdout.decode("utf-8")
     except UnicodeDecodeError as exc:
         raise CredentialError("systemd-creds returned an invalid encrypted credential") from exc
+    _validate_encryption_model(encrypted.encode("utf-8"))
     atomic_replace_text(destination, encrypted, mode=PRIVATE_FILE_MODE)
+
+
+def _validate_encryption_model(ciphertext: bytes) -> None:
+    try:
+        decoded = base64.b64decode(b"".join(ciphertext.split()), validate=True)
+    except (ValueError, base64.binascii.Error) as exc:
+        raise CredentialError("systemd-creds returned an invalid encrypted credential") from exc
+    if len(decoded) < len(HOST_SCOPED_CREDENTIAL_ID) or not hmac_compare(
+        decoded[:16], HOST_SCOPED_CREDENTIAL_ID
+    ):
+        raise CredentialError(
+            "encrypted credential is not host-key-only user-scoped data"
+        )
+
+
+def hmac_compare(left: bytes, right: bytes) -> bool:
+    return secrets.compare_digest(left, right)
+
+
+def _new_attestation_key(*, excluding: set[str] | None = None) -> str:
+    excluded = excluding or set()
+    for _ in range(4):
+        value = secrets.token_hex(32)
+        if value not in excluded:
+            return value
+    raise CredentialError("could not generate a distinct attestation key")
 
 
 def credential_prerequisites() -> dict[str, str | int]:
@@ -210,21 +272,36 @@ def _rotation_state() -> str:
 
 
 def provision_attestation_key() -> Path:
+    with _lifecycle_lock(exclusive=True):
+        return _provision_attestation_key()
+
+
+def _provision_attestation_key() -> Path:
     destination = encrypted_credential_path("review-attestation")
     if destination.exists():
         raise CredentialError(
             "review-attestation is already provisioned; use rotate-attestation"
         )
+    previous = _new_attestation_key()
+    current = _new_attestation_key(excluding={previous})
     _encrypt(
         PREVIOUS_ATTESTATION_CREDENTIAL,
-        secrets.token_hex(32),
+        previous,
         encrypted_credential_path("review-attestation-previous"),
     )
-    _encrypt(ATTESTATION_CREDENTIAL, secrets.token_hex(32), destination)
+    _encrypt(ATTESTATION_CREDENTIAL, current, destination)
     return destination
 
 
 def rotate_attestation_key(
+    *,
+    previous_key_in_use: Callable[[str], bool],
+) -> Path:
+    with _lifecycle_lock(exclusive=True):
+        return _rotate_attestation_key(previous_key_in_use=previous_key_in_use)
+
+
+def _rotate_attestation_key(
     *,
     previous_key_in_use: Callable[[str], bool],
 ) -> Path:
@@ -234,6 +311,8 @@ def rotate_attestation_key(
         )
     current = _decrypt_encrypted_credential("review-attestation")
     previous = _decrypt_encrypted_credential("review-attestation-previous")
+    if secrets.compare_digest(current, previous):
+        raise CredentialError("current and previous attestation keys must differ")
     if previous_key_in_use(previous):
         raise CredentialError(
             "previous attestation key still protects review records; archive or retire them before rotating"
@@ -260,11 +339,20 @@ def rotate_attestation_key(
         encrypted_credential_path("review-attestation-previous"),
     )
     destination = encrypted_credential_path("review-attestation")
-    _encrypt(ATTESTATION_CREDENTIAL, secrets.token_hex(32), destination)
+    _encrypt(
+        ATTESTATION_CREDENTIAL,
+        _new_attestation_key(excluding={current, previous}),
+        destination,
+    )
     return destination
 
 
 def attestation_rotation_values() -> tuple[str, str]:
+    with _lifecycle_lock(exclusive=False):
+        return _attestation_rotation_values()
+
+
+def _attestation_rotation_values() -> tuple[str, str]:
     if _rotation_state() != "pending-seal":
         raise CredentialError("no attestation rotation is pending sealing")
     return (
@@ -273,7 +361,20 @@ def attestation_rotation_values() -> tuple[str, str]:
     )
 
 
+def seal_attestation_rotation(sealer: Callable[[str, str], Path]) -> Path:
+    with _lifecycle_lock(exclusive=True):
+        current, previous = _attestation_rotation_values()
+        result = sealer(current, previous)
+        _complete_attestation_rotation()
+        return result
+
+
 def complete_attestation_rotation() -> None:
+    with _lifecycle_lock(exclusive=True):
+        _complete_attestation_rotation()
+
+
+def _complete_attestation_rotation() -> None:
     state = _rotation_state()
     if state not in {"pending-seal", "sealed-cleanup"}:
         raise CredentialError("no attestation rotation is pending sealing")
@@ -292,6 +393,11 @@ def complete_attestation_rotation() -> None:
 
 
 def rollback_attestation_rotation() -> Path:
+    with _lifecycle_lock(exclusive=True):
+        return _rollback_attestation_rotation()
+
+
+def _rollback_attestation_rotation() -> Path:
     state_path, current_backup, previous_backup = _rotation_paths()
     state = _rotation_state()
     if state == "ready":
@@ -312,6 +418,11 @@ def rollback_attestation_rotation() -> Path:
 
 
 def revoke_credential(kind: str) -> list[Path]:
+    with _lifecycle_lock(exclusive=True):
+        return _revoke_credential(kind)
+
+
+def _revoke_credential(kind: str) -> list[Path]:
     kinds = (
         ["review-attestation", "review-attestation-previous"]
         if kind == "review-attestation"
@@ -340,9 +451,10 @@ def store_github_mcp_token() -> Path:
     confirmation = getpass.getpass("Confirm token: ")
     if not token or not secrets.compare_digest(token, confirmation):
         raise CredentialError("credential entries did not match")
-    destination = encrypted_credential_path("github-mcp")
-    _encrypt(GITHUB_MCP_CREDENTIAL, token, destination)
-    return destination
+    with _lifecycle_lock(exclusive=True):
+        destination = encrypted_credential_path("github-mcp")
+        _encrypt(GITHUB_MCP_CREDENTIAL, token, destination)
+        return destination
 
 
 def systemd_credential(name: str) -> str:
@@ -389,6 +501,7 @@ def _decrypt_encrypted_credential(kind: str) -> str:
         or metadata.st_mode & 0o077
     ):
         raise CredentialError(f"encrypted credential has unsafe ownership or mode: {kind}")
+    _validate_encryption_model(_read_private_file(path).encode("utf-8"))
     try:
         result = subprocess.run(
             [
@@ -422,6 +535,11 @@ def _decrypt_encrypted_credential(kind: str) -> str:
 
 
 def validate_encrypted_credential(kind: str) -> Path:
+    with _lifecycle_lock(exclusive=False):
+        return _validate_encrypted_credential(kind)
+
+
+def _validate_encrypted_credential(kind: str) -> Path:
     _decrypt_encrypted_credential(kind)
     if kind == "review-attestation":
         _decrypt_encrypted_credential("review-attestation-previous")
@@ -429,8 +547,13 @@ def validate_encrypted_credential(kind: str) -> Path:
 
 
 def credential_status(kind: str) -> dict[str, str]:
-    path = validate_encrypted_credential(kind)
-    status = {"status": "valid", "path": str(path)}
-    if kind == "review-attestation":
-        status["rotation"] = _rotation_state()
-    return status
+    with _lifecycle_lock(exclusive=False):
+        path = _validate_encrypted_credential(kind)
+        status = {
+            "status": "valid",
+            "path": str(path),
+            "encryption": "host-key-only-user-scoped",
+        }
+        if kind == "review-attestation":
+            status["rotation"] = _rotation_state()
+        return status

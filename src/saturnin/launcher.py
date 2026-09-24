@@ -7,9 +7,12 @@ import hmac
 import json
 import os
 import re
+import secrets
+import signal
 import shutil
 import stat
 import subprocess
+import time
 from contextlib import contextmanager
 from dataclasses import asdict, dataclass
 from pathlib import Path
@@ -73,6 +76,14 @@ class _StagedReviewInput:
     binding: str
     path: Path
     payload_digest: str
+
+
+@dataclass(frozen=True)
+class _GithubBroker:
+    socket: Path
+    capability: str
+    process: subprocess.Popen[bytes]
+    process_start_time: int
 
 
 @dataclass(frozen=True)
@@ -148,6 +159,7 @@ class AgentLauncher:
         log_path = self.dir / f"{task.id}.log"
         launch_error: LauncherError | None = None
         process: subprocess.Popen[bytes] | None = None
+        github_broker: _GithubBroker | None = None
         workdir: Path | None = None
         metadata: dict[str, Any] | None = None
         metadata_attempted = False
@@ -198,11 +210,18 @@ class AgentLauncher:
                     workdir = self._validated_workdir(claimed)
                     worker_config = self._worker_config(workdir)
                     contract = self._contract(claimed, worker_config)
+                    github_broker = self._start_github_broker(
+                        claimed,
+                        contract,
+                        config=worker_config,
+                        worktree_scope=workdir,
+                    )
                     mcp_path = self._write_mcp_config(
                         claimed,
                         contract,
                         config=worker_config,
                         worktree_scope=workdir,
+                        github_broker=github_broker,
                     )
                     verified_review_input = self._verified_review_input(claimed)
                     review_input = self._stage_review_input(
@@ -246,6 +265,7 @@ class AgentLauncher:
                         trusted_config=self._trusted_config(worker_config),
                         git_objects=git_objects,
                         mcp_config=mcp_path,
+                        broker_socket=github_broker.socket if github_broker else None,
                         review_input=review_input.path if review_input else None,
                     )
                     with self._private_log(log_path) as output:
@@ -278,6 +298,15 @@ class AgentLauncher:
                         "started_at": utcnow(),
                         "cwd": str(workdir),
                         "mcp_config": str(mcp_path),
+                        "github_broker_socket": (
+                            str(github_broker.socket) if github_broker else None
+                        ),
+                        "github_broker_pid": (
+                            github_broker.process.pid if github_broker else None
+                        ),
+                        "github_broker_start_time_ticks": (
+                            github_broker.process_start_time if github_broker else None
+                        ),
                         "log": str(log_path),
                         "resumed_checkpoint": resumed_checkpoint,
                         "callback_dir": environment.get(ENV_CALLBACK_DIR),
@@ -304,6 +333,7 @@ class AgentLauncher:
                             reason=reason,
                         )
                     else:
+                        self._settle_github_broker(github_broker)
                         if previous_state in ("routed", "in_progress"):
                             stored.state = previous_state
                         stored.checkpoint_resumed_at = previous_checkpoint_resumed_at
@@ -340,6 +370,7 @@ class AgentLauncher:
             if completed_during_grace:
                 completed_persistence_problem = reason
             else:
+                self._settle_github_broker(github_broker)
                 if termination_problem:
                     reason = f"{reason}; {termination_problem}"
                 restored = self._restore_launch_claim(
@@ -363,6 +394,7 @@ class AgentLauncher:
                     f"agent launcher failed for task {task.id}: {reason}"
                 ) from exc
         if launch_error is not None:
+            self._settle_github_broker(github_broker)
             mcp_removal_problem = self._remove_mcp_config(mcp_path)
             if mcp_removal_problem:
                 raise LauncherError(
@@ -376,6 +408,7 @@ class AgentLauncher:
         if process is None or workdir is None or mcp_path is None:  # pragma: no cover
             raise LauncherError(f"agent launcher failed for task {task.id}")
         if completed_during_grace:
+            self._settle_github_broker(github_broker)
             mcp_removal_problem = self._remove_mcp_config(mcp_path)
             if mcp_removal_problem:
                 completed_persistence_problem = (
@@ -466,6 +499,7 @@ class AgentLauncher:
                 removal_problem = self._remove_mcp_config(metadata.get("mcp_config"))
                 if removal_problem:
                     continue
+                self._settle_metadata_github_broker(metadata)
                 recovery_pending, callbacks_complete, _ = (
                     self._reconcile_exited_launch(metadata)
                 )
@@ -625,6 +659,62 @@ class AgentLauncher:
         except OSError as exc:
             return f"could not remove MCP config: {exc}"
         return None
+
+    @staticmethod
+    def _settle_github_broker(broker: _GithubBroker | None) -> None:
+        if broker is None:
+            return
+        try:
+            if broker.process.poll() is None:
+                broker.process.terminate()
+                try:
+                    broker.process.wait(timeout=5)
+                except subprocess.TimeoutExpired:
+                    broker.process.kill()
+                    broker.process.wait()
+        finally:
+            broker.socket.unlink(missing_ok=True)
+
+    def _settle_metadata_github_broker(self, metadata: dict[str, Any]) -> None:
+        pid = metadata.get("github_broker_pid")
+        started = metadata.get("github_broker_start_time_ticks")
+        socket_value = metadata.get("github_broker_socket")
+        if (
+            not isinstance(pid, int)
+            or isinstance(pid, bool)
+            or not isinstance(started, int)
+            or isinstance(started, bool)
+        ):
+            return
+        if self._process_start_time(pid) == started:
+            try:
+                os.kill(pid, signal.SIGTERM)
+            except (ProcessLookupError, OSError):
+                pass
+            deadline = time.monotonic() + 2
+            while (
+                time.monotonic() < deadline
+                and self._process_start_time(pid) == started
+            ):
+                time.sleep(0.01)
+            if self._process_start_time(pid) == started:
+                try:
+                    os.kill(pid, signal.SIGKILL)
+                except (ProcessLookupError, OSError):
+                    pass
+        if socket_value is not None:
+            socket_path = Path(str(socket_value))
+            if (
+                socket_path.parent.resolve(strict=False)
+                == self.dir.resolve(strict=False)
+                and socket_path.name.endswith(".github-mcp.sock")
+            ):
+                try:
+                    socket_metadata = socket_path.stat(follow_symlinks=False)
+                    if stat.S_ISSOCK(socket_metadata.st_mode):
+                        socket_path.unlink()
+                except (FileNotFoundError, OSError):
+                    pass
 
     def _settle_failed_process(
         self,
@@ -844,6 +934,7 @@ class AgentLauncher:
         git_objects: Path,
         mcp_config: Path,
         review_input: Path | None = None,
+        broker_socket: Path | None = None,
     ) -> list[str]:
         sandbox_policy = trusted_config.policy("mcp").get("launcher", {}).get(
             "sandbox", {}
@@ -950,6 +1041,8 @@ class AgentLauncher:
             ("--ro-bind", git_control, git_control),
             ("--bind", isolated_home.resolve(), isolated_home.resolve()),
         ]
+        if broker_socket is not None:
+            mounts.append(("--bind", broker_socket, broker_socket))
         created: set[Path] = set()
         for _, _, target in mounts:
             parent = target if target.is_dir() else target.parent
@@ -1588,6 +1681,7 @@ class AgentLauncher:
         *,
         config: Config | None = None,
         worktree_scope: Path | None = None,
+        github_broker: _GithubBroker | None = None,
     ) -> Path:
         config = config or self.config
         trusted_config = self._trusted_config(config)
@@ -1660,38 +1754,31 @@ class AgentLauncher:
                     f"MCP server {name!r} is not authorized for role "
                     f"{contract.role!r}: {authorization_problem}"
                 )
-            command, args = server_process(
-                name,
-                definition,
-                trusted_config,
-                worktree_scope=worktree_scope,
-            )
-            canonical_github = (
-                config.var_dir / "bin" / "github-mcp-server"
-            ).resolve(strict=False)
-            if Path(command).resolve(strict=False) == canonical_github:
-                verified = verify_github_binary(trusted_config).resolve()
-                if verified != canonical_github:
-                    raise LauncherError(
-                        "verified GitHub MCP executable does not match canonical path"
-                    )
+            if name == "github":
+                if github_broker is None:
+                    continue
+                command = str(trusted_config.root / ".venv" / "bin" / "python")
+                args = [
+                    "-m",
+                    "saturnin.mcp_broker",
+                    "client",
+                    "--socket",
+                    str(github_broker.socket),
+                    "--capability",
+                    github_broker.capability,
+                ]
+            else:
+                command, args = server_process(
+                    name,
+                    definition,
+                    trusted_config,
+                    worktree_scope=worktree_scope,
+                )
             server: dict[str, Any] = {
                 "type": definition.get("transport", "stdio"),
                 "command": command,
                 "args": args,
             }
-            if name == "github":
-                token_name = str(
-                    trusted_config.policy("mcp")
-                    .get("launcher", {})
-                    .get("github_read_token_env", "SATURNIN_GITHUB_MCP_TOKEN")
-                )
-                try:
-                    token = credential_value(token_name, GITHUB_MCP_CREDENTIAL)
-                except CredentialError as exc:
-                    raise LauncherError(str(exc)) from exc
-                if token:
-                    server["env"] = {"GITHUB_PERSONAL_ACCESS_TOKEN": token}
             servers[name] = server
         path = self.dir / f"{task.id}.mcp.json"
         atomic_replace_text(
@@ -1700,6 +1787,110 @@ class AgentLauncher:
             mode=PRIVATE_FILE_MODE,
         )
         return path
+
+    def _start_github_broker(
+        self,
+        task: Task,
+        contract: AgentContract,
+        *,
+        config: Config,
+        worktree_scope: Path,
+    ) -> _GithubBroker | None:
+        if "github" not in contract.mcp:
+            return None
+        trusted_config = self._trusted_config(config)
+        token_name = str(
+            trusted_config.policy("mcp")
+            .get("launcher", {})
+            .get("github_read_token_env", "SATURNIN_GITHUB_MCP_TOKEN")
+        )
+        try:
+            token = credential_value(token_name, GITHUB_MCP_CREDENTIAL)
+        except CredentialError as exc:
+            raise LauncherError(str(exc)) from exc
+        if not token:
+            return None
+        definition = trusted_config.policy("mcp").get("servers", {}).get("github")
+        if not isinstance(definition, dict):
+            raise LauncherError("trusted GitHub MCP server definition is missing")
+        command, args = server_process(
+            "github",
+            definition,
+            trusted_config,
+            worktree_scope=worktree_scope,
+        )
+        verified = verify_github_binary(trusted_config).resolve()
+        if Path(command).resolve(strict=False) != verified:
+            raise LauncherError("GitHub MCP executable does not match verified binary")
+        python = trusted_config.root / ".venv" / "bin" / "python"
+        if not python.is_file():
+            raise LauncherError("trusted Python runtime for GitHub MCP broker is missing")
+        socket_path = self.dir / f"{task.id}.github-mcp.sock"
+        capability = secrets.token_urlsafe(32)
+        read_fd, write_fd = os.pipe2(os.O_CLOEXEC)
+        try:
+            try:
+                process = subprocess.Popen(
+                    [
+                        str(python),
+                        "-m",
+                        "saturnin.mcp_broker",
+                        "serve",
+                        "--socket",
+                        str(socket_path),
+                        "--capability",
+                        capability,
+                        "--token-fd",
+                        str(read_fd),
+                        command,
+                        *args,
+                    ],
+                    stdin=subprocess.DEVNULL,
+                    stdout=subprocess.DEVNULL,
+                    stderr=subprocess.DEVNULL,
+                    env={
+                        "PATH": os.environ.get("PATH", "/usr/bin:/bin"),
+                        "PYTHONPATH": str(trusted_config.root / "src"),
+                    },
+                    pass_fds=(read_fd,),
+                    start_new_session=True,
+                )
+            except BaseException:
+                os.close(write_fd)
+                raise
+        finally:
+            os.close(read_fd)
+        try:
+            os.write(write_fd, token.encode("utf-8"))
+        finally:
+            os.close(write_fd)
+        try:
+            deadline = time.monotonic() + 2
+            while time.monotonic() < deadline:
+                if process.poll() is not None:
+                    raise LauncherError("GitHub MCP broker exited during startup")
+                try:
+                    metadata = socket_path.stat(follow_symlinks=False)
+                except FileNotFoundError:
+                    time.sleep(0.01)
+                    continue
+                if (
+                    stat.S_ISSOCK(metadata.st_mode)
+                    and metadata.st_uid == os.getuid()
+                    and not metadata.st_mode & 0o077
+                ):
+                    started = self._process_start_time(process.pid)
+                    if started is None:
+                        raise LauncherError("could not read GitHub MCP broker identity")
+                    return _GithubBroker(socket_path, capability, process, started)
+                raise LauncherError("GitHub MCP broker created an unsafe socket")
+            raise LauncherError("GitHub MCP broker did not create its socket")
+        except BaseException:
+            self._settle_github_broker(
+                _GithubBroker(socket_path, capability, process, 0)
+            )
+            socket_path.unlink(missing_ok=True)
+            raise
 
     def _prompt(
         self,

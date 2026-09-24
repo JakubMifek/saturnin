@@ -38,13 +38,18 @@ different identity or freshly installed host.
 Creating the host key is a one-time administrator action, not an operation
 Saturnin may perform. A human administrator runs:
 
+<!-- generated:credential-admin-setup -->
+This is a bounded human-administrator operation; Saturnin and its workers remain forbidden from using privilege elevation.
+
 ```bash
 sudo systemd-creds setup
 sudo stat -c '%U %G %a %n' /var/lib/systemd/credential.secret
 ```
 
-The metadata check must report `root root 400`. The host key contents must
-never be printed. On systemd 256 and newer, unprivileged `--user` operations
+The metadata check must report `root root 400`. Never print the host key contents.
+<!-- /generated:credential-admin-setup -->
+
+On systemd 256 and newer, unprivileged `--user` operations
 are brokered to the system credential service; there is no separate
 Saturnin-owned plaintext master or exportable user keyring to initialize.
 Recovery therefore depends on the root-owned host master and the bound host
@@ -90,10 +95,13 @@ systemctl --user restart saturnin-improve.timer saturnin-resume.timer saturnin-d
 
 The units use private mount namespaces. Systemd decrypts credentials into the
 service credential directory in protected runtime memory. The launcher derives
-attestation keys only for configured reviewer roles. A GitHub MCP token exists
-in an owner-only runtime MCP configuration only while its worker is active;
-normal completion, launch failure, and recovery reconciliation remove that
-file. It never enters task, board, Git, or log content.
+attestation keys only for configured reviewer roles. The reusable GitHub token
+stays in a host-side broker outside the worker sandbox and process namespace.
+The worker receives only a task-scoped capability and owner-only Unix socket
+for the constrained read-only API. Normal completion, launch failure, and
+recovery reconciliation terminate the broker and remove its socket. The token
+never enters worker file, environment, descriptor, argv, task, board, Git, or
+log content.
 
 ### Rotation, sealing, and rollback
 
@@ -136,41 +144,54 @@ The ciphertext alone is not a recoverable backup. Recovery requires all of:
 - the root-only `/var/lib/systemd/credential.secret` host master;
 - the same machine ID, numeric UID, and account name.
 
-Use a root-owned, encrypted, offline or separate-filesystem backup destination.
-The owner backs up ciphertext without decrypting it:
+Use a mounted encrypted, offline or separate-filesystem backup destination.
+The owner chooses that destination interactively and backs up ciphertext
+without decrypting it:
 
 ```bash
 saturnin credential status all
-install -d -m 0700 /secure-backup/saturnin/credentials
-cp --archive ~/.config/systemd/user/saturnin-credentials/. /secure-backup/saturnin/credentials/
-chmod -R go-rwx /secure-backup/saturnin/credentials
+read -r -p 'Encrypted backup mount: ' SATURNIN_ENCRYPTED_BACKUP
+test -n "$SATURNIN_ENCRYPTED_BACKUP" && test "${SATURNIN_ENCRYPTED_BACKUP#/}" != "$SATURNIN_ENCRYPTED_BACKUP"
+install -d -m 0700 "$SATURNIN_ENCRYPTED_BACKUP/saturnin/credentials"
+cp --archive ~/.config/systemd/user/saturnin-credentials/. "$SATURNIN_ENCRYPTED_BACKUP/saturnin/credentials/"
+chmod -R go-rwx "$SATURNIN_ENCRYPTED_BACKUP/saturnin/credentials"
 ```
 
 A human administrator separately backs up the host master and identity
 metadata to that encrypted destination without displaying them:
 
+<!-- generated:credential-admin-recovery -->
+The destination must be a mounted, encrypted, offline or separate filesystem. Set its path in the administrator shell and reject an empty or relative value:
+
 ```bash
-sudo install -D -o root -g root -m 0400 /var/lib/systemd/credential.secret /secure-backup/saturnin/systemd/credential.secret
-sudo install -D -o root -g root -m 0444 /etc/machine-id /secure-backup/saturnin/systemd/machine-id
+read -r -p 'Encrypted backup mount: ' SATURNIN_ENCRYPTED_BACKUP
+test -n "${SATURNIN_ENCRYPTED_BACKUP}" && test "${SATURNIN_ENCRYPTED_BACKUP#/}" != "${SATURNIN_ENCRYPTED_BACKUP}"
+sudo install -d -o root -g root -m 0700 "${SATURNIN_ENCRYPTED_BACKUP}/saturnin/systemd"
+sudo install -m 0400 /var/lib/systemd/credential.secret "${SATURNIN_ENCRYPTED_BACKUP}/saturnin/systemd/credential.secret"
+sudo install -m 0444 /etc/machine-id "${SATURNIN_ENCRYPTED_BACKUP}/saturnin/systemd/machine-id"
 id -u saturnin
 ```
 
-Record the reported UID and account name in the protected backup inventory.
-After host-key loss, keep all Saturnin timers stopped. A human administrator
-must first verify that the restored host has the same machine ID and account
-identity, then restore the host master:
+Record the reported UID and account name in the protected backup inventory. For recovery, keep all Saturnin timers stopped and run:
 
 ```bash
-sudo cmp --silent /etc/machine-id /secure-backup/saturnin/systemd/machine-id
+read -r -p 'Encrypted backup mount: ' SATURNIN_ENCRYPTED_BACKUP
+test -n "${SATURNIN_ENCRYPTED_BACKUP}" && test "${SATURNIN_ENCRYPTED_BACKUP#/}" != "${SATURNIN_ENCRYPTED_BACKUP}"
+sudo cmp --silent /etc/machine-id "${SATURNIN_ENCRYPTED_BACKUP}/saturnin/systemd/machine-id"
 id -u saturnin
-sudo install -D -o root -g root -m 0400 /secure-backup/saturnin/systemd/credential.secret /var/lib/systemd/credential.secret
+sudo install -o root -g root -m 0400 "${SATURNIN_ENCRYPTED_BACKUP}/saturnin/systemd/credential.secret" /var/lib/systemd/credential.secret
 ```
+
+The administrator must verify the recorded UID and account name before restoring the host key.
+<!-- /generated:credential-admin-recovery -->
 
 The owner then restores and validates ciphertext:
 
 ```bash
+read -r -p 'Encrypted backup mount: ' SATURNIN_ENCRYPTED_BACKUP
+test -n "$SATURNIN_ENCRYPTED_BACKUP" && test "${SATURNIN_ENCRYPTED_BACKUP#/}" != "$SATURNIN_ENCRYPTED_BACKUP"
 install -d -m 0700 ~/.config/systemd/user/saturnin-credentials
-cp --archive /secure-backup/saturnin/credentials/. ~/.config/systemd/user/saturnin-credentials/
+cp --archive "$SATURNIN_ENCRYPTED_BACKUP/saturnin/credentials/." ~/.config/systemd/user/saturnin-credentials/
 chmod 0700 ~/.config/systemd/user/saturnin-credentials
 chmod 0600 ~/.config/systemd/user/saturnin-credentials/*
 saturnin credential prerequisites

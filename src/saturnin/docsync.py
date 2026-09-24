@@ -174,6 +174,79 @@ def _runtime_summary(config: Config) -> str:
     return _governance_documentation(config, "runtime_summary")
 
 
+def _credential_admin(config: Config) -> dict[str, Any]:
+    value = config.policy("server_scope").get("administrator_credential_recovery")
+    if not isinstance(value, dict) or value.get("runtime_allowed") is not False:
+        raise GeneratedBlockError(
+            "server_scope administrator credential recovery must deny runtime access"
+        )
+    return value
+
+
+def _credential_admin_setup(config: Config) -> str:
+    policy = _credential_admin(config)
+    key = policy["host_key_path"]
+    owner = policy["required_host_key_owner"]
+    group = policy["required_host_key_group"]
+    mode = policy["required_host_key_mode"].lstrip("0")
+    return "\n".join(
+        [
+            "This is a bounded human-administrator operation; Saturnin and its "
+            "workers remain forbidden from using privilege elevation.",
+            "",
+            "```bash",
+            "sudo systemd-creds setup",
+            f"sudo stat -c '%U %G %a %n' {key}",
+            "```",
+            "",
+            f"The metadata check must report `{owner} {group} {mode}`. Never print "
+            "the host key contents.",
+        ]
+    )
+
+
+def _credential_admin_recovery(config: Config) -> str:
+    policy = _credential_admin(config)
+    key = policy["host_key_path"]
+    machine_id = policy["machine_id_path"]
+    account = policy["service_account"]
+    variable = policy["backup_root_variable"]
+    return "\n".join(
+        [
+            "The destination must be a mounted, encrypted, offline or separate "
+            "filesystem. Set its path in the administrator shell and reject an "
+            "empty or relative value:",
+            "",
+            "```bash",
+            f"read -r -p 'Encrypted backup mount: ' {variable}",
+            f'test -n "${{{variable}}}" && test "${{{variable}#/}}" != "${{{variable}}}"',
+            f'sudo install -d -o root -g root -m 0700 "${{{variable}}}/saturnin/systemd"',
+            f"sudo install -m 0400 {key} "
+            f'"${{{variable}}}/saturnin/systemd/credential.secret"',
+            f"sudo install -m 0444 {machine_id} "
+            f'"${{{variable}}}/saturnin/systemd/machine-id"',
+            f"id -u {account}",
+            "```",
+            "",
+            "Record the reported UID and account name in the protected backup "
+            "inventory. For recovery, keep all Saturnin timers stopped and run:",
+            "",
+            "```bash",
+            f"read -r -p 'Encrypted backup mount: ' {variable}",
+            f'test -n "${{{variable}}}" && test "${{{variable}#/}}" != "${{{variable}}}"',
+            f'sudo cmp --silent {machine_id} '
+            f'"${{{variable}}}/saturnin/systemd/machine-id"',
+            f"id -u {account}",
+            f'sudo install -o root -g root -m 0400 '
+            f'"${{{variable}}}/saturnin/systemd/credential.secret" {key}',
+            "```",
+            "",
+            "The administrator must verify the recorded UID and account name "
+            "before restoring the host key.",
+        ]
+    )
+
+
 def _roles_table(config: Config) -> str:
     roles: dict[str, dict[str, Any]] = config.routing.get("roles", {})
     lines = ["| Role | Unit | Executes | Purpose |", "| --- | --- | --- | --- |"]
@@ -225,6 +298,8 @@ GENERATORS: dict[str, Callable[[Config], str]] = {
     "runtime-summary": _runtime_summary,
     "pr-review-flow": _pr_review_flow,
     "issue-review-flow": _issue_review_flow,
+    "credential-admin-setup": _credential_admin_setup,
+    "credential-admin-recovery": _credential_admin_recovery,
     "roles": _roles_table,
     "routing": _routing_table,
     "backlog": _backlog_table,

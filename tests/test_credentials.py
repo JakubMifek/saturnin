@@ -2,6 +2,9 @@ from __future__ import annotations
 
 import os
 import stat
+import base64
+import threading
+import time
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -9,6 +12,7 @@ import pytest
 
 from saturnin.credentials import (
     ATTESTATION_CREDENTIAL,
+    HOST_SCOPED_CREDENTIAL_ID,
     PREVIOUS_ATTESTATION_CREDENTIAL,
     CredentialError,
     attestation_rotation_values,
@@ -24,12 +28,16 @@ from saturnin.credentials import (
 )
 
 
+def _ciphertext(payload: bytes = b"fixture") -> bytes:
+    return base64.b64encode(HOST_SCOPED_CREDENTIAL_ID + payload) + b"\n"
+
+
 def _write_attestation_credentials(credential_dir: Path) -> tuple[Path, Path]:
     credential_dir.mkdir(parents=True, mode=0o700)
     current = credential_dir / f"{ATTESTATION_CREDENTIAL}.cred"
     previous = credential_dir / f"{PREVIOUS_ATTESTATION_CREDENTIAL}.cred"
-    current.write_text("encrypted-current\n", encoding="utf-8")
-    previous.write_text("encrypted-previous\n", encoding="utf-8")
+    current.write_bytes(_ciphertext(b"current"))
+    previous.write_bytes(_ciphertext(b"previous"))
     current.chmod(0o600)
     previous.chmod(0o600)
     return current, previous
@@ -39,23 +47,61 @@ def test_provision_attestation_encrypts_without_secret_arguments(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path / "config"))
-    monkeypatch.setattr("saturnin.credentials.secrets.token_hex", lambda _: "private-value")
+    generated = iter(("previous-value", "private-value"))
+    monkeypatch.setattr(
+        "saturnin.credentials.secrets.token_hex", lambda _: next(generated)
+    )
     calls: list[list[str]] = []
 
     def fake_run(command: list[str], **kwargs: object) -> SimpleNamespace:
         calls.append(command)
-        assert kwargs["input"] == b"private-value"
-        return SimpleNamespace(returncode=0, stdout=b"encrypted-payload\n")
+        assert kwargs["input"] in {b"private-value", b"previous-value"}
+        return SimpleNamespace(returncode=0, stdout=_ciphertext())
 
     monkeypatch.setattr("saturnin.credentials.subprocess.run", fake_run)
 
     destination = provision_attestation_key()
 
-    assert destination.read_text(encoding="utf-8") == "encrypted-payload\n"
+    assert destination.read_bytes() == _ciphertext()
     assert destination.stat().st_mode & 0o777 == 0o600
     assert destination.parent.stat().st_mode & 0o777 == 0o700
     assert "private-value" not in " ".join(calls[0])
+    assert "--with-key=host" in calls[0]
     assert all(command[-2:] == ["-", "-"] for command in calls)
+
+
+def test_parallel_provision_is_serialized_without_partial_ready_state(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path / "config"))
+
+    def fake_run(*args: object, **kwargs: object) -> SimpleNamespace:
+        time.sleep(0.02)
+        return SimpleNamespace(returncode=0, stdout=_ciphertext())
+
+    monkeypatch.setattr("saturnin.credentials.subprocess.run", fake_run)
+    destinations: list[Path] = []
+    failures: list[CredentialError] = []
+
+    def provision() -> None:
+        try:
+            destinations.append(provision_attestation_key())
+        except CredentialError as exc:
+            failures.append(exc)
+
+    workers = [threading.Thread(target=provision) for _ in range(2)]
+    for worker in workers:
+        worker.start()
+    for worker in workers:
+        worker.join(timeout=2)
+
+    assert all(not worker.is_alive() for worker in workers)
+    assert len(destinations) == 1
+    assert len(failures) == 1
+    assert "already provisioned" in str(failures[0])
+    credential_dir = destinations[0].parent
+    assert (credential_dir / f"{PREVIOUS_ATTESTATION_CREDENTIAL}.cred").is_file()
+    assert (credential_dir / ".lifecycle").stat().st_mode & 0o777 == 0o600
 
 
 def test_systemd_credential_requires_private_owner_file(
@@ -87,6 +133,46 @@ def test_validate_encrypted_credential_reports_only_status(
     )
 
     assert validate_encrypted_credential("review-attestation") == path
+
+
+def test_status_rejects_non_host_scoped_credential_envelope(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path / "config"))
+    credential_dir = tmp_path / "config" / "systemd" / "user" / "saturnin-credentials"
+    current, previous = _write_attestation_credentials(credential_dir)
+    current.write_bytes(base64.b64encode(b"\0" * 16 + b"auto-envelope") + b"\n")
+
+    with pytest.raises(CredentialError, match="not host-key-only"):
+        credential_status("review-attestation")
+
+    assert previous.is_file()
+
+
+def test_restored_ciphertext_requires_matching_host_identity(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path / "restored-host"))
+    credential_dir = (
+        tmp_path
+        / "restored-host"
+        / "systemd"
+        / "user"
+        / "saturnin-credentials"
+    )
+    _write_attestation_credentials(credential_dir)
+    monkeypatch.setattr(
+        "saturnin.credentials.subprocess.run",
+        lambda *args, **kwargs: SimpleNamespace(returncode=0, stdout=b"restored-value"),
+    )
+    assert credential_status("review-attestation")["status"] == "valid"
+
+    monkeypatch.setattr(
+        "saturnin.credentials.subprocess.run",
+        lambda *args, **kwargs: SimpleNamespace(returncode=1, stdout=b"identity mismatch"),
+    )
+    with pytest.raises(CredentialError, match="cannot be decrypted"):
+        credential_status("review-attestation")
 
 
 def test_failed_encryption_removes_exact_staging_file(
@@ -151,7 +237,7 @@ def test_rotation_reencrypts_old_key_without_exposing_values(
             return SimpleNamespace(returncode=0, stdout=b"old-master")
         if command[1] == "decrypt":
             return SimpleNamespace(returncode=0, stdout=b"older-master")
-        return SimpleNamespace(returncode=0, stdout=b"encrypted-new\n")
+        return SimpleNamespace(returncode=0, stdout=_ciphertext(b"new"))
 
     monkeypatch.setattr("saturnin.credentials.subprocess.run", fake_run)
     monkeypatch.setattr("saturnin.credentials.secrets.token_hex", lambda _: "new-master")
@@ -181,11 +267,18 @@ def test_failed_rotation_can_restore_both_encrypted_slots(
     def fake_run(command: list[str], **kwargs: object) -> SimpleNamespace:
         nonlocal encryptions
         if command[1] == "decrypt":
-            return SimpleNamespace(returncode=0, stdout=b"master")
+            return SimpleNamespace(
+                returncode=0,
+                stdout=(
+                    b"current-master"
+                    if command[-2].endswith(f"{ATTESTATION_CREDENTIAL}.cred")
+                    else b"previous-master"
+                ),
+            )
         encryptions += 1
         if encryptions == 2:
             return SimpleNamespace(returncode=1, stdout=b"")
-        return SimpleNamespace(returncode=0, stdout=b"changed-previous\n")
+        return SimpleNamespace(returncode=0, stdout=_ciphertext(b"changed"))
 
     monkeypatch.setattr("saturnin.credentials.subprocess.run", fake_run)
 
@@ -210,9 +303,13 @@ def test_rotation_refuses_to_replace_pending_previous_key(
         lambda command, **kwargs: SimpleNamespace(
             returncode=0,
             stdout=(
-                b"master"
+                (
+                    b"current-master"
+                    if command[-2].endswith(f"{ATTESTATION_CREDENTIAL}.cred")
+                    else b"previous-master"
+                )
                 if command[1] == "decrypt"
-                else b"encrypted-new\n"
+                else _ciphertext(b"new")
             ),
         ),
     )
@@ -230,7 +327,14 @@ def test_rotation_refuses_to_discard_key_used_by_review_records(
     _write_attestation_credentials(credential_dir)
     monkeypatch.setattr(
         "saturnin.credentials.subprocess.run",
-        lambda *args, **kwargs: SimpleNamespace(returncode=0, stdout=b"master"),
+        lambda command, **kwargs: SimpleNamespace(
+            returncode=0,
+            stdout=(
+                b"current-master"
+                if command[-2].endswith(f"{ATTESTATION_CREDENTIAL}.cred")
+                else b"previous-master"
+            ),
+        ),
     )
 
     with pytest.raises(CredentialError, match="still protects review records"):
@@ -250,7 +354,7 @@ def test_revoke_attestation_removes_current_and_previous(
         credential_dir / f"{PREVIOUS_ATTESTATION_CREDENTIAL}.cred",
     ]
     for path in paths:
-        path.write_text("encrypted\n", encoding="utf-8")
+        path.write_bytes(_ciphertext())
         path.chmod(0o600)
 
     assert revoke_credential("review-attestation") == paths

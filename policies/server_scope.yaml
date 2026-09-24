@@ -8,6 +8,19 @@ user:
   # Commands must never be run through these.
   forbidden_prefixes: [sudo, su, doas, pkexec]
 
+# Human-operated recovery boundary. These commands are documentation inputs,
+# not permissions granted to Saturnin or its workers.
+administrator_credential_recovery:
+  actor: human-administrator
+  runtime_allowed: false
+  host_key_path: /var/lib/systemd/credential.secret
+  machine_id_path: /etc/machine-id
+  service_account: saturnin
+  backup_root_variable: SATURNIN_ENCRYPTED_BACKUP
+  required_host_key_owner: root
+  required_host_key_group: root
+  required_host_key_mode: "0400"
+
 packages:
   # apt is only allowed for packages that belong to a Saturnin-dedicated service.
   apt_allowed: true
