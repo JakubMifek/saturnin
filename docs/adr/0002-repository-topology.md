@@ -1,7 +1,8 @@
 # ADR-0002: Three repositories - public engine, private board, private notes
 
-Status: **Proposed** - one open question for @jakubmifek, see "Decision needed".
+Status: **Accepted**
 Date: 2026-08-30
+Accepted: 2026-09-24
 
 ## Context
 
@@ -24,11 +25,13 @@ Split by *sensitivity and access pattern*, not by content type. Three
 repositories, declared in `policies/repos.yaml` and validated by
 `saturnin doctor`:
 
-| Repo | Visibility | Holds | Why separate |
-| --- | --- | --- | --- |
-| `JakubMifek/saturnin` | public | engine code, policies, agent and skill contracts, runbooks that contain no private detail | It is the reusable part. Public is also a discipline: nothing secret can accumulate here by accident. |
-| `JakubMifek/saturnin-ops` | private | mirrored task issues (durable copy once mirroring is enabled), escalation issues | Issues need automation (labels, assignees, timelines) and a real API. A wiki cannot be dispatched from. |
-| `JakubMifek/saturnin-notes` | private | long-form notes, project context, Obsidian vault | Notes are written and read by humans, change constantly, and would drown the engine's history in noise. |
+<!-- generated:repository-topology -->
+| Repository | Visibility | Purpose |
+| --- | --- | --- |
+| `JakubMifek/saturnin` | public | Public engine, policies, contracts and public runbooks |
+| `JakubMifek/saturnin-ops` | private | Private operational board and escalation issues |
+| `JakubMifek/saturnin-notes` | private | Private long-form context and Obsidian notes |
+<!-- /generated:repository-topology -->
 
 ### The open question, answered: separate board repo, not merged with the notes
 
@@ -48,11 +51,19 @@ alike:
 Merging them means every board automation has commit access to the notes, and
 every note sync races the mirror timer. They stay separate.
 
-**Decision needed from @jakubmifek**: confirm the two private repository names
-(`saturnin-ops`, `saturnin-notes`) and create them, or say which naming you
-prefer. Until they exist, `saturnin task sync` remains a preview/opt-in mirror
-path, the mirror timer is not enabled by the installer, and `doctor` does not
-make this proposed topology a hard gate.
+The owner accepted the declared topology. Acceptance does not enable issue
+mirroring: `policies/repos.yaml:tracking.mirror_tasks_as_issues` remains the
+canonical activation switch and is still false.
+
+Private notes access and review are also policy-rendered:
+
+<!-- generated:notes-governance -->
+- Sole writer: `scribe`.
+- Every other role: read-only; secrets allowed: false.
+- Curation requirements: search before create, atomic notes, stable ids, stable aliases, canonical notes, redirects, maps of content, optimize for read only lookup.
+- Public bootstrap packages may only be applied by `scribe`.
+- Every change requires an independent, zero-context rubber-duck `pr-reviewer` check for: factual integrity, duplication, canonical structure, links, retrievability.
+<!-- /generated:notes-governance -->
 
 ## Consequences
 

@@ -28,9 +28,36 @@ repos:
     slug: JakubMifek/saturnin-notes
     visibility: private
     format: obsidian
+    access:
+      writer_roles: [scribe]
+      non_writer_access: read-only
+      secrets_allowed: false
+    curation:
+      search_before_create: true
+      atomic_notes: true
+      stable_ids: true
+      stable_aliases: true
+      canonical_notes: true
+      redirects: true
+      maps_of_content: true
+      optimize_for_read_only_lookup: true
+      public_bootstrap_application_role: scribe
+    change_review:
+      required: true
+      independent: true
+      zero_context: true
+      method: rubber-duck
+      reviewer_role: pr-reviewer
+      checks:
+        - factual_integrity
+        - duplication
+        - canonical_structure
+        - links
+        - retrievability
 
 tracking:
-  # Optional until ADR-0002's repository topology is accepted and provisioned.
+  # Topology acceptance does not enable mirroring; provisioning and a separate
+  # operational decision still precede activation.
   mirror_tasks_as_issues: false
   # Improvement findings and automation proposals are mirrored too.
   mirror_kinds: [objective, epic, feature, task, pr-review, issue-review, automation, improvement]

@@ -143,6 +143,46 @@ def test_squad_is_assembled_per_task(config: Config, board: Board) -> None:
 
 
 @pytest.mark.parametrize(
+    "text",
+    [
+        "Implement cache ownership and record the decision",
+        "Implement publication of the investigation result",
+        "Implement export of this durable information",
+    ],
+)
+def test_durable_information_automatically_includes_scribe(
+    config: Config, board: Board, text: str
+) -> None:
+    task = board.create(text)
+
+    route = Router(config).dispatch(board, task, squad=["code-worker"])
+
+    assert route.role == "code-worker"
+    assert board.get(task.id).squad == ["code-worker", "scribe"]
+
+
+def test_private_notes_changes_route_only_to_scribe_with_reviewer(
+    config: Config, board: Board
+) -> None:
+    task = board.create("Apply synthetic vault bootstrap", labels=["vault-change"])
+
+    route = Router(config).dispatch(board, task)
+
+    assert route.role == "scribe"
+    assert route.result_contract == "pr-gate"
+    assert board.get(task.id).squad == ["scribe", "pr-reviewer"]
+
+
+def test_private_notes_change_rejects_non_scribe_lead(
+    config: Config, board: Board
+) -> None:
+    task = board.create("Apply public bootstrap", labels=["notes-write"])
+
+    with pytest.raises(RoutingError, match="only be led"):
+        Router(config).resolve(task, lead_role="code-worker")
+
+
+@pytest.mark.parametrize(
     ("squad", "message"),
     [(["ceo"], "CEO never executes"), (["ghost"], "unknown squad")],
 )

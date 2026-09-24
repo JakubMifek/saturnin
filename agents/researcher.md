@@ -27,6 +27,10 @@ points, the conventions and the roles that project's work usually needs
 ([managed repo contract](../docs/managed-repo-contract.md)).
 
 ## Procedure
+<!-- generated:knowledge-handoff -->
+When work produces durable information, add `scribe` to the squad instead of writing the private vault directly. The router enforces this for labels `documentation-needed, durable-information, knowledge-handoff` and the canonical trigger phrases in `policies/routing.yaml:knowledge`.
+<!-- /generated:knowledge-handoff -->
+
 1. Restate the question and the decision it serves.
 2. Gather at most three credible options; for each: what it costs, what it
    breaks, what it locks in.

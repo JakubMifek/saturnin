@@ -39,6 +39,11 @@ def test_checked_in_docs_match_policy() -> None:
     )
     assert ".github/workflows/governance.yml" in runtime_block.group("body")
     assert "independently enforces the review gate" in runtime_block.group("body")
+    topology = (REPO_ROOT / "docs" / "adr" / "0002-repository-topology.md").read_text(
+        encoding="utf-8"
+    )
+    assert "Status: **Accepted**" in topology
+    assert "<!-- generated:notes-governance -->" in topology
 
 
 def test_cleanup_guidance_references_policy_without_copying_configurable_facts() -> None:

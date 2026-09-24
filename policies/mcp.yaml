@@ -49,6 +49,15 @@ rules:
   # A role that does not execute may not hold any MCP server at all.
   non_executing_roles_get_none: true
 
+# The notes lookup integration is only a declared future boundary. It is not a
+# server entry, cannot be launched, and grants no write path in this change.
+future_integrations:
+  notes:
+    enabled: false
+    repository: notes
+    non_scribe_access: read-only
+    write_roles: []
+
 launcher:
   # Repository default is safety-first: routing/dispatch works everywhere,
   # launch is enabled per host once bwrap/copilot/npx/uvx are installed.

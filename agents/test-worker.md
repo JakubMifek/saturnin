@@ -20,6 +20,10 @@ a target - a test that asserts nothing does not count, and gaming the number is
 a review finding.
 
 ## Procedure
+<!-- generated:knowledge-handoff -->
+When work produces durable information, add `scribe` to the squad instead of writing the private vault directly. The router enforces this for labels `documentation-needed, durable-information, knowledge-handoff` and the canonical trigger phrases in `policies/routing.yaml:knowledge`.
+<!-- /generated:knowledge-handoff -->
+
 1. Own worktree, own branch (`fix/<slug>` or `chore/<slug>`).
 2. Write the failing test first; confirm it fails for the stated reason.
 3. Fix or hand back to the `code-worker` with the reproduction attached to the
