@@ -45,7 +45,9 @@ keeping the rules as data.
   CI archives the immutable PR commit. Both scan raw file bytes and report only
   rule, a path digest and line:
   candidate-controlled paths, matched values and raw scanner output are never
-  printed.
+  printed. Tracked symlink blobs are scanned as inert regular-file bytes and
+  are never followed. Policy and scanner configuration come from the same
+  selected index or commit tree and must pass the trusted audit before use.
 - Disclosure exceptions are limited to exact line or complete-match digests
   under `tests/fixtures/disclosure/`; regex equivalents are rejected. A PR may
   propose scanner or allowlist changes, but `pull_request_target` validates

@@ -181,6 +181,17 @@ def _git(repo: Path, *args: str) -> None:
     subprocess.run(["git", *args], cwd=repo, check=True, capture_output=True)
 
 
+def _add_disclosure_policy(repo: Path) -> None:
+    shutil.copytree(REPO_ROOT / "policies", repo / "policies")
+    fixture = repo / "tests" / "fixtures" / "disclosure"
+    fixture.mkdir(parents=True)
+    shutil.copy(
+        REPO_ROOT / "tests" / "fixtures" / "disclosure" / "synthetic-allowed.txt",
+        fixture,
+    )
+    _git(repo, "add", "policies", "tests/fixtures/disclosure")
+
+
 def _fake_gitleaks(path: Path) -> None:
     path.write_text(
         """#!/usr/bin/env python3
@@ -263,6 +274,7 @@ def test_gate_scans_tracked_content_and_redacts_scanner_output(tmp_path: Path) -
     repo = tmp_path / "candidate"
     repo.mkdir()
     _git(repo, "init", "-b", "feature/test")
+    _add_disclosure_policy(repo)
     (repo / "leak.txt").write_text("RAW-SYNTHETIC-SECRET\n", encoding="utf-8")
     _git(repo, "add", "leak.txt")
     _git(repo, "-c", "user.name=Test", "-c", "user.email=test@example.com",
@@ -282,6 +294,7 @@ def test_gate_ignores_untracked_and_ignored_content(tmp_path: Path) -> None:
     repo = tmp_path / "candidate"
     repo.mkdir()
     _git(repo, "init", "-b", "feature/test")
+    _add_disclosure_policy(repo)
     (repo / ".gitignore").write_text("leak.txt\n", encoding="utf-8")
     (repo / "clean.txt").write_text("clean\n", encoding="utf-8")
     (repo / "leak.txt").write_text("untracked\n", encoding="utf-8")
@@ -301,6 +314,7 @@ def test_gate_scans_index_bytes_not_worktree_bytes(tmp_path: Path) -> None:
     repo = tmp_path / "candidate"
     repo.mkdir()
     _git(repo, "init", "-b", "feature/test")
+    _add_disclosure_policy(repo)
     target = repo / "leak.txt"
     target.write_text("clean\n", encoding="utf-8")
     _git(repo, "add", "leak.txt")
@@ -332,6 +346,7 @@ def test_gate_scans_exact_commit_tree_despite_index_changes(tmp_path: Path) -> N
     repo = tmp_path / "candidate"
     repo.mkdir()
     _git(repo, "init", "-b", "feature/test")
+    _add_disclosure_policy(repo)
     target = repo / "leak.txt"
     target.write_text("RAW-SYNTHETIC-SECRET\n", encoding="utf-8")
     _git(repo, "add", "leak.txt")
@@ -363,6 +378,129 @@ def test_gate_scans_exact_commit_tree_despite_index_changes(tmp_path: Path) -> N
     assert "RAW-SYNTHETIC-SECRET" not in result.stdout + result.stderr
 
 
+@pytest.mark.parametrize("source_kind", ["index", "commit"])
+@pytest.mark.parametrize(
+    ("blob", "expected_rule"),
+    [
+        ("SATURNIN-DISCLOSURE:PRIVATE hidden", "private-material"),
+        ("RAW-SYNTHETIC-SECRET", "fake-token"),
+    ],
+)
+def test_gate_scans_symlink_blob_without_following_target(
+    tmp_path: Path, source_kind: str, blob: str, expected_rule: str
+) -> None:
+    repo = tmp_path / "candidate"
+    repo.mkdir()
+    _git(repo, "init", "-b", "feature/test")
+    _add_disclosure_policy(repo)
+    (repo / "outside.txt").write_text("clean external target\n", encoding="utf-8")
+    os.symlink(blob, repo / "tracked-link")
+    _git(repo, "add", "tracked-link")
+    _git(
+        repo,
+        "-c",
+        "user.name=Test",
+        "-c",
+        "user.email=test@example.com",
+        "commit",
+        "-m",
+        "symlink blob",
+    )
+    source_ref = "index"
+    if source_kind == "commit":
+        source_ref = subprocess.run(
+            ["git", "rev-parse", "HEAD"],
+            cwd=repo,
+            check=True,
+            capture_output=True,
+            text=True,
+        ).stdout.strip()
+    fake = tmp_path / "gitleaks"
+    _fake_gitleaks(fake)
+
+    result = _run_gate(repo, fake, source_ref=source_ref)
+
+    assert result.returncode == 1
+    assert f"rule={expected_rule}" in result.stdout
+    assert blob not in result.stdout + result.stderr
+    assert (repo / "outside.txt").read_text(encoding="utf-8") == (
+        "clean external target\n"
+    )
+
+
+@pytest.mark.parametrize("source_kind", ["index", "commit"])
+def test_gate_uses_policy_from_selected_tree_not_worktree(
+    tmp_path: Path, source_kind: str
+) -> None:
+    repo = tmp_path / "candidate"
+    repo.mkdir()
+    _git(repo, "init", "-b", "feature/test")
+    _add_disclosure_policy(repo)
+    secret = "RAW-SYNTHETIC-SECRET"
+    (repo / "leak.txt").write_text(secret + "\n", encoding="utf-8")
+    _git(repo, "add", "leak.txt")
+    _git(
+        repo,
+        "-c",
+        "user.name=Test",
+        "-c",
+        "user.email=test@example.com",
+        "commit",
+        "-m",
+        "selected tree",
+    )
+    source_ref = "index"
+    if source_kind == "commit":
+        source_ref = subprocess.run(
+            ["git", "rev-parse", "HEAD"],
+            cwd=repo,
+            check=True,
+            capture_output=True,
+            text=True,
+        ).stdout.strip()
+    config = repo / "policies" / "gitleaks.toml"
+    config.write_text(
+        config.read_text(encoding="utf-8")
+        + '\n[allowlist]\npaths = [".*"]\n',
+        encoding="utf-8",
+    )
+    policy_path = repo / "policies" / "disclosure.yaml"
+    policy = yaml.safe_load(policy_path.read_text(encoding="utf-8"))
+    policy["scanner"]["config"] = "README.md"
+    policy_path.write_text(yaml.safe_dump(policy), encoding="utf-8")
+    fake = tmp_path / "gitleaks"
+    _fake_gitleaks(fake)
+
+    result = _run_gate(repo, fake, source_ref=source_ref)
+
+    assert result.returncode == 1
+    assert "rule=fake-token" in result.stdout
+    assert secret not in result.stdout + result.stderr
+
+
+def test_gate_fails_closed_when_selected_tree_policy_audit_fails(
+    tmp_path: Path,
+) -> None:
+    repo = tmp_path / "candidate"
+    repo.mkdir()
+    _git(repo, "init", "-b", "feature/test")
+    _add_disclosure_policy(repo)
+    config = repo / "policies" / "gitleaks.toml"
+    config.write_text(
+        config.read_text(encoding="utf-8")
+        + '\n[allowlist]\npaths = [".*"]\n',
+        encoding="utf-8",
+    )
+    _git(repo, "add", "policies/gitleaks.toml")
+    fake = tmp_path / "gitleaks"
+    _fake_gitleaks(fake)
+
+    result = _run_gate(repo, fake)
+
+    assert result.returncode == 2
+    assert "rejected selected-tree policy" in result.stdout
+
+
 @pytest.mark.parametrize("immutable", [False, True], ids=["index", "commit"])
 def test_gate_rejects_annotated_credentials_with_redacted_output(
     tmp_path: Path, immutable: bool
@@ -370,6 +508,7 @@ def test_gate_rejects_annotated_credentials_with_redacted_output(
     repo = tmp_path / "candidate"
     repo.mkdir()
     _git(repo, "init", "-b", "feature/test")
+    _add_disclosure_policy(repo)
     secret = "RAW-SYNTHETIC-SECRET"
     (repo / "leak.txt").write_text(
         f"token={secret} # gitleaks:allow\n",
@@ -436,6 +575,7 @@ def test_gate_does_not_descend_into_gitlink_worktrees(tmp_path: Path) -> None:
     repo = tmp_path / "candidate"
     repo.mkdir()
     _git(repo, "init", "-b", "feature/test")
+    _add_disclosure_policy(repo)
     _git(repo, "-c", "protocol.file.allow=always", "submodule", "add", str(child), "vendor")
     _git(
         repo,
@@ -462,6 +602,7 @@ def test_gate_rejects_scanner_override(tmp_path: Path) -> None:
     repo = tmp_path / "candidate"
     repo.mkdir()
     _git(repo, "init", "-b", "feature/test")
+    _add_disclosure_policy(repo)
     (repo / "clean.txt").write_text("clean\n", encoding="utf-8")
     _git(repo, "add", "clean.txt")
     fake = tmp_path / "gitleaks"
