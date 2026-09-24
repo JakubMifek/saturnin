@@ -44,8 +44,12 @@ sudo stat -c '%U %G %a %n' /var/lib/systemd/credential.secret
 ```
 
 The metadata check must report `root root 400`. The host key contents must
-never be printed. After the reviewed PR is merged, the unprivileged Saturnin
-owner runs:
+never be printed. On systemd 256 and newer, unprivileged `--user` operations
+are brokered to the system credential service; there is no separate
+Saturnin-owned plaintext master or exportable user keyring to initialize.
+Recovery therefore depends on the root-owned host master and the bound host
+and account identity described below. After the reviewed PR is merged, the
+unprivileged Saturnin owner runs:
 
 ```bash
 cd /home/saturnin/saturnin
