@@ -36,7 +36,7 @@ from .governance import (
 )
 from .issues import MirrorError, run_gh
 from .jsonlines import PRIVATE_FILE_MODE, atomic_replace_text
-from .launcher_host import host_launcher_enabled
+from .launcher_host import host_launcher_enabled, prerequisite_invocation
 from .locking import file_lock
 from .mcp import MCPError, StagedGithubBinary, server_process, stage_github_binary
 from .review import (
@@ -1831,13 +1831,27 @@ class AgentLauncher:
                 "prerequisite_checks", {}
             ):
                 try:
-                    command = str(
-                        resolve_trusted_executable(
-                            trusted_config,
-                            command,
-                            expected_binary=command_name,
-                        )
+                    executable = resolve_trusted_executable(
+                        trusted_config,
+                        command,
+                        expected_binary=command_name,
                     )
+                    prerequisite = trusted_config.server_scope[
+                        "prerequisite_checks"
+                    ][command_name]
+                    invocation, _ = prerequisite_invocation(
+                        trusted_config,
+                        executable,
+                        args,
+                        prerequisite,
+                    )
+                    command, *args = invocation
+                    if executable != Path(command) and not self._sandbox_visible_executable(
+                        executable, trusted_config
+                    ):
+                        raise LauncherError(
+                            f"MCP wrapper is outside sandbox read-only mounts: {executable}"
+                        )
                 except ExecutableTrustError as exc:
                     raise LauncherError(
                         f"untrusted MCP executable {command_name}: {exc}"

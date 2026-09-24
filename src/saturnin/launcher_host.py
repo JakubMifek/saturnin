@@ -292,7 +292,7 @@ def _executable_health(
         }
     path = str(executable)
     try:
-        command, system_path = _prerequisite_command(
+        command, system_path = prerequisite_invocation(
             config, executable, arguments, definition
         )
         result = subprocess.run(
@@ -330,12 +330,13 @@ def _executable_health(
     }
 
 
-def _prerequisite_command(
+def prerequisite_invocation(
     config: Config,
     executable: Path,
     arguments: list[str],
     definition: dict[str, Any],
 ) -> tuple[list[str], str]:
+    """Bind a prerequisite script to its governed interpreter."""
     roots = _trusted_system_path(config.server_scope.get("filesystem", {}))
     system_path = os.pathsep.join(str(root) for root in roots)
     try:
@@ -369,7 +370,12 @@ def _prerequisite_command(
         raise ExecutableTrustError(
             f"required script interpreter not found in trusted system PATH: {interpreter_name}"
         )
-    interpreter = Path(found).resolve(strict=True)
+    try:
+        interpreter = Path(found).resolve(strict=True)
+    except (OSError, RuntimeError, ValueError) as exc:
+        raise ExecutableTrustError(
+            f"trusted script interpreter could not be resolved: {exc}"
+        ) from exc
     if _containing_root(interpreter, roots) is None:
         raise ExecutableTrustError(
             f"script interpreter {str(interpreter)!r} is outside trusted system PATH"

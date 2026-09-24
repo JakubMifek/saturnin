@@ -22,6 +22,7 @@ from saturnin.checkpoints import Checkpoint, CheckpointStore
 from saturnin.cli import main
 from saturnin.config import Config
 from saturnin.launcher import AgentLauncher, LauncherError
+from saturnin.launcher_host import prerequisite_invocation
 from saturnin.governance import resolve_trusted_executable
 from saturnin.mcp import MCPError, StagedGithubBinary
 from saturnin.review import (
@@ -78,6 +79,13 @@ def verified_github_mcp(monkeypatch: pytest.MonkeyPatch) -> None:
         "saturnin.launcher.resolve_trusted_executable",
         lambda config, path, **kwargs: (
             Path(path) if "/" in path else Path("/usr/bin") / path
+        ),
+    )
+    monkeypatch.setattr(
+        "saturnin.launcher.prerequisite_invocation",
+        lambda _config, executable, arguments, _definition: (
+            [str(executable), *arguments],
+            "/usr/bin:/bin",
         ),
     )
 
@@ -168,6 +176,70 @@ def test_launcher_starts_routed_role_with_filtered_mcp(
     monkeypatch.setattr(launcher, "_process_start_time", lambda pid: None)
     assert launcher.reconcile_exited_launches() == [task.id]
     assert not github_command.parent.exists()
+
+
+def test_mcp_scripts_launch_through_verified_interpreter(
+    config: Config,
+    board: Board,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    task = board.create("Implement MCP launch hardening")
+    Router(config).dispatch(board, task)
+    launcher = AgentLauncher(config, board)
+    contract = launcher._contract(board.get(task.id), config)
+    contract.front_matter["mcp"] = ["filesystem", "fetch"]
+    trusted_bin = tmp_path / "trusted-system"
+    trusted_bin.mkdir()
+    trusted_node = trusted_bin / "node"
+    trusted_node.write_text("#!/bin/sh\n", encoding="utf-8")
+    trusted_node.chmod(0o755)
+    wrapper = tmp_path / "npx-cli.js"
+    wrapper.write_text("#!/usr/bin/env node\n", encoding="utf-8")
+    wrapper.chmod(0o755)
+    ordinary = tmp_path / "uvx"
+    ordinary.write_bytes(b"\x7fELF")
+    ordinary.chmod(0o755)
+    shadow = tmp_path / "ambient"
+    shadow.mkdir()
+    attacker_node = shadow / "node"
+    attacker_node.write_text("#!/bin/sh\nexit 99\n", encoding="utf-8")
+    attacker_node.chmod(0o755)
+    monkeypatch.setenv("PATH", str(shadow))
+    monkeypatch.setattr(
+        "saturnin.launcher.resolve_trusted_executable",
+        lambda _config, _command, *, expected_binary: (
+            wrapper if expected_binary == "npx" else ordinary
+        ),
+    )
+    monkeypatch.setattr(
+        "saturnin.launcher.prerequisite_invocation",
+        prerequisite_invocation,
+    )
+    monkeypatch.setattr(
+        "saturnin.launcher_host._trusted_system_path",
+        lambda _filesystem: [trusted_bin],
+    )
+    monkeypatch.setattr(
+        "saturnin.launcher_host.shutil.which",
+        lambda _name, *, path: str(trusted_node),
+    )
+    monkeypatch.setattr(
+        "saturnin.launcher_host._trusted_system_path_problem",
+        lambda *_args: None,
+    )
+    monkeypatch.setattr(launcher, "_sandbox_visible_executable", lambda *_args: True)
+
+    mcp_launch = launcher._write_mcp_config(board.get(task.id), contract)
+    generated = json.loads(mcp_launch.path.read_text(encoding="utf-8"))["mcpServers"]
+
+    filesystem = generated["filesystem"]
+    assert filesystem["command"] == str(trusted_node)
+    assert filesystem["args"][0] == str(wrapper)
+    assert str(attacker_node) not in (filesystem["command"], *filesystem["args"])
+    fetch = generated["fetch"]
+    assert fetch["command"] == str(ordinary)
+    assert fetch["args"] == ["mcp-server-fetch@2026.8.18"]
 
 
 def test_launcher_binds_verified_mcp_descriptor_after_path_substitution(

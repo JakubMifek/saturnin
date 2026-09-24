@@ -42,7 +42,7 @@ def _healthy_prerequisites(
         lambda _, name, **kwargs: binary_dir / name,
     )
     monkeypatch.setattr(
-        "saturnin.launcher_host._prerequisite_command",
+        "saturnin.launcher_host.prerequisite_invocation",
         lambda _, executable, arguments, definition: (
             ["/bin/sh", str(executable), *arguments],
             "/usr/bin:/bin",
