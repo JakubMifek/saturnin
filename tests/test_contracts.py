@@ -87,7 +87,7 @@ def test_private_notes_policy_has_one_writer_and_independent_review(
 
     assert notes["access"]["writer_roles"] == ["scribe"]
     assert notes["access"]["non_writer_access"] == "read-only"
-    assert notes["change_review"]["reviewer_role"] == "pr-reviewer"
+    assert notes["change_review"]["allowed_reviewer_roles"] == ["pr-reviewer"]
     assert notes["change_review"]["independent"] is True
     assert audit(config) == []
 

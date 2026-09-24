@@ -170,6 +170,44 @@ def _issue_review_flow(config: Config) -> str:
     return _review_flow(config, "issue")
 
 
+def _notes_review_flow(config: Config) -> str:
+    notes = config.policy("repos").get("repos", {}).get("notes", {})
+    review = notes.get("change_review", {})
+    repo = notes.get("slug", "<owner/repo>")
+    writers = notes.get("access", {}).get("writer_roles", [])
+    reviewers = review.get("allowed_reviewer_roles", [])
+    checks = review.get("required_checks", [])
+    if not writers or not reviewers or not checks:
+        raise GeneratedBlockError("canonical notes review policy is incomplete")
+    check_args = " ".join(f"--check {check}" for check in checks)
+    author = writers[0]
+    reviewer = reviewers[0]
+    profile = review.get("profile")
+    method = review.get("method")
+    return "\n".join(
+        [
+            "```bash",
+            f'HEAD_SHA="$(gh pr view <N> --repo {repo} --json headRefOid --jq .headRefOid)"',
+            "VERDICT=approved",
+            f'attestation="$(saturnin review attest {repo}#<N> --kind pr \\',
+            f"  --repo {repo} --author {author} --reviewer {reviewer} \\",
+            f'  --verdict "$VERDICT" --head-sha "$HEAD_SHA" \\',
+            f"  --profile {profile} --method {method} {check_args})\"",
+            f"saturnin review record {repo}#<N> --kind pr \\",
+            f"  --repo {repo} --author {author} --reviewer {reviewer} \\",
+            f'  --verdict "$VERDICT" --head-sha "$HEAD_SHA" \\',
+            f'  --profile {profile} --method {method} {check_args} \\',
+            '  --attestation "$attestation"',
+            f"saturnin review gate {repo}#<N> --kind pr \\",
+            f"  --repo {repo} --author {author} --head-sha \"$HEAD_SHA\"",
+            "```",
+            "",
+            "Use this flow for notes changes; every profile field and completed "
+            "check is covered by the signed attestation and persisted ledger record.",
+        ]
+    )
+
+
 def _runtime_summary(config: Config) -> str:
     return _governance_documentation(config, "runtime_summary")
 
@@ -233,7 +271,11 @@ def _notes_governance(config: Config) -> str:
         for key, enabled in curation.items()
         if enabled is True
     ]
-    checks = [str(check).replace("_", " ") for check in review.get("checks", [])]
+    checks = [
+        str(check).replace("_", " ")
+        for check in review.get("required_checks", [])
+    ]
+    reviewers = review.get("allowed_reviewer_roles", [])
     return "\n".join(
         [
             f"- Sole writer: `{', '.join(access.get('writer_roles', []))}`.",
@@ -244,7 +286,7 @@ def _notes_governance(config: Config) -> str:
             f"`{curation.get('public_bootstrap_application_role')}`.",
             f"- Every change requires an independent, zero-context "
             f"{review.get('method')} "
-            f"`{review.get('reviewer_role')}` review using the "
+            f"`{reviewers[0] if reviewers else ''}` review using the "
             f"`{review.get('profile')}` profile. Its signed attestation and ledger "
             f"record must include: {', '.join(checks)}.",
         ]
@@ -283,6 +325,7 @@ GENERATORS: dict[str, Callable[[Config], str]] = {
     "capabilities": _capabilities_table,
     "runtime-summary": _runtime_summary,
     "pr-review-flow": _pr_review_flow,
+    "notes-review-flow": _notes_review_flow,
     "issue-review-flow": _issue_review_flow,
     "roles": _roles_table,
     "routing": _routing_table,

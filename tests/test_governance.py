@@ -23,6 +23,7 @@ from saturnin.review import (
     review_attestation_signing_key,
     role_scoped_review_attestation_key,
     sign_review_attestation,
+    notes_review_settings,
 )
 
 SELF_REPO = "JakubMifek/saturnin"
@@ -89,14 +90,27 @@ def test_policies_audit_clean(governance: Governance) -> None:
 def test_private_notes_review_contract_is_mandatory_and_independent(
     config: Config,
 ) -> None:
-    review = config.governance["review"]["notes"]
+    reference = config.governance["review"]["notes"]
+    review = notes_review_settings(config)
 
+    assert reference == {"policy_ref": "repos.repos.notes.change_review"}
     assert review["required"] is True
     assert review["independent"] is True
     assert review["zero_context"] is True
     assert review["author_may_review"] is False
     assert review["allowed_reviewer_roles"] == ["pr-reviewer"]
     assert review["profile"] == "notes-review"
+
+
+def test_private_notes_review_reference_must_resolve(config: Config) -> None:
+    config.governance["review"]["notes"]["policy_ref"] = (
+        "repos.repos.notes.missing"
+    )
+
+    assert any(
+        "policy reference is invalid" in problem
+        for problem in Governance(config).audit()
+    )
 
 
 def test_review_attestation_key_environments_must_be_distinct(config: Config) -> None:
@@ -183,7 +197,7 @@ def test_notes_review_gate_requires_signed_profile_and_all_checks(
     ledger = ReviewLedger(config)
     repo = config.policy("repos")["repos"]["notes"]["slug"]
     subject = f"{repo}#7"
-    settings = config.governance["review"]["notes"]
+    settings = notes_review_settings(config)
     record_review(
         ledger,
         subject=subject,

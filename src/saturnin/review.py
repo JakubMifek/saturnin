@@ -203,6 +203,19 @@ def normalize_repository_slug(repo: str) -> str:
     return slug.casefold()
 
 
+def notes_review_settings(config: Config) -> dict[str, Any]:
+    """Return the canonical notes review contract referenced by governance."""
+    reference = (
+        config.governance.get("review", {}).get("notes", {}).get("policy_ref")
+    )
+    if not isinstance(reference, str) or not reference:
+        raise ReviewError("notes review policy reference is not configured")
+    settings = config.policy_reference(reference)
+    if not isinstance(settings, dict):
+        raise ReviewError("notes review policy reference must resolve to a mapping")
+    return settings
+
+
 def _canonical_attestation_payload(
     payload: dict[str, Any], fields: tuple[str, ...] = ATTESTED_FIELDS
 ) -> bytes:
@@ -685,7 +698,7 @@ class ReviewLedger:
         )
         if not is_notes_review:
             return
-        settings = self.config.governance.get("review", {}).get("notes", {})
+        settings = notes_review_settings(self.config)
         expected_profile = str(settings.get("profile", ""))
         expected_method = str(settings.get("method", ""))
         expected_checks = sorted(

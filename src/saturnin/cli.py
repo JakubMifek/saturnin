@@ -609,6 +609,11 @@ def _prepare_project_route(
     squad = list(squad_override or project_squad or route.squad)
     if squad_override is None and lead and lead not in squad:
         squad.insert(0, lead)
+    squad.extend(
+        role
+        for role in router._required_collaborators(task)
+        if role not in squad
+    )
     router.validate_dispatch_squad(squad, local_roles)
     with board.edit(task_id) as stored:
         if stored.state != "routed":

@@ -223,9 +223,12 @@ def audit(config: Config | None = None) -> list[str]:
         problems.append("private notes changes require independent zero-context review")
     if review.get("method") != "rubber-duck":
         problems.append("private notes changes require the rubber-duck review method")
-    if review.get("reviewer_role") not in roles:
-        problems.append("private notes reviewer must be a known role")
-    if review.get("reviewer_role") == scribe:
+    reviewers = review.get("allowed_reviewer_roles", [])
+    if not isinstance(reviewers, list) or not reviewers or any(
+        reviewer not in roles for reviewer in reviewers
+    ):
+        problems.append("private notes reviewers must be known roles")
+    if scribe in reviewers:
         problems.append("private notes reviewer must be independent from the scribe")
     integration = config.policy("mcp").get("future_integrations", {}).get("notes", {})
     if integration.get("enabled") is not False or integration.get("write_roles") != []:

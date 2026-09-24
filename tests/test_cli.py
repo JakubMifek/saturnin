@@ -22,6 +22,7 @@ from saturnin.review import (
     issue_content_digest,
     review_attestation_signing_key,
     sign_review_attestation,
+    notes_review_settings,
 )
 from saturnin.routing import Router
 from saturnin.worktrees import CleanupPlan, WorktreeManager
@@ -732,6 +733,80 @@ def test_dispatch_squad_override_survives_project_preparation(
     assert Board().get(task["id"]).squad == ["pr-reviewer"]
 
 
+def test_notes_project_squad_cannot_discard_mandatory_collaborators(
+    home: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    config = Config.load()
+    repo = config.policy("repos")["repos"]["notes"]["slug"]
+    worktree = home / "var" / "worktrees" / "notes-squad"
+    (worktree / ".saturnin").mkdir(parents=True)
+    (worktree / ".saturnin" / "repo.yaml").write_text(
+        "project: Notes\nsquad: [code-worker]\n",
+        encoding="utf-8",
+    )
+    task = json.loads(
+        run(
+            capsys,
+            "--json",
+            "task",
+            "add",
+            "Provision notes structure",
+            "--repo",
+            repo,
+            "--dispatch",
+        )[1]
+    )
+    with Board().edit(task["id"]) as stored:
+        stored.worktree = str(worktree)
+
+    code, out = run(
+        capsys,
+        "--json",
+        "dispatch",
+        task["id"],
+        "--no-launch",
+    )
+
+    assert code == 0
+    assert json.loads(out)[0]["role"] == "scribe"
+    assert Board().get(task["id"]).squad == [
+        "code-worker",
+        "scribe",
+        "pr-reviewer",
+    ]
+
+
+def test_notes_project_manifest_cannot_select_non_scribe_lead(
+    home: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    config = Config.load()
+    repo = config.policy("repos")["repos"]["notes"]["slug"]
+    worktree = home / "var" / "worktrees" / "notes-lead"
+    (worktree / ".saturnin").mkdir(parents=True)
+    (worktree / ".saturnin" / "repo.yaml").write_text(
+        "project: Notes\nlead: code-worker\nsquad: [code-worker]\n",
+        encoding="utf-8",
+    )
+    task = json.loads(
+        run(
+            capsys,
+            "--json",
+            "task",
+            "add",
+            "Provision notes structure",
+            "--repo",
+            repo,
+            "--dispatch",
+        )[1]
+    )
+    with Board().edit(task["id"]) as stored:
+        stored.worktree = str(worktree)
+
+    assert main(["dispatch", task["id"], "--no-launch"]) == 1
+    assert "only be led by the configured scribe" in capsys.readouterr().err
+    assert Board().get(task["id"]).role == "scribe"
+
+
 def test_task_reroute_adds_labels_and_routes_current_task(
     home: Path, capsys: pytest.CaptureFixture[str]
 ) -> None:
@@ -1301,7 +1376,7 @@ def test_notes_review_cli_binds_profile_method_and_checks(
 ) -> None:
     config = Config.load()
     repo = config.policy("repos")["repos"]["notes"]["slug"]
-    settings = config.governance["review"]["notes"]
+    settings = notes_review_settings(config)
     subject = f"{repo}#42"
     head_sha = "b" * 40
     profile_args = [

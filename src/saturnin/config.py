@@ -122,6 +122,21 @@ class Config:
             self._cache[name] = load_yaml(self.policies / f"{name}.yaml")
         return self._cache[name]
 
+    def policy_reference(self, reference: str) -> Any:
+        """Resolve ``policy.path.to.value`` without duplicating policy facts."""
+        parts = reference.split(".")
+        if len(parts) < 2 or any(not part for part in parts):
+            raise ConfigError(self.policies, f"invalid policy reference: {reference!r}")
+        value: Any = self.policy(parts[0])
+        for part in parts[1:]:
+            if not isinstance(value, dict) or part not in value:
+                raise ConfigError(
+                    self.policies / f"{parts[0]}.yaml",
+                    f"policy reference does not exist: {reference}",
+                )
+            value = value[part]
+        return value
+
     @property
     def governance(self) -> dict[str, Any]:
         return self.policy("governance")

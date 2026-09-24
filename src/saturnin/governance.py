@@ -16,8 +16,8 @@ from pathlib import Path
 from typing import Any, Iterable, Sequence
 from urllib.parse import urlsplit
 
-from .config import Config, default_config
-from .review import ReviewRecord
+from .config import Config, ConfigError, default_config
+from .review import ReviewError, ReviewRecord, notes_review_settings
 
 _MAX_COMMAND_DEPTH = 8
 _WRAPPERS = {"env", "nice", "ionice", "stdbuf", "timeout", "exec", "command"}
@@ -222,7 +222,14 @@ class Governance:
         records = [r for r in records if r.author.strip().lower() == author_lower]
         if self.review.get("attestation", {}).get("required", False):
             records = [r for r in records if r.attestation_id and r.attestation_signature]
-        allowed = _allowed_reviewer_roles(kind, self.config) if kind else set()
+        configured_roles = settings.get("allowed_reviewer_roles")
+        allowed = (
+            {str(role).strip().lower() for role in configured_roles}
+            if isinstance(configured_roles, list)
+            else _allowed_reviewer_roles(kind, self.config)
+            if kind
+            else set()
+        )
         if kind:
             records = [r for r in records if r.reviewer.strip().lower() in allowed]
         required_profile = str(settings.get("profile", ""))
@@ -288,8 +295,25 @@ class Governance:
             .get("slug", "")
         )
         is_notes_repo = _repo_slug_key(repo) == _repo_slug_key(notes_repo)
-        settings = self.review.get("notes" if is_notes_repo else "pr", {})
+        settings = (
+            notes_review_settings(self.config)
+            if is_notes_repo
+            else self.review.get("pr", {})
+        )
         if is_notes_repo:
+            writer_roles = (
+                self.config.policy("repos")
+                .get("repos", {})
+                .get("notes", {})
+                .get("access", {})
+                .get("writer_roles", [])
+            )
+            if author.strip().lower() not in {
+                str(role).strip().lower() for role in writer_roles
+            }:
+                return Decision.deny(
+                    f"notes review: author {author!r} is not an authorized notes writer"
+                )
             records = [
                 r
                 for r in records
@@ -648,7 +672,7 @@ class Governance:
                 "governance requires task mirroring but repos policy disables "
                 "tracking.mirror_tasks_as_issues"
             )
-        for kind in ("pr", "issue", "notes"):
+        for kind in ("pr", "issue"):
             reviewers = self.review.get(kind, {}).get("allowed_reviewer_roles", [])
             if not isinstance(reviewers, list) or not reviewers or not all(
                 isinstance(role, str) and role.strip() for role in reviewers
@@ -665,7 +689,12 @@ class Governance:
                 problems.append(
                     f"{kind} review policy names unknown reviewer role(s): {', '.join(unknown)}"
                 )
-        notes_review = self.review.get("notes", {})
+        notes_reference = self.review.get("notes", {}).get("policy_ref")
+        try:
+            notes_review = notes_review_settings(self.config)
+        except (ConfigError, ReviewError) as exc:
+            problems.append(f"private notes review policy reference is invalid: {exc}")
+            notes_review = {}
         if not all(
             notes_review.get(key) is True
             for key in ("required", "independent", "zero_context")
@@ -682,32 +711,28 @@ class Governance:
             self.review.get("issue", {}).get("profile", "issue"),
         }:
             problems.append("private notes review profile must be distinct")
-        repository_review = (
-            self.config.policy("repos")
-            .get("repos", {})
-            .get("notes", {})
-            .get("change_review", {})
-        )
-        if repository_review.get("reviewer_role") not in notes_review.get(
-            "allowed_reviewer_roles", []
+        if not isinstance(notes_reference, str) or not notes_reference:
+            problems.append("private notes review policy must name its canonical reference")
+        required_checks = notes_review.get("required_checks", [])
+        if not isinstance(required_checks, list) or not required_checks or not all(
+            isinstance(check, str) and check.strip() for check in required_checks
         ):
-            problems.append(
-                "private notes reviewer must agree with repository access policy"
-            )
-        if repository_review.get("profile") != notes_review.get("profile"):
-            problems.append(
-                "private notes review profile must agree with repository policy"
-            )
-        if repository_review.get("method") != notes_review.get("method"):
-            problems.append(
-                "private notes review method must agree with repository policy"
-            )
-        if set(repository_review.get("checks", [])) != set(
-            notes_review.get("required_checks", [])
+            problems.append("private notes review requires non-empty integrity checks")
+        notes_reviewers = notes_review.get("allowed_reviewer_roles", [])
+        if not isinstance(notes_reviewers, list) or not notes_reviewers or not all(
+            isinstance(role, str) and role.strip() for role in notes_reviewers
         ):
-            problems.append(
-                "private notes integrity checks must agree with repository policy"
+            problems.append("private notes review requires reviewer roles")
+        else:
+            unknown = sorted(
+                {role.strip() for role in notes_reviewers}
+                - set(self.config.routing.get("roles", {}))
             )
+            if unknown:
+                problems.append(
+                    "private notes review names unknown reviewer role(s): "
+                    + ", ".join(unknown)
+                )
         github_reviewers = self.review.get("pr", {}).get("github_reviewer_logins", [])
         if not isinstance(github_reviewers, list) or not github_reviewers or not all(
             isinstance(login, str) and login.strip() for login in github_reviewers
