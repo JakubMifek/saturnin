@@ -220,6 +220,11 @@ def test_launcher_health_uses_trusted_interpreter_not_ambient_path(
         "saturnin.launcher_host.resolve_trusted_executable",
         lambda *_args, **_kwargs: script,
     )
+    trusted_interpreter = Path("/bin/sh").resolve(strict=True)
+    monkeypatch.setattr(
+        "saturnin.launcher_host.shutil.which",
+        lambda _name, *, path: str(trusted_interpreter),
+    )
     calls: list[tuple[list[str], dict[str, str]]] = []
     monkeypatch.setattr(
         "saturnin.launcher_host.subprocess.run",
@@ -233,7 +238,7 @@ def test_launcher_health_uses_trusted_interpreter_not_ambient_path(
     assert check["healthy"]
     command, environment = calls[0]
     assert command[0] != str(attacker_node)
-    assert Path(command[0]).name == "node"
+    assert command[0] == str(trusted_interpreter)
     assert command[1:] == [str(script), "--version"]
     assert str(shadow) not in environment["PATH"]
 
