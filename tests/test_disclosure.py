@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import os
 import hashlib
+import re
 import shutil
 import subprocess
 import sys
@@ -186,8 +187,22 @@ def _fake_gitleaks(path: Path) -> None:
 import json, pathlib, sys
 root = pathlib.Path(sys.argv[2])
 report = pathlib.Path(sys.argv[sys.argv.index("--report-path") + 1])
-leak = next((path for path in root.rglob("*")
-             if path.is_file() and b"RAW-SYNTHETIC-SECRET" in path.read_bytes()), None)
+ignore_annotations = "--ignore-gitleaks-allow" not in sys.argv
+ignore_path = pathlib.Path(sys.argv[sys.argv.index("--gitleaks-ignore-path") + 1])
+candidate_ignore_active = ignore_path != pathlib.Path("/dev/null") and ignore_path.exists()
+leak = next(
+    (
+        path
+        for path in root.rglob("*")
+        if path.is_file()
+        and b"RAW-SYNTHETIC-SECRET" in path.read_bytes()
+        and not (
+            ignore_annotations and b"gitleaks:allow" in path.read_bytes()
+        )
+        and not candidate_ignore_active
+    ),
+    None,
+)
 if leak is not None:
     print("RAW-SYNTHETIC-SECRET", file=sys.stderr)
     report.write_text(json.dumps([{"RuleID": "fake-token", "File": str(leak),
@@ -346,6 +361,60 @@ def test_gate_scans_exact_commit_tree_despite_index_changes(tmp_path: Path) -> N
 
     assert result.returncode == 1
     assert "RAW-SYNTHETIC-SECRET" not in result.stdout + result.stderr
+
+
+@pytest.mark.parametrize("immutable", [False, True], ids=["index", "commit"])
+def test_gate_rejects_annotated_credentials_with_redacted_output(
+    tmp_path: Path, immutable: bool
+) -> None:
+    repo = tmp_path / "candidate"
+    repo.mkdir()
+    _git(repo, "init", "-b", "feature/test")
+    secret = "RAW-SYNTHETIC-SECRET"
+    (repo / "leak.txt").write_text(
+        f"token={secret} # gitleaks:allow\n",
+        encoding="utf-8",
+    )
+    _git(repo, "add", "leak.txt")
+    _git(
+        repo,
+        "-c",
+        "user.name=Test",
+        "-c",
+        "user.email=test@example.com",
+        "commit",
+        "-m",
+        "annotated credential",
+    )
+    source_ref = "index"
+    if immutable:
+        source_ref = subprocess.run(
+            ["git", "rev-parse", "HEAD"],
+            cwd=repo,
+            check=True,
+            capture_output=True,
+            text=True,
+        ).stdout.strip()
+    fake = tmp_path / "gitleaks"
+    _fake_gitleaks(fake)
+
+    result = _run_gate(repo, fake, source_ref=source_ref)
+
+    assert result.returncode == 1
+    assert "rule=fake-token" in result.stdout
+    assert secret not in result.stdout + result.stderr
+
+
+def test_gate_disables_all_candidate_controlled_gitleaks_ignores() -> None:
+    script = GATE.read_text(encoding="utf-8")
+    match = re.search(r'"\$gitleaks" dir .*?--report-path', script, re.DOTALL)
+    assert match is not None
+    invocation = match.group()
+
+    assert "--ignore-gitleaks-allow" in invocation
+    assert "--gitleaks-ignore-path /dev/null" in invocation
+    assert '--config "$config"' in invocation
+    assert "--baseline-path" not in invocation
 
 
 def test_gate_does_not_descend_into_gitlink_worktrees(tmp_path: Path) -> None:

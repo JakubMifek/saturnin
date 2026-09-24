@@ -51,6 +51,9 @@ keeping the rules as data.
   propose scanner or allowlist changes, but `pull_request_target` validates
   them with base-branch code, executes only base-branch automation, and treats
   the fork or same-repository PR checkout strictly as data.
+  Inline `gitleaks:allow` annotations, candidate `.gitleaksignore` files and
+  baseline reports cannot suppress findings; only the trusted, digest-bound
+  fixture exceptions are active.
 - Private/runtime state stays under ignored `board/` and `var/` paths. External
   private stores are referenced through the generic topology abstractions in
   policy and ADR-0002, never through committed private names or contents.

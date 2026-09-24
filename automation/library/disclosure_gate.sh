@@ -82,7 +82,9 @@ PYTHONPATH="$trusted/src${PYTHONPATH:+:$PYTHONPATH}" \
   saturnin_python -m saturnin.disclosure --root "$tree" --policy "$policy" || marker_status=$?
 
 scanner_status=0
-"$gitleaks" dir "$tree" --config "$config" --no-banner --redact=100 \
+"$gitleaks" dir "$tree" --config "$config" \
+  --gitleaks-ignore-path /dev/null --ignore-gitleaks-allow \
+  --no-banner --redact=100 \
   --report-format json --report-path "$report" >/dev/null 2>&1 || scanner_status=$?
 
 if (( scanner_status == 1 )); then
