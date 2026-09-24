@@ -103,7 +103,7 @@ class Router:
                     "priority": "P2",
                     "squad": [
                         writer,
-                        private_notes.get("reviewer_role"),
+                        self._private_notes_reviewer(),
                     ],
                     "result_contract": private_notes.get(
                         "result_contract", "pr-gate"
@@ -171,7 +171,7 @@ class Router:
             required.extend(
                 [
                     private_notes.get("writer_role"),
-                    private_notes.get("reviewer_role"),
+                    self._private_notes_reviewer(),
                 ]
             )
         return list(dict.fromkeys(r for r in required if r))
@@ -191,6 +191,16 @@ class Router:
             labels
             & {str(value).lower() for value in private_notes.get("labels", [])}
         )
+
+    def _private_notes_reviewer(self) -> str | None:
+        private_notes = self.policy.get("knowledge", {}).get(
+            "private_notes_changes", {}
+        )
+        repository = self.repos.get(private_notes.get("repository_policy"), {})
+        reviewers = repository.get("change_review", {}).get(
+            "allowed_reviewer_roles", []
+        )
+        return reviewers[0] if isinstance(reviewers, list) and reviewers else None
 
     def _build(
         self,
@@ -398,7 +408,7 @@ class Router:
             problems.append("knowledge policy names an unknown scribe role")
         if private_notes.get("writer_role") != scribe:
             problems.append("private notes writer must be the configured scribe role")
-        reviewer = private_notes.get("reviewer_role")
+        reviewer = self._private_notes_reviewer()
         if reviewer not in self.roles or reviewer == scribe:
             problems.append("private notes require a known independent reviewer role")
         if not private_notes.get("labels"):

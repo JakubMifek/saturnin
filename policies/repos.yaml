@@ -48,8 +48,9 @@ repos:
       independent: true
       zero_context: true
       method: rubber-duck
-      reviewer_role: pr-reviewer
-      checks:
+      author_may_review: false
+      allowed_reviewer_roles: [pr-reviewer]
+      required_checks:
         - factual_integrity
         - duplication
         - canonical_structure
