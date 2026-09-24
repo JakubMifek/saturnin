@@ -3,11 +3,14 @@
 from __future__ import annotations
 
 import getpass
+import json
 import os
 import secrets
+import shutil
 import stat
 import subprocess
 from pathlib import Path
+from typing import Callable
 
 from .jsonlines import PRIVATE_FILE_MODE, atomic_replace_text
 
@@ -20,6 +23,11 @@ KNOWN_CREDENTIALS = {
     "github-mcp": GITHUB_MCP_CREDENTIAL,
 }
 MAX_CREDENTIAL_BYTES = 16 * 1024
+MINIMUM_SYSTEMD_CREDS_VERSION = 256
+HOST_CREDENTIAL_SECRET = Path("/var/lib/systemd/credential.secret")
+ROTATION_STATE = ".attestation-rotation.json"
+ROTATION_CURRENT_BACKUP = ".saturnin-review-attestation-key.rollback.cred"
+ROTATION_PREVIOUS_BACKUP = ".saturnin-review-attestation-previous-key.rollback.cred"
 
 
 class CredentialError(RuntimeError):
@@ -96,6 +104,111 @@ def _encrypt(name: str, value: str, destination: Path) -> None:
     atomic_replace_text(destination, encrypted, mode=PRIVATE_FILE_MODE)
 
 
+def credential_prerequisites() -> dict[str, str | int]:
+    executable = shutil.which("systemd-creds")
+    if not executable:
+        raise CredentialError("systemd-creds is not installed")
+    try:
+        result = subprocess.run(
+            [executable, "--version"],
+            check=False,
+            capture_output=True,
+            text=True,
+        )
+    except OSError as exc:
+        raise CredentialError("systemd-creds prerequisites could not be checked") from exc
+    first_line = result.stdout.splitlines()[0] if result.stdout else ""
+    fields = first_line.split()
+    if result.returncode != 0 or len(fields) < 2 or not fields[1].isdigit():
+        raise CredentialError("systemd-creds version could not be determined")
+    version = int(fields[1])
+    if version < MINIMUM_SYSTEMD_CREDS_VERSION:
+        raise CredentialError(
+            f"systemd-creds {MINIMUM_SYSTEMD_CREDS_VERSION} or newer is required"
+        )
+    runtime = Path(os.environ.get("XDG_RUNTIME_DIR", ""))
+    manager_socket = runtime / "systemd" / "private" if runtime.is_absolute() else Path()
+    try:
+        manager_metadata = manager_socket.stat()
+        host_key_metadata = HOST_CREDENTIAL_SECRET.stat()
+    except OSError as exc:
+        raise CredentialError(
+            "systemd credential prerequisites are incomplete; administrator setup is required"
+        ) from exc
+    if (
+        not runtime.is_absolute()
+        or not stat.S_ISSOCK(manager_metadata.st_mode)
+        or manager_metadata.st_uid != os.getuid()
+    ):
+        raise CredentialError("the systemd user manager is not available")
+    if (
+        not stat.S_ISREG(host_key_metadata.st_mode)
+        or host_key_metadata.st_uid != 0
+        or stat.S_IMODE(host_key_metadata.st_mode) != 0o400
+    ):
+        raise CredentialError(
+            "the systemd credential host key has unsafe ownership or mode"
+        )
+    return {
+        "systemd_creds_version": version,
+        "user_manager": "available",
+        "host_key": "initialized",
+    }
+
+
+def _rotation_paths() -> tuple[Path, Path, Path]:
+    directory = encrypted_credential_dir()
+    return (
+        directory / ROTATION_STATE,
+        directory / ROTATION_CURRENT_BACKUP,
+        directory / ROTATION_PREVIOUS_BACKUP,
+    )
+
+
+def _read_private_file(path: Path) -> str:
+    try:
+        descriptor = os.open(path, os.O_RDONLY | os.O_NOFOLLOW)
+    except OSError as exc:
+        raise CredentialError(f"credential recovery artifact is unavailable: {path.name}") from exc
+    try:
+        metadata = os.fstat(descriptor)
+        if (
+            not stat.S_ISREG(metadata.st_mode)
+            or metadata.st_uid != os.getuid()
+            or metadata.st_mode & 0o077
+        ):
+            raise CredentialError(
+                f"credential recovery artifact has unsafe ownership or mode: {path.name}"
+            )
+        data = os.read(descriptor, MAX_CREDENTIAL_BYTES + 1)
+    finally:
+        os.close(descriptor)
+    if not data or len(data) > MAX_CREDENTIAL_BYTES:
+        raise CredentialError(f"credential recovery artifact is invalid: {path.name}")
+    try:
+        return data.decode("utf-8")
+    except UnicodeDecodeError as exc:
+        raise CredentialError(
+            f"credential recovery artifact is invalid: {path.name}"
+        ) from exc
+
+
+def _rotation_state() -> str:
+    state_path, current_backup, previous_backup = _rotation_paths()
+    artifacts = [path.exists() for path in (state_path, current_backup, previous_backup)]
+    if not any(artifacts):
+        return "ready"
+    try:
+        data = json.loads(_read_private_file(state_path))
+    except (CredentialError, json.JSONDecodeError):
+        return "recovery-required"
+    if data == {"version": 1, "state": "sealed-cleanup"}:
+        return "sealed-cleanup"
+    if all(artifacts) and data == {"version": 1, "state": "pending-seal"}:
+        return "pending-seal"
+    return "recovery-required"
+
+
 def provision_attestation_key() -> Path:
     destination = encrypted_credential_path("review-attestation")
     if destination.exists():
@@ -111,8 +224,36 @@ def provision_attestation_key() -> Path:
     return destination
 
 
-def rotate_attestation_key() -> Path:
+def rotate_attestation_key(
+    *,
+    previous_key_in_use: Callable[[str], bool],
+) -> Path:
+    if _rotation_state() != "ready":
+        raise CredentialError(
+            "attestation rotation is already pending; seal or roll it back"
+        )
     current = _decrypt_encrypted_credential("review-attestation")
+    previous = _decrypt_encrypted_credential("review-attestation-previous")
+    if previous_key_in_use(previous):
+        raise CredentialError(
+            "previous attestation key still protects review records; archive or retire them before rotating"
+        )
+    state_path, current_backup, previous_backup = _rotation_paths()
+    atomic_replace_text(
+        current_backup,
+        _read_private_file(encrypted_credential_path("review-attestation")),
+        mode=PRIVATE_FILE_MODE,
+    )
+    atomic_replace_text(
+        previous_backup,
+        _read_private_file(encrypted_credential_path("review-attestation-previous")),
+        mode=PRIVATE_FILE_MODE,
+    )
+    atomic_replace_text(
+        state_path,
+        json.dumps({"version": 1, "state": "pending-seal"}) + "\n",
+        mode=PRIVATE_FILE_MODE,
+    )
     _encrypt(
         PREVIOUS_ATTESTATION_CREDENTIAL,
         current,
@@ -124,10 +265,50 @@ def rotate_attestation_key() -> Path:
 
 
 def attestation_rotation_values() -> tuple[str, str]:
+    if _rotation_state() != "pending-seal":
+        raise CredentialError("no attestation rotation is pending sealing")
     return (
         _decrypt_encrypted_credential("review-attestation"),
         _decrypt_encrypted_credential("review-attestation-previous"),
     )
+
+
+def complete_attestation_rotation() -> None:
+    state = _rotation_state()
+    if state not in {"pending-seal", "sealed-cleanup"}:
+        raise CredentialError("no attestation rotation is pending sealing")
+    state_path, current_backup, previous_backup = _rotation_paths()
+    if state == "pending-seal":
+        atomic_replace_text(
+            state_path,
+            json.dumps({"version": 1, "state": "sealed-cleanup"}) + "\n",
+            mode=PRIVATE_FILE_MODE,
+        )
+    for path in (current_backup, previous_backup, state_path):
+        try:
+            path.unlink(missing_ok=True)
+        except OSError as exc:
+            raise CredentialError("could not remove attestation rotation recovery data") from exc
+
+
+def rollback_attestation_rotation() -> Path:
+    state_path, current_backup, previous_backup = _rotation_paths()
+    state = _rotation_state()
+    if state == "ready":
+        raise CredentialError("no attestation rotation recovery data exists")
+    if state == "sealed-cleanup":
+        raise CredentialError("sealed attestation rotation may not be rolled back")
+    if not current_backup.exists() or not previous_backup.exists():
+        raise CredentialError("attestation rotation recovery data is incomplete")
+    current = encrypted_credential_path("review-attestation")
+    previous = encrypted_credential_path("review-attestation-previous")
+    atomic_replace_text(current, _read_private_file(current_backup), mode=PRIVATE_FILE_MODE)
+    atomic_replace_text(previous, _read_private_file(previous_backup), mode=PRIVATE_FILE_MODE)
+    _decrypt_encrypted_credential("review-attestation")
+    _decrypt_encrypted_credential("review-attestation-previous")
+    for path in (state_path, current_backup, previous_backup):
+        path.unlink(missing_ok=True)
+    return current
 
 
 def revoke_credential(kind: str) -> list[Path]:
@@ -146,6 +327,9 @@ def revoke_credential(kind: str) -> list[Path]:
         except OSError as exc:
             raise CredentialError(f"could not revoke encrypted credential: {kind}") from exc
         removed.append(path)
+    if kind == "review-attestation":
+        for path in _rotation_paths():
+            path.unlink(missing_ok=True)
     if not removed:
         raise CredentialError(f"encrypted credential is not provisioned: {kind}")
     return removed
@@ -242,3 +426,11 @@ def validate_encrypted_credential(kind: str) -> Path:
     if kind == "review-attestation":
         _decrypt_encrypted_credential("review-attestation-previous")
     return encrypted_credential_path(kind)
+
+
+def credential_status(kind: str) -> dict[str, str]:
+    path = validate_encrypted_credential(kind)
+    status = {"status": "valid", "path": str(path)}
+    if kind == "review-attestation":
+        status["rotation"] = _rotation_state()
+    return status

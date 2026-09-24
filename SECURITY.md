@@ -41,7 +41,9 @@ keeping the rules as data.
   launcher reads the attestation master only to derive reviewer-role keys and
   injects the dedicated read-only GitHub token only into the GitHub MCP server.
   Provision and validate these through `saturnin credential`; the CLI never
-  accepts secret values as command-line arguments.
+  accepts secret values as command-line arguments. Rotation passes keys
+  directly between credential and review APIs, never through broad environment
+  variables, and keeps only owner-readable encrypted rollback material.
 - Nothing secret belongs in this repository. `board/tasks/`, `var/` and
   checkpoints are gitignored; private material belongs in the private
   companion repositories (ADR-0002).

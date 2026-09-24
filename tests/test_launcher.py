@@ -3119,6 +3119,12 @@ def test_reconcile_exited_launch_keeps_legal_task_state(
     board.transition(board.get(task.id), "in_progress")
     launch_file = config.var_dir / "launches" / f"{task.id}.json"
     launch_file.parent.mkdir(parents=True, exist_ok=True)
+    mcp_file = config.var_dir / "launches" / f"{task.id}.mcp.json"
+    mcp_file.write_text(
+        '{"mcpServers":{"github":{"env":{"GITHUB_PERSONAL_ACCESS_TOKEN":"runtime"}}}}',
+        encoding="utf-8",
+    )
+    mcp_file.chmod(0o600)
     launch_file.write_text(
         json.dumps(
             {
@@ -3128,7 +3134,7 @@ def test_reconcile_exited_launch_keeps_legal_task_state(
                 "process_start_time_ticks": 123456,
                 "started_at": utcnow(),
                 "cwd": str(config.root),
-                "mcp_config": str(config.root / ".mcp.json"),
+                "mcp_config": str(mcp_file),
                 "log": str(config.var_dir / "launches" / f"{task.id}.log"),
             }
         ),
@@ -3151,6 +3157,7 @@ def test_reconcile_exited_launch_keeps_legal_task_state(
     )
     assert restored.history[-1]["event"] == "agent:launch_failed"
     assert not launch_file.exists()
+    assert not mcp_file.exists()
 
 
 def test_reconcile_exited_poller_launch_keeps_waiting_task(

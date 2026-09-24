@@ -466,7 +466,15 @@ def test_review_key_rotation_retains_history_without_blocking_other_subjects(
 
     with pytest.raises(ReviewError, match="manifest is missing or invalid"):
         ledger.for_subject(old_subject, "pr")
-    manifest_path = ledger.seal_rotation_manifest()
+    assert ledger.has_records_signed_by("old-master-key")
+    monkeypatch.delenv("SATURNIN_REVIEW_ATTESTATION_KEY")
+    monkeypatch.delenv("SATURNIN_REVIEW_ATTESTATION_PREVIOUS_KEY")
+    manifest_path = ledger.seal_rotation_manifest(
+        current_master="new-master-key",
+        previous_master="old-master-key",
+    )
+    monkeypatch.setenv("SATURNIN_REVIEW_ATTESTATION_KEY", "new-master-key")
+    monkeypatch.setenv("SATURNIN_REVIEW_ATTESTATION_PREVIOUS_KEY", "old-master-key")
     assert ledger.for_subject(old_subject, "pr")
     stale_key_attestation = sign_review_attestation(
         key=role_scoped_review_attestation_key("old-master-key", "pr-reviewer"),

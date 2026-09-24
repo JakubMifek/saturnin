@@ -20,7 +20,9 @@ class JSONLinesError(ValueError):
 
 
 def atomic_replace_text(path: Path, text: str, *, mode: int | None = None) -> None:
-    temporary = path.with_name(f".{path.name}.{os.getpid()}.tmp")
+    temporary = path.with_name(
+        f".{path.name}.{os.getpid()}.{os.urandom(6).hex()}.tmp"
+    )
     target_mode = mode
     if target_mode is None:
         try:
@@ -28,7 +30,12 @@ def atomic_replace_text(path: Path, text: str, *, mode: int | None = None) -> No
         except FileNotFoundError:
             target_mode = None
     try:
-        with temporary.open("w", encoding="utf-8") as handle:
+        descriptor = os.open(
+            temporary,
+            os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW,
+            target_mode if target_mode is not None else 0o666,
+        )
+        with os.fdopen(descriptor, "w", encoding="utf-8") as handle:
             if target_mode is not None:
                 os.fchmod(handle.fileno(), target_mode)
             handle.write(text)

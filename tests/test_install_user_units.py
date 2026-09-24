@@ -99,6 +99,7 @@ def test_install_user_units_installs_safe_checkout_path(tmp_path: Path) -> None:
         "saturnin-discovery.service",
     ):
         text = (installed_dir / unit).read_text(encoding="utf-8")
+        assert "PrivateMounts=yes" in text
         assert "LoadCredentialEncrypted=saturnin-review-attestation-key:" in text
         assert "LoadCredentialEncrypted=saturnin-review-attestation-previous-key:" in text
         assert "LoadCredentialEncrypted=saturnin-github-mcp-token:" in text

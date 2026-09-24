@@ -356,10 +356,18 @@ class AgentLauncher:
                     removal_problem = self._remove_launch_metadata(metadata_path)
                     if removal_problem:
                         reason = f"{reason}; {removal_problem}"
+                mcp_removal_problem = self._remove_mcp_config(mcp_path)
+                if mcp_removal_problem:
+                    reason = f"{reason}; {mcp_removal_problem}"
                 raise LauncherError(
                     f"agent launcher failed for task {task.id}: {reason}"
                 ) from exc
         if launch_error is not None:
+            mcp_removal_problem = self._remove_mcp_config(mcp_path)
+            if mcp_removal_problem:
+                raise LauncherError(
+                    f"{launch_error}; {mcp_removal_problem}"
+                ) from launch_error
             if not failure_cleanup_problem and metadata_attempted:
                 removal_problem = self._remove_launch_metadata(metadata_path)
                 if removal_problem:
@@ -368,6 +376,13 @@ class AgentLauncher:
         if process is None or workdir is None or mcp_path is None:  # pragma: no cover
             raise LauncherError(f"agent launcher failed for task {task.id}")
         if completed_during_grace:
+            mcp_removal_problem = self._remove_mcp_config(mcp_path)
+            if mcp_removal_problem:
+                completed_persistence_problem = (
+                    f"{completed_persistence_problem}; {mcp_removal_problem}"
+                    if completed_persistence_problem
+                    else mcp_removal_problem
+                )
             metadata_ready = metadata_path.exists() and completed_persistence_problem is None
             if completed_persistence_problem and metadata is not None:
                 try:
@@ -388,9 +403,11 @@ class AgentLauncher:
                     self._reconcile_exited_launch(metadata)
                 )
                 if callbacks_complete:
-                    completed_persistence_problem = self._remove_launch_metadata(
-                        metadata_path
-                    )
+                    completed_persistence_problem = self._remove_mcp_config(mcp_path)
+                    if completed_persistence_problem is None:
+                        completed_persistence_problem = self._remove_launch_metadata(
+                            metadata_path
+                        )
                 else:
                     completed_persistence_problem = (
                         f"{completed_persistence_problem}; {recovery_reason}"
@@ -402,7 +419,9 @@ class AgentLauncher:
                     self._reconcile_exited_launch(metadata)
                 )
                 if callbacks_complete:
-                    removal_problem = self._remove_launch_metadata(metadata_path)
+                    removal_problem = self._remove_mcp_config(mcp_path)
+                    if removal_problem is None:
+                        removal_problem = self._remove_launch_metadata(metadata_path)
                     completed_persistence_problem = removal_problem
                 else:
                     completed_persistence_problem = (
@@ -444,6 +463,9 @@ class AgentLauncher:
                 ):
                     self._recover_launch_metadata(metadata)
                     continue
+                removal_problem = self._remove_mcp_config(metadata.get("mcp_config"))
+                if removal_problem:
+                    continue
                 recovery_pending, callbacks_complete, _ = (
                     self._reconcile_exited_launch(metadata)
                 )
@@ -477,6 +499,8 @@ class AgentLauncher:
                 )
                 if recovery_pending:
                     resumed.append(task_id)
+                if callbacks_complete:
+                    self._remove_mcp_config(self.dir / f"{task_id}.mcp.json")
         return resumed
 
     def _reconcile_exited_launch(
@@ -585,6 +609,21 @@ class AgentLauncher:
             metadata_path.unlink(missing_ok=True)
         except OSError as exc:
             return f"could not remove launch metadata: {exc}"
+        return None
+
+    def _remove_mcp_config(self, value: object) -> str | None:
+        if value is None:
+            return None
+        path = Path(str(value))
+        if (
+            path.parent.resolve(strict=False) != self.dir.resolve(strict=False)
+            or not path.name.endswith(".mcp.json")
+        ):
+            return None
+        try:
+            path.unlink(missing_ok=True)
+        except OSError as exc:
+            return f"could not remove MCP config: {exc}"
         return None
 
     def _settle_failed_process(

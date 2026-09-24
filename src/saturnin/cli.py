@@ -35,11 +35,14 @@ from .contracts import (
 from .credentials import (
     CredentialError,
     attestation_rotation_values,
+    complete_attestation_rotation,
+    credential_prerequisites,
+    credential_status,
     provision_attestation_key,
     revoke_credential,
+    rollback_attestation_rotation,
     rotate_attestation_key,
     store_github_mcp_token,
-    validate_encrypted_credential,
 )
 from .discovery import DiscoveryError, IssueDiscovery
 from . import docsync
@@ -389,6 +392,14 @@ def build_parser() -> argparse.ArgumentParser:
     credential.add_parser(
         "seal-attestation-rotation",
         help="seal previous-key review records using encrypted credentials",
+    )
+    credential.add_parser(
+        "rollback-attestation-rotation",
+        help="restore encrypted current and previous keys after a failed rotation",
+    )
+    credential.add_parser(
+        "prerequisites",
+        help="check systemd user credential prerequisites without changing the host",
     )
     credential.add_parser(
         "store-github-mcp",
@@ -970,7 +981,10 @@ def _run(args: argparse.Namespace, config: Config) -> int:  # noqa: C901 - flat 
                 )
                 return 0
             if args.credential_command == "rotate-attestation":
-                path = rotate_attestation_key()
+                ledger = ReviewLedger(config)
+                path = rotate_attestation_key(
+                    previous_key_in_use=ledger.has_records_signed_by,
+                )
                 _emit(
                     {"credential": "review-attestation", "path": str(path)},
                     as_json,
@@ -978,37 +992,41 @@ def _run(args: argparse.Namespace, config: Config) -> int:  # noqa: C901 - flat 
                 )
                 return 0
             if args.credential_command == "seal-attestation-rotation":
-                current, previous = attestation_rotation_values()
-                settings = config.governance.get("review", {}).get(
-                    "attestation", {}
-                )
-                current_env = str(
-                    settings.get("key_env", "SATURNIN_REVIEW_ATTESTATION_KEY")
-                )
-                previous_env = str(
-                    settings.get(
-                        "previous_key_env",
-                        "SATURNIN_REVIEW_ATTESTATION_PREVIOUS_KEY",
+                status = credential_status("review-attestation")
+                if status.get("rotation") == "sealed-cleanup":
+                    complete_attestation_rotation()
+                    _emit(
+                        {"rotation": "ready"},
+                        as_json,
+                        "completed sealed attestation rotation cleanup",
                     )
+                    return 0
+                current, previous = attestation_rotation_values()
+                manifest = ReviewLedger(config).seal_rotation_manifest(
+                    current_master=current,
+                    previous_master=previous,
                 )
-                saved = {
-                    current_env: os.environ.get(current_env),
-                    previous_env: os.environ.get(previous_env),
-                }
-                try:
-                    os.environ[current_env] = current
-                    os.environ[previous_env] = previous
-                    manifest = ReviewLedger(config).seal_rotation_manifest()
-                finally:
-                    for name, value in saved.items():
-                        if value is None:
-                            os.environ.pop(name, None)
-                        else:
-                            os.environ[name] = value
+                complete_attestation_rotation()
                 _emit(
                     {"rotation_manifest": str(manifest)},
                     as_json,
                     f"sealed attestation rotation in {manifest}",
+                )
+                return 0
+            if args.credential_command == "rollback-attestation-rotation":
+                path = rollback_attestation_rotation()
+                _emit(
+                    {"credential": "review-attestation", "path": str(path)},
+                    as_json,
+                    f"rolled back review-attestation rotation at {path}",
+                )
+                return 0
+            if args.credential_command == "prerequisites":
+                status = credential_prerequisites()
+                _emit(
+                    status,
+                    as_json,
+                    "credential prerequisites: ready",
                 )
                 return 0
             if args.credential_command == "revoke":
@@ -1024,13 +1042,19 @@ def _run(args: argparse.Namespace, config: Config) -> int:  # noqa: C901 - flat 
                 if args.kind == "all"
                 else [args.kind]
             )
-            paths = {
-                kind: str(validate_encrypted_credential(kind)) for kind in kinds
-            }
+            paths = {kind: credential_status(kind) for kind in kinds}
             _emit(
                 paths,
                 as_json,
-                "\n".join(f"{kind}: valid ({path})" for kind, path in paths.items()),
+                "\n".join(
+                    f"{kind}: {details['status']} ({details['path']})"
+                    + (
+                        f"; rotation={details['rotation']}"
+                        if "rotation" in details
+                        else ""
+                    )
+                    for kind, details in paths.items()
+                ),
             )
             return 0
         except CredentialError as exc:
