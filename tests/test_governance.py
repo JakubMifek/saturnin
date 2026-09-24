@@ -16,10 +16,12 @@ import pytest
 from saturnin import review
 from saturnin.config import Config
 from saturnin.governance import (
+    ExecutableTrustError,
     Governance,
     _curl_targets,
     _git_targets,
     _trusted_system_path_problem,
+    resolve_trusted_executable,
 )
 from saturnin.jsonlines import durable_append_text
 from saturnin.review import (
@@ -103,6 +105,8 @@ def test_policies_audit_clean(governance: Governance) -> None:
         lambda checks: checks["npx"].__setitem__(
             "script_interpreters", ["/usr/bin/node"]
         ),
+        lambda checks: checks["npx"].__setitem__("target_names", ["bin/npx"]),
+        lambda checks: checks["npx"].__setitem__("target_names", []),
     ],
 )
 def test_prerequisite_policy_schema_rejects_drift(
@@ -1254,11 +1258,17 @@ def test_prerequisite_checks_are_narrowly_governed(
     trusted.mkdir()
     commands = ("bwrap", "pasta", "copilot", "npx", "uvx")
     config.server_scope["filesystem"]["trusted_executable_roots"].append(str(trusted))
-    system_executable = shutil.which("true", path="/usr/bin:/bin")
-    assert system_executable is not None
+    for command in commands:
+        executable = trusted / command
+        executable.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+        executable.chmod(0o755)
     monkeypatch.setattr(
         "saturnin.governance.shutil.which",
-        lambda command: system_executable,
+        lambda command: str(trusted / command),
+    )
+    monkeypatch.setattr(
+        "saturnin.governance._trusted_system_path_problem",
+        lambda *_: None,
     )
 
     for command in commands:
@@ -1269,6 +1279,7 @@ def test_prerequisite_checks_are_narrowly_governed(
     relocated = tmp_path / "relocated-npx"
     relocated.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
     relocated.chmod(0o755)
+    (trusted / "npx").unlink()
     (trusted / "npx").symlink_to(relocated)
     monkeypatch.setattr(
         "saturnin.governance.shutil.which",
@@ -1290,6 +1301,68 @@ def test_prerequisite_checks_are_narrowly_governed(
     assert not governance.check_server_command(
         f"{trusted / 'github-mcp-server'} --version"
     ).allowed
+
+
+@pytest.mark.parametrize(
+    ("locator", "replacement"),
+    [
+        (("launcher", "command"), "true"),
+        (("launcher", "sandbox", "command"), "bash"),
+        (("launcher", "sandbox", "network", "command"), "curl"),
+        (("servers", "fetch", "command"), "python3"),
+        (("servers", "filesystem", "command"), "true"),
+    ],
+)
+def test_audit_rejects_launcher_command_substitution(
+    config: Config,
+    locator: tuple[str, ...],
+    replacement: str,
+) -> None:
+    current = config.policy("mcp")
+    for component in locator[:-1]:
+        current = current[component]
+    current[locator[-1]] = replacement
+
+    assert any(
+        "launcher command" in problem and replacement in problem
+        for problem in Governance(config).audit()
+    )
+
+
+def test_resolver_rejects_direct_expected_binary_mismatch(
+    config: Config,
+) -> None:
+    with pytest.raises(
+        ExecutableTrustError, match="does not match expected binary 'copilot'"
+    ):
+        resolve_trusted_executable(
+            config,
+            "/usr/bin/true",
+            expected_binary="copilot",
+        )
+
+
+def test_prerequisite_rejects_symlink_to_unrelated_binary(
+    governance: Governance,
+    config: Config,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    trusted = tmp_path / "trusted"
+    trusted.mkdir()
+    bash = trusted / "bash"
+    bash.write_text("#!/bin/sh\n", encoding="utf-8")
+    bash.chmod(0o755)
+    (trusted / "bwrap").symlink_to(bash)
+    config.server_scope["filesystem"]["trusted_executable_roots"] = [str(trusted)]
+    monkeypatch.setattr(
+        "saturnin.governance.shutil.which", lambda _: str(trusted / "bwrap")
+    )
+
+    decision = governance.check_server_command("bwrap --version")
+
+    assert not decision.allowed
+    assert "resolved executable basename 'bash'" in decision.reasons[0]
 
 
 def test_prerequisite_target_roots_allow_only_safe_governed_targets(
@@ -1352,6 +1425,33 @@ def test_prerequisite_target_roots_do_not_cross_binary_boundaries(
     checks = config.server_scope["prerequisite_checks"]
     checks["npx"]["target_roots"] = [str(npx_root)]
     checks["uvx"]["target_roots"] = [str(uvx_root)]
+    monkeypatch.setattr("saturnin.governance.shutil.which", lambda _: str(selected))
+
+    decision = governance.check_server_command("npx --version")
+
+    assert not decision.allowed
+    assert "outside trusted system executable roots" in decision.reasons[0]
+
+
+def test_prerequisite_target_cannot_escape_to_another_global_root(
+    governance: Governance,
+    config: Config,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    selected_root = tmp_path / "selected-bin"
+    unrelated_root = tmp_path / "other-system-bin"
+    selected_root.mkdir()
+    unrelated_root.mkdir()
+    unrelated = unrelated_root / "npx"
+    unrelated.write_text("#!/bin/sh\n", encoding="utf-8")
+    unrelated.chmod(0o755)
+    selected = selected_root / "npx"
+    selected.symlink_to(unrelated)
+    config.server_scope["filesystem"]["trusted_executable_roots"] = [
+        str(selected_root),
+        str(unrelated_root),
+    ]
     monkeypatch.setattr("saturnin.governance.shutil.which", lambda _: str(selected))
 
     decision = governance.check_server_command("npx --version")

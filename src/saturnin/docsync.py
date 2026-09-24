@@ -179,16 +179,18 @@ def _server_prerequisites(config: Config) -> str:
     requirements = filesystem.get("trusted_path_requirements", {})
     checks = config.server_scope.get("prerequisite_checks", {})
     lines = [
-        "| Executable | Additional resolved target roots | Script interpreters |",
-        "| --- | --- | --- |",
+        "| Executable | Additional resolved target roots | Target names | Script interpreters |",
+        "| --- | --- | --- | --- |",
     ]
     for name, definition in checks.items():
         if definition.get("type") != "system-executable":
             continue
         roots = definition.get("target_roots", [])
+        targets = definition.get("target_names", [])
         interpreters = definition.get("script_interpreters", [])
         lines.append(
             f"| `{name}` | {', '.join(f'`{root}`' for root in roots) or 'none'} | "
+            f"{', '.join(f'`{value}`' for value in targets) or 'none'} | "
             f"{', '.join(f'`{value}`' for value in interpreters) or 'none'} |"
         )
     lines.extend(

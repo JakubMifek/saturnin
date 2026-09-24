@@ -256,14 +256,16 @@ def test_launcher_rejects_required_executables_from_worktree_path(
     with pytest.raises(LauncherError, match="must be owned by root"):
         launcher._launcher_executable()
 
-    trusted_system_executable = str(Path(system_executable).resolve())
     monkeypatch.setattr(
         "saturnin.launcher.shutil.which",
         lambda name: system_executable,
     )
-    assert launcher._launcher_executable() == trusted_system_executable
-    assert launcher._sandbox_executable() == trusted_system_executable
-    assert launcher._network_sandbox_executable() == trusted_system_executable
+    with pytest.raises(LauncherError, match="basename 'true'.*'copilot'"):
+        launcher._launcher_executable()
+    with pytest.raises(LauncherError, match="basename 'true'.*'bwrap'"):
+        launcher._sandbox_executable()
+    with pytest.raises(LauncherError, match="basename 'true'.*'pasta'"):
+        launcher._network_sandbox_executable()
     assert launcher._sandbox_visible_executable(Path("/usr/bin/npx"), config)
     assert launcher._sandbox_visible_executable(
         Path("/opt/pipx/venvs/uv/bin/uvx"), config

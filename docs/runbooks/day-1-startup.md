@@ -51,13 +51,13 @@ Enablement succeeds only after version probes pass for `bwrap`, `pasta`,
 pinned release and checksum.
 
 <!-- generated:server-prerequisites -->
-| Executable | Additional resolved target roots | Script interpreters |
-| --- | --- | --- |
-| `bwrap` | none | none |
-| `pasta` | none | none |
-| `copilot` | none | none |
-| `npx` | `/usr/share/nodejs/npm` | `node` |
-| `uvx` | `/opt/pipx/venvs/uv` | none |
+| Executable | Additional resolved target roots | Target names | Script interpreters |
+| --- | --- | --- | --- |
+| `bwrap` | none | none | none |
+| `pasta` | none | none | none |
+| `copilot` | none | none | none |
+| `npx` | `/usr/share/nodejs/npm` | `npx-cli.js` | `node` |
+| `uvx` | `/opt/pipx/venvs/uv` | `uvx` | none |
 
 Selected executables, resolved targets, and script interpreters must be owned by **root**; group-writable paths are **forbidden** and world-writable paths are **forbidden**.
 Script interpreters are resolved from the fixed system path: `/usr/local/sbin`, `/usr/local/bin`, `/usr/sbin`, `/usr/bin`, `/sbin`, `/bin`.

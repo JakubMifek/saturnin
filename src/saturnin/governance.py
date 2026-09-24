@@ -712,7 +712,11 @@ class Governance:
                 )
                 expected_keys = {"type", "args"}
                 if check_type == "system-executable":
-                    expected_keys |= {"target_roots", "script_interpreters"}
+                    expected_keys |= {
+                        "target_roots",
+                        "target_names",
+                        "script_interpreters",
+                    }
                     try:
                         _prerequisite_target_roots(server_scope, binary)
                     except ValueError as error:
@@ -731,6 +735,20 @@ class Governance:
                     ):
                         problems.append(
                             f"invalid server prerequisite interpreters for {binary!r}"
+                        )
+                    target_names = definition.get("target_names", [])
+                    if (
+                        not isinstance(target_names, list)
+                        or not all(
+                            isinstance(value, str)
+                            and value
+                            and Path(value).name == value
+                            for value in target_names
+                        )
+                        or bool(definition.get("target_roots")) != bool(target_names)
+                    ):
+                        problems.append(
+                            f"invalid server prerequisite target names for {binary!r}"
                         )
                 if (
                     not isinstance(binary, str)
@@ -751,6 +769,46 @@ class Governance:
             if pinned != ["github-mcp-server"]:
                 problems.append(
                     "server scope requires exactly one pinned GitHub MCP prerequisite"
+                )
+        bindings = server_scope.get("launcher_command_bindings")
+        if not isinstance(bindings, dict) or not bindings:
+            problems.append("server scope launcher_command_bindings must be a mapping")
+        else:
+            mcp_policy = self.config.policy("mcp")
+            system_checks = {
+                name
+                for name, definition in (prerequisite_checks or {}).items()
+                if isinstance(definition, dict)
+                and definition.get("type") == "system-executable"
+            }
+            for locator, binary in bindings.items():
+                if (
+                    not isinstance(locator, str)
+                    or not locator
+                    or not isinstance(binary, str)
+                    or binary not in system_checks
+                ):
+                    problems.append(
+                        f"invalid launcher command binding {locator!r}: {binary!r}"
+                    )
+                    continue
+                actual: Any = mcp_policy
+                for component in locator.split("."):
+                    if not isinstance(actual, dict) or component not in actual:
+                        actual = None
+                        break
+                    actual = actual[component]
+                if actual != binary:
+                    problems.append(
+                        f"launcher command {locator!r} must be {binary!r}, got {actual!r}"
+                    )
+            bound_checks = {
+                value for value in bindings.values() if isinstance(value, str)
+            }
+            if bound_checks != system_checks or len(bindings) != len(system_checks):
+                problems.append(
+                    "server scope launcher_command_bindings must bind every "
+                    "system prerequisite exactly"
                 )
         if self.delegation.get("ceo_may_wait_for_workers", False):
             problems.append("CEO is allowed to wait for workers; dispatch must be non-blocking")
@@ -970,6 +1028,12 @@ def _check_executable_location(
         return Decision.deny(
             f"executable {str(selected)!r} is outside trusted system executable roots"
         )
+    is_prerequisite = binary in set(scope.get("prerequisite_checks", {}))
+    if is_prerequisite and selected.name != binary:
+        return Decision.deny(
+            f"selected executable basename {selected.name!r} does not match "
+            f"expected binary {binary!r}"
+        )
 
     try:
         resolved = selected.resolve(strict=True)
@@ -986,19 +1050,38 @@ def _check_executable_location(
             f"classified executable {str(resolved)!r} is not executable"
         )
 
-    resolved_roots = trusted_roots
-    if binary in set(scope.get("prerequisite_checks", {})):
+    selected_root = _containing_root(selected, configured_roots)
+    assert selected_root is not None
+    canonical_selected_root = selected_root.resolve(strict=False)
+    trusted_root = _containing_root(
+        resolved,
+        [canonical_selected_root] if is_prerequisite else trusted_roots,
+    )
+    if is_prerequisite:
         try:
-            resolved_roots = [
-                *trusted_roots,
-                *_prerequisite_target_roots(scope, binary),
-            ]
+            target_roots = _prerequisite_target_roots(scope, binary)
+            target_names = _prerequisite_target_names(scope, binary)
         except ValueError as error:
             return Decision.deny(f"invalid executable trust policy: {error}")
-    trusted_root = _containing_root(resolved, resolved_roots)
+        if trusted_root is None:
+            trusted_root = _containing_root(resolved, target_roots)
+            if trusted_root is not None and resolved.name not in target_names:
+                return Decision.deny(
+                    f"resolved executable basename {resolved.name!r} is not an "
+                    f"authorized target for {binary!r}"
+                )
     if trusted_root is None:
         return Decision.deny(
             f"executable {str(resolved)!r} is outside trusted system executable roots"
+        )
+    if (
+        is_prerequisite
+        and _containing_root(resolved, [canonical_selected_root]) is not None
+        and resolved.name != binary
+    ):
+        return Decision.deny(
+            f"resolved executable basename {resolved.name!r} does not match "
+            f"expected binary {binary!r}"
         )
     if binary in set(scope.get("prerequisite_checks", {})):
         try:
@@ -1107,6 +1190,19 @@ def _prerequisite_target_roots(
         raise ValueError(
             str(error).replace("filesystem.target_roots", f"prerequisite_checks.{binary}.target_roots")
         ) from error
+
+
+def _prerequisite_target_names(scope: dict[str, Any], binary: str) -> set[str]:
+    definition = scope.get("prerequisite_checks", {}).get(binary)
+    values = definition.get("target_names") if isinstance(definition, dict) else None
+    if not isinstance(values, list) or not all(
+        isinstance(value, str) and value and Path(value).name == value
+        for value in values
+    ):
+        raise ValueError(
+            f"prerequisite_checks.{binary}.target_names must be a list of basenames"
+        )
+    return set(values)
 
 
 def _trusted_system_path(filesystem: dict[str, Any]) -> list[Path]:
