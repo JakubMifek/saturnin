@@ -3,6 +3,7 @@ from __future__ import annotations
 import os
 import shutil
 import subprocess
+import sys
 from pathlib import Path
 
 import pytest
@@ -33,13 +34,22 @@ def test_rendered_systemd_templates_pass_systemd_analyze(config: Config) -> None
     shutil.rmtree(rendered, ignore_errors=True)
     rendered.mkdir(parents=True, mode=0o700)
     try:
+        attestation_home = rendered / "attestation-home"
+        python = attestation_home / ".venv" / "bin" / "python"
+        python.parent.mkdir(parents=True)
+        python.symlink_to(sys.executable)
         paths: list[str] = []
         for source in sorted((REPO_ROOT / "systemd").glob("saturnin-*")):
             destination = rendered / source.name
+            home = (
+                attestation_home
+                if source.name == "saturnin-attestation.service"
+                else REPO_ROOT
+            )
             destination.write_text(
                 source.read_text(encoding="utf-8")
-                .replace("@SATURNIN_HOME@", str(REPO_ROOT))
-                .replace("@SATURNIN_HOME_ENV@", str(REPO_ROOT)),
+                .replace("@SATURNIN_HOME@", str(home))
+                .replace("@SATURNIN_HOME_ENV@", str(home)),
                 encoding="utf-8",
             )
             paths.append(str(destination))
