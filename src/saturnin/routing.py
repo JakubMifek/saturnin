@@ -46,6 +46,7 @@ class Router:
             "default_result_contract",
             delegation.get("default_result_contract", "board-callback"),
         )
+        self.repos: dict[str, Any] = self.config.policy("repos").get("repos", {})
 
     # -- matching ------------------------------------------------------
     @staticmethod
@@ -90,11 +91,7 @@ class Router:
         private_notes = self.policy.get("knowledge", {}).get(
             "private_notes_changes", {}
         )
-        write_labels = {
-            str(label).lower() for label in private_notes.get("labels", [])
-        }
-        task_labels = {label.lower() for label in task.labels}
-        if write_labels & task_labels:
+        if self._is_private_notes_change(task):
             writer = private_notes.get("writer_role")
             if lead_role is not None and lead_role != writer:
                 raise RoutingError(
@@ -170,9 +167,7 @@ class Router:
         )
         required = [knowledge.get("scribe_role")] if triggered else []
         private_notes = knowledge.get("private_notes_changes", {})
-        if labels & {
-            str(value).lower() for value in private_notes.get("labels", [])
-        }:
+        if self._is_private_notes_change(task):
             required.extend(
                 [
                     private_notes.get("writer_role"),
@@ -180,6 +175,22 @@ class Router:
                 ]
             )
         return list(dict.fromkeys(r for r in required if r))
+
+    def _is_private_notes_change(self, task: Task) -> bool:
+        private_notes = self.policy.get("knowledge", {}).get(
+            "private_notes_changes", {}
+        )
+        repository_policy = private_notes.get("repository_policy")
+        repository = self.repos.get(repository_policy, {})
+        notes_slug = str(repository.get("slug", "")).strip().casefold()
+        task_repo = str(task.repo or "").strip().casefold()
+        if notes_slug and task_repo == notes_slug:
+            return True
+        labels = {label.lower() for label in task.labels}
+        return bool(
+            labels
+            & {str(value).lower() for value in private_notes.get("labels", [])}
+        )
 
     def _build(
         self,
@@ -275,6 +286,12 @@ class Router:
                 additional_roles=additional_roles,
                 lead_role=lead_role,
             )
+            if self._is_private_notes_change(current) and route.role != self.policy[
+                "knowledge"
+            ]["private_notes_changes"]["writer_role"]:
+                raise RoutingError(
+                    "private notes changes may only be led by the configured scribe"
+                )
             current.role = route.role
             current.unit = route.unit
             requested_squad = list(squad or route.squad)
@@ -386,4 +403,14 @@ class Router:
             problems.append("private notes require a known independent reviewer role")
         if not private_notes.get("labels"):
             problems.append("private notes changes require routing labels")
+        repository_policy = private_notes.get("repository_policy")
+        repository = self.repos.get(repository_policy, {})
+        if not repository.get("slug"):
+            problems.append(
+                "private notes changes require a canonical repository policy slug"
+            )
+        elif repository.get("access", {}).get("writer_roles") != [scribe]:
+            problems.append(
+                "private notes routing writer must agree with repository access policy"
+            )
         return problems

@@ -43,6 +43,7 @@ repos:
       optimize_for_read_only_lookup: true
       public_bootstrap_application_role: scribe
     change_review:
+      profile: notes-review
       required: true
       independent: true
       zero_context: true

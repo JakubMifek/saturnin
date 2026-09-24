@@ -243,6 +243,24 @@ def build_parser() -> argparse.ArgumentParser:
         default="",
         help="reviewed title/body digest for issue reviews",
     )
+    record.add_argument(
+        "--profile",
+        default="",
+        help="policy review profile bound into the signed ledger record",
+    )
+    record.add_argument(
+        "--method",
+        default="",
+        dest="review_method",
+        help="review method bound into the signed ledger record",
+    )
+    record.add_argument(
+        "--check",
+        action="append",
+        default=[],
+        dest="review_checks",
+        help="completed profile check (repeatable)",
+    )
     attest = review.add_parser("attest", help="sign a review verdict as the reviewer")
     attest.add_argument("subject", help="e.g. owner/repo#12 or issue draft id")
     attest.add_argument("--kind", choices=["pr", "issue"], required=True)
@@ -264,6 +282,24 @@ def build_parser() -> argparse.ArgumentParser:
         "--issue-digest",
         default="",
         help="reviewed title/body digest for issue reviews",
+    )
+    attest.add_argument(
+        "--profile",
+        default="",
+        help="policy review profile to bind into the attestation",
+    )
+    attest.add_argument(
+        "--method",
+        default="",
+        dest="review_method",
+        help="review method to bind into the attestation",
+    )
+    attest.add_argument(
+        "--check",
+        action="append",
+        default=[],
+        dest="review_checks",
+        help="completed profile check (repeatable)",
     )
     review.add_parser(
         "seal-rotation",
@@ -1841,6 +1877,9 @@ def _run_review(args: argparse.Namespace, config: Config, as_json: bool) -> int:
                     "head_sha": args.head_sha,
                     "issue_digest": args.issue_digest,
                     "destination_repo": args.repo,
+                    "review_profile": args.profile,
+                    "review_method": args.review_method,
+                    "review_checks": args.review_checks,
                 }
             )
         except AttestationServiceError as exc:
@@ -1865,6 +1904,9 @@ def _run_review(args: argparse.Namespace, config: Config, as_json: bool) -> int:
             head_sha=head_sha,
             issue_digest=getattr(args, "issue_digest", ""),
             destination_repo=getattr(args, "repo", ""),
+            review_profile=args.profile,
+            review_method=args.review_method,
+            review_checks=args.review_checks,
             notes=args.notes,
             attestation=attestation,
         )
@@ -2013,7 +2055,7 @@ def _run_review(args: argparse.Namespace, config: Config, as_json: bool) -> int:
     governance = Governance(config)
     records = ledger.for_subject(args.subject, args.kind)
     decision = (
-        governance.merge_allowed(
+        governance.pr_review_allowed(
             repo=args.repo, author=args.author, records=records,
             head_sha=head_sha,
         )

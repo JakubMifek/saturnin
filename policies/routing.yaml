@@ -103,6 +103,7 @@ knowledge:
       - durable information
   private_notes_changes:
     labels: [notes-write, vault-change, notes-curation]
+    repository_policy: notes
     writer_role: scribe
     reviewer_role: pr-reviewer
     result_contract: pr-gate
