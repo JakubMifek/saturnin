@@ -40,6 +40,8 @@ keeping the rules as data.
 <!-- generated:attestation-boundary -->
 During autonomous operation, the master and previous keys are loaded only by `saturnin-attestation.service` in its private mount, network, runtime, and credential namespace. Supervisor and worker units do not load either credential. Explicit owner lifecycle commands may decrypt them in bounded process memory only while the signer and supervisors are stopped.
 
+The signer remains disabled until the owner rotates the master and seals a version-2 migration manifest. That manifest enumerates the exact immutable historical attestations, records a signed ledger digest and timestamp cutoff, and never permits a legacy role-scoped signature to authorize a new record.
+
 For a routed reviewer task, the trusted launcher asks the service for a session bound to task, role, author, subject, immutable head or issue digest, a random nonce, and the launched process identity. The session expires after 900 seconds, accepts one signature, and verifies that the connecting process descends from that exact launch. Its Unix socket is bind-mounted only into that reviewer's sandbox; `/run` and `/proc` remain isolated for all workers.
 
 No worker receives a master or derived key in argv, environment, files, descriptors, logs, board data, or Git. Ordinary workers do not receive the session socket. The signed ledger retains only scope, key identifier, nonce, and signature, never plaintext key material.

@@ -85,6 +85,7 @@ review:
     required: true
     role_scoped: true
     execution_scoped: true
+    legacy_migration: rotation-manifest-v2-required
     service_socket: "%t/saturnin-attestation/control.sock"
     session_ttl_seconds: 900
     supervisor_units:

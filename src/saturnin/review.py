@@ -152,7 +152,10 @@ ATTESTED_FIELDS = (
 )
 ROLE_SCOPED_KEY_CONTEXT = "saturnin-review-attestation"
 EXECUTION_SCOPED_KEY_CONTEXT = "saturnin-review-attestation-execution:v1"
-ROTATION_MANIFEST_KEY_CONTEXT = "saturnin-review-rotation-manifest:v1"
+ROTATION_MANIFEST_KEY_CONTEXT = "saturnin-review-rotation-manifest:v2"
+_EXECUTION_ATTESTATION_ID_RE = re.compile(
+    r"T-[0-9]{8}-[a-z0-9]+:[0-9a-f]{64}"
+)
 
 
 def slugify(subject: str) -> str:
@@ -294,6 +297,13 @@ def _execution_key_for_payload(master_key: str, payload: dict[str, Any]) -> str:
     )
 
 
+def _is_execution_attestation_id(value: object) -> bool:
+    return (
+        isinstance(value, str)
+        and _EXECUTION_ATTESTATION_ID_RE.fullmatch(value) is not None
+    )
+
+
 def _rotation_manifest_key(master_key: str) -> bytes:
     return hmac.new(
         master_key.encode("utf-8"),
@@ -407,6 +417,13 @@ def _verify_review_attestation(
         expected_type = bool if field_name == "zero_context" else str
         if type(payload[field_name]) is not expected_type:
             raise ReviewError(f"review attestation field {field_name!r} has the wrong type")
+    execution_scoped = _is_execution_attestation_id(payload["attestation_id"])
+    if not execution_scoped:
+        if historical_identity is None:
+            raise ReviewError(
+                "new review records require an execution-scoped attestation id"
+            )
+        _require_sealed_previous_attestation(config, historical_identity)
     include_previous = historical_identity is not None
     settings = config.governance.get("review", {}).get("attestation", {})
     scope_env = str(
@@ -488,9 +505,18 @@ def _verify_review_attestation(
     return payload
 
 
-def _manifest_payload(entries: list[dict[str, str]]) -> bytes:
+def _manifest_payload(
+    entries: list[dict[str, str]],
+    migration_cutoff: str,
+    ledger_digest: str,
+) -> bytes:
     return json.dumps(
-        {"version": 1, "attestations": entries},
+        {
+            "version": 2,
+            "migration_cutoff": migration_cutoff,
+            "ledger_digest": ledger_digest,
+            "attestations": entries,
+        },
         sort_keys=True,
         separators=(",", ":"),
     ).encode("utf-8")
@@ -498,6 +524,43 @@ def _manifest_payload(entries: list[dict[str, str]]) -> bytes:
 
 def _rotation_manifest_path(config: Config) -> Path:
     return config.board_dir / "reviews" / "rotation-manifest.json"
+
+
+def _ledger_digest_at_cutoff(config: Config, cutoff: str) -> str:
+    try:
+        cutoff_time = datetime.fromisoformat(cutoff)
+    except ValueError as exc:
+        raise ReviewError("previous-key rotation manifest has an invalid cutoff") from exc
+    if cutoff_time.tzinfo is None:
+        raise ReviewError("previous-key rotation manifest cutoff must include a timezone")
+    snapshot: list[dict[str, Any]] = []
+    ledger_dir = config.board_dir / "reviews"
+    for path in sorted(ledger_dir.glob("*.jsonl")):
+        with file_lock(path, exclusive=False):
+            text = path.read_text(encoding="utf-8")
+        try:
+            records = [
+                ReviewRecord.from_dict(data)
+                for data in objects(
+                    text,
+                    path,
+                    required_fields=REQUIRED_FIELDS,
+                    validator=ReviewRecord.validate_dict,
+                )
+            ]
+        except JSONLinesError as exc:
+            raise ReviewError(f"corrupt review ledger {exc}") from exc
+        snapshot.extend(
+            record.to_dict()
+            for record in records
+            if datetime.fromisoformat(record.created_at) <= cutoff_time
+        )
+    snapshot.sort(
+        key=lambda item: json.dumps(item, sort_keys=True, separators=(",", ":"))
+    )
+    return hashlib.sha256(
+        json.dumps(snapshot, sort_keys=True, separators=(",", ":")).encode()
+    ).hexdigest()
 
 
 def _load_rotation_manifest(config: Config) -> set[tuple[str, str, str]]:
@@ -510,11 +573,26 @@ def _load_rotation_manifest(config: Config) -> set[tuple[str, str, str]]:
         data = json.loads(path.read_text(encoding="utf-8"))
     except (OSError, json.JSONDecodeError) as exc:
         raise ReviewError(f"previous-key rotation manifest is missing or invalid: {path}") from exc
-    if not isinstance(data, dict) or set(data) != {"version", "attestations", "signature"}:
+    if not isinstance(data, dict) or set(data) != {
+        "version",
+        "migration_cutoff",
+        "ledger_digest",
+        "attestations",
+        "signature",
+    }:
         raise ReviewError("previous-key rotation manifest has an invalid schema")
     entries = data["attestations"]
     signature = data["signature"]
-    if data["version"] != 1 or not isinstance(entries, list):
+    cutoff = data["migration_cutoff"]
+    ledger_digest = data["ledger_digest"]
+    if (
+        data["version"] != 2
+        or not isinstance(entries, list)
+        or not isinstance(cutoff, str)
+        or not cutoff
+        or not isinstance(ledger_digest, str)
+        or not re.fullmatch(r"[0-9a-f]{64}", ledger_digest)
+    ):
         raise ReviewError("previous-key rotation manifest has an invalid schema")
     if not isinstance(signature, str) or not re.fullmatch(r"[0-9a-f]{64}", signature):
         raise ReviewError("previous-key rotation manifest has an invalid signature")
@@ -532,10 +610,13 @@ def _load_rotation_manifest(config: Config) -> set[tuple[str, str, str]]:
         key=lambda item: (item["reviewer"], item["attestation_id"], item["signature"]),
     ):
         raise ReviewError("previous-key rotation manifest entries are not canonical")
+    expected_digest = _ledger_digest_at_cutoff(config, cutoff)
+    if not hmac.compare_digest(ledger_digest, expected_digest):
+        raise ReviewError("previous-key rotation manifest ledger digest does not match")
     try:
         expected = hmac.new(
             _rotation_manifest_key(_load_attestation_key(config)),
-            _manifest_payload(normalized),
+            _manifest_payload(normalized, cutoff, ledger_digest),
             hashlib.sha256,
         ).hexdigest()
         if not hmac.compare_digest(signature, expected):
@@ -551,7 +632,9 @@ def _load_rotation_manifest(config: Config) -> set[tuple[str, str, str]]:
         )
 
         try:
-            verify_manifest_with_service(config, normalized, signature)
+            verify_manifest_with_service(
+                config, normalized, cutoff, ledger_digest, signature
+            )
         except (AttestationServiceError, OSError) as service_exc:
             raise ReviewError(str(service_exc)) from service_exc
     return {
@@ -764,9 +847,13 @@ class ReviewLedger:
             entries.sort(
                 key=lambda item: (item["reviewer"], item["attestation_id"], item["signature"])
             )
-            payload = _manifest_payload(entries)
+            cutoff = utcnow()
+            ledger_digest = _ledger_digest_at_cutoff(self.config, cutoff)
+            payload = _manifest_payload(entries, cutoff, ledger_digest)
             manifest = {
-                "version": 1,
+                "version": 2,
+                "migration_cutoff": cutoff,
+                "ledger_digest": ledger_digest,
                 "attestations": entries,
                 "signature": hmac.new(
                     _rotation_manifest_key(current_master),

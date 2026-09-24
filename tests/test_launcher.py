@@ -22,6 +22,7 @@ from saturnin.config import Config
 from saturnin.launcher import AgentLauncher, LauncherError, _SigningSession
 from saturnin.review import (
     ReviewLedger,
+    execution_scoped_review_attestation_key,
     issue_content_digest,
     review_attestation_signing_key,
     sign_review_attestation,
@@ -994,14 +995,24 @@ def test_trusted_cli_callback_records_review_as_assigned_reviewer(
         stored.review_subject = subject
         stored.review_author = "code-worker"
         stored.review_head_sha = head_sha
+    nonce = "a" * 64
     attestation = sign_review_attestation(
-        key=review_attestation_signing_key(config, "pr-reviewer"),
+        key=execution_scoped_review_attestation_key(
+            "test-review-attestation-key",
+            "pr-reviewer",
+            task.id,
+            nonce,
+            subject,
+            head_sha,
+            "",
+        ),
         subject=subject,
         kind="pr",
         author="code-worker",
         reviewer="pr-reviewer",
         verdict="approved",
         head_sha=head_sha,
+        attestation_id=f"{task.id}:{nonce}",
     )
     callback_dir = AgentLauncher(config, board)._isolated_home(
         task.id

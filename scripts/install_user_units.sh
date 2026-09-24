@@ -94,7 +94,11 @@ if [[ -e "$current" || -e "$previous" ]]; then
     echo "Attestation credential pair is incomplete or unsafe; refusing unit replacement." >&2
     exit 1
   fi
-  "$SATURNIN_HOME/.venv/bin/saturnin" credential status review-attestation >/dev/null
+  credential_status="$("$SATURNIN_HOME/.venv/bin/saturnin" credential status review-attestation)"
+  if [[ "$credential_status" != *"signer=ready"* ]]; then
+    echo "Attestation master rotation and migration sealing are required before unit replacement." >&2
+    exit 1
+  fi
   INSTALL_ATTESTATION_SERVICE=1
 fi
 

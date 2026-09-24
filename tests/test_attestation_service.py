@@ -26,6 +26,10 @@ def stable_generation(monkeypatch: pytest.MonkeyPatch) -> None:
         "saturnin.attestation_service.credential_generation",
         lambda: "test-generation",
     )
+    monkeypatch.setattr(
+        "saturnin.attestation_service.execution_signer_ready",
+        lambda: True,
+    )
 
 
 def _scope() -> dict[str, str]:
@@ -161,6 +165,21 @@ def test_generation_change_invalidates_inflight_session(
         sender.close()
         receiver.close()
         session.listener.close()
+
+
+def test_signer_startup_requires_completed_rotation(
+    config: Config, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(
+        "saturnin.attestation_service.systemd_credential",
+        lambda name: f"{name}-test-value",
+    )
+    monkeypatch.setattr(
+        "saturnin.attestation_service.execution_signer_ready",
+        lambda: False,
+    )
+    with pytest.raises(AttestationServiceError, match="rotation and migration"):
+        SigningService(config)
 
 
 def test_process_binding_uses_pid_and_start_identity() -> None:

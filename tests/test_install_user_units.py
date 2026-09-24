@@ -5,6 +5,9 @@ import shutil
 import subprocess
 from pathlib import Path
 
+import pytest
+
+from saturnin.config import Config
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 
@@ -20,6 +23,35 @@ def _filesystem_topology(root: Path) -> list[tuple[str, str, str | bytes]]:
         else:
             entries.append(("file", relative, path.read_bytes()))
     return entries
+
+
+def test_rendered_systemd_templates_pass_systemd_analyze(config: Config) -> None:
+    analyzer = shutil.which("systemd-analyze")
+    if analyzer is None:
+        pytest.skip("systemd-analyze is unavailable")
+    rendered = config.var_dir / "test-systemd-render"
+    shutil.rmtree(rendered, ignore_errors=True)
+    rendered.mkdir(parents=True, mode=0o700)
+    try:
+        paths: list[str] = []
+        for source in sorted((REPO_ROOT / "systemd").glob("saturnin-*")):
+            destination = rendered / source.name
+            destination.write_text(
+                source.read_text(encoding="utf-8")
+                .replace("@SATURNIN_HOME@", str(REPO_ROOT))
+                .replace("@SATURNIN_HOME_ENV@", str(REPO_ROOT)),
+                encoding="utf-8",
+            )
+            paths.append(str(destination))
+        result = subprocess.run(
+            [analyzer, "--user", "verify", *paths],
+            check=False,
+            capture_output=True,
+            text=True,
+        )
+        assert result.returncode == 0, result.stderr
+    finally:
+        shutil.rmtree(rendered, ignore_errors=True)
 
 
 def test_install_user_units_rejects_unsupported_checkout_path(tmp_path: Path) -> None:

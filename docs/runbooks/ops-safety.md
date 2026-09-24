@@ -62,6 +62,9 @@ saturnin credential prerequisites
 umask 077
 saturnin credential provision-attestation
 saturnin credential status review-attestation
+saturnin credential rotate-attestation
+saturnin credential seal-attestation-rotation
+saturnin credential status review-attestation
 ```
 
 `provision-attestation` generates both current and initial previous-slot keys
@@ -69,7 +72,9 @@ inside the process and streams them to `systemd-creds` over stdin. Neither key
 is accepted in argv, a prompt, an environment variable, or a plaintext file.
 Status decrypts only into captured process memory and prints status and paths,
 never values. Encrypted files are owner-owned `0600` files in an owner-owned
-`0700` directory.
+`0700` directory. The first status reports `signer=rotation-required`; the
+final status must report `rotation=ready; signer=ready` before unit
+installation.
 
 Once status is valid:
 
@@ -83,6 +88,8 @@ systemctl --user status saturnin-attestation.service
 
 <!-- generated:attestation-boundary -->
 During autonomous operation, the master and previous keys are loaded only by `saturnin-attestation.service` in its private mount, network, runtime, and credential namespace. Supervisor and worker units do not load either credential. Explicit owner lifecycle commands may decrypt them in bounded process memory only while the signer and supervisors are stopped.
+
+The signer remains disabled until the owner rotates the master and seals a version-2 migration manifest. That manifest enumerates the exact immutable historical attestations, records a signed ledger digest and timestamp cutoff, and never permits a legacy role-scoped signature to authorize a new record.
 
 For a routed reviewer task, the trusted launcher asks the service for a session bound to task, role, author, subject, immutable head or issue digest, a random nonce, and the launched process identity. The session expires after 900 seconds, accepts one signature, and verifies that the connecting process descends from that exact launch. Its Unix socket is bind-mounted only into that reviewer's sandbox; `/run` and `/proc` remain isolated for all workers.
 

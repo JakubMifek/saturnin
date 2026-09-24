@@ -1037,6 +1037,11 @@ def _run(args: argparse.Namespace, config: Config) -> int:  # noqa: C901 - flat 
                         if "rotation" in details
                         else ""
                     )
+                    + (
+                        f"; signer={details['signer']}"
+                        if "signer" in details
+                        else ""
+                    )
                     for kind, details in paths.items()
                 ),
             )

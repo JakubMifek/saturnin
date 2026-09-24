@@ -249,12 +249,16 @@ def test_rotation_reencrypts_old_key_without_exposing_values(
     assert calls[2][1] == b"old-master"
     assert calls[3][1] == b"new-master"
     assert all("old-master" not in " ".join(command) for command, _ in calls)
-    assert credential_status("review-attestation")["rotation"] == "pending-seal"
+    pending = credential_status("review-attestation")
+    assert pending["rotation"] == "pending-seal"
+    assert pending["signer"] == "rotation-required"
     assert attestation_rotation_values() == ("old-master", "older-master")
 
     complete_attestation_rotation()
 
-    assert credential_status("review-attestation")["rotation"] == "ready"
+    ready = credential_status("review-attestation")
+    assert ready["rotation"] == "ready"
+    assert ready["signer"] == "ready"
 
 
 def test_failed_rotation_can_restore_both_encrypted_slots(
@@ -292,7 +296,9 @@ def test_failed_rotation_can_restore_both_encrypted_slots(
     assert rollback_attestation_rotation() == current
     assert current.read_text(encoding="utf-8") == original_current
     assert previous.read_text(encoding="utf-8") == original_previous
-    assert credential_status("review-attestation")["rotation"] == "ready"
+    restored = credential_status("review-attestation")
+    assert restored["rotation"] == "ready"
+    assert restored["signer"] == "rotation-required"
 
 
 def test_rotation_refuses_to_replace_pending_previous_key(

@@ -252,6 +252,7 @@ def _attestation_boundary(config: Config) -> str:
     if (
         policy.get("required") is not True
         or policy.get("execution_scoped") is not True
+        or policy.get("legacy_migration") != "rotation-manifest-v2-required"
         or not isinstance(policy.get("service_socket"), str)
     ):
         raise GeneratedBlockError(
@@ -270,6 +271,12 @@ def _attestation_boundary(config: Config) -> str:
             "not load either credential. Explicit owner lifecycle commands may "
             "decrypt them in bounded process memory only while the signer and "
             "supervisors are stopped.",
+            "",
+            "The signer remains disabled until the owner rotates the master and "
+            "seals a version-2 migration manifest. That manifest enumerates the "
+            "exact immutable historical attestations, records a signed ledger "
+            "digest and timestamp cutoff, and never permits a legacy role-scoped "
+            "signature to authorize a new record.",
             "",
             "For a routed reviewer task, the trusted launcher asks the service "
             "for a session bound to task, role, author, subject, immutable head "

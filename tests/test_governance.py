@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import os
+import secrets
 import shutil
 import threading
 from contextlib import contextmanager
@@ -16,9 +17,11 @@ from saturnin.config import Config
 from saturnin.governance import Governance, _curl_targets, _git_targets
 from saturnin.jsonlines import durable_append_text
 from saturnin.review import (
+    ReviewRecord,
     ReviewLedger,
     ReviewError,
     _verification_keys,
+    execution_scoped_review_attestation_key,
     issue_content_digest,
     review_attestation_signing_key,
     role_scoped_review_attestation_key,
@@ -30,13 +33,22 @@ OTHER_REPO = "JakubMifek/some-project"
 TEST_HEAD_SHA = "a" * 40
 
 
-def record_review(ledger: ReviewLedger, **kwargs):
-    destination_repo = kwargs.pop(
-        "destination_repo",
-        "JakubMifek/saturnin-ops" if kwargs["kind"] == "issue" else "",
+def execution_attestation(config: Config, **kwargs) -> str:
+    destination_repo = kwargs.get("destination_repo", "")
+    task_id = "T-20260924-test"
+    nonce = secrets.token_hex(32)
+    attestation_id = f"{task_id}:{nonce}"
+    key = execution_scoped_review_attestation_key(
+        os.environ["SATURNIN_REVIEW_ATTESTATION_KEY"],
+        kwargs["reviewer"],
+        task_id,
+        nonce,
+        kwargs["subject"],
+        kwargs.get("head_sha", ""),
+        kwargs.get("issue_digest", ""),
     )
-    attestation = sign_review_attestation(
-        key=review_attestation_signing_key(ledger.config, kwargs["reviewer"]),
+    return sign_review_attestation(
+        key=key,
         subject=kwargs["subject"],
         kind=kwargs["kind"],
         author=kwargs["author"],
@@ -46,6 +58,17 @@ def record_review(ledger: ReviewLedger, **kwargs):
         head_sha=kwargs.get("head_sha", ""),
         issue_digest=kwargs.get("issue_digest", ""),
         destination_repo=destination_repo,
+        attestation_id=attestation_id,
+    )
+
+
+def record_review(ledger: ReviewLedger, **kwargs):
+    destination_repo = kwargs.pop(
+        "destination_repo",
+        "JakubMifek/saturnin-ops" if kwargs["kind"] == "issue" else "",
+    )
+    attestation = execution_attestation(
+        ledger.config, destination_repo=destination_repo, **kwargs
     )
     return ledger.record(
         attestation=attestation,
@@ -290,8 +313,8 @@ def test_self_review_is_impossible(config: Config) -> None:
 def test_review_record_requires_valid_signed_attestation(config: Config) -> None:
     ledger = ReviewLedger(config)
     subject = "JakubMifek/saturnin#signed"
-    attestation = sign_review_attestation(
-        key=review_attestation_signing_key(config, "pr-reviewer"),
+    attestation = execution_attestation(
+        config,
         subject=subject,
         kind="pr",
         author="code-worker",
@@ -333,7 +356,7 @@ def test_review_record_requires_valid_signed_attestation(config: Config) -> None
         )
 
 
-def test_attestation_key_is_scoped_to_reviewer_role(config: Config) -> None:
+def test_retained_legacy_role_key_cannot_authorize_new_record(config: Config) -> None:
     ledger = ReviewLedger(config)
     subject = "JakubMifek/saturnin#role-scoped"
     pr_reviewer_key = review_attestation_signing_key(config, "pr-reviewer")
@@ -348,7 +371,7 @@ def test_attestation_key_is_scoped_to_reviewer_role(config: Config) -> None:
         destination_repo="JakubMifek/saturnin-ops",
     )
 
-    with pytest.raises(ReviewError, match="signature does not match"):
+    with pytest.raises(ReviewError, match="execution-scoped attestation id"):
         ledger.record(
             subject=subject,
             kind="issue",
@@ -380,7 +403,7 @@ def test_role_scoped_attestation_verification_rejects_cross_role_impersonation(
     monkeypatch.setenv("SATURNIN_REVIEW_ATTESTATION_KEY_SCOPE", "role")
     monkeypatch.setenv("SATURNIN_AGENT_ROLE", "issue-reviewer")
 
-    with pytest.raises(ReviewError, match="may not verify reviewer pr-reviewer"):
+    with pytest.raises(ReviewError, match="execution-scoped attestation id"):
         ledger.record(
             subject=subject,
             kind="pr",
@@ -485,7 +508,7 @@ def test_review_key_rotation_retains_history_without_blocking_other_subjects(
         verdict="approved",
         head_sha="c" * 40,
     )
-    with pytest.raises(ReviewError, match="signature does not match"):
+    with pytest.raises(ReviewError, match="execution-scoped attestation id"):
         ledger.record(
             subject="JakubMifek/saturnin#stale-key",
             kind="pr",
@@ -507,15 +530,109 @@ def test_review_key_rotation_retains_history_without_blocking_other_subjects(
     monkeypatch.delenv("SATURNIN_REVIEW_ATTESTATION_PREVIOUS_KEY")
 
     assert ledger.for_subject(new_subject, "pr")
-    with pytest.raises(ReviewError, match="signature does not match"):
+    with pytest.raises(
+        ReviewError, match="ledger digest does not match|signature does not match"
+    ):
         ledger.for_subject(old_subject, "pr")
 
     monkeypatch.setenv("SATURNIN_REVIEW_ATTESTATION_PREVIOUS_KEY", "old-master-key")
     manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
     manifest["attestations"][0]["reviewer"] = "issue-reviewer"
     manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
-    with pytest.raises(ReviewError, match="signature does not match"):
+    with pytest.raises(
+        ReviewError, match="ledger digest does not match|signature does not match"
+    ):
         ledger.for_subject(old_subject, "pr")
+
+
+def test_legacy_records_require_explicit_migration_cutoff(
+    config: Config, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    ledger = ReviewLedger(config)
+    old_master = "retained-legacy-master"
+    new_master = "rotated-execution-master"
+
+    def legacy_record(subject: str, attestation_id: str) -> ReviewRecord:
+        attestation = json.loads(
+            sign_review_attestation(
+                key=role_scoped_review_attestation_key(
+                    old_master, "pr-reviewer"
+                ),
+                subject=subject,
+                kind="pr",
+                author="code-worker",
+                reviewer="pr-reviewer",
+                verdict="approved",
+                head_sha=TEST_HEAD_SHA,
+                attestation_id=attestation_id,
+            )
+        )
+        return ReviewRecord(
+            subject=subject,
+            kind="pr",
+            author="code-worker",
+            reviewer="pr-reviewer",
+            verdict="approved",
+            head_sha=TEST_HEAD_SHA,
+            attestation_id=attestation_id,
+            attestation_signature=(
+                f"{attestation['key_id']}:{attestation['signature']}"
+            ),
+        )
+
+    migrated_subject = "JakubMifek/saturnin#legacy-migrated"
+    migrated = legacy_record(migrated_subject, "legacy-attestation-one")
+    migrated_path = ledger.dir / f"pr-{review.slugify(migrated_subject)}.jsonl"
+    migrated_path.write_text(json.dumps(migrated.to_dict()) + "\n", encoding="utf-8")
+    monkeypatch.setenv("SATURNIN_REVIEW_ATTESTATION_KEY", new_master)
+    monkeypatch.setenv("SATURNIN_REVIEW_ATTESTATION_PREVIOUS_KEY", old_master)
+
+    with pytest.raises(ReviewError, match="manifest is missing or invalid"):
+        ledger.for_subject(migrated_subject, "pr")
+
+    manifest = ledger.seal_rotation_manifest(
+        current_master=new_master,
+        previous_master=old_master,
+    )
+    assert ledger.for_subject(migrated_subject, "pr")
+    manifest_data = json.loads(manifest.read_text(encoding="utf-8"))
+    assert manifest_data["version"] == 2
+    assert len(manifest_data["ledger_digest"]) == 64
+    assert manifest_data["migration_cutoff"]
+
+    late_subject = "JakubMifek/saturnin#legacy-after-cutoff"
+    late = legacy_record(late_subject, "legacy-attestation-two")
+    late_path = ledger.dir / f"pr-{review.slugify(late_subject)}.jsonl"
+    late_path.write_text(json.dumps(late.to_dict()) + "\n", encoding="utf-8")
+    with pytest.raises(ReviewError, match="not sealed by the rotation manifest"):
+        ledger.for_subject(late_subject, "pr")
+
+    forged_new = sign_review_attestation(
+        key=role_scoped_review_attestation_key(old_master, "pr-reviewer"),
+        subject="JakubMifek/saturnin#legacy-forged-new",
+        kind="pr",
+        author="code-worker",
+        reviewer="pr-reviewer",
+        verdict="approved",
+        head_sha="b" * 40,
+        attestation_id="legacy-forged-new",
+    )
+    with pytest.raises(ReviewError, match="execution-scoped attestation id"):
+        ledger.record(
+            subject="JakubMifek/saturnin#legacy-forged-new",
+            kind="pr",
+            author="code-worker",
+            reviewer="pr-reviewer",
+            verdict="approved",
+            head_sha="b" * 40,
+            attestation=forged_new,
+        )
+
+    migrated_data = migrated.to_dict()
+    migrated_data["notes"] = "tampered after migration"
+    migrated_path.write_text(json.dumps(migrated_data) + "\n", encoding="utf-8")
+    with pytest.raises(ReviewError, match="ledger digest does not match"):
+        ledger.for_subject(migrated_subject, "pr")
 
 
 def test_rotation_seal_serializes_concurrent_record_writes(

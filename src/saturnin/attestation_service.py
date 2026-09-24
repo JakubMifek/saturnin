@@ -28,6 +28,7 @@ from .credentials import (
     _lifecycle_lock,
     _rotation_state,
     credential_generation,
+    execution_signer_ready,
     systemd_credential,
 )
 
@@ -170,6 +171,10 @@ class SigningService:
             raise AttestationServiceError("attestation service credentials are unavailable")
         with _lifecycle_lock(exclusive=False):
             self.generation = credential_generation()
+            if not execution_signer_ready():
+                raise AttestationServiceError(
+                    "master rotation and migration sealing are required before signer startup"
+                )
         self.sessions: dict[str, _Session] = {}
         self.lock = threading.Lock()
 
@@ -334,6 +339,7 @@ class SigningService:
         with _lifecycle_lock(exclusive=False):
             if (
                 _rotation_state() != "ready"
+                or not execution_signer_ready()
                 or not secrets.compare_digest(
                     self.generation, credential_generation()
                 )
@@ -420,12 +426,19 @@ class SigningService:
         from .review import _manifest_payload, _rotation_manifest_key
 
         entries = request.get("entries")
+        cutoff = request.get("migration_cutoff")
+        ledger_digest = request.get("ledger_digest")
         signature = request.get("signature")
-        if not isinstance(entries, list) or not isinstance(signature, str):
+        if (
+            not isinstance(entries, list)
+            or not isinstance(cutoff, str)
+            or not isinstance(ledger_digest, str)
+            or not isinstance(signature, str)
+        ):
             raise AttestationServiceError("invalid rotation manifest request")
         expected = hmac.new(
             _rotation_manifest_key(self.current),
-            _manifest_payload(entries),
+            _manifest_payload(entries, cutoff, ledger_digest),
             hashlib.sha256,
         ).hexdigest()
         if not hmac.compare_digest(signature, expected):
@@ -505,13 +518,19 @@ def verify_with_service(config: Config, attestation: str) -> dict[str, Any]:
 
 
 def verify_manifest_with_service(
-    config: Config, entries: list[dict[str, str]], signature: str
+    config: Config,
+    entries: list[dict[str, str]],
+    migration_cutoff: str,
+    ledger_digest: str,
+    signature: str,
 ) -> None:
     response = request(
         config,
         {
             "action": "verify_manifest",
             "entries": entries,
+            "migration_cutoff": migration_cutoff,
+            "ledger_digest": ledger_digest,
             "signature": signature,
         },
     )

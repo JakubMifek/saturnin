@@ -31,6 +31,7 @@ ROTATION_CURRENT_BACKUP = ".saturnin-review-attestation-key.rollback.cred"
 ROTATION_PREVIOUS_BACKUP = ".saturnin-review-attestation-previous-key.rollback.cred"
 LIFECYCLE_LOCK = ".lifecycle"
 CREDENTIAL_GENERATION = ".generation"
+EXECUTION_SIGNER_ENABLEMENT = ".execution-signer-enabled"
 HOST_SCOPED_CREDENTIAL_ID = bytes.fromhex("55b9ed1d38594d43a8319d2ebb332ac6")
 
 
@@ -237,6 +238,27 @@ def _advance_generation() -> None:
     )
 
 
+def execution_signer_ready() -> bool:
+    if _rotation_state() != "ready":
+        return False
+    try:
+        enabled = _read_private_file(
+            encrypted_credential_dir() / EXECUTION_SIGNER_ENABLEMENT
+        ).strip()
+        generation = credential_generation()
+    except CredentialError:
+        return False
+    return secrets.compare_digest(enabled, generation)
+
+
+def _enable_execution_signer() -> None:
+    atomic_replace_text(
+        encrypted_credential_dir() / EXECUTION_SIGNER_ENABLEMENT,
+        credential_generation() + "\n",
+        mode=PRIVATE_FILE_MODE,
+    )
+
+
 def _read_private_file(path: Path) -> str:
     try:
         descriptor = os.open(path, os.O_RDONLY | os.O_NOFOLLOW)
@@ -288,6 +310,9 @@ def provision_attestation_key() -> Path:
 
 def _provision_attestation_key() -> Path:
     destination = encrypted_credential_path("review-attestation")
+    (encrypted_credential_dir() / EXECUTION_SIGNER_ENABLEMENT).unlink(
+        missing_ok=True
+    )
     if destination.exists():
         raise CredentialError(
             "review-attestation is already provisioned; use rotate-attestation"
@@ -320,6 +345,9 @@ def _rotate_attestation_key(
         raise CredentialError(
             "attestation rotation is already pending; seal or roll it back"
         )
+    (encrypted_credential_dir() / EXECUTION_SIGNER_ENABLEMENT).unlink(
+        missing_ok=True
+    )
     current = _decrypt_encrypted_credential("review-attestation")
     previous = _decrypt_encrypted_credential("review-attestation-previous")
     if secrets.compare_digest(current, previous):
@@ -397,6 +425,7 @@ def _complete_attestation_rotation() -> None:
             json.dumps({"version": 1, "state": "sealed-cleanup"}) + "\n",
             mode=PRIVATE_FILE_MODE,
         )
+    _enable_execution_signer()
     for path in (current_backup, previous_backup, state_path):
         try:
             path.unlink(missing_ok=True)
@@ -425,6 +454,9 @@ def _rollback_attestation_rotation() -> Path:
     _decrypt_encrypted_credential("review-attestation")
     _decrypt_encrypted_credential("review-attestation-previous")
     _advance_generation()
+    (encrypted_credential_dir() / EXECUTION_SIGNER_ENABLEMENT).unlink(
+        missing_ok=True
+    )
     for path in (state_path, current_backup, previous_backup):
         path.unlink(missing_ok=True)
     return current
@@ -455,6 +487,9 @@ def _revoke_credential(kind: str) -> list[Path]:
         for path in _rotation_paths():
             path.unlink(missing_ok=True)
         (encrypted_credential_dir() / CREDENTIAL_GENERATION).unlink(missing_ok=True)
+        (encrypted_credential_dir() / EXECUTION_SIGNER_ENABLEMENT).unlink(
+            missing_ok=True
+        )
     if not removed:
         raise CredentialError(f"encrypted credential is not provisioned: {kind}")
     return removed
@@ -560,4 +595,7 @@ def credential_status(kind: str) -> dict[str, str]:
         }
         if kind == "review-attestation":
             status["rotation"] = _rotation_state()
+            status["signer"] = (
+                "ready" if execution_signer_ready() else "rotation-required"
+            )
         return status
