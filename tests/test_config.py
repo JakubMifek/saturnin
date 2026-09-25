@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import re
 import subprocess
 from pathlib import Path
 
@@ -51,6 +52,8 @@ def test_ci_runs_untrusted_tests_only_for_push_and_pull_request() -> None:
     assert "pull_request:" in workflow
     assert "pull_request_target:" not in workflow
     assert "review_gate.sh" not in workflow
+    assert "github.event.pull_request.head.sha || github.sha" in workflow
+    assert 'disclosure_gate.sh . . "$TARGET_SHA"' in workflow
 
 
 def test_ci_review_gate_does_not_claim_a_fixed_author_role() -> None:
@@ -72,13 +75,51 @@ def test_ci_governance_uses_base_controlled_workflow_and_code() -> None:
     assert "\n  pull_request:\n" not in workflow
     assert "github.event.pull_request.base.sha" in workflow
     assert "persist-credentials: false" in workflow
-    assert "ref: ${{ github.event.pull_request.head.sha }}" not in workflow
+    assert "ref: ${{ github.event.pull_request.head.sha }}" in workflow
+    assert "repository: ${{ github.event.pull_request.head.repo.full_name }}" in workflow
+    assert "path: trusted" in workflow
+    assert "path: candidate" in workflow
+    assert "candidate trusted \"$CANDIDATE_SHA\"" in workflow
+    assert "--policy candidate/policies/disclosure.yaml" in workflow
+    assert "trusted/.venv/bin/python" in workflow
+    assert "--require-hashes" in workflow
+    assert "./trusted[dev]" not in workflow
+    assert "actions/checkout@v4" not in workflow
+    assert "actions/setup-python@v5" not in workflow
+    assert "candidate/automation/library/disclosure_gate.sh" not in workflow
     assert "TRUSTED_BOOTSTRAP_BASE_SHA" not in workflow
     assert "Require seeded base governance runtime" in workflow
     assert "seed this workflow/runtime on the default branch" in workflow
     assert "Repository-native bootstrap approval" not in workflow
     assert "github.paginate(" not in workflow
     assert "listReviews" not in workflow
+
+
+def test_privileged_workflow_uses_only_trusted_saturnin_runtime() -> None:
+    workflow_path = REPO_ROOT / ".github/workflows/governance.yml"
+    workflow = yaml.safe_load(workflow_path.read_text(encoding="utf-8"))
+    run_blocks = [
+        step["run"]
+        for job in workflow["jobs"].values()
+        for step in job.get("steps", [])
+        if "run" in step
+    ]
+
+    assert 'trusted/.venv/bin/saturnin check branch "$HEAD_REF"' in run_blocks
+    for run in run_blocks:
+        cli_invocations = re.findall(
+            r"(\S*saturnin)\s+"
+            r"(?:check|review|doctor|docs|task|push|dispatch|improve)\b",
+            run,
+        )
+        assert all(command == "trusted/.venv/bin/saturnin" for command in cli_invocations)
+        module_invocations = re.findall(
+            r"(\S*python(?:3)?)\s+(?:\\\s*)?-m\s+saturnin(?:\.|\s|$)",
+            run,
+        )
+        assert all(
+            command == "trusted/.venv/bin/python" for command in module_invocations
+        )
 
 
 def test_runtime_summary_is_policy_generated() -> None:
