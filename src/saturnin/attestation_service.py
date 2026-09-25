@@ -9,6 +9,7 @@ import hmac
 import json
 import os
 import secrets
+import signal
 import socket
 import stat
 import struct
@@ -93,12 +94,32 @@ def _peer_pid(connection: socket.socket) -> int:
     return pid
 
 
-def _process_start_time(pid: int) -> int | None:
+def _process_stat(pid: int) -> tuple[int, int] | None:
     try:
-        fields = Path(f"/proc/{pid}/stat").read_text(encoding="utf-8").split()
-        return int(fields[21])
-    except (OSError, ValueError, IndexError):
+        value = Path(f"/proc/{pid}/stat").read_text(encoding="utf-8")
+    except (OSError, UnicodeError):
         return None
+    prefix, separator, suffix = value.rpartition(")")
+    fields = suffix.split()
+    if (
+        not separator
+        or not prefix.startswith(f"{pid} (")
+        or len(fields) < 20
+    ):
+        return None
+    try:
+        parent = int(fields[1])
+        started = int(fields[19])
+    except ValueError:
+        return None
+    if parent < 0 or started < 0:
+        return None
+    return parent, started
+
+
+def _process_start_time(pid: int) -> int | None:
+    process = _process_stat(pid)
+    return process[1] if process is not None else None
 
 
 def _is_descendant(pid: int, ancestor: int, ancestor_start: int) -> bool:
@@ -106,35 +127,160 @@ def _is_descendant(pid: int, ancestor: int, ancestor_start: int) -> bool:
     for _ in range(64):
         if current == ancestor:
             return _process_start_time(current) == ancestor_start
-        try:
-            fields = Path(f"/proc/{current}/stat").read_text(encoding="utf-8").split()
-            current = int(fields[3])
-        except (OSError, ValueError, IndexError):
+        process = _process_stat(current)
+        if process is None:
             return False
+        current = process[0]
         if current <= 1:
             return False
     return False
 
 
-def _trusted_supervisor(pid: int, config: Config) -> bool:
+def _process_cgroups(pid: int) -> tuple[str, ...] | None:
     try:
-        executable = Path(f"/proc/{pid}/exe").resolve()
-        command = Path(f"/proc/{pid}/cmdline").read_bytes().replace(b"\0", b" ")
-        cgroup = Path(f"/proc/{pid}/cgroup").read_text(encoding="utf-8")
+        lines = Path(f"/proc/{pid}/cgroup").read_text(encoding="utf-8").splitlines()
+    except (OSError, UnicodeError):
+        return None
+    paths: list[str] = []
+    for line in lines:
+        parts = line.split(":", 2)
+        if len(parts) != 3 or not parts[2].startswith("/"):
+            return None
+        paths.append(parts[2])
+    return tuple(sorted(paths)) if paths else None
+
+
+def _process_namespace_pids(pid: int) -> tuple[int, ...] | None:
+    try:
+        lines = Path(f"/proc/{pid}/status").read_text(encoding="utf-8").splitlines()
+    except (OSError, UnicodeError):
+        return None
+    for line in lines:
+        if not line.startswith("NSpid:"):
+            continue
+        try:
+            values = tuple(int(value) for value in line.split()[1:])
+        except ValueError:
+            return None
+        if values and values[0] == pid and all(value > 0 for value in values):
+            return values
+        return None
+    return None
+
+
+@dataclass
+class _ProcessIdentity:
+    pid: int
+    started: int
+    pidfd: int
+    pid_namespace: tuple[int, int]
+    namespace_pids: tuple[int, ...]
+    cgroups: tuple[str, ...]
+
+    def close(self) -> None:
+        if self.pidfd >= 0:
+            os.close(self.pidfd)
+            self.pidfd = -1
+
+
+def _process_identity(pid: int) -> _ProcessIdentity | None:
+    if pid <= 1 or not hasattr(os, "pidfd_open"):
+        return None
+    try:
+        pidfd = os.pidfd_open(pid)
+    except OSError:
+        return None
+    try:
+        process = _process_stat(pid)
+        namespace = os.stat(f"/proc/{pid}/ns/pid")
+        namespace_pids = _process_namespace_pids(pid)
+        cgroups = _process_cgroups(pid)
+        if (
+            process is None
+            or namespace_pids is None
+            or cgroups is None
+            or _process_start_time(pid) != process[1]
+        ):
+            os.close(pidfd)
+            return None
+        return _ProcessIdentity(
+            pid,
+            process[1],
+            pidfd,
+            (namespace.st_dev, namespace.st_ino),
+            namespace_pids,
+            cgroups,
+        )
+    except OSError:
+        os.close(pidfd)
+        return None
+
+
+def _identity_is_live(identity: _ProcessIdentity) -> bool:
+    try:
+        signal.pidfd_send_signal(identity.pidfd, 0)
     except OSError:
         return False
-    trusted_python = (config.root / ".venv" / "bin" / "python").resolve()
-    units = (
-        config.governance.get("review", {})
-        .get("attestation", {})
-        .get("supervisor_units", [])
-    )
+    return _process_start_time(identity.pid) == identity.started
+
+
+def _peer_identity(connection: socket.socket) -> _ProcessIdentity:
+    identity = _process_identity(_peer_pid(connection))
+    if identity is None:
+        raise AttestationServiceError("attestation service peer identity is unavailable")
+    return identity
+
+
+def _peer_matches_root(
+    peer: _ProcessIdentity, root: _ProcessIdentity
+) -> bool:
     return (
-        executable == trusted_python
-        and b"saturnin" in command
-        and isinstance(units, list)
-        and any(f"/{unit}" in cgroup for unit in units)
+        _identity_is_live(peer)
+        and _identity_is_live(root)
+        and peer.cgroups == root.cgroups
+        and len(peer.namespace_pids) >= len(root.namespace_pids)
+        and (
+            peer.pid_namespace == root.pid_namespace
+            or len(peer.namespace_pids) > len(root.namespace_pids)
+        )
+        and _is_descendant(peer.pid, root.pid, root.started)
     )
+
+
+def _cgroup_contains_unit(cgroups: tuple[str, ...], unit: str) -> bool:
+    return any(unit in Path(path).parts for path in cgroups)
+
+
+def _trusted_supervisor(pid: int | _ProcessIdentity, config: Config) -> bool:
+    owned = not isinstance(pid, _ProcessIdentity)
+    identity = pid if isinstance(pid, _ProcessIdentity) else _process_identity(pid)
+    if identity is None:
+        return False
+    try:
+        if not _identity_is_live(identity):
+            return False
+        executable = Path(f"/proc/{identity.pid}/exe").resolve()
+        trusted_python = (config.root / ".venv" / "bin" / "python").resolve()
+        units = (
+            config.governance.get("review", {})
+            .get("attestation", {})
+            .get("supervisor_units", [])
+        )
+        return (
+            executable == trusted_python
+            and isinstance(units, list)
+            and any(
+                isinstance(unit, str)
+                and _cgroup_contains_unit(identity.cgroups, unit)
+                for unit in units
+            )
+            and _identity_is_live(identity)
+        )
+    except OSError:
+        return False
+    finally:
+        if owned:
+            identity.close()
 
 
 def _execution_key(master: str, scope: dict[str, str]) -> str:
@@ -159,6 +305,7 @@ class _Session:
     expires_at: float
     root_pid: int = 0
     root_start: int = 0
+    root_identity: _ProcessIdentity | None = None
     used: bool = False
 
 
@@ -246,26 +393,41 @@ class SigningService:
         return {"status": "ready", "socket": str(path), "nonce": scope["nonce"]}
 
     def _activate(
-        self, request: dict[str, Any], supervisor_pid: int
+        self, request: dict[str, Any], supervisor: _ProcessIdentity
     ) -> dict[str, Any]:
         nonce = request.get("nonce")
         pid = request.get("root_pid")
         started = request.get("root_start")
-        if not isinstance(nonce, str) or not isinstance(pid, int) or not isinstance(started, int):
+        if (
+            not isinstance(nonce, str)
+            or not isinstance(pid, int)
+            or isinstance(pid, bool)
+            or not isinstance(started, int)
+            or isinstance(started, bool)
+        ):
             raise AttestationServiceError("invalid reviewer process binding")
+        root = _process_identity(pid)
+        if root is None:
+            raise AttestationServiceError("reviewer process identity does not match")
         with self.lock:
             session = self.sessions.get(nonce)
             if session is None or session.used or time.monotonic() >= session.expires_at:
+                root.close()
                 raise AttestationServiceError("reviewer signing session is unavailable")
-            supervisor_start = _process_start_time(supervisor_pid)
             if (
-                _process_start_time(pid) != started
-                or supervisor_start is None
-                or not _is_descendant(pid, supervisor_pid, supervisor_start)
+                root.started != started
+                or root.pid_namespace != supervisor.pid_namespace
+                or root.cgroups != supervisor.cgroups
+                or not _identity_is_live(supervisor)
+                or not _is_descendant(pid, supervisor.pid, supervisor.started)
             ):
+                root.close()
                 raise AttestationServiceError("reviewer process identity does not match")
+            if session.root_identity is not None:
+                session.root_identity.close()
             session.root_pid = pid
             session.root_start = started
+            session.root_identity = root
         return {"status": "activated"}
 
     def _cancel(self, request: dict[str, Any]) -> dict[str, Any]:
@@ -277,6 +439,9 @@ class SigningService:
             if session is not None:
                 session.used = True
         if session is not None:
+            if session.root_identity is not None:
+                session.root_identity.close()
+                session.root_identity = None
             session.listener.close()
             session.socket_path.unlink(missing_ok=True)
         return {"status": "cancelled"}
@@ -288,21 +453,29 @@ class SigningService:
             )
             connection, _ = session.listener.accept()
             with connection:
-                peer = _peer_pid(connection)
-                if (
-                    session.root_pid <= 1
-                    or not _is_descendant(peer, session.root_pid, session.root_start)
-                    or time.monotonic() >= session.expires_at
-                ):
-                    raise AttestationServiceError("reviewer signing peer does not match launch")
-                request = _receive(connection)
-                self._sign(session, request, connection)
+                peer = _peer_identity(connection)
+                try:
+                    if (
+                        session.root_identity is None
+                        or not _peer_matches_root(peer, session.root_identity)
+                        or time.monotonic() >= session.expires_at
+                    ):
+                        raise AttestationServiceError(
+                            "reviewer signing peer does not match launch"
+                        )
+                    request = _receive(connection)
+                    self._sign(session, request, connection)
+                finally:
+                    peer.close()
         except (OSError, AttestationServiceError):
             pass
         finally:
             with self.lock:
                 session.used = True
                 self.sessions.pop(session.scope["nonce"], None)
+            if session.root_identity is not None:
+                session.root_identity.close()
+                session.root_identity = None
             session.listener.close()
             session.socket_path.unlink(missing_ok=True)
 
@@ -364,26 +537,31 @@ class SigningService:
         _send(connection, {"attestation": attestation})
 
     def handle(self, connection: socket.socket) -> None:
-        peer = _peer_pid(connection)
-        request = _receive(connection)
-        action = request.get("action")
-        if action in {"open", "activate", "cancel"} and not _trusted_supervisor(
-            peer, self.config
-        ):
-            raise AttestationServiceError("attestation service caller is not trusted supervisor")
-        if action == "open":
-            response = self._open(request)
-        elif action == "activate":
-            response = self._activate(request, peer)
-        elif action == "cancel":
-            response = self._cancel(request)
-        elif action == "verify":
-            response = self._verify(request)
-        elif action == "verify_manifest":
-            response = self._verify_manifest(request)
-        else:
-            raise AttestationServiceError("unknown attestation service action")
-        _send(connection, response)
+        peer = _peer_identity(connection)
+        try:
+            request = _receive(connection)
+            action = request.get("action")
+            if action in {"open", "activate", "cancel"} and not _trusted_supervisor(
+                peer, self.config
+            ):
+                raise AttestationServiceError(
+                    "attestation service caller is not trusted supervisor"
+                )
+            if action == "open":
+                response = self._open(request)
+            elif action == "activate":
+                response = self._activate(request, peer)
+            elif action == "cancel":
+                response = self._cancel(request)
+            elif action == "verify":
+                response = self._verify(request)
+            elif action == "verify_manifest":
+                response = self._verify_manifest(request)
+            else:
+                raise AttestationServiceError("unknown attestation service action")
+            _send(connection, response)
+        finally:
+            peer.close()
 
     def _verify(self, request: dict[str, Any]) -> dict[str, Any]:
         from .review import (

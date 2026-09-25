@@ -1,7 +1,10 @@
 from __future__ import annotations
 
 import json
+import os
 import socket
+import subprocess
+import sys
 import threading
 import time
 from pathlib import Path
@@ -10,9 +13,13 @@ import pytest
 
 from saturnin.attestation_service import (
     AttestationServiceError,
+    _ProcessIdentity,
     SigningService,
     _Session,
+    _identity_is_live,
     _is_descendant,
+    _peer_matches_root,
+    _process_identity,
     _process_start_time,
     _trusted_supervisor,
     sign_from_session,
@@ -183,8 +190,76 @@ def test_signer_startup_requires_completed_rotation(
 
 
 def test_process_binding_uses_pid_and_start_identity() -> None:
-    pid = __import__("os").getpid()
+    pid = os.getpid()
     started = _process_start_time(pid)
     assert started is not None
     assert _is_descendant(pid, pid, started)
     assert not _is_descendant(pid, pid, started + 1)
+
+
+def test_crafted_process_name_cannot_spoof_unrelated_sibling_ancestry() -> None:
+    root = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(30)"])
+    attacker = subprocess.Popen(
+        [
+            sys.executable,
+            "-c",
+            (
+                "import ctypes,sys,time;"
+                "ctypes.CDLL(None).prctl(15,sys.argv[1].encode(),0,0,0);"
+                "print('ready',flush=True);time.sleep(30)"
+            ),
+            f") S {root.pid} x",
+        ],
+        stdout=subprocess.PIPE,
+        text=True,
+    )
+    try:
+        assert attacker.stdout is not None
+        assert attacker.stdout.readline().strip() == "ready"
+        root_started = _process_start_time(root.pid)
+        assert root_started is not None
+        assert not _is_descendant(attacker.pid, root.pid, root_started)
+    finally:
+        attacker.terminate()
+        root.terminate()
+        attacker.wait(timeout=5)
+        root.wait(timeout=5)
+
+
+def test_process_identity_is_pidfd_bound_and_namespace_aware() -> None:
+    identity = _process_identity(os.getpid())
+    assert identity is not None
+    try:
+        assert _identity_is_live(identity)
+        assert identity.namespace_pids[0] == os.getpid()
+        assert identity.pid_namespace[0] > 0
+        assert identity.pid_namespace[1] > 0
+    finally:
+        identity.close()
+    assert not _identity_is_live(identity)
+
+
+def test_peer_binding_rejects_sibling_namespace_and_cgroup(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        "saturnin.attestation_service._identity_is_live", lambda identity: True
+    )
+    monkeypatch.setattr(
+        "saturnin.attestation_service._is_descendant",
+        lambda pid, ancestor, started: True,
+    )
+    root = _ProcessIdentity(10, 100, -1, (1, 20), (10,), ("/trusted.service",))
+    sibling_namespace = _ProcessIdentity(
+        11, 101, -1, (1, 21), (11,), ("/trusted.service",)
+    )
+    nested_namespace = _ProcessIdentity(
+        12, 102, -1, (1, 22), (12, 1), ("/trusted.service",)
+    )
+    wrong_cgroup = _ProcessIdentity(
+        13, 103, -1, (1, 20), (13,), ("/attacker.service",)
+    )
+
+    assert not _peer_matches_root(sibling_namespace, root)
+    assert _peer_matches_root(nested_namespace, root)
+    assert not _peer_matches_root(wrong_cgroup, root)
