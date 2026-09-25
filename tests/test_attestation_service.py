@@ -18,11 +18,17 @@ from saturnin.attestation_service import (
     _Session,
     _identity_is_live,
     _is_descendant,
+    _peer_identity,
     _peer_matches_root,
     _process_identity,
     _process_start_time,
+    _trusted_attestation_server,
     _trusted_supervisor,
+    request,
+    service_socket,
     sign_from_session,
+    verify_manifest_with_service,
+    verify_with_service,
 )
 from saturnin.config import Config
 
@@ -263,3 +269,136 @@ def test_peer_binding_rejects_sibling_namespace_and_cgroup(
     assert not _peer_matches_root(sibling_namespace, root)
     assert _peer_matches_root(nested_namespace, root)
     assert not _peer_matches_root(wrong_cgroup, root)
+
+
+def _fake_attestation_service(
+    listener: socket.socket, response: dict[str, object]
+) -> threading.Thread:
+    def respond() -> None:
+        connection, _ = listener.accept()
+        with connection:
+            try:
+                connection.sendall(
+                    json.dumps(response, separators=(",", ":")).encode() + b"\n"
+                )
+            except BrokenPipeError:
+                pass
+
+    thread = threading.Thread(target=respond)
+    thread.start()
+    return thread
+
+
+def test_control_socket_replacement_cannot_forge_verification(
+    config: Config, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    runtime = tmp_path / "runtime"
+    monkeypatch.setenv("XDG_RUNTIME_DIR", str(runtime))
+    config.governance["review"]["attestation"]["service_socket"] = "%t/s"
+    path = service_socket(config)
+    path.parent.mkdir(parents=True)
+    original = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+    replacement = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+    original.bind(str(path))
+    path.unlink()
+    replacement.bind(str(path))
+    replacement.listen(1)
+    thread = _fake_attestation_service(
+        replacement, {"status": "verified", "previous": False}
+    )
+    try:
+        with pytest.raises(AttestationServiceError, match="identity is not trusted"):
+            verify_with_service(config, '{"key_id":"forged","signature":"forged"}')
+    finally:
+        original.close()
+        replacement.close()
+        thread.join(timeout=5)
+
+
+def test_fake_same_uid_responder_cannot_forge_manifest_verification(
+    config: Config, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    runtime = tmp_path / "runtime"
+    monkeypatch.setenv("XDG_RUNTIME_DIR", str(runtime))
+    config.governance["review"]["attestation"]["service_socket"] = "%t/s"
+    path = service_socket(config)
+    path.parent.mkdir(parents=True)
+    listener = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+    listener.bind(str(path))
+    listener.listen(1)
+    thread = _fake_attestation_service(listener, {"status": "verified"})
+    try:
+        with pytest.raises(AttestationServiceError, match="identity is not trusted"):
+            verify_manifest_with_service(config, [], "cutoff", "digest", "signature")
+    finally:
+        listener.close()
+        thread.join(timeout=5)
+
+
+def test_attestation_server_requires_exact_executable_and_cgroup(
+    config: Config, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    identity = _ProcessIdentity(
+        10,
+        100,
+        -1,
+        (1, 20),
+        (10,),
+        ("/user.slice/saturnin-attestation.service",),
+    )
+    trusted_python = (config.root / ".venv" / "bin" / "python").resolve()
+    monkeypatch.setattr(
+        "saturnin.attestation_service._identity_is_live", lambda candidate: True
+    )
+    monkeypatch.setattr(
+        "saturnin.attestation_service._process_executable",
+        lambda candidate: trusted_python,
+    )
+    assert _trusted_attestation_server(identity, config)
+
+    identity.cgroups = ("/user.slice/attacker.service",)
+    assert not _trusted_attestation_server(identity, config)
+    identity.cgroups = ("/user.slice/saturnin-attestation.service",)
+    monkeypatch.setattr(
+        "saturnin.attestation_service._process_executable",
+        lambda candidate: Path("/usr/bin/not-saturnin"),
+    )
+    assert not _trusted_attestation_server(identity, config)
+
+
+def test_attestation_server_pid_reuse_race_fails_closed(
+    config: Config, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    identity = _ProcessIdentity(
+        10,
+        100,
+        -1,
+        (1, 20),
+        (10,),
+        ("/user.slice/saturnin-attestation.service",),
+    )
+    checks = iter((True, False))
+    monkeypatch.setattr(
+        "saturnin.attestation_service._identity_is_live",
+        lambda candidate: next(checks),
+    )
+    monkeypatch.setattr(
+        "saturnin.attestation_service._process_executable",
+        lambda candidate: (config.root / ".venv" / "bin" / "python").resolve(),
+    )
+    assert not _trusted_attestation_server(identity, config)
+
+
+def test_attestation_server_missing_proc_identity_fails_closed(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    client, server = socket.socketpair()
+    monkeypatch.setattr(
+        "saturnin.attestation_service._process_identity", lambda pid: None
+    )
+    try:
+        with pytest.raises(AttestationServiceError, match="identity is unavailable"):
+            _peer_identity(client)
+    finally:
+        client.close()
+        server.close()

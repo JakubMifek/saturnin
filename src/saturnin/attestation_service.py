@@ -37,6 +37,7 @@ MAX_MESSAGE = 128 * 1024
 SESSION_TTL_SECONDS = 15 * 60
 ENV_SESSION_SOCKET = "SATURNIN_REVIEW_SIGNING_SOCKET"
 ENV_SESSION_NONCE = "SATURNIN_REVIEW_SIGNING_NONCE"
+ATTESTATION_SERVICE_UNIT = "saturnin-attestation.service"
 
 
 class AttestationServiceError(RuntimeError):
@@ -251,6 +252,13 @@ def _cgroup_contains_unit(cgroups: tuple[str, ...], unit: str) -> bool:
     return any(unit in Path(path).parts for path in cgroups)
 
 
+def _process_executable(identity: _ProcessIdentity) -> Path | None:
+    try:
+        return Path(f"/proc/{identity.pid}/exe").resolve(strict=True)
+    except OSError:
+        return None
+
+
 def _trusted_supervisor(pid: int | _ProcessIdentity, config: Config) -> bool:
     owned = not isinstance(pid, _ProcessIdentity)
     identity = pid if isinstance(pid, _ProcessIdentity) else _process_identity(pid)
@@ -259,7 +267,7 @@ def _trusted_supervisor(pid: int | _ProcessIdentity, config: Config) -> bool:
     try:
         if not _identity_is_live(identity):
             return False
-        executable = Path(f"/proc/{identity.pid}/exe").resolve()
+        executable = _process_executable(identity)
         trusted_python = (config.root / ".venv" / "bin" / "python").resolve()
         units = (
             config.governance.get("review", {})
@@ -281,6 +289,18 @@ def _trusted_supervisor(pid: int | _ProcessIdentity, config: Config) -> bool:
     finally:
         if owned:
             identity.close()
+
+
+def _trusted_attestation_server(
+    identity: _ProcessIdentity, config: Config
+) -> bool:
+    trusted_python = (config.root / ".venv" / "bin" / "python").resolve()
+    return (
+        _identity_is_live(identity)
+        and _process_executable(identity) == trusted_python
+        and _cgroup_contains_unit(identity.cgroups, ATTESTATION_SERVICE_UNIT)
+        and _identity_is_live(identity)
+    )
 
 
 def _execution_key(master: str, scope: dict[str, str]) -> str:
@@ -657,14 +677,23 @@ class SigningService:
 
 def request(config: Config, payload: dict[str, Any]) -> dict[str, Any]:
     path = service_socket(config)
-    metadata = path.stat(follow_symlinks=False)
-    if not stat.S_ISSOCK(metadata.st_mode) or metadata.st_uid != os.getuid():
-        raise AttestationServiceError("attestation service socket is unsafe")
     connection = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
     with connection:
         connection.connect(str(path))
-        _send(connection, payload)
-        response = _receive(connection)
+        server = _peer_identity(connection)
+        try:
+            if not _trusted_attestation_server(server, config):
+                raise AttestationServiceError(
+                    "attestation service server identity is not trusted"
+                )
+            _send(connection, payload)
+            response = _receive(connection)
+            if not _identity_is_live(server):
+                raise AttestationServiceError(
+                    "attestation service server identity changed"
+                )
+        finally:
+            server.close()
     if "error" in response:
         raise AttestationServiceError(str(response["error"]))
     return response
