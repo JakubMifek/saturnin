@@ -1,0 +1,30 @@
+version: 1
+
+scanner:
+  name: gitleaks
+  version: 8.24.3
+  linux_x64_sha256: 9991e0b2903da4c8f6122b5c3186448b927a5da4deef1fe45271c3793f4ee29c
+  linux_x64_binary_sha256: e18325d568268b6efb6cd0cc721f8bea5667f4cd1c8d03618ab61987f41269ad
+  config: policies/gitleaks.toml
+
+# Exact, conspicuous labels keep the repository-specific layer deterministic
+# and low-noise. Gitleaks remains responsible for credential and key detection.
+forbidden_markers:
+  - id: private-material
+    literal: "SATURNIN-DISCLOSURE:PRIVATE"
+  - id: proprietary-material
+    literal: "SATURNIN-DISCLOSURE:PROPRIETARY"
+
+# Exceptions require an exact rule, fixture-only path, and complete line digest.
+# Values are intentionally absent so diagnostics and policy never disclose them.
+allowlist:
+  - rule: private-material
+    path: tests/fixtures/disclosure/synthetic-allowed.txt
+    line_sha256: 98c1bdabbc1f92018cacbf9dd88ed9e103374e5cb60aa0f613306070ae3478c4
+
+# Gitleaks exceptions are bound to one rule, one literal fixture path, and the
+# complete synthetic match digest. The trusted validator rejects regex variants.
+scanner_allowlist:
+  - rule: saturnin-synthetic-token
+    path: tests/fixtures/disclosure/synthetic-allowed.txt
+    match_sha256: fcecc9e6f35f18df3fb5594841b8929f1c297228f1cce1dff527cabbfaee4b58

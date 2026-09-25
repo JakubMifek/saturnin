@@ -33,6 +33,7 @@ from .contracts import (
     project_agent_path,
 )
 from .discovery import DiscoveryError, IssueDiscovery
+from .disclosure import audit as audit_disclosure
 from . import docsync
 from .governance import Governance, github_repo_slug
 from .improve import ImprovementLoop
@@ -1231,6 +1232,10 @@ def _run_doctor(config: Config, as_json: bool) -> int:
         (
             config.policies / "governance.yaml",
             lambda: Governance(config).audit(),
+        ),
+        (
+            config.policies / "disclosure.yaml",
+            lambda: audit_disclosure(config.root, config.policy("disclosure")),
         ),
         (
             config.policies / "routing.yaml",
