@@ -128,8 +128,11 @@ def probe_github_stdio(config: Config | None = None, *, timeout: float = 10) -> 
     definition = _github_definition(config)
     target = verify_github_binary(config)
     _, args = server_process("github", definition, config)
-    environment = dict(os.environ)
-    environment.setdefault("GITHUB_PERSONAL_ACCESS_TOKEN", "saturnin-startup-check")
+    environment = {
+        name: os.environ[name]
+        for name in ("PATH", "LANG", "LC_ALL", "LC_CTYPE", "HOME")
+        if name in os.environ
+    }
     process = subprocess.Popen(
         [str(target), *args],
         stdin=subprocess.PIPE,

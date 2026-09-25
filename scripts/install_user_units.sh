@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 # Install the Saturnin systemd *user* units (rule 7: user scope only, no root).
 set -Eeuo pipefail
+umask 077
 
 SATURNIN_HOME="${SATURNIN_HOME:-$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)}"
 UNIT_DIR="${XDG_CONFIG_HOME:-$HOME/.config}/systemd/user"
@@ -29,11 +30,19 @@ ERR
 fi
 
 mkdir -p "$UNIT_DIR"
-STAGE_DIR="$(mktemp -d "${TMPDIR:-/tmp}/saturnin-units.XXXXXX")"
-BACKUP_DIR="$(mktemp -d "${TMPDIR:-/tmp}/saturnin-units-backup.XXXXXX")"
+if [[ -L "$SATURNIN_HOME/var" ]]; then
+  echo "Refusing symlinked Saturnin transaction directory." >&2
+  exit 1
+fi
+mkdir -p "$SATURNIN_HOME/var"
+TRANSACTION_DIR="$SATURNIN_HOME/var/install-user-units.$$.$RANDOM"
+mkdir -m 0700 "$TRANSACTION_DIR"
+STAGE_DIR="$TRANSACTION_DIR/stage"
+BACKUP_DIR="$TRANSACTION_DIR/backup"
+mkdir -m 0700 "$STAGE_DIR" "$BACKUP_DIR"
 installing=0
 cleanup() {
-  rm -rf "$STAGE_DIR" "$BACKUP_DIR"
+  rm -rf "$TRANSACTION_DIR"
 }
 rollback() {
   set +e
@@ -75,6 +84,23 @@ on_exit() {
   exit "$status"
 }
 trap on_exit EXIT
+
+CREDENTIAL_DIR="${XDG_CONFIG_HOME:-$HOME/.config}/systemd/user/saturnin-credentials"
+current="$CREDENTIAL_DIR/saturnin-review-attestation-key.cred"
+previous="$CREDENTIAL_DIR/saturnin-review-attestation-previous-key.cred"
+INSTALL_ATTESTATION_SERVICE=0
+if [[ -e "$current" || -e "$previous" ]]; then
+  if [[ ! -f "$current" || -L "$current" || ! -f "$previous" || -L "$previous" ]]; then
+    echo "Attestation credential pair is incomplete or unsafe; refusing unit replacement." >&2
+    exit 1
+  fi
+  credential_status="$("$SATURNIN_HOME/.venv/bin/saturnin" credential status review-attestation)"
+  if [[ "$credential_status" != *"signer=ready"* ]]; then
+    echo "Attestation master rotation and migration sealing are required before unit replacement." >&2
+    exit 1
+  fi
+  INSTALL_ATTESTATION_SERVICE=1
+fi
 
 for unit in "$SATURNIN_HOME"/systemd/saturnin-*; do
   name="$(basename "$unit")"
@@ -128,6 +154,11 @@ for staged in "$STAGE_DIR"/saturnin-*; do
 done
 
 systemctl --user daemon-reload
+if [[ "$INSTALL_ATTESTATION_SERVICE" -eq 1 ]]; then
+  systemctl --user enable --now saturnin-attestation.service
+else
+  systemctl --user disable --now saturnin-attestation.service 2>/dev/null || true
+fi
 systemctl --user enable --now "${ENABLED_TIMERS[@]}"
 installing=0
 systemctl --user list-timers 'saturnin-*' || true

@@ -7,9 +7,11 @@ import hmac
 import json
 import os
 import re
+import signal
 import shutil
 import stat
 import subprocess
+import time
 from contextlib import contextmanager
 from dataclasses import asdict, dataclass
 from pathlib import Path
@@ -20,6 +22,12 @@ from yaml import YAMLError
 from .board import Board, BoardError, Task, utcnow
 from .checkpoints import Checkpoint, CheckpointStore
 from .config import Config, default_config, load_yaml
+from .attestation_service import (
+    ENV_SESSION_NONCE,
+    ENV_SESSION_SOCKET,
+    AttestationServiceError,
+    request as attestation_service_request,
+)
 from .contracts import (
     FRONT_MATTER,
     AgentContract,
@@ -36,7 +44,6 @@ from .review import (
     ReviewError,
     issue_content_digest,
     normalize_repository_slug,
-    role_scoped_review_attestation_key,
     slugify as review_slugify,
 )
 from .worker_callbacks import (
@@ -67,6 +74,12 @@ class _StagedReviewInput:
     binding: str
     path: Path
     payload_digest: str
+
+
+@dataclass(frozen=True)
+class _SigningSession:
+    socket: Path
+    nonce: str
 
 
 @dataclass(frozen=True)
@@ -142,6 +155,7 @@ class AgentLauncher:
         log_path = self.dir / f"{task.id}.log"
         launch_error: LauncherError | None = None
         process: subprocess.Popen[bytes] | None = None
+        signing_session: _SigningSession | None = None
         workdir: Path | None = None
         metadata: dict[str, Any] | None = None
         metadata_attempted = False
@@ -199,6 +213,9 @@ class AgentLauncher:
                         worktree_scope=workdir,
                     )
                     verified_review_input = self._verified_review_input(claimed)
+                    signing_session = self._open_signing_session(
+                        claimed, contract, worker_config
+                    )
                     review_input = self._stage_review_input(
                         claimed,
                         verified_review_input,
@@ -221,6 +238,7 @@ class AgentLauncher:
                         task=claimed,
                         workdir=workdir,
                         review_input=review_input,
+                        signing_session=signing_session,
                     )
                     home = Path(environment["HOME"])
                     git_environment, git_objects = self._isolated_git_environment(
@@ -240,6 +258,9 @@ class AgentLauncher:
                         trusted_config=self._trusted_config(worker_config),
                         git_objects=git_objects,
                         mcp_config=mcp_path,
+                        signing_socket=(
+                            signing_session.socket if signing_session else None
+                        ),
                         review_input=review_input.path if review_input else None,
                     )
                     with self._private_log(log_path) as output:
@@ -257,6 +278,10 @@ class AgentLauncher:
                             raise LauncherError(
                                 f"could not read process identity for agent pid {process.pid}"
                             )
+                        if signing_session is not None:
+                            self._activate_signing_session(
+                                signing_session, process.pid, process_start_time
+                            )
                         immediate_status = self._immediate_exit_status(process)
                         if immediate_status not in (None, 0):
                             raise LauncherError(
@@ -272,6 +297,9 @@ class AgentLauncher:
                         "started_at": utcnow(),
                         "cwd": str(workdir),
                         "mcp_config": str(mcp_path),
+                        "signing_session_nonce": (
+                            signing_session.nonce if signing_session else None
+                        ),
                         "log": str(log_path),
                         "resumed_checkpoint": resumed_checkpoint,
                         "callback_dir": environment.get(ENV_CALLBACK_DIR),
@@ -350,10 +378,20 @@ class AgentLauncher:
                     removal_problem = self._remove_launch_metadata(metadata_path)
                     if removal_problem:
                         reason = f"{reason}; {removal_problem}"
+                mcp_removal_problem = self._remove_mcp_config(mcp_path)
+                self._cancel_signing_session(signing_session)
+                if mcp_removal_problem:
+                    reason = f"{reason}; {mcp_removal_problem}"
                 raise LauncherError(
                     f"agent launcher failed for task {task.id}: {reason}"
                 ) from exc
         if launch_error is not None:
+            self._cancel_signing_session(signing_session)
+            mcp_removal_problem = self._remove_mcp_config(mcp_path)
+            if mcp_removal_problem:
+                raise LauncherError(
+                    f"{launch_error}; {mcp_removal_problem}"
+                ) from launch_error
             if not failure_cleanup_problem and metadata_attempted:
                 removal_problem = self._remove_launch_metadata(metadata_path)
                 if removal_problem:
@@ -362,6 +400,14 @@ class AgentLauncher:
         if process is None or workdir is None or mcp_path is None:  # pragma: no cover
             raise LauncherError(f"agent launcher failed for task {task.id}")
         if completed_during_grace:
+            self._cancel_signing_session(signing_session)
+            mcp_removal_problem = self._remove_mcp_config(mcp_path)
+            if mcp_removal_problem:
+                completed_persistence_problem = (
+                    f"{completed_persistence_problem}; {mcp_removal_problem}"
+                    if completed_persistence_problem
+                    else mcp_removal_problem
+                )
             metadata_ready = metadata_path.exists() and completed_persistence_problem is None
             if completed_persistence_problem and metadata is not None:
                 try:
@@ -382,9 +428,11 @@ class AgentLauncher:
                     self._reconcile_exited_launch(metadata)
                 )
                 if callbacks_complete:
-                    completed_persistence_problem = self._remove_launch_metadata(
-                        metadata_path
-                    )
+                    completed_persistence_problem = self._remove_mcp_config(mcp_path)
+                    if completed_persistence_problem is None:
+                        completed_persistence_problem = self._remove_launch_metadata(
+                            metadata_path
+                        )
                 else:
                     completed_persistence_problem = (
                         f"{completed_persistence_problem}; {recovery_reason}"
@@ -396,7 +444,9 @@ class AgentLauncher:
                     self._reconcile_exited_launch(metadata)
                 )
                 if callbacks_complete:
-                    removal_problem = self._remove_launch_metadata(metadata_path)
+                    removal_problem = self._remove_mcp_config(mcp_path)
+                    if removal_problem is None:
+                        removal_problem = self._remove_launch_metadata(metadata_path)
                     completed_persistence_problem = removal_problem
                 else:
                     completed_persistence_problem = (
@@ -438,6 +488,10 @@ class AgentLauncher:
                 ):
                     self._recover_launch_metadata(metadata)
                     continue
+                removal_problem = self._remove_mcp_config(metadata.get("mcp_config"))
+                if removal_problem:
+                    continue
+                self._cancel_metadata_signing_session(metadata)
                 recovery_pending, callbacks_complete, _ = (
                     self._reconcile_exited_launch(metadata)
                 )
@@ -471,6 +525,8 @@ class AgentLauncher:
                 )
                 if recovery_pending:
                     resumed.append(task_id)
+                if callbacks_complete:
+                    self._remove_mcp_config(self.dir / f"{task_id}.mcp.json")
         return resumed
 
     def _reconcile_exited_launch(
@@ -579,6 +635,21 @@ class AgentLauncher:
             metadata_path.unlink(missing_ok=True)
         except OSError as exc:
             return f"could not remove launch metadata: {exc}"
+        return None
+
+    def _remove_mcp_config(self, value: object) -> str | None:
+        if value is None:
+            return None
+        path = Path(str(value))
+        if (
+            path.parent.resolve(strict=False) != self.dir.resolve(strict=False)
+            or not path.name.endswith(".mcp.json")
+        ):
+            return None
+        try:
+            path.unlink(missing_ok=True)
+        except OSError as exc:
+            return f"could not remove MCP config: {exc}"
         return None
 
     def _settle_failed_process(
@@ -799,6 +870,7 @@ class AgentLauncher:
         git_objects: Path,
         mcp_config: Path,
         review_input: Path | None = None,
+        signing_socket: Path | None = None,
     ) -> list[str]:
         sandbox_policy = trusted_config.policy("mcp").get("launcher", {}).get(
             "sandbox", {}
@@ -905,6 +977,8 @@ class AgentLauncher:
             ("--ro-bind", git_control, git_control),
             ("--bind", isolated_home.resolve(), isolated_home.resolve()),
         ]
+        if signing_socket is not None:
+            mounts.append(("--bind", signing_socket, signing_socket))
         created: set[Path] = set()
         for _, _, target in mounts:
             parent = target if target.is_dir() else target.parent
@@ -1127,13 +1201,9 @@ class AgentLauncher:
         task: Task,
         workdir: Path,
         review_input: _StagedReviewInput | None = None,
+        signing_session: _SigningSession | None = None,
     ) -> dict[str, str]:
         trusted_config = self._trusted_config(config)
-        token_name = str(
-            trusted_config.policy("mcp")
-            .get("launcher", {})
-            .get("github_read_token_env", "SATURNIN_GITHUB_MCP_TOKEN")
-        )
         environment = {
             name: value
             for name in self._worker_env_allowlist()
@@ -1167,7 +1237,7 @@ class AgentLauncher:
             previous_key_env,
             scope_env,
             role_env,
-            token_name,
+            "SATURNIN_GITHUB_MCP_TOKEN",
             "GH_TOKEN",
             "GITHUB_TOKEN",
             "GITHUB_PERSONAL_ACCESS_TOKEN",
@@ -1181,17 +1251,93 @@ class AgentLauncher:
                 raise LauncherError(
                     f"reviewer role {contract.role!r} requires verified review input"
                 )
-            master_key = os.environ.get(key_env, "")
-            if not master_key:
+            if signing_session is None:
                 raise LauncherError(
-                    f"reviewer role {contract.role!r} requires {key_env} in the launcher environment"
+                    f"reviewer role {contract.role!r} requires a signing session"
                 )
-            environment[key_env] = role_scoped_review_attestation_key(
-                master_key,
-                contract.role,
-            )
-            environment[scope_env] = "role"
+            environment[ENV_SESSION_SOCKET] = str(signing_session.socket)
+            environment[ENV_SESSION_NONCE] = signing_session.nonce
         return environment
+
+    def _open_signing_session(
+        self, task: Task, contract: AgentContract, config: Config
+    ) -> _SigningSession | None:
+        trusted = self._trusted_config(config)
+        if contract.role not in self._review_attestation_roles(trusted):
+            return None
+        kind = task.kind.removesuffix("-review")
+        try:
+            response = attestation_service_request(
+                trusted,
+                {
+                    "action": "open",
+                    "task_id": task.id,
+                    "role": contract.role,
+                    "subject": task.review_subject or "",
+                    "kind": kind,
+                    "author": task.review_author or "",
+                    "head_sha": task.review_head_sha or "",
+                    "issue_digest": task.review_issue_digest or "",
+                    "destination_repo": (
+                        task.review_destination_repo or task.repo or ""
+                        if kind == "issue"
+                        else ""
+                    ),
+                },
+            )
+        except (AttestationServiceError, OSError) as exc:
+            raise LauncherError(f"review signing service unavailable: {exc}") from exc
+        socket_value = response.get("socket")
+        nonce = response.get("nonce")
+        if not isinstance(socket_value, str) or not isinstance(nonce, str):
+            raise LauncherError("review signing service returned an invalid session")
+        path = Path(socket_value)
+        try:
+            metadata = path.stat(follow_symlinks=False)
+        except OSError as exc:
+            raise LauncherError("review signing service session is unavailable") from exc
+        if (
+            not stat.S_ISSOCK(metadata.st_mode)
+            or metadata.st_uid != os.getuid()
+            or metadata.st_mode & 0o077
+        ):
+            raise LauncherError("review signing service session socket is unsafe")
+        return _SigningSession(path, nonce)
+
+    def _activate_signing_session(
+        self, session: _SigningSession, pid: int, started: int
+    ) -> None:
+        try:
+            response = attestation_service_request(
+                self._trusted_config(self.config),
+                {
+                    "action": "activate",
+                    "nonce": session.nonce,
+                    "root_pid": pid,
+                    "root_start": started,
+                },
+            )
+        except (AttestationServiceError, OSError) as exc:
+            raise LauncherError(f"review signing session activation failed: {exc}") from exc
+        if response.get("status") != "activated":
+            raise LauncherError("review signing session activation failed")
+
+    def _cancel_signing_session(self, session: _SigningSession | None) -> None:
+        if session is None:
+            return
+        try:
+            attestation_service_request(
+                self._trusted_config(self.config),
+                {"action": "cancel", "nonce": session.nonce},
+            )
+        except (AttestationServiceError, OSError):
+            pass
+
+    def _cancel_metadata_signing_session(self, metadata: dict[str, Any]) -> None:
+        nonce = metadata.get("signing_session_nonce")
+        if not isinstance(nonce, str) or not nonce:
+            return
+        self._cancel_signing_session(_SigningSession(Path(), nonce))
 
     def _verified_review_input(self, task: Task) -> _VerifiedReviewInput | None:
         if task.kind == "pr-review":
@@ -1612,35 +1758,25 @@ class AgentLauncher:
                     f"MCP server {name!r} is not authorized for role "
                     f"{contract.role!r}: {authorization_problem}"
                 )
+            if name == "github":
+                if trusted_config.policy("mcp").get("launcher", {}).get(
+                    "github_worker_enabled", False
+                ):
+                    raise LauncherError(
+                        "GitHub MCP requires the separately reviewed external broker"
+                    )
+                continue
             command, args = server_process(
                 name,
                 definition,
                 trusted_config,
                 worktree_scope=worktree_scope,
             )
-            canonical_github = (
-                config.var_dir / "bin" / "github-mcp-server"
-            ).resolve(strict=False)
-            if Path(command).resolve(strict=False) == canonical_github:
-                verified = verify_github_binary(trusted_config).resolve()
-                if verified != canonical_github:
-                    raise LauncherError(
-                        "verified GitHub MCP executable does not match canonical path"
-                    )
             server: dict[str, Any] = {
                 "type": definition.get("transport", "stdio"),
                 "command": command,
                 "args": args,
             }
-            if name == "github":
-                token_name = str(
-                    trusted_config.policy("mcp")
-                    .get("launcher", {})
-                    .get("github_read_token_env", "SATURNIN_GITHUB_MCP_TOKEN")
-                )
-                token = os.environ.get(token_name, "")
-                if token:
-                    server["env"] = {"GITHUB_PERSONAL_ACCESS_TOKEN": token}
             servers[name] = server
         path = self.dir / f"{task.id}.mcp.json"
         atomic_replace_text(

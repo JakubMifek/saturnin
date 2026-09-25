@@ -14,10 +14,14 @@ from saturnin.mcp import MCPError, install_github, probe_github_stdio, server_pr
 def _fake_server(path: Path) -> str:
     path.write_text(
         "#!/usr/bin/env python3\n"
-        "import json, sys\n"
+        "import json, os, sys\n"
         "if '--version' in sys.argv:\n"
         "    print('GitHub MCP Server\\nVersion: 1.0')\n"
         "    raise SystemExit(0)\n"
+        "if any(name in os.environ for name in "
+        "('GH_TOKEN', 'GITHUB_TOKEN', 'GITHUB_PERSONAL_ACCESS_TOKEN', "
+        "'SATURNIN_GITHUB_MCP_TOKEN')):\n"
+        "    raise SystemExit(9)\n"
         "request = json.loads(sys.stdin.readline())\n"
         "print(json.dumps({'jsonrpc': '2.0', 'id': request['id'], "
         "'result': {'protocolVersion': request['params']['protocolVersion'], "
@@ -104,7 +108,16 @@ def test_github_mcp_accepts_effective_read_only_forms(config: Config, flag: str)
     assert server_process("github", definition, config)[1] == ["stdio", flag]
 
 
-def test_github_mcp_stdio_startup_handshake(config: Config) -> None:
+def test_github_mcp_stdio_startup_handshake_ignores_ambient_tokens(
+    config: Config, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    for name in (
+        "GH_TOKEN",
+        "GITHUB_TOKEN",
+        "GITHUB_PERSONAL_ACCESS_TOKEN",
+        "SATURNIN_GITHUB_MCP_TOKEN",
+    ):
+        monkeypatch.setenv(name, "ambient-test-token")
     script = config.var_dir / "bin" / "github-mcp-server"
     script.parent.mkdir(parents=True)
     checksum = _fake_server(script)

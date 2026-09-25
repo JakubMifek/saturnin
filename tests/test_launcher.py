@@ -19,10 +19,10 @@ from saturnin.board import Board, utcnow
 from saturnin.checkpoints import Checkpoint, CheckpointStore
 from saturnin.cli import main
 from saturnin.config import Config
-from saturnin.launcher import AgentLauncher, LauncherError
-from saturnin.mcp import MCPError
+from saturnin.launcher import AgentLauncher, LauncherError, _SigningSession
 from saturnin.review import (
     ReviewLedger,
+    execution_scoped_review_attestation_key,
     issue_content_digest,
     review_attestation_signing_key,
     sign_review_attestation,
@@ -100,11 +100,8 @@ def test_launcher_starts_routed_role_with_filtered_mcp(
     assert launched_task.launch_deferred_at is None
     assert launched_task.launch_deferred_reason is None
     mcp = json.loads((config.var_dir / "launches" / f"{task.id}.mcp.json").read_text())
-    assert set(mcp["mcpServers"]) == {"github", "filesystem"}
-    assert mcp["mcpServers"]["github"]["command"] == str(
-        config.data_root / "var/bin/github-mcp-server"
-    )
-    assert mcp["mcpServers"]["github"]["args"] == ["stdio", "--read-only"]
+    assert set(mcp["mcpServers"]) == {"filesystem"}
+    assert "GITHUB_PERSONAL_ACCESS_TOKEN" not in json.dumps(mcp)
     assert mcp["mcpServers"]["filesystem"]["args"][-1] == str(worktree.path)
     command = calls[0][0]
     assert "--no-ask-user" in command
@@ -998,14 +995,24 @@ def test_trusted_cli_callback_records_review_as_assigned_reviewer(
         stored.review_subject = subject
         stored.review_author = "code-worker"
         stored.review_head_sha = head_sha
+    nonce = "a" * 64
     attestation = sign_review_attestation(
-        key=review_attestation_signing_key(config, "pr-reviewer"),
+        key=execution_scoped_review_attestation_key(
+            "test-review-attestation-key",
+            "pr-reviewer",
+            task.id,
+            nonce,
+            subject,
+            head_sha,
+            "",
+        ),
         subject=subject,
         kind="pr",
         author="code-worker",
         reviewer="pr-reviewer",
         verdict="approved",
         head_sha=head_sha,
+        attestation_id=f"{task.id}:{nonce}",
     )
     callback_dir = AgentLauncher(config, board)._isolated_home(
         task.id
@@ -3104,10 +3111,7 @@ def test_launcher_uses_trusted_source_for_linked_saturnin_worktree(
     generated = json.loads(
         (config.var_dir / "launches" / f"{task.id}.mcp.json").read_text()
     )
-    assert generated["mcpServers"]["github"]["args"] == [
-        "stdio",
-        "--read-only",
-    ]
+    assert "github" not in generated["mcpServers"]
     assert (config.var_dir / "launches" / f"{task.id}.json").is_file()
 
 
@@ -3119,6 +3123,12 @@ def test_reconcile_exited_launch_keeps_legal_task_state(
     board.transition(board.get(task.id), "in_progress")
     launch_file = config.var_dir / "launches" / f"{task.id}.json"
     launch_file.parent.mkdir(parents=True, exist_ok=True)
+    mcp_file = config.var_dir / "launches" / f"{task.id}.mcp.json"
+    mcp_file.write_text(
+        '{"mcpServers":{"github":{"env":{"GITHUB_PERSONAL_ACCESS_TOKEN":"runtime"}}}}',
+        encoding="utf-8",
+    )
+    mcp_file.chmod(0o600)
     launch_file.write_text(
         json.dumps(
             {
@@ -3128,7 +3138,7 @@ def test_reconcile_exited_launch_keeps_legal_task_state(
                 "process_start_time_ticks": 123456,
                 "started_at": utcnow(),
                 "cwd": str(config.root),
-                "mcp_config": str(config.root / ".mcp.json"),
+                "mcp_config": str(mcp_file),
                 "log": str(config.var_dir / "launches" / f"{task.id}.log"),
             }
         ),
@@ -3151,6 +3161,7 @@ def test_reconcile_exited_launch_keeps_legal_task_state(
     )
     assert restored.history[-1]["event"] == "agent:launch_failed"
     assert not launch_file.exists()
+    assert not mcp_file.exists()
 
 
 def test_reconcile_exited_poller_launch_keeps_waiting_task(
@@ -3367,7 +3378,7 @@ def test_launcher_keeps_engine_source_for_managed_repository(
     assert calls[0]["env"]["PYTHONPATH"].split(":")[0] == str(config.root / "src")
 
 
-def test_launcher_worker_environment_uses_allowlist_and_mcp_scoped_github_token(
+def test_launcher_worker_environment_never_exposes_github_token(
     config: Config, board: Board, git_repo: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     task = board.create("Constrain worker environment")
@@ -3425,6 +3436,9 @@ def test_launcher_worker_environment_uses_allowlist_and_mcp_scoped_github_token(
     assert "GITHUB_TOKEN" not in environment
     assert "SATURNIN_REVIEW_ATTESTATION_KEY" not in environment
     assert "SATURNIN_REVIEW_ATTESTATION_PREVIOUS_KEY" not in environment
+    assert "SATURNIN_REVIEW_SIGNING_SOCKET" not in environment
+    assert "SATURNIN_REVIEW_SIGNING_NONCE" not in environment
+    assert "CREDENTIALS_DIRECTORY" not in environment
     assert environment["SATURNIN_AGENT_ROLE"] == contract.role
     assert "AWS_SECRET_ACCESS_KEY" not in environment
     assert "host" not in environment["PYTHONPATH"]
@@ -3436,9 +3450,56 @@ def test_launcher_worker_environment_uses_allowlist_and_mcp_scoped_github_token(
     )
     mcp = json.loads(mcp_path.read_text(encoding="utf-8"))
     assert mcp_path.stat().st_mode & 0o777 == 0o600
-    assert mcp["mcpServers"]["github"]["env"] == {
-        "GITHUB_PERSONAL_ACCESS_TOKEN": "scoped-read-token"
-    }
+    assert "github" not in mcp["mcpServers"]
+    assert "scoped-read-token" not in mcp_path.read_text(encoding="utf-8")
+
+
+def test_launcher_reads_systemd_credentials_without_exposing_master_to_worker(
+    config: Config,
+    board: Board,
+    git_repo: Path,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    task = board.create("Use systemd credentials")
+    Router(config).dispatch(board, task)
+    worktree = WorktreeManager(config, repo=git_repo, board=board).create(
+        "feature/systemd-credential"
+    )
+    with board.edit(task.id) as stored:
+        stored.branch = "feature/systemd-credential"
+        stored.worktree = str(worktree.path)
+    credentials = tmp_path / "credentials"
+    credentials.mkdir(mode=0o700)
+    (credentials / "saturnin-review-attestation-key").write_text(
+        "master-from-systemd", encoding="utf-8"
+    )
+    for path in credentials.iterdir():
+        path.chmod(0o600)
+    monkeypatch.setenv("CREDENTIALS_DIRECTORY", str(credentials))
+    monkeypatch.delenv("SATURNIN_REVIEW_ATTESTATION_KEY", raising=False)
+    monkeypatch.delenv("SATURNIN_GITHUB_MCP_TOKEN", raising=False)
+
+    launcher = AgentLauncher(config, board)
+    worker_config = launcher._worker_config(worktree.path)
+    contract = launcher._contract(board.get(task.id), worker_config)
+    environment = launcher._worker_environment(
+        worker_config,
+        contract,
+        task=board.get(task.id),
+        workdir=worktree.path,
+    )
+    mcp_path = launcher._write_mcp_config(
+        board.get(task.id),
+        contract,
+        config=worker_config,
+        worktree_scope=worktree.path,
+    )
+    mcp = json.loads(mcp_path.read_text(encoding="utf-8"))
+
+    assert "SATURNIN_REVIEW_ATTESTATION_KEY" not in environment
+    assert "CREDENTIALS_DIRECTORY" not in environment
+    assert "github" not in mcp["mcpServers"]
 
 
 def test_launcher_preserves_approved_config_path_under_isolated_home(
@@ -3512,7 +3573,7 @@ def test_launcher_rejects_approved_config_destination_collisions(
         AgentLauncher(config, board)._isolated_home("duplicate-destination")
 
 
-def test_launcher_injects_role_scoped_attestation_key_only_for_reviewers(
+def test_launcher_injects_only_scoped_signing_session_for_reviewers(
     config: Config, board: Board, git_repo: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     monkeypatch.setenv("SATURNIN_REVIEW_ATTESTATION_PREVIOUS_KEY", "old-master-key")
@@ -3556,41 +3617,22 @@ def test_launcher_injects_role_scoped_attestation_key_only_for_reviewers(
         task=board.get(task.id),
         workdir=worktree.path,
         review_input=review_input,
+        signing_session=_SigningSession(
+            config.var_dir / "signing-session.sock", "public-session-nonce"
+        ),
     )
 
-    role_key = environment["SATURNIN_REVIEW_ATTESTATION_KEY"]
-    assert role_key != "test-review-attestation-key"
-    assert environment["SATURNIN_REVIEW_ATTESTATION_KEY_SCOPE"] == "role"
+    assert "SATURNIN_REVIEW_ATTESTATION_KEY" not in environment
+    assert "SATURNIN_REVIEW_ATTESTATION_KEY_SCOPE" not in environment
     assert environment["SATURNIN_AGENT_ROLE"] == "pr-reviewer"
     assert "SATURNIN_REVIEW_ATTESTATION_PREVIOUS_KEY" not in environment
-
-    attestation = sign_review_attestation(
-        key=role_key,
-        subject="JakubMifek/saturnin#reviewer-key",
-        kind="pr",
-        author="code-worker",
-        reviewer="pr-reviewer",
-        verdict="approved",
-        head_sha="c" * 40,
+    assert environment["SATURNIN_REVIEW_SIGNING_NONCE"] == "public-session-nonce"
+    assert environment["SATURNIN_REVIEW_SIGNING_SOCKET"].endswith(
+        "signing-session.sock"
     )
-    with monkeypatch.context() as scoped:
-        scoped.setenv("SATURNIN_REVIEW_ATTESTATION_KEY", role_key)
-        scoped.setenv("SATURNIN_REVIEW_ATTESTATION_KEY_SCOPE", "role")
-        scoped.setenv("SATURNIN_AGENT_ROLE", "pr-reviewer")
-        scoped.setenv("SATURNIN_REVIEW_ATTESTATION_PREVIOUS_KEY", "old-master-key")
-        ReviewLedger(config).record(
-            subject="JakubMifek/saturnin#reviewer-key",
-            kind="pr",
-            author="code-worker",
-            reviewer="pr-reviewer",
-            verdict="approved",
-            head_sha="c" * 40,
-            attestation=attestation,
-        )
-    assert ReviewLedger(config).for_subject("JakubMifek/saturnin#reviewer-key", "pr")
 
 
-def test_launcher_refuses_reviewer_without_attestation_key(
+def test_launcher_refuses_reviewer_without_signing_session(
     config: Config, board: Board, git_repo: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     head_sha = "d" * 40
@@ -3629,7 +3671,7 @@ def test_launcher_refuses_reviewer_without_attestation_key(
         verified_review_input,
     )
 
-    with pytest.raises(LauncherError, match="requires SATURNIN_REVIEW_ATTESTATION_KEY"):
+    with pytest.raises(LauncherError, match="requires a signing session"):
         launcher._worker_environment(
             worker_config,
             contract,
@@ -3680,6 +3722,9 @@ def test_launcher_stages_pr_diff_for_exact_review_head_before_signing(
         task=task,
         workdir=git_repo,
         review_input=review_input,
+        signing_session=_SigningSession(
+            config.var_dir / "signing-session.sock", "public-session-nonce"
+        ),
     )
 
     assert calls == [
@@ -3705,7 +3750,8 @@ def test_launcher_stages_pr_diff_for_exact_review_head_before_signing(
     assert "diff --git a/app.py b/app.py" in review_input.path.read_text()
     assert "diff --git a/app.py b/app.py" not in prompt
     assert review_input.path.stat().st_mode & 0o777 == 0o600
-    assert "SATURNIN_REVIEW_ATTESTATION_KEY" in environment
+    assert "SATURNIN_REVIEW_ATTESTATION_KEY" not in environment
+    assert "SATURNIN_REVIEW_SIGNING_SOCKET" in environment
 
 
 def test_launcher_keeps_large_verified_pr_diff_out_of_command_arguments(
@@ -3866,40 +3912,6 @@ def test_launcher_keeps_large_verified_issue_body_out_of_prompt(
     assert body not in prompt
     assert staged_payload["title"] == title
     assert staged_payload["body"] == body
-
-
-def test_launcher_rejects_unverified_github_binary(
-    config: Config,
-    board: Board,
-    git_repo: Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    config.policy("mcp")["launcher"]["enabled"] = True
-    task = board.create("Implement checksum validation")
-    Router(config).dispatch(board, task)
-    worktree = WorktreeManager(config, repo=git_repo, board=board).create(
-        "feature/checksum-validation"
-    )
-    with board.edit(task.id) as stored:
-        stored.branch = "feature/checksum-validation"
-        stored.worktree = str(worktree.path)
-    monkeypatch.setattr("saturnin.launcher.shutil.which", lambda _: "/usr/bin/copilot")
-    verification_roots: list[Path] = []
-
-    def reject_binary(trusted: Config) -> Path:
-        verification_roots.append(trusted.root)
-        raise MCPError("checksum mismatch")
-
-    monkeypatch.setattr(
-        "saturnin.launcher.verify_github_binary",
-        reject_binary,
-    )
-
-    with pytest.raises(LauncherError, match="checksum mismatch"):
-        AgentLauncher(config, board).launch(task.id)
-
-    assert verification_roots == [config.data_root]
-    assert board.get(task.id).state == "routed"
 
 
 def test_launcher_rejects_branch_local_github_replacement(

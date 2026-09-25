@@ -3,8 +3,12 @@ from __future__ import annotations
 import os
 import shutil
 import subprocess
+import sys
 from pathlib import Path
 
+import pytest
+
+from saturnin.config import Config
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 
@@ -20,6 +24,44 @@ def _filesystem_topology(root: Path) -> list[tuple[str, str, str | bytes]]:
         else:
             entries.append(("file", relative, path.read_bytes()))
     return entries
+
+
+def test_rendered_systemd_templates_pass_systemd_analyze(config: Config) -> None:
+    analyzer = shutil.which("systemd-analyze")
+    if analyzer is None:
+        pytest.skip("systemd-analyze is unavailable")
+    rendered = config.var_dir / "test-systemd-render"
+    shutil.rmtree(rendered, ignore_errors=True)
+    rendered.mkdir(parents=True, mode=0o700)
+    try:
+        attestation_home = rendered / "attestation-home"
+        python = attestation_home / ".venv" / "bin" / "python"
+        python.parent.mkdir(parents=True)
+        python.symlink_to(sys.executable)
+        paths: list[str] = []
+        for source in sorted((REPO_ROOT / "systemd").glob("saturnin-*")):
+            destination = rendered / source.name
+            home = (
+                attestation_home
+                if source.name == "saturnin-attestation.service"
+                else REPO_ROOT
+            )
+            destination.write_text(
+                source.read_text(encoding="utf-8")
+                .replace("@SATURNIN_HOME@", str(home))
+                .replace("@SATURNIN_HOME_ENV@", str(home)),
+                encoding="utf-8",
+            )
+            paths.append(str(destination))
+        result = subprocess.run(
+            [analyzer, "--user", "verify", *paths],
+            check=False,
+            capture_output=True,
+            text=True,
+        )
+        assert result.returncode == 0, result.stderr
+    finally:
+        shutil.rmtree(rendered, ignore_errors=True)
 
 
 def test_install_user_units_rejects_unsupported_checkout_path(tmp_path: Path) -> None:
@@ -93,6 +135,61 @@ def test_install_user_units_installs_safe_checkout_path(tmp_path: Path) -> None:
         assert working_directory == str(saturnin_home)
         assert environment == str(saturnin_home)
         assert "EnvironmentFile=-" not in text
+    for unit in (
+        "saturnin-improve.service",
+        "saturnin-resume.service",
+        "saturnin-discovery.service",
+    ):
+        text = (installed_dir / unit).read_text(encoding="utf-8")
+        assert "PrivateMounts=yes" in text
+        assert "LoadCredentialEncrypted=" not in text
+    signer = (installed_dir / "saturnin-attestation.service").read_text(
+        encoding="utf-8"
+    )
+    assert signer.count("LoadCredentialEncrypted=") == 2
+    assert "PrivateNetwork=yes" in signer
+    assert "ProtectProc=invisible" in signer
+
+
+def test_install_user_units_rejects_incomplete_attestation_pair_before_replacement(
+    tmp_path: Path,
+) -> None:
+    saturnin_home = tmp_path / "checkout"
+    shutil.copytree(REPO_ROOT / "systemd", saturnin_home / "systemd")
+    fake_bin = tmp_path / "bin"
+    fake_bin.mkdir()
+    (fake_bin / "id").write_text("#!/bin/sh\nprintf '1000\\n'\n", encoding="utf-8")
+    (fake_bin / "systemctl").write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+    (fake_bin / "systemd-analyze").write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+    for command in ("id", "systemctl", "systemd-analyze"):
+        (fake_bin / command).chmod(0o755)
+    config_home = tmp_path / "config"
+    unit_dir = config_home / "systemd" / "user"
+    unit_dir.mkdir(parents=True)
+    previous = unit_dir / "saturnin-improve.service"
+    previous.write_text("existing installation\n", encoding="utf-8")
+    credential_dir = unit_dir / "saturnin-credentials"
+    credential_dir.mkdir(mode=0o700)
+    (credential_dir / "saturnin-review-attestation-key.cred").write_text(
+        "ciphertext\n", encoding="utf-8"
+    )
+
+    result = subprocess.run(
+        ["bash", str(REPO_ROOT / "scripts/install_user_units.sh")],
+        check=False,
+        capture_output=True,
+        text=True,
+        env={
+            **os.environ,
+            "PATH": f"{fake_bin}:{os.environ['PATH']}",
+            "SATURNIN_HOME": str(saturnin_home),
+            "XDG_CONFIG_HOME": str(config_home),
+        },
+    )
+
+    assert result.returncode == 1
+    assert "pair is incomplete or unsafe" in result.stderr
+    assert previous.read_text(encoding="utf-8") == "existing installation\n"
 
 
 def test_install_does_not_enable_unaccepted_mirror_timer(tmp_path: Path) -> None:

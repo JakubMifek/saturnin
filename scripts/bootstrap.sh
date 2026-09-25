@@ -80,7 +80,9 @@ cat <<'MSG'
 
 Saturnin is installed. Next:
   source .venv/bin/activate
-  export SATURNIN_REVIEW_ATTESTATION_KEY='<trusted-supervisor-secret>'
+  saturnin credential prerequisites
+  saturnin credential provision-attestation
+  saturnin credential status review-attestation
   saturnin task add "<your first task>" --dispatch
   scripts/install_user_units.sh    # scheduled janitor + improvement workers
   # if missing: create companion repos declared in policies/repos.yaml

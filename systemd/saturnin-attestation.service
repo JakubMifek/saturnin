@@ -1,0 +1,25 @@
+[Unit]
+Description=Saturnin private review attestation signer
+Documentation=file://@SATURNIN_HOME@/docs/runbooks/ops-safety.md
+
+[Service]
+Type=simple
+WorkingDirectory=@SATURNIN_HOME@
+Environment=SATURNIN_HOME="@SATURNIN_HOME_ENV@"
+Environment=PYTHONPATH="@SATURNIN_HOME_ENV@/src"
+ExecStart=@SATURNIN_HOME@/.venv/bin/python -m saturnin.attestation_service serve
+LoadCredentialEncrypted=saturnin-review-attestation-key:%h/.config/systemd/user/saturnin-credentials/saturnin-review-attestation-key.cred
+LoadCredentialEncrypted=saturnin-review-attestation-previous-key:%h/.config/systemd/user/saturnin-credentials/saturnin-review-attestation-previous-key.cred
+RuntimeDirectory=saturnin-attestation
+RuntimeDirectoryMode=0700
+PrivateMounts=yes
+PrivateTmp=yes
+PrivateNetwork=yes
+ProtectHome=read-only
+ProtectSystem=strict
+ProtectProc=invisible
+NoNewPrivileges=yes
+RestrictAddressFamilies=AF_UNIX
+
+[Install]
+WantedBy=default.target
