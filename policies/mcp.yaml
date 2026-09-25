@@ -74,6 +74,7 @@ launcher:
       - /lib
       - /lib64
       - /usr
+      - /opt/pipx/venvs/uv
       - /etc/alternatives
       - /etc/ssl/certs
       - /etc/ca-certificates

@@ -34,6 +34,18 @@ filesystem:
     - /usr/sbin
     - /usr/local/bin
     - /usr/local/sbin
+  # Script interpreters are resolved only from this fixed system path.
+  trusted_system_path:
+    - /usr/local/sbin
+    - /usr/local/bin
+    - /usr/sbin
+    - /usr/bin
+    - /sbin
+    - /bin
+  trusted_path_requirements:
+    owner: root
+    forbid_group_writable: true
+    forbid_world_writable: true
   # The supported bootstrap installs this one project runtime executable.
   # It is resolved only against the canonical main checkout, never a worker worktree.
   trusted_runtime_executable: .venv/bin/saturnin
@@ -80,3 +92,36 @@ filesystem:
     - systemctl
     - journalctl
     - apt
+    - bwrap
+    - pasta
+    - copilot
+    - npx
+    - uvx
+    - github-mcp-server
+
+# These executables receive no general host-command capability. Only their
+# non-mutating version probes are accepted by `saturnin check command`.
+prerequisite_checks:
+  bwrap: {type: system-executable, args: [--version], target_roots: [], target_names: [], script_interpreters: []}
+  pasta: {type: system-executable, args: [--version], target_roots: [], target_names: [], script_interpreters: []}
+  copilot: {type: system-executable, args: [--version], target_roots: [], target_names: [], script_interpreters: []}
+  npx:
+    type: system-executable
+    args: [--version]
+    target_roots: [/usr/share/nodejs/npm]
+    target_names: [npx-cli.js]
+    script_interpreters: [node]
+  uvx:
+    type: system-executable
+    args: [--version]
+    target_roots: [/opt/pipx/venvs/uv]
+    target_names: [uvx]
+    script_interpreters: []
+  github-mcp-server: {type: pinned-github-mcp, args: [--version]}
+
+launcher_command_bindings:
+  launcher.command: copilot
+  launcher.sandbox.command: bwrap
+  launcher.sandbox.network.command: pasta
+  servers.fetch.command: uvx
+  servers.filesystem.command: npx

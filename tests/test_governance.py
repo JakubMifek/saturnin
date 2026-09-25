@@ -3,17 +3,26 @@ from __future__ import annotations
 import json
 import os
 import shutil
+import stat
 import threading
 from contextlib import contextmanager
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Iterator
 
 import pytest
 
 from saturnin import review
 from saturnin.config import Config
-from saturnin.governance import Governance, _curl_targets, _git_targets
+from saturnin.governance import (
+    ExecutableTrustError,
+    Governance,
+    _curl_targets,
+    _git_targets,
+    _trusted_system_path_problem,
+    resolve_trusted_executable,
+)
 from saturnin.jsonlines import durable_append_text
 from saturnin.review import (
     ReviewLedger,
@@ -81,6 +90,33 @@ def trusted_python3_lookup(
 
 def test_policies_audit_clean(governance: Governance) -> None:
     assert governance.audit() == []
+
+
+@pytest.mark.parametrize(
+    "mutation",
+    [
+        lambda checks: checks.__setitem__("bwrap", ["--version"]),
+        lambda checks: checks["bwrap"].__setitem__("type", "unknown"),
+        lambda checks: checks["github-mcp-server"].__setitem__(
+            "type", "system-executable"
+        ),
+        lambda checks: checks["bwrap"].__setitem__("extra", True),
+        lambda checks: checks["npx"].__setitem__("target_roots", ["relative"]),
+        lambda checks: checks["npx"].__setitem__(
+            "script_interpreters", ["/usr/bin/node"]
+        ),
+        lambda checks: checks["npx"].__setitem__("target_names", ["bin/npx"]),
+        lambda checks: checks["npx"].__setitem__("target_names", []),
+    ],
+)
+def test_prerequisite_policy_schema_rejects_drift(
+    governance: Governance,
+    config: Config,
+    mutation,
+) -> None:
+    mutation(config.server_scope["prerequisite_checks"])
+
+    assert any("prerequisite" in problem for problem in governance.audit())
 
 
 def test_review_attestation_key_environments_must_be_distinct(config: Config) -> None:
@@ -1210,6 +1246,239 @@ def test_in_scope_server_commands(
     governance: Governance, command: str, trusted_python3_lookup: None
 ) -> None:
     assert governance.check_server_command(command).allowed
+
+
+def test_prerequisite_checks_are_narrowly_governed(
+    governance: Governance,
+    config: Config,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    trusted = tmp_path / "trusted-bin"
+    trusted.mkdir()
+    commands = ("bwrap", "pasta", "copilot", "npx", "uvx")
+    config.server_scope["filesystem"]["trusted_executable_roots"].append(str(trusted))
+    for command in commands:
+        executable = trusted / command
+        executable.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+        executable.chmod(0o755)
+    monkeypatch.setattr(
+        "saturnin.governance.shutil.which",
+        lambda command: str(trusted / command),
+    )
+    monkeypatch.setattr(
+        "saturnin.governance._trusted_system_path_problem",
+        lambda *_: None,
+    )
+
+    for command in commands:
+        assert governance.check_server_command(f"{command} --version").allowed
+        assert not governance.check_server_command(f"{command} run").allowed
+        assert not governance.check_server_command(command).allowed
+
+    relocated = tmp_path / "relocated-npx"
+    relocated.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+    relocated.chmod(0o755)
+    (trusted / "npx").unlink()
+    (trusted / "npx").symlink_to(relocated)
+    monkeypatch.setattr(
+        "saturnin.governance.shutil.which",
+        lambda command: str(trusted / command),
+    )
+    assert not governance.check_server_command("npx --version").allowed
+    assert not governance.check_server_command("npx run arbitrary-package").allowed
+
+    github = config.var_dir / "bin" / "github-mcp-server"
+    github.parent.mkdir(parents=True)
+    github.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+    github.chmod(0o755)
+    monkeypatch.setattr(
+        "saturnin.mcp.verify_github_binary",
+        lambda config: github,
+    )
+    assert governance.check_server_command(f"{github} --version").allowed
+    assert not governance.check_server_command(f"{github} serve").allowed
+    assert not governance.check_server_command(
+        f"{trusted / 'github-mcp-server'} --version"
+    ).allowed
+
+
+@pytest.mark.parametrize(
+    ("locator", "replacement"),
+    [
+        (("launcher", "command"), "true"),
+        (("launcher", "sandbox", "command"), "bash"),
+        (("launcher", "sandbox", "network", "command"), "curl"),
+        (("servers", "fetch", "command"), "python3"),
+        (("servers", "filesystem", "command"), "true"),
+    ],
+)
+def test_audit_rejects_launcher_command_substitution(
+    config: Config,
+    locator: tuple[str, ...],
+    replacement: str,
+) -> None:
+    current = config.policy("mcp")
+    for component in locator[:-1]:
+        current = current[component]
+    current[locator[-1]] = replacement
+
+    assert any(
+        "launcher command" in problem and replacement in problem
+        for problem in Governance(config).audit()
+    )
+
+
+def test_resolver_rejects_direct_expected_binary_mismatch(
+    config: Config,
+) -> None:
+    with pytest.raises(
+        ExecutableTrustError, match="does not match expected binary 'copilot'"
+    ):
+        resolve_trusted_executable(
+            config,
+            "/usr/bin/true",
+            expected_binary="copilot",
+        )
+
+
+def test_prerequisite_rejects_symlink_to_unrelated_binary(
+    governance: Governance,
+    config: Config,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    trusted = tmp_path / "trusted"
+    trusted.mkdir()
+    bash = trusted / "bash"
+    bash.write_text("#!/bin/sh\n", encoding="utf-8")
+    bash.chmod(0o755)
+    (trusted / "bwrap").symlink_to(bash)
+    config.server_scope["filesystem"]["trusted_executable_roots"] = [str(trusted)]
+    monkeypatch.setattr(
+        "saturnin.governance.shutil.which", lambda _: str(trusted / "bwrap")
+    )
+
+    decision = governance.check_server_command("bwrap --version")
+
+    assert not decision.allowed
+    assert "resolved executable basename 'bash'" in decision.reasons[0]
+
+
+def test_prerequisite_target_roots_allow_only_safe_governed_targets(
+    governance: Governance,
+    config: Config,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    selected_root = tmp_path / "system-bin"
+    target_root = tmp_path / "package-root"
+    selected_root.mkdir()
+    target_root.mkdir()
+    target = target_root / "npx-cli.js"
+    target.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+    target.chmod(0o755)
+    selected = selected_root / "npx"
+    selected.symlink_to(target)
+    filesystem = config.server_scope["filesystem"]
+    filesystem["trusted_executable_roots"] = [str(selected_root)]
+    config.server_scope["prerequisite_checks"]["npx"]["target_roots"] = [
+        str(target_root)
+    ]
+    monkeypatch.setattr("saturnin.governance.shutil.which", lambda _: str(selected))
+    monkeypatch.setattr(
+        "saturnin.governance._trusted_system_path_problem",
+        lambda *_: None,
+    )
+
+    assert governance.check_server_command("npx --version").allowed
+
+    monkeypatch.setattr(
+        "saturnin.governance._trusted_system_path_problem",
+        lambda *_: "trusted executable path is group/world-writable",
+    )
+    decision = governance.check_server_command("npx --version")
+
+    assert not decision.allowed
+    assert "group/world-writable" in decision.reasons[0]
+
+
+def test_prerequisite_target_roots_do_not_cross_binary_boundaries(
+    governance: Governance,
+    config: Config,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    selected_root = tmp_path / "system-bin"
+    npx_root = tmp_path / "npx-root"
+    uvx_root = tmp_path / "uvx-root"
+    selected_root.mkdir()
+    npx_root.mkdir()
+    uvx_root.mkdir()
+    uvx_target = uvx_root / "npx-cli.js"
+    uvx_target.write_text("#!/bin/sh\n", encoding="utf-8")
+    uvx_target.chmod(0o755)
+    selected = selected_root / "npx"
+    selected.symlink_to(uvx_target)
+    filesystem = config.server_scope["filesystem"]
+    filesystem["trusted_executable_roots"] = [str(selected_root)]
+    checks = config.server_scope["prerequisite_checks"]
+    checks["npx"]["target_roots"] = [str(npx_root)]
+    checks["uvx"]["target_roots"] = [str(uvx_root)]
+    monkeypatch.setattr("saturnin.governance.shutil.which", lambda _: str(selected))
+
+    decision = governance.check_server_command("npx --version")
+
+    assert not decision.allowed
+    assert "outside trusted system executable roots" in decision.reasons[0]
+
+
+def test_prerequisite_target_cannot_escape_to_another_global_root(
+    governance: Governance,
+    config: Config,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    selected_root = tmp_path / "selected-bin"
+    unrelated_root = tmp_path / "other-system-bin"
+    selected_root.mkdir()
+    unrelated_root.mkdir()
+    unrelated = unrelated_root / "npx"
+    unrelated.write_text("#!/bin/sh\n", encoding="utf-8")
+    unrelated.chmod(0o755)
+    selected = selected_root / "npx"
+    selected.symlink_to(unrelated)
+    config.server_scope["filesystem"]["trusted_executable_roots"] = [
+        str(selected_root),
+        str(unrelated_root),
+    ]
+    monkeypatch.setattr("saturnin.governance.shutil.which", lambda _: str(selected))
+
+    decision = governance.check_server_command("npx --version")
+
+    assert not decision.allowed
+    assert "outside trusted system executable roots" in decision.reasons[0]
+
+
+@pytest.mark.parametrize("writable_part", ["leaf", "ancestor"])
+def test_trusted_executable_rejects_writable_path_components(
+    monkeypatch: pytest.MonkeyPatch,
+    writable_part: str,
+) -> None:
+    executable = Path("/trusted/bin/tool")
+    writable = executable if writable_part == "leaf" else executable.parent
+
+    def fake_stat(path: Path, *, follow_symlinks: bool = True) -> SimpleNamespace:
+        mode = stat.S_IFREG | 0o755 if path == executable else stat.S_IFDIR | 0o755
+        if path == writable:
+            mode |= stat.S_IWGRP
+        return SimpleNamespace(st_uid=0, st_mode=mode)
+
+    monkeypatch.setattr(Path, "stat", fake_stat)
+
+    assert "group/world-writable" in (
+        _trusted_system_path_problem(executable) or ""
+    )
 
 
 def test_bootstrap_runtime_saturnin_executable_is_trusted(

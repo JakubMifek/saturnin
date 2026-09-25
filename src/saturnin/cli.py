@@ -40,6 +40,11 @@ from .improve import ImprovementLoop
 from .issues import IssueMirror, MirrorError, run_gh
 from .jsonlines import PRIVATE_FILE_MODE, atomic_replace_text
 from .launcher import AgentLauncher, LauncherError, LaunchResult
+from .launcher_host import (
+    LauncherHostError,
+    launcher_status,
+    set_host_launcher_enabled,
+)
 from .locking import file_lock
 from .review import (
     ReviewError,
@@ -156,6 +161,16 @@ def build_parser() -> argparse.ArgumentParser:
 
     run_agent = sub.add_parser("run", help="start the routed agent without waiting")
     run_agent.add_argument("task_id")
+
+    # launcher ---------------------------------------------------------
+    launcher = sub.add_parser(
+        "launcher", help="host-local worker launcher configuration"
+    ).add_subparsers(dest="launcher_command", required=True)
+    launcher.add_parser("status", help="check launcher configuration and prerequisites")
+    launcher.add_parser(
+        "enable", help="enable launching on this host after all checks pass"
+    )
+    launcher.add_parser("disable", help="restore the repository safe default on this host")
 
     # board ------------------------------------------------------------
     board_cmd = sub.add_parser("board", help="board overview").add_subparsers(
@@ -885,6 +900,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                 docsync.GeneratedBlockError,
                 ConfigError,
                 yaml.YAMLError,
+                LauncherHostError,
                 RuntimeError,
             ),
         ):
@@ -908,6 +924,38 @@ def _run(args: argparse.Namespace, config: Config) -> int:  # noqa: C901 - flat 
     as_json = args.json
     if args.command == "doctor":
         return _run_doctor(config, as_json)
+    if args.command == "launcher":
+        if args.launcher_command == "disable":
+            set_host_launcher_enabled(config, False)
+            status = launcher_status(config)
+        else:
+            status = launcher_status(config)
+            if args.launcher_command == "enable":
+                failed = [
+                    check["name"] for check in status["checks"] if not check["healthy"]
+                ]
+                if failed:
+                    raise LauncherHostError(
+                        "launcher remains disabled; failed prerequisite checks: "
+                        + ", ".join(failed)
+                    )
+                set_host_launcher_enabled(config, True)
+                status["enabled"] = True
+                status["source"] = "host-local"
+        _emit(
+            status,
+            as_json,
+            (
+                f"launcher {'enabled' if status['enabled'] else 'disabled'} "
+                f"({status['source']}); prerequisites "
+                f"{'healthy' if status['healthy'] else 'unhealthy'}"
+            ),
+        )
+        return (
+            0
+            if args.launcher_command == "disable" or status["healthy"]
+            else 2
+        )
     board = Board(config)
 
     if args.command == "task":

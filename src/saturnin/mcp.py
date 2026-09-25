@@ -8,18 +8,46 @@ import os
 import platform
 import select
 import shutil
+import stat
 import subprocess
 import sys
 import tarfile
 import urllib.request
+from contextlib import contextmanager
+from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Sequence
+from typing import Any, Iterator, Sequence
 
 from .config import Config, default_config
 
 
 class MCPError(RuntimeError):
     pass
+
+
+@dataclass
+class StagedGithubBinary:
+    path: Path
+    descriptor: int
+    device: int
+    inode: int
+    runtime_device: int
+    runtime_inode: int
+
+    def close(self) -> None:
+        if self.descriptor >= 0:
+            os.close(self.descriptor)
+            self.descriptor = -1
+
+    def metadata(self) -> dict[str, Any]:
+        return {
+            "directory": str(self.path.parent),
+            "directory_device": self.runtime_device,
+            "directory_inode": self.runtime_inode,
+            "file": self.path.name,
+            "file_device": self.device,
+            "file_inode": self.inode,
+        }
 
 
 def _validate_github_read_only(args: Sequence[str]) -> None:
@@ -104,15 +132,94 @@ def _expected_binary(config: Config) -> tuple[Path, dict[str, str], dict[str, An
     return Path(command), {str(key): str(value) for key, value in asset.items()}, install
 
 
-def verify_github_binary(config: Config | None = None) -> Path:
-    config = config or default_config()
+@contextmanager
+def _verified_github_descriptor(
+    config: Config,
+) -> Iterator[tuple[int, Path, dict[str, Any]]]:
     target, asset, install = _expected_binary(config)
-    if not target.is_file():
-        raise MCPError(f"GitHub MCP server is not installed: {target}")
-    if _sha256(target) != asset.get("binary_sha256"):
-        raise MCPError("installed GitHub MCP server checksum does not match policy")
+    try:
+        descriptor = os.open(
+            target,
+            os.O_RDONLY | os.O_CLOEXEC | os.O_NOFOLLOW,
+        )
+    except OSError as exc:
+        raise MCPError(f"GitHub MCP server cannot be securely opened: {target}: {exc}") from exc
+    try:
+        metadata = os.fstat(descriptor)
+        if not stat.S_ISREG(metadata.st_mode):
+            raise MCPError(f"GitHub MCP server is not a regular file: {target}")
+        if metadata.st_uid != os.geteuid():
+            raise MCPError(
+                f"GitHub MCP server must be owned by uid {os.geteuid()}: {target}"
+            )
+        if metadata.st_mode & (stat.S_IWGRP | stat.S_IWOTH):
+            raise MCPError(
+                f"GitHub MCP server must not be group/world-writable: {target}"
+            )
+        parent_problem = _private_runtime_path_problem(target.parent)
+        if parent_problem:
+            raise MCPError(parent_problem)
+        if _sha256_descriptor(descriptor) != asset.get("binary_sha256"):
+            raise MCPError("installed GitHub MCP server checksum does not match policy")
+        yield descriptor, target, install
+    finally:
+        os.close(descriptor)
+
+
+def _sha256_descriptor(descriptor: int) -> str:
+    digest = hashlib.sha256()
+    os.lseek(descriptor, 0, os.SEEK_SET)
+    while chunk := os.read(descriptor, 1024 * 1024):
+        digest.update(chunk)
+    os.lseek(descriptor, 0, os.SEEK_SET)
+    return digest.hexdigest()
+
+
+def _private_runtime_path_problem(path: Path) -> str | None:
+    current = path
+    while True:
+        try:
+            metadata = current.stat(follow_symlinks=False)
+        except OSError as exc:
+            return f"GitHub MCP runtime path cannot be inspected: {current}: {exc}"
+        if not stat.S_ISDIR(metadata.st_mode):
+            return f"GitHub MCP runtime path is not a directory: {current}"
+        if metadata.st_uid not in {0, os.geteuid()}:
+            return f"GitHub MCP runtime path has unexpected owner uid {metadata.st_uid}: {current}"
+        if metadata.st_mode & (stat.S_IWGRP | stat.S_IWOTH):
+            sticky_root = (
+                metadata.st_uid == 0
+                and bool(metadata.st_mode & stat.S_ISVTX)
+            )
+            if not sticky_root:
+                return f"GitHub MCP runtime path must not be group/world-writable: {current}"
+        if current.parent == current:
+            return None
+        current = current.parent
+
+
+def _github_version_args(config: Config) -> list[str]:
+    definition = config.server_scope.get("prerequisite_checks", {}).get(
+        "github-mcp-server"
+    )
+    if (
+        not isinstance(definition, dict)
+        or definition.get("type") != "pinned-github-mcp"
+        or not isinstance(definition.get("args"), list)
+        or not all(isinstance(value, str) for value in definition["args"])
+    ):
+        raise MCPError("pinned GitHub MCP prerequisite policy is invalid")
+    return list(definition["args"])
+
+
+def _verify_github_version(
+    descriptor: int,
+    install: dict[str, Any],
+    arguments: Sequence[str],
+) -> None:
     version = subprocess.run(
-        [str(target), "--version"],
+        [f"/proc/self/fd/{descriptor}", *arguments],
+        pass_fds=(descriptor,),
         capture_output=True,
         text=True,
         check=False,
@@ -120,58 +227,189 @@ def verify_github_binary(config: Config | None = None) -> Path:
     expected = str(install.get("tag", "")).removeprefix("v")
     if version.returncode or f"Version: {expected}" not in version.stdout:
         raise MCPError(f"installed GitHub MCP server is not release {expected}")
-    return target
+
+
+def verify_github_binary(
+    config: Config | None = None,
+    *,
+    version_args: Sequence[str] | None = None,
+) -> Path:
+    config = config or default_config()
+    arguments = list(version_args) if version_args is not None else _github_version_args(config)
+    with _verified_github_descriptor(config) as (descriptor, target, install):
+        _verify_github_version(descriptor, install, arguments)
+        return target
+
+
+def stage_github_binary(config: Config, destination: Path) -> StagedGithubBinary:
+    destination.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+    _prepare_private_runtime_path(destination.parent)
+    expected_runtime = destination.parent.stat(follow_symlinks=False)
+    flags = os.O_RDWR | os.O_CREAT | os.O_EXCL | os.O_CLOEXEC | os.O_NOFOLLOW
+    staged = -1
+    runtime = os.open(
+        destination.parent,
+        os.O_RDONLY | os.O_DIRECTORY | os.O_CLOEXEC | os.O_NOFOLLOW,
+    )
+    try:
+        runtime_metadata = os.fstat(runtime)
+        if (
+            runtime_metadata.st_dev,
+            runtime_metadata.st_ino,
+        ) != (
+            expected_runtime.st_dev,
+            expected_runtime.st_ino,
+        ):
+            raise MCPError("private GitHub MCP runtime directory identity changed")
+        if (
+            runtime_metadata.st_uid != os.geteuid()
+            or runtime_metadata.st_mode & (stat.S_IWGRP | stat.S_IWOTH)
+        ):
+            raise MCPError("private GitHub MCP runtime directory is unsafe")
+        with _verified_github_descriptor(config) as (source, _, install):
+            try:
+                staged = os.open(destination.name, flags, 0o500, dir_fd=runtime)
+            except OSError as exc:
+                raise MCPError(
+                    f"private GitHub MCP stage cannot be created: {destination}: {exc}"
+                ) from exc
+            try:
+                os.fchmod(staged, 0o500)
+                while chunk := os.read(source, 1024 * 1024):
+                    view = memoryview(chunk)
+                    while view:
+                        written = os.write(staged, view)
+                        view = view[written:]
+                os.fsync(staged)
+                written_metadata = os.fstat(staged)
+                os.close(staged)
+                staged = os.open(
+                    destination.name,
+                    os.O_RDONLY | os.O_CLOEXEC | os.O_NOFOLLOW,
+                    dir_fd=runtime,
+                )
+                reopened_metadata = os.fstat(staged)
+                if (
+                    written_metadata.st_dev,
+                    written_metadata.st_ino,
+                ) != (
+                    reopened_metadata.st_dev,
+                    reopened_metadata.st_ino,
+                ):
+                    raise MCPError("private GitHub MCP staged inode changed")
+            except Exception:
+                if staged >= 0:
+                    os.close(staged)
+                staged = -1
+                os.unlink(destination.name, dir_fd=runtime)
+                raise
+        try:
+            staged_metadata = os.fstat(staged)
+            _verify_github_version(
+                staged,
+                install,
+                _github_version_args(config),
+            )
+        except Exception:
+            os.close(staged)
+            staged = -1
+            os.unlink(destination.name, dir_fd=runtime)
+            raise
+    finally:
+        os.close(runtime)
+    return StagedGithubBinary(
+        path=destination,
+        descriptor=staged,
+        device=staged_metadata.st_dev,
+        inode=staged_metadata.st_ino,
+        runtime_device=runtime_metadata.st_dev,
+        runtime_inode=runtime_metadata.st_ino,
+    )
+
+
+def _prepare_private_runtime_path(path: Path) -> None:
+    current = path
+    while True:
+        try:
+            metadata = current.stat(follow_symlinks=False)
+        except OSError as exc:
+            raise MCPError(
+                f"GitHub MCP runtime path cannot be inspected: {current}: {exc}"
+            ) from exc
+        if not stat.S_ISDIR(metadata.st_mode):
+            raise MCPError(f"GitHub MCP runtime path is not a directory: {current}")
+        if metadata.st_uid not in {0, os.geteuid()}:
+            raise MCPError(
+                f"GitHub MCP runtime path has unexpected owner uid {metadata.st_uid}: {current}"
+            )
+        if metadata.st_mode & (stat.S_IWGRP | stat.S_IWOTH):
+            sticky_root = metadata.st_uid == 0 and bool(metadata.st_mode & stat.S_ISVTX)
+            if sticky_root:
+                pass
+            elif metadata.st_uid == os.geteuid():
+                current.chmod(stat.S_IMODE(metadata.st_mode) & ~0o022)
+            else:
+                raise MCPError(
+                    f"GitHub MCP runtime path must not be group/world-writable: {current}"
+                )
+        if current.parent == current:
+            return
+        current = current.parent
 
 
 def probe_github_stdio(config: Config | None = None, *, timeout: float = 10) -> None:
     config = config or default_config()
     definition = _github_definition(config)
-    target = verify_github_binary(config)
     _, args = server_process("github", definition, config)
     environment = dict(os.environ)
     environment.setdefault("GITHUB_PERSONAL_ACCESS_TOKEN", "saturnin-startup-check")
-    process = subprocess.Popen(
-        [str(target), *args],
-        stdin=subprocess.PIPE,
-        stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE,
-        text=True,
-        env=environment,
-    )
-    request = {
-        "jsonrpc": "2.0",
-        "id": 1,
-        "method": "initialize",
-        "params": {
-            "protocolVersion": "2025-06-18",
-            "capabilities": {},
-            "clientInfo": {"name": "saturnin-startup-check", "version": "1"},
-        },
-    }
-    try:
-        assert process.stdin is not None and process.stdout is not None
-        process.stdin.write(json.dumps(request) + "\n")
-        process.stdin.flush()
-        ready, _, _ = select.select([process.stdout], [], [], timeout)
-        if not ready:
-            raise MCPError("GitHub MCP server did not answer the stdio initialize request")
-        response = json.loads(process.stdout.readline())
-        if response.get("id") != 1 or not isinstance(response.get("result"), dict):
-            raise MCPError("GitHub MCP server returned an invalid initialize response")
-    except (BrokenPipeError, json.JSONDecodeError) as exc:
-        raise MCPError(f"GitHub MCP stdio handshake failed: {exc}") from exc
-    finally:
-        process.terminate()
+    with _verified_github_descriptor(config) as (descriptor, _, install):
+        _verify_github_version(descriptor, install, _github_version_args(config))
+        process = subprocess.Popen(
+            [f"/proc/self/fd/{descriptor}", *args],
+            pass_fds=(descriptor,),
+            stdin=subprocess.PIPE,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            env=environment,
+        )
+        request = {
+            "jsonrpc": "2.0",
+            "id": 1,
+            "method": "initialize",
+            "params": {
+                "protocolVersion": "2025-06-18",
+                "capabilities": {},
+                "clientInfo": {"name": "saturnin-startup-check", "version": "1"},
+            },
+        }
         try:
-            process.communicate(timeout=2)
-        except subprocess.TimeoutExpired:
-            process.kill()
-            process.communicate()
+            assert process.stdin is not None and process.stdout is not None
+            process.stdin.write(json.dumps(request) + "\n")
+            process.stdin.flush()
+            ready, _, _ = select.select([process.stdout], [], [], timeout)
+            if not ready:
+                raise MCPError("GitHub MCP server did not answer the stdio initialize request")
+            response = json.loads(process.stdout.readline())
+            if response.get("id") != 1 or not isinstance(response.get("result"), dict):
+                raise MCPError("GitHub MCP server returned an invalid initialize response")
+        except (BrokenPipeError, json.JSONDecodeError) as exc:
+            raise MCPError(f"GitHub MCP stdio handshake failed: {exc}") from exc
+        finally:
+            process.terminate()
+            try:
+                process.communicate(timeout=2)
+            except subprocess.TimeoutExpired:
+                process.kill()
+                process.communicate()
 
 
 def install_github(config: Config | None = None) -> Path:
     config = config or default_config()
     target, asset, install = _expected_binary(config)
+    target.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+    _prepare_private_runtime_path(target.parent)
     if target.is_file():
         try:
             probe_github_stdio(config)
@@ -185,7 +423,6 @@ def install_github(config: Config | None = None) -> Path:
         raise MCPError("GitHub MCP release metadata is incomplete")
     download_dir = config.var_dir / "downloads"
     download_dir.mkdir(parents=True, exist_ok=True)
-    target.parent.mkdir(parents=True, exist_ok=True)
     archive = download_dir / archive_name
     partial = archive.with_suffix(archive.suffix + ".download")
     url = f"https://github.com/{repository}/releases/download/{tag}/{archive_name}"

@@ -37,11 +37,46 @@ saturnin task add "Fix the failing deploy pipeline" \
 saturnin task list --open
 ```
 
-The default installation is non-launching: the task is routed, and `saturnin run
-<task-id>` reports `{"disabled": true}` until `policies/mcp.yaml` is configured
-for this host. Enable launching only after the worker has an attached feature
-branch/worktree, installs and verifies the pinned GitHub MCP server, and checks
-that the `bwrap`, `pasta`, `copilot`, `npx` and `uvx` prerequisites are installed.
+The committed default is non-launching: the task is routed, and `saturnin run
+<task-id>` reports `{"disabled": true}`. Keep that safe default in
+`policies/mcp.yaml`; enable a prepared host through ignored runtime state:
+
+```bash
+saturnin launcher status
+saturnin launcher enable
+```
+
+Enablement succeeds only after version probes pass for `bwrap`, `pasta`,
+`copilot`, `npx` and `uvx`, and the installed GitHub MCP server matches the
+pinned release and checksum.
+
+<!-- generated:server-prerequisites -->
+| Executable | Additional resolved target roots | Target names | Script interpreters |
+| --- | --- | --- | --- |
+| `bwrap` | none | none | none |
+| `pasta` | none | none | none |
+| `copilot` | none | none | none |
+| `npx` | `/usr/share/nodejs/npm` | `npx-cli.js` | `node` |
+| `uvx` | `/opt/pipx/venvs/uv` | `uvx` | none |
+
+Selected executables, resolved targets, and script interpreters must be owned by **root**; group-writable paths are **forbidden** and world-writable paths are **forbidden**.
+Script interpreters are resolved from the fixed system path: `/usr/local/sbin`, `/usr/local/bin`, `/usr/sbin`, `/usr/bin`, `/sbin`, `/bin`.
+<!-- /generated:server-prerequisites -->
+
+The host-local file contains only the enablement boolean, lives under
+`var/config/`, and is not a credential store. To return to the safe default,
+run `saturnin launcher disable`.
+
+The equivalent individually governed probes are:
+
+```bash
+saturnin check command "bwrap --version"
+saturnin check command "pasta --version"
+saturnin check command "copilot --version"
+saturnin check command "npx --version"
+saturnin check command "uvx --version"
+saturnin check command "$PWD/var/bin/github-mcp-server --version"
+```
 
 ## 4. Do the work in a worktree
 

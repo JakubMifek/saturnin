@@ -7,6 +7,7 @@ import hmac
 import json
 import os
 import re
+import secrets
 import shutil
 import stat
 import subprocess
@@ -27,11 +28,17 @@ from .contracts import (
     mcp_authorization_problem,
     project_agent_path,
 )
-from .governance import Governance, github_repo_slug
+from .governance import (
+    ExecutableTrustError,
+    Governance,
+    github_repo_slug,
+    resolve_trusted_executable,
+)
 from .issues import MirrorError, run_gh
 from .jsonlines import PRIVATE_FILE_MODE, atomic_replace_text
+from .launcher_host import host_launcher_enabled, prerequisite_invocation
 from .locking import file_lock
-from .mcp import MCPError, server_process, verify_github_binary
+from .mcp import MCPError, StagedGithubBinary, server_process, stage_github_binary
 from .review import (
     ReviewError,
     issue_content_digest,
@@ -70,6 +77,12 @@ class _StagedReviewInput:
 
 
 @dataclass(frozen=True)
+class _MCPLaunchConfig:
+    path: Path
+    github_stage: StagedGithubBinary | None
+
+
+@dataclass(frozen=True)
 class LaunchResult:
     task_id: str
     role: str
@@ -95,7 +108,7 @@ class AgentLauncher:
 
     @property
     def enabled(self) -> bool:
-        return bool(self.policy.get("enabled", True))
+        return bool(self.policy.get("enabled", False)) or host_launcher_enabled(self.config)
 
     def launch(
         self,
@@ -131,14 +144,11 @@ class AgentLauncher:
     ) -> LaunchResult | None:
         metadata_path = self.dir / f"{task.id}.json"
         checkpoint = CheckpointStore(self.config, self.board).latest(task.id)
-        executable = str(self.policy.get("command", "copilot"))
-        executable_path = shutil.which(executable)
-        if executable_path is None:
-            raise LauncherError(f"agent launcher executable not found: {executable}")
-        executable_path = str(Path(executable_path).resolve())
+        executable_path = self._launcher_executable()
         sandbox_path = self._sandbox_executable()
         network_sandbox_path = self._network_sandbox_executable()
         mcp_path: Path | None = None
+        mcp_launch: _MCPLaunchConfig | None = None
         log_path = self.dir / f"{task.id}.log"
         launch_error: LauncherError | None = None
         process: subprocess.Popen[bytes] | None = None
@@ -192,12 +202,13 @@ class AgentLauncher:
                     workdir = self._validated_workdir(claimed)
                     worker_config = self._worker_config(workdir)
                     contract = self._contract(claimed, worker_config)
-                    mcp_path = self._write_mcp_config(
+                    mcp_launch = self._write_mcp_config(
                         claimed,
                         contract,
                         config=worker_config,
                         worktree_scope=workdir,
                     )
+                    mcp_path = mcp_launch.path
                     verified_review_input = self._verified_review_input(claimed)
                     review_input = self._stage_review_input(
                         claimed,
@@ -240,6 +251,7 @@ class AgentLauncher:
                         trusted_config=self._trusted_config(worker_config),
                         git_objects=git_objects,
                         mcp_config=mcp_path,
+                        github_stage=mcp_launch.github_stage,
                         review_input=review_input.path if review_input else None,
                     )
                     with self._private_log(log_path) as output:
@@ -251,7 +263,14 @@ class AgentLauncher:
                             stdout=output,
                             stderr=subprocess.STDOUT,
                             start_new_session=True,
+                            pass_fds=(
+                                (mcp_launch.github_stage.descriptor,)
+                                if mcp_launch.github_stage is not None
+                                else ()
+                            ),
                         )
+                        if mcp_launch.github_stage is not None:
+                            mcp_launch.github_stage.close()
                         process_start_time = self._process_start_time(process.pid)
                         if process_start_time is None:
                             raise LauncherError(
@@ -276,6 +295,11 @@ class AgentLauncher:
                         "resumed_checkpoint": resumed_checkpoint,
                         "callback_dir": environment.get(ENV_CALLBACK_DIR),
                         "completed": completed_during_grace,
+                        "github_runtime": (
+                            mcp_launch.github_stage.metadata()
+                            if mcp_launch.github_stage is not None
+                            else None
+                        ),
                     }
                     metadata_attempted = True
                     atomic_replace_text(
@@ -298,6 +322,9 @@ class AgentLauncher:
                             reason=reason,
                         )
                     else:
+                        cleanup_problem = self._cleanup_mcp_launch(mcp_launch, claimed.id)
+                        if cleanup_problem:
+                            reason = f"{reason}; {cleanup_problem}"
                         if previous_state in ("routed", "in_progress"):
                             stored.state = previous_state
                         stored.checkpoint_resumed_at = previous_checkpoint_resumed_at
@@ -334,6 +361,9 @@ class AgentLauncher:
             if completed_during_grace:
                 completed_persistence_problem = reason
             else:
+                cleanup_problem = self._cleanup_mcp_launch(mcp_launch, task.id)
+                if cleanup_problem:
+                    reason = f"{reason}; {cleanup_problem}"
                 if termination_problem:
                     reason = f"{reason}; {termination_problem}"
                 restored = self._restore_launch_claim(
@@ -518,6 +548,17 @@ class AgentLauncher:
             return False, False, f"{reason}; launch reconciliation failed: {exc}"
         except BoardError:
             pass
+        if callbacks_complete:
+            cleanup_problem = self._cleanup_github_runtime(
+                task_id,
+                metadata.get("github_runtime"),
+            )
+            if cleanup_problem:
+                return (
+                    recovery_pending,
+                    False,
+                    f"{reason}; {cleanup_problem}",
+                )
         return recovery_pending, callbacks_complete, reason
 
     def _recover_launch_metadata(self, metadata: dict[str, Any]) -> str | None:
@@ -579,6 +620,112 @@ class AgentLauncher:
             metadata_path.unlink(missing_ok=True)
         except OSError as exc:
             return f"could not remove launch metadata: {exc}"
+        return None
+
+    def _cleanup_mcp_launch(
+        self,
+        launch: _MCPLaunchConfig | None,
+        task_id: str,
+    ) -> str | None:
+        if launch is None or launch.github_stage is None:
+            return None
+        launch.github_stage.close()
+        return self._cleanup_github_runtime(
+            task_id,
+            launch.github_stage.metadata(),
+        )
+
+    def _cleanup_github_runtime(
+        self,
+        task_id: str,
+        value: object,
+    ) -> str | None:
+        if value is None:
+            return None
+        if not isinstance(value, dict):
+            return "GitHub MCP runtime cleanup metadata is invalid"
+        directory = Path(str(value.get("directory", "")))
+        expected_name = re.fullmatch(
+            rf"{re.escape(task_id)}\.runtime-[0-9a-f]{{32}}",
+            directory.name,
+        )
+        if directory.parent != self.dir or expected_name is None:
+            return "GitHub MCP runtime cleanup path is outside the exact launch scope"
+        filename = value.get("file")
+        expected_numbers = (
+            value.get("directory_device"),
+            value.get("directory_inode"),
+            value.get("file_device"),
+            value.get("file_inode"),
+        )
+        if filename != "github-mcp-server" or not all(
+            isinstance(number, int) and not isinstance(number, bool)
+            for number in expected_numbers
+        ):
+            return "GitHub MCP runtime cleanup metadata is invalid"
+        root_descriptor = -1
+        runtime_descriptor = -1
+        try:
+            root_descriptor = os.open(
+                self.dir,
+                os.O_RDONLY | os.O_DIRECTORY | os.O_CLOEXEC | os.O_NOFOLLOW,
+            )
+            runtime_descriptor = os.open(
+                directory.name,
+                os.O_RDONLY | os.O_DIRECTORY | os.O_CLOEXEC | os.O_NOFOLLOW,
+                dir_fd=root_descriptor,
+            )
+            runtime_metadata = os.fstat(runtime_descriptor)
+            if (
+                runtime_metadata.st_dev != expected_numbers[0]
+                or runtime_metadata.st_ino != expected_numbers[1]
+                or runtime_metadata.st_uid != os.geteuid()
+                or runtime_metadata.st_mode & (stat.S_IWGRP | stat.S_IWOTH)
+            ):
+                return (
+                    "GitHub MCP runtime directory identity or permissions changed "
+                    f"(expected {expected_numbers[:2]}, got "
+                    f"{(runtime_metadata.st_dev, runtime_metadata.st_ino)}, "
+                    f"mode {stat.S_IMODE(runtime_metadata.st_mode):#o})"
+                )
+            if os.listdir(runtime_descriptor) != [filename]:
+                return "GitHub MCP runtime directory contains unexpected entries"
+            file_metadata = os.stat(
+                filename,
+                dir_fd=runtime_descriptor,
+                follow_symlinks=False,
+            )
+            if (
+                not stat.S_ISREG(file_metadata.st_mode)
+                or file_metadata.st_dev != expected_numbers[2]
+                or file_metadata.st_ino != expected_numbers[3]
+                or file_metadata.st_uid != os.geteuid()
+            ):
+                return "GitHub MCP staged executable identity changed"
+            os.unlink(filename, dir_fd=runtime_descriptor)
+            current_runtime = os.stat(
+                directory.name,
+                dir_fd=root_descriptor,
+                follow_symlinks=False,
+            )
+            if (
+                current_runtime.st_dev,
+                current_runtime.st_ino,
+            ) != (
+                runtime_metadata.st_dev,
+                runtime_metadata.st_ino,
+            ):
+                return "GitHub MCP runtime directory path identity changed"
+            os.rmdir(directory.name, dir_fd=root_descriptor)
+        except FileNotFoundError:
+            return None
+        except OSError as exc:
+            return f"could not clean exact GitHub MCP runtime: {exc}"
+        finally:
+            if runtime_descriptor >= 0:
+                os.close(runtime_descriptor)
+            if root_descriptor >= 0:
+                os.close(root_descriptor)
         return None
 
     def _settle_failed_process(
@@ -708,7 +855,14 @@ class AgentLauncher:
         path = shutil.which(executable)
         if path is None:
             raise LauncherError(f"required worker sandbox executable not found: {executable}")
-        return str(Path(path).resolve())
+        return self._validate_required_executable(path, "bwrap")
+
+    def _launcher_executable(self) -> str:
+        executable = str(self.policy.get("command", "copilot")).strip()
+        path = shutil.which(executable)
+        if path is None:
+            raise LauncherError(f"agent launcher executable not found: {executable}")
+        return self._validate_required_executable(path, "copilot")
 
     def _agent_args(self, *, prompt: str, mcp_config: Path, task_id: str) -> list[str]:
         return [
@@ -743,7 +897,52 @@ class AgentLauncher:
             raise LauncherError(
                 f"required worker network sandbox executable not found: {executable}"
             )
-        return str(Path(path).resolve())
+        return self._validate_required_executable(path, "pasta")
+
+    def _validate_required_executable(self, path: str, name: str) -> str:
+        try:
+            return str(
+                resolve_trusted_executable(
+                    self._trusted_config(self.config),
+                    path,
+                    expected_binary=name,
+                )
+            )
+        except ExecutableTrustError as exc:
+            raise LauncherError(f"untrusted {name} executable: {exc}") from exc
+
+    def _sandbox_visible_executable(self, path: Path, config: Config) -> bool:
+        sandbox = self.policy.get("sandbox", {})
+        read_only_paths = sandbox.get("read_only_paths", []) if isinstance(sandbox, dict) else []
+        visible_roots = [
+            Path(value).resolve(strict=False)
+            for value in read_only_paths
+            if isinstance(value, str) and Path(value).is_absolute()
+        ]
+        visible_roots.append((config.var_dir / "bin").resolve(strict=False))
+        private_stage = (self.dir / path.parent.name).resolve(strict=False)
+        resolved = path.resolve(strict=False)
+        if resolved == private_stage or resolved.is_relative_to(private_stage):
+            return True
+        return any(
+            resolved == root or resolved.is_relative_to(root)
+            for root in visible_roots
+        )
+
+    @staticmethod
+    def _mcp_executable_paths(mcp_config: Path) -> list[Path]:
+        try:
+            payload = json.loads(mcp_config.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError) as exc:
+            raise LauncherError(f"cannot read generated MCP configuration: {exc}") from exc
+        paths: list[Path] = []
+        for definition in payload.get("mcpServers", {}).values():
+            if not isinstance(definition, dict):
+                continue
+            command = Path(str(definition.get("command", "")))
+            if command.is_absolute():
+                paths.append(command)
+        return paths
 
     def _tighten_existing_logs(self) -> None:
         for path in self.dir.glob("*.log"):
@@ -798,6 +997,7 @@ class AgentLauncher:
         trusted_config: Config,
         git_objects: Path,
         mcp_config: Path,
+        github_stage: StagedGithubBinary | None = None,
         review_input: Path | None = None,
     ) -> list[str]:
         sandbox_policy = trusted_config.policy("mcp").get("launcher", {}).get(
@@ -879,6 +1079,13 @@ class AgentLauncher:
         read_only_mounts.extend(
             (path, path) for path in (Path(executable), git_objects, mcp_config)
         )
+        for path in AgentLauncher._mcp_executable_paths(mcp_config):
+            source = (
+                Path(f"/proc/self/fd/{github_stage.descriptor}")
+                if github_stage is not None and path == github_stage.path
+                else path
+            )
+            read_only_mounts.append((source, path))
         if review_input is not None:
             read_only_mounts.append((review_input, review_input))
         staged_board = isolated_home / ".saturnin-board"
@@ -1540,7 +1747,7 @@ class AgentLauncher:
         *,
         config: Config | None = None,
         worktree_scope: Path | None = None,
-    ) -> Path:
+    ) -> _MCPLaunchConfig:
         config = config or self.config
         trusted_config = self._trusted_config(config)
         trusted_definitions = trusted_config.policy("mcp").get("servers", {})
@@ -1573,6 +1780,7 @@ class AgentLauncher:
             name: trusted_definitions[name] for name in source_definitions
         }
         servers: dict[str, dict[str, Any]] = {}
+        github_stage: StagedGithubBinary | None = None
         allowed = list(contract.mcp)
         if task.worktree:
             worktree_root = Path(task.worktree).resolve(strict=False)
@@ -1618,15 +1826,42 @@ class AgentLauncher:
                 trusted_config,
                 worktree_scope=worktree_scope,
             )
-            canonical_github = (
-                config.var_dir / "bin" / "github-mcp-server"
-            ).resolve(strict=False)
-            if Path(command).resolve(strict=False) == canonical_github:
-                verified = verify_github_binary(trusted_config).resolve()
-                if verified != canonical_github:
-                    raise LauncherError(
-                        "verified GitHub MCP executable does not match canonical path"
+            command_name = Path(command).name
+            if command_name in trusted_config.server_scope.get(
+                "prerequisite_checks", {}
+            ):
+                try:
+                    executable = resolve_trusted_executable(
+                        trusted_config,
+                        command,
+                        expected_binary=command_name,
                     )
+                    prerequisite = trusted_config.server_scope[
+                        "prerequisite_checks"
+                    ][command_name]
+                    invocation, _ = prerequisite_invocation(
+                        trusted_config,
+                        executable,
+                        args,
+                        prerequisite,
+                    )
+                    command, *args = invocation
+                    if executable != Path(command) and not self._sandbox_visible_executable(
+                        executable, trusted_config
+                    ):
+                        raise LauncherError(
+                            f"MCP wrapper is outside sandbox read-only mounts: {executable}"
+                        )
+                except ExecutableTrustError as exc:
+                    raise LauncherError(
+                        f"untrusted MCP executable {command_name}: {exc}"
+                    ) from exc
+            if Path(command).is_absolute() and not self._sandbox_visible_executable(
+                Path(command), trusted_config
+            ):
+                raise LauncherError(
+                    f"MCP executable is outside sandbox read-only mounts: {command}"
+                )
             server: dict[str, Any] = {
                 "type": definition.get("transport", "stdio"),
                 "command": command,
@@ -1642,13 +1877,35 @@ class AgentLauncher:
                 if token:
                     server["env"] = {"GITHUB_PERSONAL_ACCESS_TOKEN": token}
             servers[name] = server
+        if "github" in servers:
+            private_stage = (
+                self.dir
+                / f"{task.id}.runtime-{secrets.token_hex(16)}"
+                / "github-mcp-server"
+            )
+            try:
+                github_stage = stage_github_binary(trusted_config, private_stage)
+            except MCPError as exc:
+                raise LauncherError(f"cannot stage GitHub MCP executable: {exc}") from exc
+            servers["github"]["command"] = str(github_stage.path)
         path = self.dir / f"{task.id}.mcp.json"
-        atomic_replace_text(
-            path,
-            json.dumps({"mcpServers": servers}, indent=2) + "\n",
-            mode=PRIVATE_FILE_MODE,
-        )
-        return path
+        try:
+            atomic_replace_text(
+                path,
+                json.dumps({"mcpServers": servers}, indent=2) + "\n",
+                mode=PRIVATE_FILE_MODE,
+            )
+        except Exception:
+            if github_stage is not None:
+                github_stage.close()
+                cleanup_problem = self._cleanup_github_runtime(
+                    task.id,
+                    github_stage.metadata(),
+                )
+                if cleanup_problem:
+                    raise LauncherError(cleanup_problem)
+            raise
+        return _MCPLaunchConfig(path=path, github_stage=github_stage)
 
     def _prompt(
         self,

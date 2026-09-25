@@ -11,6 +11,7 @@ import os
 import re
 import shlex
 import shutil
+import stat
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Iterable, Sequence
@@ -151,6 +152,10 @@ class _AssignmentError(ValueError):
 
 
 class _WriteScopeError(ValueError):
+    pass
+
+
+class ExecutableTrustError(RuntimeError):
     pass
 
 
@@ -459,6 +464,24 @@ class Governance:
             )
 
         scope = self.config.server_scope
+        prerequisite_checks = scope.get("prerequisite_checks", {})
+        if binary in prerequisite_checks:
+            definition = prerequisite_checks[binary]
+            if not isinstance(definition, dict):
+                return Decision.deny(
+                    f"invalid prerequisite check policy for {binary!r}"
+                )
+            allowed_arguments = definition.get("args")
+            if not isinstance(allowed_arguments, list) or not all(
+                isinstance(value, str) for value in allowed_arguments
+            ):
+                return Decision.deny(f"invalid prerequisite arguments for {binary!r}")
+            if parts[1:] != allowed_arguments:
+                return Decision.deny(
+                    f"{binary} is limited to the prerequisite check: "
+                    + " ".join([binary, *allowed_arguments])
+                )
+            return Decision.ok(f"{binary}: non-mutating prerequisite check")
         services = scope.get("services", {})
         packages = scope.get("packages", {})
         filesystem_decision = _check_filesystem_scope(
@@ -666,10 +689,127 @@ class Governance:
         try:
             filesystem = server_scope.get("filesystem", {})
             _trusted_executable_roots(filesystem)
+            _trusted_system_path(filesystem)
+            _trusted_path_requirements(filesystem)
             _trusted_runtime_executable(filesystem, self.config.data_root)
             _writable_roots(filesystem, self.config.data_root)
         except ValueError as error:
             problems.append(f"{self.config.policies / 'server_scope.yaml'}: {error}")
+        prerequisite_checks = server_scope.get("prerequisite_checks")
+        if not isinstance(prerequisite_checks, dict) or not prerequisite_checks:
+            problems.append("server scope prerequisite_checks must be a non-empty mapping")
+        else:
+            allowlist = set(
+                server_scope.get("filesystem", {}).get("executable_allowlist", [])
+            )
+            pinned = []
+            for binary, definition in prerequisite_checks.items():
+                check_type = (
+                    definition.get("type") if isinstance(definition, dict) else None
+                )
+                arguments = (
+                    definition.get("args") if isinstance(definition, dict) else None
+                )
+                expected_keys = {"type", "args"}
+                if check_type == "system-executable":
+                    expected_keys |= {
+                        "target_roots",
+                        "target_names",
+                        "script_interpreters",
+                    }
+                    try:
+                        _prerequisite_target_roots(server_scope, binary)
+                    except ValueError as error:
+                        problems.append(
+                            f"invalid server prerequisite check for {binary!r}: {error}"
+                        )
+                    interpreters = definition.get("script_interpreters", [])
+                    if (
+                        not isinstance(interpreters, list)
+                        or not all(
+                            isinstance(value, str)
+                            and value
+                            and "/" not in value
+                            for value in interpreters
+                        )
+                    ):
+                        problems.append(
+                            f"invalid server prerequisite interpreters for {binary!r}"
+                        )
+                    target_names = definition.get("target_names", [])
+                    if (
+                        not isinstance(target_names, list)
+                        or not all(
+                            isinstance(value, str)
+                            and value
+                            and Path(value).name == value
+                            for value in target_names
+                        )
+                        or bool(definition.get("target_roots")) != bool(target_names)
+                    ):
+                        problems.append(
+                            f"invalid server prerequisite target names for {binary!r}"
+                        )
+                if (
+                    not isinstance(binary, str)
+                    or not binary
+                    or "/" in binary
+                    or binary not in allowlist
+                    or check_type not in {"system-executable", "pinned-github-mcp"}
+                    or not isinstance(arguments, list)
+                    or not arguments
+                    or not all(isinstance(value, str) and value for value in arguments)
+                    or set(definition or {}) != expected_keys
+                ):
+                    problems.append(
+                        f"invalid server prerequisite check for {binary!r}"
+                    )
+                if check_type == "pinned-github-mcp":
+                    pinned.append(binary)
+            if pinned != ["github-mcp-server"]:
+                problems.append(
+                    "server scope requires exactly one pinned GitHub MCP prerequisite"
+                )
+        bindings = server_scope.get("launcher_command_bindings")
+        if not isinstance(bindings, dict) or not bindings:
+            problems.append("server scope launcher_command_bindings must be a mapping")
+        else:
+            mcp_policy = self.config.policy("mcp")
+            system_checks = {
+                name
+                for name, definition in (prerequisite_checks or {}).items()
+                if isinstance(definition, dict)
+                and definition.get("type") == "system-executable"
+            }
+            for locator, binary in bindings.items():
+                if (
+                    not isinstance(locator, str)
+                    or not locator
+                    or not isinstance(binary, str)
+                    or binary not in system_checks
+                ):
+                    problems.append(
+                        f"invalid launcher command binding {locator!r}: {binary!r}"
+                    )
+                    continue
+                actual: Any = mcp_policy
+                for component in locator.split("."):
+                    if not isinstance(actual, dict) or component not in actual:
+                        actual = None
+                        break
+                    actual = actual[component]
+                if actual != binary:
+                    problems.append(
+                        f"launcher command {locator!r} must be {binary!r}, got {actual!r}"
+                    )
+            bound_checks = {
+                value for value in bindings.values() if isinstance(value, str)
+            }
+            if bound_checks != system_checks or len(bindings) != len(system_checks):
+                problems.append(
+                    "server scope launcher_command_bindings must bind every "
+                    "system prerequisite exactly"
+                )
         if self.delegation.get("ceo_may_wait_for_workers", False):
             problems.append("CEO is allowed to wait for workers; dispatch must be non-blocking")
         if not self.result_contracts:
@@ -677,6 +817,46 @@ class Governance:
         if self.mirror_required() and not self.config.policy("repos").get("repos", {}).get("board"):
             problems.append("task mirroring is on but policies/repos.yaml names no board repo")
         return problems
+
+
+def resolve_trusted_executable(
+    config: Config,
+    executable: str,
+    *,
+    expected_binary: str | None = None,
+) -> Path:
+    """Resolve an executable once and enforce the server-scope trust policy."""
+    executable = executable.strip()
+    if not executable:
+        raise ExecutableTrustError("executable name must not be empty")
+    requested_binary = Path(executable).name
+    binary = expected_binary or requested_binary
+    if not _is_classified_executable(binary, config.server_scope):
+        raise ExecutableTrustError(
+            f"executable {binary!r} has no server-scope trust policy"
+        )
+    if "/" in executable:
+        selected = Path(executable).expanduser()
+    else:
+        found = shutil.which(executable)
+        if found is None:
+            raise ExecutableTrustError(f"required executable not found: {executable}")
+        selected = Path(found)
+    selected = Path(os.path.abspath(selected))
+    decision = _check_executable_location(
+        str(selected),
+        binary,
+        config.server_scope,
+        runtime_root=config.data_root,
+    )
+    if not decision.allowed:
+        raise ExecutableTrustError("; ".join(decision.reasons))
+    try:
+        return selected.resolve(strict=True)
+    except (OSError, RuntimeError, ValueError) as exc:
+        raise ExecutableTrustError(
+            f"trusted executable {str(selected)!r} could not be resolved: {exc}"
+        ) from exc
 
 
 def _unsafe_shell_syntax(command: str) -> str | None:
@@ -781,14 +961,7 @@ def _check_executable_location(
     cwd: Path | None = None,
 ) -> Decision:
     filesystem = scope.get("filesystem", {})
-    classified = (
-        binary in _SPECIAL_EXECUTABLES
-        or binary in set(filesystem.get("executable_allowlist", []))
-        or binary in set(scope.get("user", {}).get("forbidden_prefixes", []))
-        or binary == "apt"
-        or binary.startswith("apt-")
-    )
-    if not classified:
+    if not _is_classified_executable(binary, scope):
         return Decision.ok("executable does not receive basename-specific privileges")
 
     if "/" in executable:
@@ -817,6 +990,21 @@ def _check_executable_location(
         return Decision.deny(
             f"classified executable {executable!r} does not resolve to an existing file"
         )
+    if binary == "github-mcp-server":
+        expected = runtime_root / "var" / "bin" / "github-mcp-server"
+        if selected != expected:
+            return Decision.deny(
+                f"GitHub MCP prerequisite check must use canonical executable {expected}"
+            )
+        try:
+            from .mcp import verify_github_binary
+
+            verified = verify_github_binary(Config(runtime_root))
+        except (OSError, RuntimeError, ValueError) as exc:
+            return Decision.deny(f"canonical GitHub MCP executable is untrusted: {exc}")
+        if verified != selected:
+            return Decision.deny("verified GitHub MCP executable path changed")
+        return Decision.ok("executable is the verified pinned GitHub MCP server")
     if binary == "saturnin":
         try:
             runtime_executable = _trusted_runtime_executable(filesystem, runtime_root)
@@ -840,6 +1028,12 @@ def _check_executable_location(
         return Decision.deny(
             f"executable {str(selected)!r} is outside trusted system executable roots"
         )
+    is_prerequisite = binary in set(scope.get("prerequisite_checks", {}))
+    if is_prerequisite and selected.name != binary:
+        return Decision.deny(
+            f"selected executable basename {selected.name!r} does not match "
+            f"expected binary {binary!r}"
+        )
 
     try:
         resolved = selected.resolve(strict=True)
@@ -856,30 +1050,113 @@ def _check_executable_location(
             f"classified executable {str(resolved)!r} is not executable"
         )
 
-    if _containing_root(resolved, trusted_roots) is None:
+    selected_root = _containing_root(selected, configured_roots)
+    assert selected_root is not None
+    canonical_selected_root = selected_root.resolve(strict=False)
+    trusted_root = _containing_root(
+        resolved,
+        [canonical_selected_root] if is_prerequisite else trusted_roots,
+    )
+    if is_prerequisite:
+        try:
+            target_roots = _prerequisite_target_roots(scope, binary)
+            target_names = _prerequisite_target_names(scope, binary)
+        except ValueError as error:
+            return Decision.deny(f"invalid executable trust policy: {error}")
+        if trusted_root is None:
+            trusted_root = _containing_root(resolved, target_roots)
+            if trusted_root is not None and resolved.name not in target_names:
+                return Decision.deny(
+                    f"resolved executable basename {resolved.name!r} is not an "
+                    f"authorized target for {binary!r}"
+                )
+    if trusted_root is None:
         return Decision.deny(
             f"executable {str(resolved)!r} is outside trusted system executable roots"
         )
+    if (
+        is_prerequisite
+        and _containing_root(resolved, [canonical_selected_root]) is not None
+        and resolved.name != binary
+    ):
+        return Decision.deny(
+            f"resolved executable basename {resolved.name!r} does not match "
+            f"expected binary {binary!r}"
+        )
+    if binary in set(scope.get("prerequisite_checks", {})):
+        try:
+            requirements = _trusted_path_requirements(filesystem)
+        except ValueError as error:
+            return Decision.deny(f"invalid executable trust policy: {error}")
+        permission_problem = _trusted_system_path_problem(resolved, requirements)
+        if permission_problem:
+            return Decision.deny(permission_problem)
     return Decision.ok(f"executable {str(resolved)!r} is under a trusted system root")
 
 
+def _is_classified_executable(binary: str, scope: dict[str, Any]) -> bool:
+    filesystem = scope.get("filesystem", {})
+    return (
+        binary in _SPECIAL_EXECUTABLES
+        or binary in set(filesystem.get("executable_allowlist", []))
+        or binary in set(scope.get("prerequisite_checks", {}))
+        or binary in set(scope.get("user", {}).get("forbidden_prefixes", []))
+        or binary == "apt"
+        or binary.startswith("apt-")
+    )
+
+
+def _trusted_system_path_problem(
+    executable: Path, requirements: dict[str, Any] | None = None
+) -> str | None:
+    requirements = requirements or {
+        "owner": "root",
+        "forbid_group_writable": True,
+        "forbid_world_writable": True,
+    }
+    current = executable
+    while True:
+        try:
+            metadata = current.stat(follow_symlinks=False)
+        except OSError as exc:
+            return f"trusted executable path {str(current)!r} cannot be inspected: {exc}"
+        if requirements["owner"] == "root" and metadata.st_uid != 0:
+            return f"trusted executable path {str(current)!r} must be owned by root"
+        forbidden_write_bits = (
+            (stat.S_IWGRP if requirements["forbid_group_writable"] else 0)
+            | (stat.S_IWOTH if requirements["forbid_world_writable"] else 0)
+        )
+        if metadata.st_mode & forbidden_write_bits:
+            return (
+                f"trusted executable path {str(current)!r} must not be group/world-writable"
+            )
+        if current.parent == current:
+            return None
+        current = current.parent
+
+
 def _trusted_executable_roots(
-    filesystem: dict[str, Any], *, resolve: bool = True
+    filesystem: dict[str, Any],
+    *,
+    resolve: bool = True,
+    key: str = "trusted_executable_roots",
+    required: bool = True,
 ) -> list[Path]:
-    values = filesystem.get("trusted_executable_roots")
-    if not isinstance(values, list) or not values:
-        raise ValueError("filesystem.trusted_executable_roots must be a non-empty list")
+    values = filesystem.get(key)
+    if not isinstance(values, list) or (required and not values):
+        qualifier = "a non-empty list" if required else "a list"
+        raise ValueError(f"filesystem.{key} must be {qualifier}")
     roots: list[Path] = []
     for index, value in enumerate(values):
         if not isinstance(value, str) or not value.strip():
             raise ValueError(
-                "filesystem.trusted_executable_roots entries must be nonempty strings "
+                f"filesystem.{key} entries must be nonempty strings "
                 f"(invalid entry at index {index})"
             )
         path = Path(value)
         if not path.is_absolute():
             raise ValueError(
-                "filesystem.trusted_executable_roots entries must be absolute paths "
+                f"filesystem.{key} entries must be absolute paths "
                 f"(invalid entry at index {index}: {value!r})"
             )
         try:
@@ -890,10 +1167,61 @@ def _trusted_executable_roots(
             )
         except (OSError, RuntimeError, ValueError) as error:
             raise ValueError(
-                "filesystem.trusted_executable_roots entry cannot be resolved "
+                f"filesystem.{key} entry cannot be resolved "
                 f"(invalid entry at index {index}: {value!r})"
             ) from error
     return roots
+
+
+def _prerequisite_target_roots(
+    scope: dict[str, Any], binary: str, *, resolve: bool = True
+) -> list[Path]:
+    definition = scope.get("prerequisite_checks", {}).get(binary)
+    if not isinstance(definition, dict):
+        raise ValueError(f"prerequisite_checks.{binary} must be a mapping")
+    try:
+        return _trusted_executable_roots(
+            definition,
+            resolve=resolve,
+            key="target_roots",
+            required=False,
+        )
+    except ValueError as error:
+        raise ValueError(
+            str(error).replace("filesystem.target_roots", f"prerequisite_checks.{binary}.target_roots")
+        ) from error
+
+
+def _prerequisite_target_names(scope: dict[str, Any], binary: str) -> set[str]:
+    definition = scope.get("prerequisite_checks", {}).get(binary)
+    values = definition.get("target_names") if isinstance(definition, dict) else None
+    if not isinstance(values, list) or not all(
+        isinstance(value, str) and value and Path(value).name == value
+        for value in values
+    ):
+        raise ValueError(
+            f"prerequisite_checks.{binary}.target_names must be a list of basenames"
+        )
+    return set(values)
+
+
+def _trusted_system_path(filesystem: dict[str, Any]) -> list[Path]:
+    return _trusted_executable_roots(filesystem, key="trusted_system_path")
+
+
+def _trusted_path_requirements(filesystem: dict[str, Any]) -> dict[str, Any]:
+    requirements = filesystem.get("trusted_path_requirements")
+    expected = {
+        "owner": "root",
+        "forbid_group_writable": True,
+        "forbid_world_writable": True,
+    }
+    if requirements != expected:
+        raise ValueError(
+            "filesystem.trusted_path_requirements must require root ownership "
+            "and forbid group/world writes"
+        )
+    return requirements
 
 
 def _trusted_runtime_executable(filesystem: dict[str, Any], runtime_root: Path) -> Path:
