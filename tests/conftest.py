@@ -19,8 +19,9 @@ REPO_ROOT = Path(__file__).resolve().parents[1]
 def home(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
     root = tmp_path / "saturnin-home"
     (root / "policies").mkdir(parents=True)
-    for policy in (REPO_ROOT / "policies").glob("*.yaml"):
-        shutil.copy(policy, root / "policies" / policy.name)
+    for pattern in ("*.yaml", "*.toml"):
+        for policy in (REPO_ROOT / "policies").glob(pattern):
+            shutil.copy(policy, root / "policies" / policy.name)
     mcp_path = root / "policies" / "mcp.yaml"
     mcp_policy = yaml.safe_load(mcp_path.read_text(encoding="utf-8"))
     mcp_policy["launcher"]["enabled"] = False
@@ -29,6 +30,10 @@ def home(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
     shutil.copytree(REPO_ROOT / "scripts", root / "scripts")
     shutil.copytree(REPO_ROOT / "agents", root / "agents")
     shutil.copytree(REPO_ROOT / "skills", root / "skills")
+    shutil.copytree(
+        REPO_ROOT / "tests" / "fixtures" / "disclosure",
+        root / "tests" / "fixtures" / "disclosure",
+    )
     monkeypatch.setenv("SATURNIN_HOME", str(root))
     monkeypatch.setenv("SATURNIN_REVIEW_ATTESTATION_KEY", "test-review-attestation-key")
     return root
