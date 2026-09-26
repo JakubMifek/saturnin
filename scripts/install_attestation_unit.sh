@@ -7,6 +7,7 @@ unset BASH_ENV ENV CDPATH PYTHONHOME PYTHONPATH
 IFS=$' \t\n'
 
 readonly UNIT=saturnin-attestation.service
+readonly EXPECTED_RUNTIME_MANIFEST_SHA256=1df8a966a2d7560e1a68ce4143ac367edcbd670a42e5782e5027d0dc46746e23
 readonly ID=/usr/bin/id
 readonly REALPATH=/usr/bin/realpath
 readonly STAT=/usr/bin/stat
@@ -337,6 +338,7 @@ snapshot_governed_runtime() {
   GOVERNED_FD="$descriptor" DESTINATION_PATH="$destination" \
     EXPECTED_UID="$CURRENT_UID" "$PYTHON" -I -c '
 import fcntl
+import hashlib
 import os
 import stat
 import zipfile
@@ -385,6 +387,7 @@ if identity(before) != identity(after):
 os.lseek(source, 0, os.SEEK_SET)
 with zipfile.ZipFile(f"/proc/self/fd/{source}") as archive:
     names = archive.namelist()
+    manifest_name = "SATURNIN-RUNTIME-MANIFEST"
     if (
         len(names) != len(set(names))
         or "saturnin/attestation_service.py" not in names
@@ -392,15 +395,30 @@ with zipfile.ZipFile(f"/proc/self/fd/{source}") as archive:
         or any(
             name.startswith("/")
             or ".." in name.split("/")
-            or not name.endswith(".py")
-            or not (
-                name.startswith("saturnin/")
-                or name.startswith("yaml/")
+            or (
+                name != manifest_name
+                and (
+                    not name.endswith(".py")
+                    or not (
+                        name.startswith("saturnin/")
+                        or name.startswith("yaml/")
+                    )
+                )
             )
             for name in names
         )
     ):
         raise SystemExit("governed runtime archive manifest is invalid")
+    manifest = archive.read(manifest_name)
+    if hashlib.sha256(manifest).hexdigest() != "'"$EXPECTED_RUNTIME_MANIFEST_SHA256"'":
+        raise SystemExit("governed runtime archive is not policy-authorized")
+    expected_manifest = b"".join(
+        name.encode() + b"\0" + hashlib.sha256(archive.read(name)).hexdigest().encode() + b"\n"
+        for name in sorted(names)
+        if name != manifest_name
+    )
+    if manifest != expected_manifest:
+        raise SystemExit("governed runtime archive content differs from manifest")
 '
 }
 
@@ -622,6 +640,87 @@ if manager[1:] != expected:
 '
 }
 
+verify_running_service() {
+  local manager_state=$1 runtime_sha256=$2
+  MANAGER_STATE_PATH="$manager_state" INSTALLED_PATH="$INSTALLED" \
+    PYTHON_PATH="$PYTHON" RUNTIME_SHA256_VALUE="$runtime_sha256" \
+    VERIFY_RUNNING_SERVICE=1 "$PYTHON" -I -c '
+import hashlib
+import os
+import stat
+from pathlib import Path
+
+properties = {}
+for line in Path(os.environ["MANAGER_STATE_PATH"]).read_text(
+    encoding="utf-8"
+).splitlines():
+    key, separator, value = line.partition("=")
+    if not separator or key in properties:
+        raise SystemExit("systemd reported invalid signer process state")
+    properties[key] = value
+expected = {
+    "LoadState": "loaded",
+    "ActiveState": "active",
+    "SubState": "running",
+    "FragmentPath": os.environ["INSTALLED_PATH"],
+    "DropInPaths": "",
+}
+if any(properties.get(key) != value for key, value in expected.items()):
+    raise SystemExit("systemd signer loaded or active identity mismatch")
+try:
+    pid = int(properties["MainPID"])
+    exec_pid = int(properties["ExecMainPID"])
+except (KeyError, ValueError):
+    raise SystemExit("systemd signer process identity is invalid")
+if pid <= 1 or exec_pid != pid:
+    raise SystemExit("systemd signer process identity is invalid")
+process = Path("/proc") / str(pid)
+metadata = process.stat()
+if metadata.st_uid != os.getuid():
+    raise SystemExit("systemd signer process owner mismatch")
+if Path(os.path.realpath(process / "exe")) != Path(os.environ["PYTHON_PATH"]):
+    raise SystemExit("systemd signer executable identity mismatch")
+arguments = (process / "cmdline").read_bytes().split(b"\0")
+if (
+    len(arguments) < 5
+    or arguments[1:3] != [b"-I", b"-c"]
+    or arguments[-2:] != [b"serve", b""]
+    or b"saturnin-attestation-runtime.pyz" not in arguments[3]
+    or b"runpy.run_module" not in arguments[3]
+):
+    raise SystemExit("systemd signer command identity mismatch")
+runtime_digest = os.environ["RUNTIME_SHA256_VALUE"]
+matched = False
+for entry in (process / "fd").iterdir():
+    try:
+        target = os.readlink(entry)
+    except OSError:
+        continue
+    if "memfd:saturnin-attestation-runtime" not in target:
+        continue
+    descriptor = os.open(entry, os.O_RDONLY | os.O_CLOEXEC)
+    try:
+        before = os.fstat(descriptor)
+        digest = hashlib.sha256()
+        while chunk := os.read(descriptor, 65536):
+            digest.update(chunk)
+        after = os.fstat(descriptor)
+    finally:
+        os.close(descriptor)
+    if (
+        stat.S_ISREG(before.st_mode)
+        and before.st_uid == os.getuid()
+        and (before.st_dev, before.st_ino, before.st_size)
+        == (after.st_dev, after.st_ino, after.st_size)
+        and digest.hexdigest() == runtime_digest
+    ):
+        matched = True
+        break
+if not matched:
+    raise SystemExit("systemd signer runtime process identity mismatch")
+'
+}
+
 if [[ ! -d "$UNIT_DIR" ]]; then
   if [[ "$action" == status ]]; then
     echo "Canonical attestation unit is not installed safely." >&2
@@ -662,6 +761,7 @@ readonly TRANSACTION="$UNIT_DIR/.saturnin-attestation-transaction.$$"
 readonly STAGE="$TRANSACTION/stage"
 readonly BACKUP="$TRANSACTION/backup"
 readonly MANAGER_VIEW="$TRANSACTION/manager-view"
+readonly MANAGER_STATE="$TRANSACTION/manager-state"
 readonly RUNTIME_SNAPSHOT="$TRANSACTION/saturnin"
 readonly RUNTIME_TREE_SNAPSHOT="$TRANSACTION/saturnin-attestation-runtime.pyz"
 readonly TEMPLATE_SNAPSHOT="$TRANSACTION/$UNIT.template"
@@ -912,6 +1012,15 @@ if [[ "$(credential_identity "$CURRENT")" != "$CURRENT_CREDENTIAL_ID" ]] \
 fi
 verify_unit_directory
 verify_wants_link
+"$SYSTEMCTL" --user cat --no-pager "$UNIT" >"$MANAGER_VIEW"
+verify_manager_loaded_unit "$MANAGER_VIEW"
 "$SYSTEMCTL" --user start "$UNIT"
+"$SYSTEMCTL" --user cat --no-pager "$UNIT" >"$MANAGER_VIEW"
+verify_manager_loaded_unit "$MANAGER_VIEW"
+"$SYSTEMCTL" --user show --no-pager \
+  --property=LoadState --property=ActiveState --property=SubState \
+  --property=FragmentPath --property=DropInPaths \
+  --property=MainPID --property=ExecMainPID "$UNIT" >"$MANAGER_STATE"
+verify_running_service "$MANAGER_STATE" "$RUNTIME_TREE_SHA256"
 mutating=0
 echo "installed and started $UNIT"

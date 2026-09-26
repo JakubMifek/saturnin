@@ -1685,6 +1685,16 @@ def _prepare_governed_runtime_sources(
                 encoding="utf-8",
             )
             path.chmod(0o644)
+    manifest = b"".join(
+        f"{package['archive']}/{relative}\0".encode()
+        + hashlib.sha256(
+            (roots[package["archive"]] / relative).read_bytes()
+        ).hexdigest().encode()
+        + b"\n"
+        for package in operation["runtime_sources"]
+        for relative in sorted(package["files"])
+    )
+    operation["runtime_manifest_sha256"] = hashlib.sha256(manifest).hexdigest()
     return [str(executable), "install"], roots
 
 
@@ -1715,16 +1725,22 @@ def test_governed_runtime_is_complete_sealed_and_survives_source_mutation(
             assert archive.read("saturnin/attestation_service.py") == original
             assert "yaml/__init__.py" in archive.namelist()
             assert all(
-                name.startswith(("saturnin/", "yaml/"))
-                and name.endswith(".py")
-                and ".." not in name.split("/")
+                name == "SATURNIN-RUNTIME-MANIFEST"
+                or (
+                    name.startswith(("saturnin/", "yaml/"))
+                    and name.endswith(".py")
+                    and ".." not in name.split("/")
+                )
                 for name in archive.namelist()
             )
     finally:
         os.close(descriptor)
 
 
-@pytest.mark.parametrize("change", ["extra", "omitted", "symlink", "substitution"])
+@pytest.mark.parametrize(
+    "change",
+    ["extra", "omitted", "symlink", "substitution", "saturnin-content", "yaml-content"],
+)
 def test_governed_runtime_rejects_manifest_and_tree_substitution(
     config: Config,
     tmp_path: Path,
@@ -1744,12 +1760,20 @@ def test_governed_runtime_rejects_manifest_and_tree_substitution(
         target = roots["saturnin"] / "review.py"
         target.unlink()
         target.symlink_to(tmp_path / "outside.py")
-    else:
+    elif change == "substitution":
         operation["runtime_sources"][1]["archive"] = "saturnin"
+    elif change == "saturnin-content":
+        (roots["saturnin"] / "review.py").write_text(
+            "raise RuntimeError('replaced')\n", encoding="utf-8"
+        )
+    else:
+        (roots["yaml"] / "loader.py").write_text(
+            "raise RuntimeError('replaced')\n", encoding="utf-8"
+        )
 
     with pytest.raises(
         WorkerCallbackError,
-        match="manifest|symlink|differs",
+        match="manifest|symlink|differs|authorized",
     ):
         worker_callbacks._open_governed_runtime(config, parts)
 

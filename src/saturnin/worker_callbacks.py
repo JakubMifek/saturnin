@@ -1372,6 +1372,19 @@ def _open_governed_runtime(config: Config, parts: Sequence[str]) -> int | None:
         descriptor = os.memfd_create(
             "saturnin-governed-runtime", os.MFD_CLOEXEC | os.MFD_ALLOW_SEALING
         )
+        manifest = "".join(
+            f"{name}\0{hashlib.sha256(content).hexdigest()}\n"
+            for name, content in sorted(entries)
+        ).encode()
+        expected_manifest_digest = operation.get("runtime_manifest_sha256")
+        if (
+            not isinstance(expected_manifest_digest, str)
+            or not re.fullmatch(r"[0-9a-f]{64}", expected_manifest_digest)
+            or hashlib.sha256(manifest).hexdigest() != expected_manifest_digest
+        ):
+            raise WorkerCallbackError(
+                "governed runtime bytes differ from the authorized manifest"
+            )
         with os.fdopen(os.dup(descriptor), "w+b") as output:
             with zipfile.ZipFile(
                 output, "w", compression=zipfile.ZIP_DEFLATED
@@ -1380,6 +1393,11 @@ def _open_governed_runtime(config: Config, parts: Sequence[str]) -> int | None:
                     info = zipfile.ZipInfo(name, date_time=(1980, 1, 1, 0, 0, 0))
                     info.external_attr = 0o400 << 16
                     archive.writestr(info, content)
+                manifest_info = zipfile.ZipInfo(
+                    "SATURNIN-RUNTIME-MANIFEST", date_time=(1980, 1, 1, 0, 0, 0)
+                )
+                manifest_info.external_attr = 0o400 << 16
+                archive.writestr(manifest_info, manifest)
             output.flush()
             os.fsync(output.fileno())
         os.fchmod(descriptor, 0o400)

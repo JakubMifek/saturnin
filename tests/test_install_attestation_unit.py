@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import fcntl
+import hashlib
 import os
 import shutil
 import subprocess
@@ -135,6 +137,10 @@ def signer_install(tmp_path: Path) -> tuple[Path, dict[str, str], Path, Path]:
         "  printf '%s\\n' 'rotation=ready; signer=ready'\n"
         "  exit 0\n"
         "fi\n"
+        "if [ -n \"${VERIFY_RUNNING_SERVICE:-}\" ]; then\n"
+        "  [ -z \"${FAIL_PROCESS_IDENTITY:-}\" ]\n"
+        "  exit\n"
+        "fi\n"
         "exec /usr/bin/python3 \"$@\"\n",
         encoding="utf-8",
     )
@@ -188,6 +194,11 @@ def signer_install(tmp_path: Path) -> tuple[Path, dict[str, str], Path, Path]:
         "      printf '# %s\\n' \"$unit_dir/saturnin-attestation.service\"\n"
         "      /usr/bin/cat \"$unit_dir/saturnin-attestation.service\"\n"
         "    fi\n"
+        "    ;;\n"
+        "  show)\n"
+        "    printf '%s\\n' 'LoadState=loaded' 'ActiveState=active' "
+        "'SubState=running' \"FragmentPath=$unit_dir/saturnin-attestation.service\" "
+        "'DropInPaths=' 'MainPID=1234' 'ExecMainPID=1234'\n"
         "    ;;\n"
         "  enable)\n"
         "    if [ -n \"${RACE_ROLLBACK:-}\" ]; then\n"
@@ -282,7 +293,7 @@ def _authorized_fds(
     executable = checkout / "scripts" / "install_attestation_unit.sh"
     operation = {
         "executable": "scripts/install_attestation_unit.sh",
-        "sha256": __import__("hashlib").sha256(executable.read_bytes()).hexdigest(),
+        "sha256": hashlib.sha256(executable.read_bytes()).hexdigest(),
         "runtime_sources": [],
     }
     for source, archive in (
@@ -303,6 +314,23 @@ def _authorized_fds(
                 ],
             }
         )
+    manifest = b"".join(
+        f"{package['archive']}/{relative}\0".encode()
+        + hashlib.sha256(
+            (
+                checkout
+                / package["source"].replace(
+                    "{python_version}",
+                    f"python{sys.version_info.major}.{sys.version_info.minor}",
+                )
+                / relative
+            ).read_bytes()
+        ).hexdigest().encode()
+        + b"\n"
+        for package in operation["runtime_sources"]
+        for relative in sorted(package["files"])
+    )
+    operation["runtime_manifest_sha256"] = hashlib.sha256(manifest).hexdigest()
     config = SimpleNamespace(
         data_root=checkout,
         server_scope={"operations": {"signer_user_unit": operation}},
@@ -385,6 +413,63 @@ def test_install_rejects_execution_without_governed_runtime_descriptor(
 
     assert result.returncode != 0
     assert "governed sealed runtime descriptor" in result.stderr
+    assert not (unit_dir / "saturnin-attestation.service").exists()
+    assert not calls.exists()
+
+
+def test_install_rejects_forged_self_consistent_sealed_runtime(
+    signer_install: tuple[Path, dict[str, str], Path, Path],
+) -> None:
+    checkout, env, unit_dir, calls = signer_install
+    executable_fd, authorized_runtime_fd = _authorized_fds(checkout, "install")
+    os.close(authorized_runtime_fd)
+    runtime_fd = os.memfd_create(
+        "forged-runtime", os.MFD_CLOEXEC | os.MFD_ALLOW_SEALING
+    )
+    entries = {
+        "saturnin/attestation_service.py": b"print('forged')\n",
+        "yaml/__init__.py": b"",
+    }
+    manifest = b"".join(
+        name.encode()
+        + b"\0"
+        + hashlib.sha256(content).hexdigest().encode()
+        + b"\n"
+        for name, content in sorted(entries.items())
+    )
+    with os.fdopen(os.dup(runtime_fd), "w+b") as output:
+        with zipfile.ZipFile(output, "w") as archive:
+            for name, content in entries.items():
+                archive.writestr(name, content)
+            archive.writestr("SATURNIN-RUNTIME-MANIFEST", manifest)
+    os.fchmod(runtime_fd, 0o400)
+    fcntl.fcntl(
+        runtime_fd,
+        fcntl.F_ADD_SEALS,
+        fcntl.F_SEAL_WRITE
+        | fcntl.F_SEAL_GROW
+        | fcntl.F_SEAL_SHRINK
+        | fcntl.F_SEAL_SEAL,
+    )
+    try:
+        result = subprocess.run(
+            [f"/proc/self/fd/{executable_fd}", "install"],
+            check=False,
+            capture_output=True,
+            text=True,
+            env={
+                **env,
+                "SATURNIN_GOVERNED_EXECUTION": "sealed-memfd",
+                "SATURNIN_GOVERNED_RUNTIME_FD": str(runtime_fd),
+            },
+            pass_fds=(executable_fd, runtime_fd),
+        )
+    finally:
+        os.close(executable_fd)
+        os.close(runtime_fd)
+
+    assert result.returncode != 0
+    assert "not policy-authorized" in result.stderr
     assert not (unit_dir / "saturnin-attestation.service").exists()
     assert not calls.exists()
 
@@ -497,6 +582,21 @@ def test_manager_loaded_mismatch_is_detected_and_rolled_back(
 
     assert result.returncode != 0
     assert _topology(unit_dir) == before
+
+
+def test_running_process_identity_failure_rolls_back_before_success(
+    signer_install: tuple[Path, dict[str, str], Path, Path],
+) -> None:
+    _, _, unit_dir, calls = signer_install
+
+    result = _run(signer_install, "install", FAIL_PROCESS_IDENTITY="1")
+
+    assert result.returncode != 0
+    assert not (unit_dir / "saturnin-attestation.service").exists()
+    assert not (unit_dir / "saturnin-attestation-runtime.pyz").exists()
+    assert calls.read_text(encoding="utf-8").splitlines()[-1] == (
+        "--user daemon-reload"
+    )
 
 
 def test_replaced_unit_directory_fails_closed_without_pathname_rollback(

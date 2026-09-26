@@ -42,7 +42,7 @@ services:
 operations:
   signer_user_unit:
     executable: scripts/install_attestation_unit.sh
-    sha256: 9e74a89455918f588327d07957334cf94b1fdb3c2245b965e8ee94dc38ea5ca6
+    sha256: 78f840fceb9ef72a460f5d9174680d2dc71300bfb75c98b1e783464c1653a50e
     dependencies:
       - .venv/bin/saturnin
       - systemd/saturnin-attestation.service
@@ -96,6 +96,7 @@ operations:
           - scanner.py
           - serializer.py
           - tokens.py
+    runtime_manifest_sha256: 1df8a966a2d7560e1a68ce4143ac367edcbd670a42e5782e5027d0dc46746e23
     trusted_tools:
       - /usr/bin/bash
       - /usr/bin/chmod
