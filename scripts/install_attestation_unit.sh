@@ -20,7 +20,6 @@ readonly RM=/usr/bin/rm
 readonly CP=/usr/bin/cp
 readonly MV=/usr/bin/mv
 readonly CHMOD=/usr/bin/chmod
-readonly RMDIR=/usr/bin/rmdir
 readonly RAW_SCRIPT_PATH="${BASH_SOURCE[0]}"
 SCRIPT_PATH="$("$REALPATH" -- "$RAW_SCRIPT_PATH")"
 readonly SCRIPT_PATH
@@ -66,7 +65,7 @@ readonly SOURCE="$SATURNIN_HOME/src/saturnin"
 readonly TEMPLATE="$SATURNIN_HOME/systemd/$UNIT"
 
 for tool in "$ID" "$REALPATH" "$STAT" "$PYTHON" "$SYSTEMCTL" \
-  "$SYSTEMD_ANALYZE" "$FLOCK" "$MKDIR" "$RM" "$CP" "$MV" "$CHMOD" "$RMDIR"; do
+  "$SYSTEMD_ANALYZE" "$FLOCK" "$MKDIR" "$RM" "$CP" "$MV" "$CHMOD"; do
   if [[ -L "$tool" || ! -x "$tool" ]] \
     || [[ "$("$STAT" -c %u "$tool")" -ne 0 ]] \
     || (( 8#$("$STAT" -c %a "$tool") & 8#022 )); then
@@ -107,7 +106,8 @@ readonly CURRENT="$CREDENTIAL_DIR/saturnin-review-attestation-key.cred"
 readonly PREVIOUS="$CREDENTIAL_DIR/saturnin-review-attestation-previous-key.cred"
 readonly INSTALLED="$UNIT_DIR/$UNIT"
 readonly INSTALLED_RUNTIME="$UNIT_DIR/saturnin-attestation-runtime.pyz"
-readonly WANTS="$UNIT_DIR/default.target.wants/$UNIT"
+readonly WANTS_DIR="$UNIT_DIR/default.target.wants"
+readonly WANTS="$WANTS_DIR/$UNIT"
 
 validate_parent_chain() {
   "$PYTHON" -I - "$1" "$CURRENT_UID" "$CURRENT_GID" <<'PY'
@@ -423,30 +423,120 @@ print(f"{before.st_dev}:{before.st_ino}:{digest.hexdigest()}")
 '
 }
 
-stable_symlink_target() {
-  LINK_PATH="$1" EXPECTED_UID="$CURRENT_UID" "$PYTHON" -I -c '
+wants_operation() {
+  WANTS_OPERATION="$1" EXPECTED_UNIT_DIR_ID="$UNIT_DIR_DEVICE_INODE" \
+    EXPECTED_WANTS_DIR_ID="${2:-}" LINK_TARGET_B64="${3:--}" \
+    UNIT_DIR_PATH="$UNIT_DIR" EXPECTED_UID="$CURRENT_UID" \
+    "$PYTHON" -I -c '
+import base64
 import os
 import stat
 
-path = os.environ["LINK_PATH"]
-before = os.lstat(path)
-target = os.readlink(path)
-after = os.lstat(path)
-identity = lambda value: (
-    value.st_dev,
-    value.st_ino,
-    value.st_size,
-    value.st_mtime_ns,
-    value.st_ctime_ns,
+operation = os.environ["WANTS_OPERATION"]
+expected_uid = int(os.environ["EXPECTED_UID"])
+unit_fd = os.open(
+    os.environ["UNIT_DIR_PATH"],
+    os.O_RDONLY | os.O_CLOEXEC | os.O_NOFOLLOW | os.O_DIRECTORY,
 )
+unit_metadata = os.fstat(unit_fd)
+unit_identity = f"{unit_metadata.st_dev}:{unit_metadata.st_ino}"
 if (
-    identity(before) != identity(after)
-    or not stat.S_ISLNK(before.st_mode)
-    or before.st_uid != int(os.environ["EXPECTED_UID"])
+    unit_identity != os.environ["EXPECTED_UNIT_DIR_ID"]
+    or unit_metadata.st_uid != expected_uid
+    or unit_metadata.st_mode & 0o022
 ):
-    raise SystemExit("enablement link identity mismatch")
-print(target)
+    raise SystemExit("user-unit directory identity changed during wants operation")
+
+name = "default.target.wants"
+if operation == "create":
+    try:
+        os.mkdir(name, 0o700, dir_fd=unit_fd)
+    except FileExistsError:
+        pass
+
+try:
+    wants_fd = os.open(
+        name,
+        os.O_RDONLY | os.O_CLOEXEC | os.O_NOFOLLOW | os.O_DIRECTORY,
+        dir_fd=unit_fd,
+    )
+except FileNotFoundError:
+    if operation == "inspect":
+        print("missing 0 -")
+        raise SystemExit
+    raise
+
+wants_metadata = os.fstat(wants_fd)
+wants_identity = f"{wants_metadata.st_dev}:{wants_metadata.st_ino}"
+expected_wants_identity = os.environ["EXPECTED_WANTS_DIR_ID"]
+if (
+    wants_metadata.st_uid != expected_uid
+    or wants_metadata.st_mode & 0o022
+    or (
+        expected_wants_identity
+        and expected_wants_identity != "missing"
+        and wants_identity != expected_wants_identity
+    )
+):
+    raise SystemExit("enablement directory identity changed or is unsafe")
+
+link_name = "saturnin-attestation.service"
+if operation == "inspect":
+    try:
+        before = os.stat(link_name, dir_fd=wants_fd, follow_symlinks=False)
+    except FileNotFoundError:
+        print(f"{wants_identity} 0 -")
+    else:
+        target = os.readlink(link_name, dir_fd=wants_fd)
+        after = os.stat(link_name, dir_fd=wants_fd, follow_symlinks=False)
+        identity = lambda value: (
+            value.st_dev,
+            value.st_ino,
+            value.st_size,
+            value.st_mtime_ns,
+            value.st_ctime_ns,
+        )
+        if (
+            not stat.S_ISLNK(before.st_mode)
+            or before.st_uid != expected_uid
+            or identity(before) != identity(after)
+        ):
+            raise SystemExit("enablement link identity mismatch")
+        encoded = base64.urlsafe_b64encode(os.fsencode(target)).decode("ascii")
+        print(f"{wants_identity} 1 {encoded}")
+elif operation in ("unlink", "link"):
+    try:
+        metadata = os.stat(link_name, dir_fd=wants_fd, follow_symlinks=False)
+    except FileNotFoundError:
+        pass
+    else:
+        if not stat.S_ISLNK(metadata.st_mode) or metadata.st_uid != expected_uid:
+            raise SystemExit("refusing non-symlink enablement entry")
+        os.unlink(link_name, dir_fd=wants_fd)
+    if operation == "link":
+        target = os.fsdecode(
+            base64.urlsafe_b64decode(os.environ["LINK_TARGET_B64"])
+        )
+        os.symlink(target, link_name, dir_fd=wants_fd)
+elif operation == "rmdir":
+    os.close(wants_fd)
+    os.rmdir(name, dir_fd=unit_fd)
+elif operation == "create":
+    print(wants_identity)
+else:
+    raise SystemExit("unsupported wants operation")
 '
+}
+
+verify_wants_link() {
+  local state identity present target
+  state="$(wants_operation inspect "$wants_dir_identity")"
+  read -r identity present target <<<"$state"
+  if [[ "$identity" != "$wants_dir_identity" || "$present" -ne 1 \
+    || "$target" != "Li4vc2F0dXJuaW4tYXR0ZXN0YXRpb24uc2VydmljZQ==" ]]; then
+    echo "Attestation enablement link identity mismatch." >&2
+    return 1
+  fi
 }
 
 verify_unit_identity() {
@@ -499,7 +589,7 @@ expected = [
         f"WorkingDirectory={home}",
         f"Environment=SATURNIN_HOME=\"{home}\"",
         f"Environment=SATURNIN_RUNTIME_SHA256=\"{runtime_sha256}\"",
-        "ExecStart=/usr/bin/python3 -I -c '\''import hashlib,os,runpy,stat,sys;p=os.path.expanduser(\"~/.config/systemd/user/saturnin-attestation-runtime.pyz\");f=os.open(p,os.O_RDONLY|os.O_CLOEXEC|os.O_NOFOLLOW);m=os.fstat(f);d=hashlib.file_digest(os.fdopen(os.dup(f),\"rb\"),\"sha256\").hexdigest();assert stat.S_ISREG(m.st_mode) and m.st_uid==os.getuid() and stat.S_IMODE(m.st_mode)==0o400 and d==os.environ[\"SATURNIN_RUNTIME_SHA256\"];sys.path.insert(0,f\"/proc/self/fd/{f}\");runpy.run_module(\"saturnin.attestation_service\",run_name=\"__main__\")'\'' serve",
+        "ExecStart=/usr/bin/python3 -I -c '\''import fcntl,hashlib,os,runpy,stat,sys;p=os.path.expanduser(\"~/.config/systemd/user/saturnin-attestation-runtime.pyz\");f=os.open(p,os.O_RDONLY|os.O_CLOEXEC|os.O_NOFOLLOW);a=os.fstat(f);assert stat.S_ISREG(a.st_mode) and a.st_uid==os.getuid() and stat.S_IMODE(a.st_mode)==0o400;s=os.memfd_create(\"saturnin-attestation-runtime\",os.MFD_CLOEXEC|os.MFD_ALLOW_SEALING);h=hashlib.sha256();exec(\"while b:=os.read(f,65536):\\\\n h.update(b)\\\\n v=memoryview(b)\\\\n while v:\\\\n  v=v[os.write(s,v):]\");z=os.fstat(f);assert (a.st_dev,a.st_ino,a.st_size,a.st_mtime_ns,a.st_ctime_ns)==(z.st_dev,z.st_ino,z.st_size,z.st_mtime_ns,z.st_ctime_ns) and h.hexdigest()==os.environ[\"SATURNIN_RUNTIME_SHA256\"];fcntl.fcntl(s,fcntl.F_ADD_SEALS,fcntl.F_SEAL_WRITE|fcntl.F_SEAL_GROW|fcntl.F_SEAL_SHRINK|fcntl.F_SEAL_SEAL);os.lseek(s,0,os.SEEK_SET);os.close(f);sys.path.insert(0,f\"/proc/self/fd/{s}\");runpy.run_module(\"saturnin.attestation_service\",run_name=\"__main__\")'\'' serve",
         "LoadCredentialEncrypted=saturnin-review-attestation-key:%h/.config/systemd/user/saturnin-credentials/saturnin-review-attestation-key.cred",
         "LoadCredentialEncrypted=saturnin-review-attestation-previous-key:%h/.config/systemd/user/saturnin-credentials/saturnin-review-attestation-previous-key.cred",
         "RuntimeDirectory=saturnin-attestation",
@@ -624,7 +714,9 @@ had_runtime=0
 unit_was_valid=0
 unit_backup_identity=
 runtime_backup_identity=
-wants_target=
+wants_target_b64=-
+wants_dir_identity=missing
+wants_state=
 
 restore_file() {
   local target=$1 backup=$2 present=$3 mode=$4 expected_identity=$5
@@ -650,13 +742,14 @@ rollback() {
   restore_file "$INSTALLED" "$BACKUP/unit" "$had_unit" 0644 "$unit_backup_identity" || return
   restore_file "$INSTALLED_RUNTIME" "$BACKUP/runtime" "$had_runtime" 0400 \
     "$runtime_backup_identity" || return
-  "$RM" -f "$WANTS"
-  if [[ "$had_wants" -eq 1 ]]; then
-    WANT_PATH="$WANTS" WANT_TARGET="$wants_target" "$PYTHON" -I -c \
-      'import os; os.symlink(os.environ["WANT_TARGET"], os.environ["WANT_PATH"])'
+  if [[ "$wants_dir_identity" != missing ]]; then
+    wants_operation unlink "$wants_dir_identity" || return
+    if [[ "$had_wants" -eq 1 ]]; then
+      wants_operation link "$wants_dir_identity" "$wants_target_b64" || return
+    fi
   fi
-  if [[ "$had_wants_dir" -eq 0 ]]; then
-    "$RMDIR" "${WANTS%/*}" 2>/dev/null || true
+  if [[ "$had_wants_dir" -eq 0 && "$wants_dir_identity" != missing ]]; then
+    wants_operation rmdir "$wants_dir_identity" || return
   fi
   "$SYSTEMCTL" --user daemon-reload >/dev/null 2>&1
   if [[ "$was_active" -eq 1 ]] \
@@ -703,12 +796,10 @@ if [[ -e "$INSTALLED" || -L "$INSTALLED" ]]; then
   snapshot_trusted_file "$INSTALLED" "$BACKUP/unit" 0644
   unit_backup_identity="$(trusted_file_identity "$BACKUP/unit" 0644)"
 fi
-if [[ -e "$WANTS" || -L "$WANTS" ]]; then
-  had_wants=1
-  wants_target="$(stable_symlink_target "$WANTS")"
-fi
-if [[ -d "${WANTS%/*}" ]]; then
+if [[ -e "$WANTS_DIR" || -L "$WANTS_DIR" ]]; then
   had_wants_dir=1
+  wants_state="$(wants_operation inspect)"
+  read -r wants_dir_identity had_wants wants_target_b64 <<<"$wants_state"
 fi
 
 if [[ "$action" == uninstall ]]; then
@@ -723,7 +814,10 @@ if [[ "$action" == uninstall ]]; then
   else
     "$SYSTEMCTL" --user stop "$UNIT" >/dev/null 2>&1 || true
   fi
-  "$RM" -f "$WANTS" "$INSTALLED" "$INSTALLED_RUNTIME"
+  if [[ "$had_wants_dir" -eq 1 ]]; then
+    wants_operation unlink "$wants_dir_identity"
+  fi
+  "$RM" -f "$INSTALLED" "$INSTALLED_RUNTIME"
   verify_unit_directory
   "$SYSTEMCTL" --user daemon-reload
   mutating=0
@@ -774,6 +868,9 @@ verify_unit_identity "$STAGE" 0600 "$RUNTIME_TREE_SHA256" >/dev/null
 "$CHMOD" 0644 "$STAGE"
 mutating=1
 verify_unit_directory
+if [[ "$had_wants_dir" -eq 0 ]]; then
+  wants_dir_identity="$(wants_operation create)"
+fi
 if [[ "$(trusted_file_identity "$RUNTIME_TREE_SNAPSHOT" 0400)" != "$RUNTIME_TREE_ID" ]] \
   || [[ "$(trusted_fd_identity "$RUNTIME_TREE_FD" 0400)" != "$RUNTIME_TREE_ID" ]]; then
   echo "Attestation runtime changed before installation." >&2
@@ -801,7 +898,9 @@ if [[ "$(verify_unit_identity "$INSTALLED" 0644 "$RUNTIME_TREE_SHA256")" != "$IN
   echo "Installed attestation unit identity drifted after daemon-reload." >&2
   exit 1
 fi
-"$SYSTEMCTL" --user enable "$UNIT"
+wants_operation link "$wants_dir_identity" \
+  "Li4vc2F0dXJuaW4tYXR0ZXN0YXRpb24uc2VydmljZQ=="
+verify_wants_link
 verify_unit_directory
 if [[ "$(verify_unit_identity "$INSTALLED" 0644 "$RUNTIME_TREE_SHA256")" != "$INSTALLED_DEVICE_INODE" ]]; then
   echo "Installed attestation unit identity drifted before start." >&2
@@ -818,6 +917,7 @@ if [[ "$(credential_identity "$CURRENT")" != "$CURRENT_CREDENTIAL_ID" ]] \
   exit 1
 fi
 verify_unit_directory
+verify_wants_link
 "$SYSTEMCTL" --user start "$UNIT"
 mutating=0
 echo "installed and started $UNIT"

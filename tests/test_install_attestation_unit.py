@@ -147,6 +147,14 @@ def signer_install(tmp_path: Path) -> tuple[Path, dict[str, str], Path, Path]:
         "case \"$sub\" in\n"
         "  is-active) [ -e \"$state/active\" ] ;;\n"
         "  daemon-reload)\n"
+        "    if [ -n \"${REPLACE_WANTS_DIR:-}\" ] "
+        "&& [ ! -e \"$state/wants-dir-replaced\" ]; then\n"
+        "      touch \"$state/wants-dir-replaced\"\n"
+        "      mv \"$unit_dir/default.target.wants\" "
+        "\"$unit_dir/default.target.wants.replaced\"\n"
+        "      ln -s \"${REPLACE_WANTS_DIR}\" "
+        "\"$unit_dir/default.target.wants\"\n"
+        "    fi\n"
         "    if [ -n \"${REPLACE_UNIT_DIR:-}\" ] "
         "&& [ ! -e \"$state/unit-dir-replaced\" ]; then\n"
         "      touch \"$state/unit-dir-replaced\"\n"
@@ -288,9 +296,8 @@ def test_install_is_selective_idempotent_and_does_not_disclose_credentials(
     )
 
 
-@pytest.mark.parametrize("failure", ["enable", "start"])
-def test_partial_service_failure_restores_preexisting_entries(
-    signer_install: tuple[Path, dict[str, str], Path, Path], failure: str
+def test_start_failure_restores_preexisting_entries(
+    signer_install: tuple[Path, dict[str, str], Path, Path]
 ) -> None:
     _, _, unit_dir, _ = signer_install
     installed = unit_dir / "saturnin-attestation.service"
@@ -303,10 +310,56 @@ def test_partial_service_failure_restores_preexisting_entries(
     wants.symlink_to("../old-attestation.service")
     before = _topology(unit_dir)
 
-    result = _run(signer_install, "install", FAIL_ON=failure)
+    result = _run(signer_install, "install", FAIL_ON="start")
 
     assert result.returncode != 0
     assert _topology(unit_dir) == before
+
+
+def test_replaced_wants_directory_cannot_escape_unit_tree(
+    signer_install: tuple[Path, dict[str, str], Path, Path],
+    tmp_path: Path,
+) -> None:
+    _, _, unit_dir, calls = signer_install
+    wants_dir = unit_dir / "default.target.wants"
+    wants_dir.mkdir()
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    victim = outside / "saturnin-attestation.service"
+    victim.write_text("unrelated\n", encoding="utf-8")
+
+    result = _run(
+        signer_install,
+        "install",
+        REPLACE_WANTS_DIR=str(outside),
+    )
+
+    assert result.returncode != 0
+    assert victim.read_text(encoding="utf-8") == "unrelated\n"
+    assert "start saturnin-attestation.service" not in calls.read_text(
+        encoding="utf-8"
+    )
+
+
+def test_symlinked_wants_directory_blocks_uninstall_without_escape(
+    signer_install: tuple[Path, dict[str, str], Path, Path],
+    tmp_path: Path,
+) -> None:
+    _, _, unit_dir, calls = signer_install
+    installed = unit_dir / "saturnin-attestation.service"
+    installed.write_text("old unit\n", encoding="utf-8")
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    victim = outside / "saturnin-attestation.service"
+    victim.write_text("unrelated\n", encoding="utf-8")
+    (unit_dir / "default.target.wants").symlink_to(outside, target_is_directory=True)
+
+    result = _run(signer_install, "uninstall")
+
+    assert result.returncode != 0
+    assert installed.read_text(encoding="utf-8") == "old unit\n"
+    assert victim.read_text(encoding="utf-8") == "unrelated\n"
+    assert not calls.exists()
 
 
 def test_failed_initial_reload_never_changes_existing_installation(
@@ -718,6 +771,25 @@ def test_service_uses_source_snapshot_not_reopened_checkout(
     with zipfile.ZipFile(unit_dir / "saturnin-attestation-runtime.pyz") as archive:
         installed_source = archive.read("saturnin/attestation_service.py")
     assert b"reopened source" not in installed_source
+
+
+def test_service_bootstrap_imports_only_from_sealed_runtime() -> None:
+    template = (
+        REPO_ROOT / "systemd" / "saturnin-attestation.service"
+    ).read_text(encoding="utf-8")
+
+    for required in (
+        "os.memfd_create",
+        "os.MFD_ALLOW_SEALING",
+        "fcntl.F_ADD_SEALS",
+        "fcntl.F_SEAL_WRITE",
+        "fcntl.F_SEAL_GROW",
+        "fcntl.F_SEAL_SHRINK",
+        "fcntl.F_SEAL_SEAL",
+        'sys.path.insert(0,f"/proc/self/fd/{s}")',
+    ):
+        assert required in template
+    assert 'sys.path.insert(0,f"/proc/self/fd/{f}")' not in template
 
 
 def test_replaced_runtime_archive_is_rejected_before_installation(
