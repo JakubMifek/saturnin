@@ -105,6 +105,9 @@ def test_install_user_units_installs_safe_checkout_path(tmp_path: Path) -> None:
         (fake_bin / command).chmod(0o755)
 
     config_home = tmp_path / "config"
+    (tmp_path / "pathlib.py").write_text(
+        "raise RuntimeError('untrusted cwd import')\n", encoding="utf-8"
+    )
     env = {
         **os.environ,
         "PATH": f"{fake_bin}:{os.environ['PATH']}",
@@ -117,6 +120,7 @@ def test_install_user_units_installs_safe_checkout_path(tmp_path: Path) -> None:
         capture_output=True,
         text=True,
         env=env,
+        cwd=tmp_path,
     )
 
     installed_dir = config_home / "systemd" / "user"

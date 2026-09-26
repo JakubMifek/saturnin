@@ -1640,10 +1640,7 @@ def test_governed_command_executes_the_authorized_descriptor(
 
     descriptor = worker_callbacks._open_governed_executable(config, parts)
     assert descriptor is not None
-    replacement = tmp_path / "replacement"
-    replacement.write_text("#!/bin/sh\nprintf replaced\n", encoding="utf-8")
-    replacement.chmod(0o755)
-    replacement.replace(executable)
+    executable.write_text("#!/bin/sh\nprintf replaced\n", encoding="utf-8")
     try:
         result = worker_callbacks._run_bounded_command(
             [f"/proc/self/fd/{descriptor}", "status"],

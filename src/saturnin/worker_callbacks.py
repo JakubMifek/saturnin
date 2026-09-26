@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import hashlib
+import fcntl
 import json
 import os
 import re
@@ -1088,30 +1089,52 @@ def _open_governed_executable(config: Config, parts: Sequence[str]) -> int | Non
         if not isinstance(digest, str) or not re.fullmatch(r"[0-9a-f]{64}", digest):
             raise WorkerCallbackError("governed executable has no approved digest")
         try:
-            descriptor = os.open(
+            source_descriptor = os.open(
                 expected, os.O_RDONLY | os.O_CLOEXEC | os.O_NOFOLLOW
             )
-            metadata = os.fstat(descriptor)
+            before = os.fstat(source_descriptor)
+            descriptor = os.memfd_create(
+                "saturnin-governed-operation",
+                os.MFD_CLOEXEC | os.MFD_ALLOW_SEALING,
+            )
             content = hashlib.sha256()
-            while chunk := os.read(descriptor, 64 * 1024):
+            while chunk := os.read(source_descriptor, 64 * 1024):
                 content.update(chunk)
-            os.lseek(descriptor, 0, os.SEEK_SET)
+                view = memoryview(chunk)
+                while view:
+                    view = view[os.write(descriptor, view):]
+            after = os.fstat(source_descriptor)
         except OSError as exc:
             if "descriptor" in locals():
                 os.close(descriptor)
+            if "source_descriptor" in locals():
+                os.close(source_descriptor)
             raise WorkerCallbackError(
                 "governed executable could not be pinned for execution"
             ) from exc
+        os.close(source_descriptor)
         if (
-            not stat.S_ISREG(metadata.st_mode)
-            or metadata.st_uid != os.geteuid()
-            or metadata.st_mode & 0o022
+            (before.st_dev, before.st_ino, before.st_size, before.st_mtime_ns)
+            != (after.st_dev, after.st_ino, after.st_size, after.st_mtime_ns)
+            or not stat.S_ISREG(before.st_mode)
+            or before.st_uid != os.geteuid()
+            or before.st_mode & 0o022
             or content.hexdigest() != digest
         ):
             os.close(descriptor)
             raise WorkerCallbackError(
                 "governed executable changed after authorization"
             )
+        os.fchmod(descriptor, 0o500)
+        fcntl.fcntl(
+            descriptor,
+            fcntl.F_ADD_SEALS,
+            fcntl.F_SEAL_SEAL
+            | fcntl.F_SEAL_SHRINK
+            | fcntl.F_SEAL_GROW
+            | fcntl.F_SEAL_WRITE,
+        )
+        os.lseek(descriptor, 0, os.SEEK_SET)
         return descriptor
     return None
 
@@ -1237,6 +1260,8 @@ def run_server_command(
         execution_parts[0] = f"/proc/self/fd/{governed_fd}"
         pass_fds = (governed_fd,)
         execution_cwd = config.data_root
+        command_environment["SATURNIN_HOME"] = str(config.data_root)
+        command_environment["SATURNIN_GOVERNED_EXECUTION"] = "sealed-memfd"
     try:
         result = _run_bounded_command(
             execution_parts,

@@ -18,7 +18,7 @@ saturnin_validate_render_path() {
 saturnin_render_unit() {
   local source=$1 destination=$2 home=$3
   SATURNIN_HOME_ESCAPED="$home" SATURNIN_HOME_ENV_ESCAPED="$home" \
-    TEMPLATE_PATH="$source" DEST="$destination" python3 -c '
+    TEMPLATE_PATH="$source" DEST="$destination" /usr/bin/python3 -I -c '
 from pathlib import Path
 import os
 template = Path(os.environ["TEMPLATE_PATH"]).read_text()

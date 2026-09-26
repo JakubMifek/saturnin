@@ -24,8 +24,16 @@ readonly RMDIR=/usr/bin/rmdir
 readonly RAW_SCRIPT_PATH="${BASH_SOURCE[0]}"
 SCRIPT_PATH="$("$REALPATH" -- "$RAW_SCRIPT_PATH")"
 readonly SCRIPT_PATH
-readonly SCRIPT_DIR="${SCRIPT_PATH%/*}"
-DETECTED_HOME="$(cd "$SCRIPT_DIR/.." && pwd -P)"
+GOVERNED_EXECUTION=0
+if [[ "${SATURNIN_GOVERNED_EXECUTION:-}" == sealed-memfd ]] \
+  && [[ "$RAW_SCRIPT_PATH" =~ ^/proc/self/fd/[0-9]+$ ]]; then
+  GOVERNED_EXECUTION=1
+  DETECTED_HOME="${SATURNIN_HOME:-}"
+else
+  readonly SCRIPT_DIR="${SCRIPT_PATH%/*}"
+  DETECTED_HOME="$(cd "$SCRIPT_DIR/.." && pwd -P)"
+fi
+readonly GOVERNED_EXECUTION
 readonly DETECTED_HOME
 
 action="${1:-}"
@@ -78,7 +86,12 @@ for trusted in "$EXPECTED_SCRIPT" "$RUNTIME" "$TEMPLATE"; do
     exit 1
   fi
 done
-if [[ -L "$RAW_SCRIPT_PATH" || "$SCRIPT_PATH" != "$EXPECTED_SCRIPT" || ! -x "$RUNTIME" ]]; then
+if [[ "$GOVERNED_EXECUTION" -eq 0 ]] \
+  && [[ -L "$RAW_SCRIPT_PATH" || "$SCRIPT_PATH" != "$EXPECTED_SCRIPT" ]]; then
+  echo "Refusing untrusted installer executable identity." >&2
+  exit 1
+fi
+if [[ ! -x "$RUNTIME" ]]; then
   echo "Refusing untrusted installer or Saturnin runtime executable identity." >&2
   exit 1
 fi
