@@ -42,7 +42,24 @@ services:
 operations:
   signer_user_unit:
     executable: scripts/install_attestation_unit.sh
-    dependencies: [scripts/lib/user_unit_install.sh]
+    dependencies:
+      - .venv/bin/saturnin
+      - systemd/saturnin-attestation.service
+    trusted_tools:
+      - /usr/bin/bash
+      - /usr/bin/chmod
+      - /usr/bin/cp
+      - /usr/bin/flock
+      - /usr/bin/id
+      - /usr/bin/mkdir
+      - /usr/bin/mv
+      - /usr/bin/python3
+      - /usr/bin/realpath
+      - /usr/bin/rm
+      - /usr/bin/rmdir
+      - /usr/bin/stat
+      - /usr/bin/systemctl
+      - /usr/bin/systemd-analyze
     allowed_actions: [install, status, uninstall]
     unit: saturnin-attestation.service
     scope: user

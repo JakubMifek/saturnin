@@ -8,6 +8,8 @@ pass through here first. The rules themselves live in
 from __future__ import annotations
 
 import os
+import grp
+import pwd
 import re
 import shlex
 import shutil
@@ -914,6 +916,32 @@ def _governed_operation(
             )
             if dependency_decision is not None:
                 return dependency_decision
+        trusted_tools = operation.get("trusted_tools", [])
+        if not isinstance(trusted_tools, list) or not all(
+            isinstance(tool, str) and Path(tool).is_absolute()
+            for tool in trusted_tools
+        ):
+            return Decision.deny(f"governed operation {name} has invalid trusted tools")
+        for tool in trusted_tools:
+            tool_path = Path(tool)
+            try:
+                resolved_tool = tool_path.resolve(strict=True)
+            except (OSError, RuntimeError, ValueError):
+                return Decision.deny(
+                    f"governed operation trusted tool {tool_path} does not exist"
+                )
+            tool_decision = _validate_governed_operation_file(
+                resolved_tool,
+                label=f"trusted tool {tool!r}",
+                executable=True,
+                owner_uid=0,
+            )
+            if tool_decision is not None:
+                return tool_decision
+            if resolved_tool.stat().st_uid != 0:
+                return Decision.deny(
+                    f"governed operation trusted tool {tool_path} must be root-owned"
+                )
         actions = operation.get("allowed_actions", [])
         if len(parts) != 2 or parts[1] not in actions:
             return Decision.deny(
@@ -927,8 +955,11 @@ def _governed_operation(
 
 
 def _validate_governed_operation_file(
-    path: Path, *, label: str, executable: bool
+    path: Path, *, label: str, executable: bool, owner_uid: int | None = None
 ) -> Decision | None:
+    parent_decision = _validate_governed_parent_chain(path.parent, label=label)
+    if parent_decision is not None:
+        return parent_decision
     try:
         if path.is_symlink():
             return Decision.deny(f"governed operation {label} {path} must not be a symlink")
@@ -940,13 +971,53 @@ def _validate_governed_operation_file(
         return Decision.deny(
             f"governed operation {label} {path} must have canonical regular-file identity"
         )
-    if metadata.st_uid != os.geteuid() or metadata.st_mode & 0o022:
+    expected_owner = os.geteuid() if owner_uid is None else owner_uid
+    if metadata.st_uid != expected_owner or metadata.st_mode & 0o022:
         return Decision.deny(
             f"governed operation {label} {path} must be owner-controlled and "
             "not group/world writable"
         )
     if executable and not os.access(path, os.X_OK):
         return Decision.deny(f"governed operation {label} {path} must be executable")
+    return None
+
+
+def _validate_governed_parent_chain(path: Path, *, label: str) -> Decision | None:
+    current = Path(path.anchor)
+    for part in path.parts[1:]:
+        current /= part
+        try:
+            metadata = current.lstat()
+        except (OSError, RuntimeError, ValueError):
+            return Decision.deny(
+                f"governed operation {label} parent {current} does not exist"
+            )
+        if current.is_symlink() or not current.is_dir():
+            return Decision.deny(
+                f"governed operation {label} parent {current} must be a real directory"
+            )
+        writable = metadata.st_mode & 0o022
+        sticky_root = metadata.st_uid == 0 and metadata.st_mode & 0o1000
+        private_group = False
+        if (
+            metadata.st_uid == os.geteuid()
+            and metadata.st_gid == os.getegid()
+            and metadata.st_mode & 0o020
+        ):
+            group = grp.getgrgid(os.getegid())
+            primary_users = {
+                entry.pw_uid for entry in pwd.getpwall() if entry.pw_gid == os.getegid()
+            }
+            private_group = not group.gr_mem and primary_users == {os.geteuid()}
+        unsafe_write = metadata.st_mode & 0o002 or (
+            metadata.st_mode & 0o020 and not private_group
+        )
+        if metadata.st_uid not in {0, os.geteuid()} or (
+            unsafe_write and not sticky_root
+        ):
+            return Decision.deny(
+                f"governed operation {label} parent {current} is not owner-controlled"
+            )
     return None
 
 

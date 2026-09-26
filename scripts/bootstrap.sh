@@ -17,6 +17,8 @@ source .venv/bin/activate
 python -m pip install --upgrade pip >/dev/null
 python -m pip install -e ".[dev]"
 python -m saturnin.mcp install github
+chmod 0755 .venv/bin/saturnin scripts/install_attestation_unit.sh
+chmod 0644 systemd/saturnin-attestation.service
 
 mkdir -p board/tasks board/checkpoints board/reviews var/logs var/worktrees var/reports
 
