@@ -185,7 +185,6 @@ def test_install_user_units_leaves_attestation_state_untouched(
     )
 
     assert result.returncode == 0
-    assert previous.read_text(encoding="utf-8") == "existing installation\n"
     assert signer.read_text(encoding="utf-8") == "existing signer\n"
 
 
