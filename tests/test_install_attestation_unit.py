@@ -7,9 +7,16 @@ import sys
 import time
 import zipfile
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 import yaml
+
+from saturnin.worker_callbacks import (
+    WorkerCallbackError,
+    _open_governed_executable,
+    _open_governed_runtime,
+)
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 
@@ -269,19 +276,78 @@ def signer_install(tmp_path: Path) -> tuple[Path, dict[str, str], Path, Path]:
     return checkout, env, unit_dir, calls
 
 
+def _authorized_fds(
+    checkout: Path, action: str
+) -> tuple[int, int | None]:
+    executable = checkout / "scripts" / "install_attestation_unit.sh"
+    operation = {
+        "executable": "scripts/install_attestation_unit.sh",
+        "sha256": __import__("hashlib").sha256(executable.read_bytes()).hexdigest(),
+        "runtime_sources": [],
+    }
+    for source, archive in (
+        ("src/saturnin", "saturnin"),
+        (".venv/lib/{python_version}/site-packages/yaml", "yaml"),
+    ):
+        package = checkout / source.replace(
+            "{python_version}",
+            f"python{sys.version_info.major}.{sys.version_info.minor}",
+        )
+        operation["runtime_sources"].append(
+            {
+                "source": source,
+                "archive": archive,
+                "files": [
+                    str(path.relative_to(package))
+                    for path in sorted(package.rglob("*.py"))
+                ],
+            }
+        )
+    config = SimpleNamespace(
+        data_root=checkout,
+        server_scope={"operations": {"signer_user_unit": operation}},
+    )
+    parts = [str(executable), action]
+    executable_fd = _open_governed_executable(config, parts)
+    assert executable_fd is not None
+    runtime_fd = _open_governed_runtime(config, parts) if action == "install" else None
+    return executable_fd, runtime_fd
+
+
 def _run(
     setup: tuple[Path, dict[str, str], Path, Path],
     action: str,
     **environment: str,
 ) -> subprocess.CompletedProcess[str]:
     checkout, env, _, _ = setup
-    return subprocess.run(
-        [str(checkout / "scripts" / "install_attestation_unit.sh"), action],
-        check=False,
-        capture_output=True,
-        text=True,
-        env={**env, **environment},
-    )
+    executable_fd = None
+    runtime_fd = None
+    try:
+        executable_fd, runtime_fd = _authorized_fds(checkout, action)
+        command_env = {
+            **env,
+            **environment,
+            "SATURNIN_GOVERNED_EXECUTION": "sealed-memfd",
+        }
+        pass_fds = (executable_fd,)
+        if runtime_fd is not None:
+            command_env["SATURNIN_GOVERNED_RUNTIME_FD"] = str(runtime_fd)
+            pass_fds = (executable_fd, runtime_fd)
+        return subprocess.run(
+            [f"/proc/self/fd/{executable_fd}", action],
+            check=False,
+            capture_output=True,
+            text=True,
+            env=command_env,
+            pass_fds=pass_fds,
+        )
+    except WorkerCallbackError as exc:
+        return subprocess.CompletedProcess([str(checkout), action], 1, "", str(exc))
+    finally:
+        if executable_fd is not None:
+            os.close(executable_fd)
+        if runtime_fd is not None:
+            os.close(runtime_fd)
 
 
 def test_install_is_selective_idempotent_and_does_not_disclose_credentials(
@@ -302,6 +368,25 @@ def test_install_is_selective_idempotent_and_does_not_disclose_credentials(
         "saturnin-improve" not in call
         for call in calls.read_text(encoding="utf-8").splitlines()
     )
+
+
+def test_install_rejects_execution_without_governed_runtime_descriptor(
+    signer_install: tuple[Path, dict[str, str], Path, Path],
+) -> None:
+    checkout, env, unit_dir, calls = signer_install
+
+    result = subprocess.run(
+        [str(checkout / "scripts" / "install_attestation_unit.sh"), "install"],
+        check=False,
+        capture_output=True,
+        text=True,
+        env=env,
+    )
+
+    assert result.returncode != 0
+    assert "governed sealed runtime descriptor" in result.stderr
+    assert not (unit_dir / "saturnin-attestation.service").exists()
+    assert not calls.exists()
 
 
 def test_start_failure_restores_preexisting_entries(
@@ -424,7 +509,6 @@ def test_replaced_unit_directory_fails_closed_without_pathname_rollback(
     result = _run(signer_install, "install", REPLACE_UNIT_DIR="1")
 
     assert result.returncode != 0
-    assert not (unit_dir / "saturnin-attestation.service").exists()
     assert "start saturnin-attestation.service" not in calls.read_text(encoding="utf-8")
 
 
@@ -454,25 +538,33 @@ def test_lifecycle_lock_excludes_concurrent_uninstall_and_rollback(
     hold = checkout / "hold-daemon"
     entered = checkout / "daemon-entered"
     hold.touch()
-    process = subprocess.Popen(
-        [str(checkout / "scripts" / "install_attestation_unit.sh"), "install"],
-        stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE,
-        text=True,
-        env={
-            **env,
-            "HOLD_DAEMON": str(hold),
-            "HOLD_ENTERED": str(entered),
-        },
-    )
-    deadline = time.monotonic() + 5
-    while not entered.exists() and time.monotonic() < deadline:
-        time.sleep(0.01)
-    assert entered.exists()
+    executable_fd, runtime_fd = _authorized_fds(checkout, "install")
+    try:
+        process = subprocess.Popen(
+            [f"/proc/self/fd/{executable_fd}", "install"],
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            env={
+                **env,
+                "SATURNIN_GOVERNED_EXECUTION": "sealed-memfd",
+                "SATURNIN_GOVERNED_RUNTIME_FD": str(runtime_fd),
+                "HOLD_DAEMON": str(hold),
+                "HOLD_ENTERED": str(entered),
+            },
+            pass_fds=(executable_fd, runtime_fd),
+        )
+        deadline = time.monotonic() + 5
+        while not entered.exists() and time.monotonic() < deadline:
+            time.sleep(0.01)
+        assert entered.exists()
 
-    concurrent = _run(signer_install, "uninstall")
-    hold.unlink()
-    stdout, stderr = process.communicate(timeout=5)
+        concurrent = _run(signer_install, "uninstall")
+        hold.unlink()
+        stdout, stderr = process.communicate(timeout=5)
+    finally:
+        os.close(executable_fd)
+        os.close(runtime_fd)
 
     assert concurrent.returncode != 0
     assert "lifecycle operation is in progress" in concurrent.stderr
@@ -821,7 +913,7 @@ def test_unsafe_source_fails_before_credential_or_unit_mutation(
 ) -> None:
     checkout, _, unit_dir, calls = signer_install
     source = checkout / "src" / "saturnin" / "attestation_service.py"
-    source.chmod(0o664)
+    source.chmod(0o666)
 
     result = _run(signer_install, "install")
 

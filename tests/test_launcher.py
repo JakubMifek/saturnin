@@ -1,12 +1,14 @@
 from __future__ import annotations
 
-import json
+import fcntl
 import hashlib
+import json
 import os
 import subprocess
 import sys
 import threading
 import time
+import zipfile
 from contextlib import contextmanager
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -1653,6 +1655,103 @@ def test_governed_command_executes_the_authorized_descriptor(
 
     assert result.returncode == 0
     assert result.stdout == "original"
+
+
+def _prepare_governed_runtime_sources(
+    config: Config,
+) -> tuple[list[str], dict[str, Path]]:
+    operation = config.server_scope["operations"]["signer_user_unit"]
+    executable = config.data_root / operation["executable"]
+    executable.parent.mkdir(parents=True, exist_ok=True)
+    executable.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+    executable.chmod(0o755)
+    operation["sha256"] = hashlib.sha256(executable.read_bytes()).hexdigest()
+    roots: dict[str, Path] = {}
+    for package in operation["runtime_sources"]:
+        source = package["source"].replace(
+            "{python_version}",
+            f"python{sys.version_info.major}.{sys.version_info.minor}",
+        )
+        root = config.data_root / source
+        root.mkdir(parents=True, exist_ok=True)
+        root.chmod(0o755)
+        roots[package["archive"]] = root
+        for relative in package["files"]:
+            path = root / relative
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.parent.chmod(0o755)
+            path.write_text(
+                f"VALUE = {relative!r}\n",
+                encoding="utf-8",
+            )
+            path.chmod(0o644)
+    return [str(executable), "install"], roots
+
+
+def test_governed_runtime_is_complete_sealed_and_survives_source_mutation(
+    config: Config,
+) -> None:
+    parts, roots = _prepare_governed_runtime_sources(config)
+
+    descriptor = worker_callbacks._open_governed_runtime(config, parts)
+    assert descriptor is not None
+    original = (roots["saturnin"] / "attestation_service.py").read_bytes()
+    (roots["saturnin"] / "attestation_service.py").write_text(
+        "raise RuntimeError('replaced')\n", encoding="utf-8"
+    )
+    (roots["yaml"] / "__init__.py").write_text(
+        "raise RuntimeError('replaced')\n", encoding="utf-8"
+    )
+    try:
+        seals = fcntl.fcntl(descriptor, fcntl.F_GET_SEALS)
+        required = (
+            fcntl.F_SEAL_WRITE
+            | fcntl.F_SEAL_GROW
+            | fcntl.F_SEAL_SHRINK
+            | fcntl.F_SEAL_SEAL
+        )
+        assert seals & required == required
+        with zipfile.ZipFile(f"/proc/self/fd/{descriptor}") as archive:
+            assert archive.read("saturnin/attestation_service.py") == original
+            assert "yaml/__init__.py" in archive.namelist()
+            assert all(
+                name.startswith(("saturnin/", "yaml/"))
+                and name.endswith(".py")
+                and ".." not in name.split("/")
+                for name in archive.namelist()
+            )
+    finally:
+        os.close(descriptor)
+
+
+@pytest.mark.parametrize("change", ["extra", "omitted", "symlink", "substitution"])
+def test_governed_runtime_rejects_manifest_and_tree_substitution(
+    config: Config,
+    tmp_path: Path,
+    change: str,
+) -> None:
+    parts, roots = _prepare_governed_runtime_sources(config)
+    operation = config.server_scope["operations"]["signer_user_unit"]
+    if change == "extra":
+        injected = roots["saturnin"] / "injected.py"
+        injected.write_text(
+            "raise RuntimeError('injected')\n", encoding="utf-8"
+        )
+        injected.chmod(0o644)
+    elif change == "omitted":
+        (roots["yaml"] / "loader.py").unlink()
+    elif change == "symlink":
+        target = roots["saturnin"] / "review.py"
+        target.unlink()
+        target.symlink_to(tmp_path / "outside.py")
+    else:
+        operation["runtime_sources"][1]["archive"] = "saturnin"
+
+    with pytest.raises(
+        WorkerCallbackError,
+        match="manifest|symlink|differs",
+    ):
+        worker_callbacks._open_governed_runtime(config, parts)
 
 
 def test_bounded_command_tracks_closed_pipes_and_kills_descendants(

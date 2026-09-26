@@ -42,10 +42,60 @@ services:
 operations:
   signer_user_unit:
     executable: scripts/install_attestation_unit.sh
-    sha256: 631be385009267019d8ed5de0e74f2a6fc41b9c9dbb65b87b5a05ef6f5aeca13
+    sha256: 9e74a89455918f588327d07957334cf94b1fdb3c2245b965e8ee94dc38ea5ca6
     dependencies:
       - .venv/bin/saturnin
       - systemd/saturnin-attestation.service
+    runtime_sources:
+      - source: src/saturnin
+        archive: saturnin
+        files:
+          - __init__.py
+          - __main__.py
+          - attestation_service.py
+          - automation.py
+          - board.py
+          - checkpoints.py
+          - cli.py
+          - config.py
+          - contracts.py
+          - credentials.py
+          - disclosure.py
+          - discovery.py
+          - docsync.py
+          - escalation.py
+          - governance.py
+          - improve.py
+          - issues.py
+          - jsonlines.py
+          - launcher.py
+          - locking.py
+          - mcp.py
+          - review.py
+          - routing.py
+          - telemetry.py
+          - worker_callbacks.py
+          - worktrees.py
+      - source: .venv/lib/{python_version}/site-packages/yaml
+        archive: yaml
+        files:
+          - __init__.py
+          - composer.py
+          - constructor.py
+          - cyaml.py
+          - dumper.py
+          - emitter.py
+          - error.py
+          - events.py
+          - loader.py
+          - nodes.py
+          - parser.py
+          - reader.py
+          - representer.py
+          - resolver.py
+          - scanner.py
+          - serializer.py
+          - tokens.py
     trusted_tools:
       - /usr/bin/bash
       - /usr/bin/chmod

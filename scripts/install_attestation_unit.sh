@@ -40,6 +40,13 @@ if [[ "$#" -ne 1 || ! "$action" =~ ^(install|status|uninstall)$ ]]; then
   echo "Usage: scripts/install_attestation_unit.sh {install|status|uninstall}" >&2
   exit 2
 fi
+if [[ "$action" == install ]] \
+  && { [[ "$GOVERNED_EXECUTION" -ne 1 ]] \
+    || [[ ! "${SATURNIN_GOVERNED_RUNTIME_FD:-}" =~ ^[0-9]+$ ]] \
+    || [[ ! -e "/proc/self/fd/$SATURNIN_GOVERNED_RUNTIME_FD" ]]; }; then
+  echo "Signer installation requires a governed sealed runtime descriptor." >&2
+  exit 1
+fi
 
 CURRENT_UID="$("$ID" -u)"
 CURRENT_GID="$("$ID" -g)"
@@ -61,7 +68,6 @@ fi
 
 readonly EXPECTED_SCRIPT="$SATURNIN_HOME/scripts/install_attestation_unit.sh"
 readonly RUNTIME="$SATURNIN_HOME/.venv/bin/saturnin"
-readonly SOURCE="$SATURNIN_HOME/src/saturnin"
 readonly TEMPLATE="$SATURNIN_HOME/systemd/$UNIT"
 
 for tool in "$ID" "$REALPATH" "$STAT" "$PYTHON" "$SYSTEMCTL" \
@@ -150,7 +156,6 @@ PY
 
 validate_parent_chain "$SATURNIN_HOME"
 validate_parent_chain "$UNIT_DIR"
-validate_parent_chain "$SOURCE"
 
 for parent in "$HOME" "$CONFIG_HOME" "$CONFIG_HOME/systemd" "$UNIT_DIR"; do
   if [[ -L "$parent" ]]; then
@@ -216,102 +221,6 @@ try:
         os.close(destination_fd)
 finally:
     os.close(source_fd)
-'
-}
-
-snapshot_runtime_tree() {
-  SOURCE_PATH="$SOURCE" HOME_PATH="$SATURNIN_HOME" DESTINATION_PATH="$1" \
-    EXPECTED_UID="$CURRENT_UID" \
-    "$PYTHON" -I -c '
-import os
-import stat
-import sys
-import zipfile
-from pathlib import Path
-
-source = Path(os.environ["SOURCE_PATH"])
-home = Path(os.environ["HOME_PATH"])
-destination = Path(os.environ["DESTINATION_PATH"])
-expected_uid = int(os.environ["EXPECTED_UID"])
-python_version = f"python{sys.version_info.major}.{sys.version_info.minor}"
-yaml_candidates = list((home / ".venv" / "lib" / python_version / "site-packages").glob("yaml"))
-if len(yaml_candidates) != 1:
-    raise SystemExit("canonical PyYAML runtime source is unavailable")
-
-entries = []
-for package, package_name in ((source, "saturnin"), (yaml_candidates[0], "yaml")):
-    for root_path, directory_names, file_names, root_fd in os.fwalk(
-        package, topdown=True, follow_symlinks=False
-    ):
-        root_metadata = os.fstat(root_fd)
-        if (
-            not stat.S_ISDIR(root_metadata.st_mode)
-            or root_metadata.st_uid != expected_uid
-            or root_metadata.st_mode & 0o022
-        ):
-            raise SystemExit(
-                f"attestation runtime directory has unsafe metadata: {root_path}"
-            )
-        for name in directory_names:
-            metadata = os.stat(name, dir_fd=root_fd, follow_symlinks=False)
-            if stat.S_ISLNK(metadata.st_mode):
-                raise SystemExit(
-                    f"refusing symlinked attestation runtime source: {root_path}/{name}"
-                )
-        relative_root = Path(root_path).relative_to(package)
-        for name in sorted(file_names):
-            metadata = os.stat(name, dir_fd=root_fd, follow_symlinks=False)
-            if stat.S_ISLNK(metadata.st_mode):
-                raise SystemExit(
-                    f"refusing symlinked attestation runtime source: {root_path}/{name}"
-                )
-            if not stat.S_ISREG(metadata.st_mode) or Path(name).suffix != ".py":
-                continue
-            if metadata.st_uid != expected_uid or metadata.st_mode & 0o022:
-                raise SystemExit(
-                    f"attestation runtime source has unsafe metadata: {root_path}/{name}"
-                )
-            descriptor = os.open(
-                name,
-                os.O_RDONLY | os.O_CLOEXEC | os.O_NOFOLLOW,
-                dir_fd=root_fd,
-            )
-            try:
-                before = os.fstat(descriptor)
-                content = bytearray()
-                while chunk := os.read(descriptor, 65536):
-                    content.extend(chunk)
-                after = os.fstat(descriptor)
-            finally:
-                os.close(descriptor)
-            identity = lambda value: (
-                value.st_dev,
-                value.st_ino,
-                value.st_size,
-                value.st_mtime_ns,
-                value.st_ctime_ns,
-            )
-            if (
-                identity(metadata) != identity(before)
-                or identity(before) != identity(after)
-                or not stat.S_ISREG(before.st_mode)
-                or before.st_uid != expected_uid
-                or before.st_mode & 0o022
-            ):
-                raise SystemExit(
-                    f"attestation runtime changed during snapshot: {root_path}/{name}"
-                )
-            relative = relative_root / name
-            entries.append((f"{package_name}/{relative}", bytes(content)))
-
-if not entries or not any(name == "saturnin/attestation_service.py" for name, _ in entries):
-    raise SystemExit("attestation source snapshot is incomplete")
-with zipfile.ZipFile(destination, "x", compression=zipfile.ZIP_DEFLATED) as archive:
-    for name, content in entries:
-        info = zipfile.ZipInfo(name)
-        info.external_attr = 0o400 << 16
-        archive.writestr(info, content)
-os.chmod(destination, 0o400)
 '
 }
 
@@ -420,6 +329,78 @@ if (
 ):
     raise SystemExit("trusted descriptor identity mismatch")
 print(f"{before.st_dev}:{before.st_ino}:{digest.hexdigest()}")
+'
+}
+
+snapshot_governed_runtime() {
+  local descriptor=$1 destination=$2
+  GOVERNED_FD="$descriptor" DESTINATION_PATH="$destination" \
+    EXPECTED_UID="$CURRENT_UID" "$PYTHON" -I -c '
+import fcntl
+import os
+import stat
+import zipfile
+
+source = int(os.environ["GOVERNED_FD"])
+expected_uid = int(os.environ["EXPECTED_UID"])
+required_seals = (
+    fcntl.F_SEAL_WRITE
+    | fcntl.F_SEAL_GROW
+    | fcntl.F_SEAL_SHRINK
+    | fcntl.F_SEAL_SEAL
+)
+before = os.fstat(source)
+if (
+    not stat.S_ISREG(before.st_mode)
+    or before.st_uid != expected_uid
+    or stat.S_IMODE(before.st_mode) != 0o400
+    or fcntl.fcntl(source, fcntl.F_GET_SEALS) & required_seals != required_seals
+):
+    raise SystemExit("governed runtime descriptor is not an immutable sealed file")
+os.lseek(source, 0, os.SEEK_SET)
+destination = os.open(
+    os.environ["DESTINATION_PATH"],
+    os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_CLOEXEC | os.O_NOFOLLOW,
+    0o400,
+)
+try:
+    while chunk := os.read(source, 65536):
+        view = memoryview(chunk)
+        while view:
+            view = view[os.write(destination, view):]
+    os.fchmod(destination, 0o400)
+    os.fsync(destination)
+finally:
+    os.close(destination)
+after = os.fstat(source)
+identity = lambda value: (
+    value.st_dev,
+    value.st_ino,
+    value.st_size,
+    value.st_mtime_ns,
+    value.st_ctime_ns,
+)
+if identity(before) != identity(after):
+    raise SystemExit("governed runtime descriptor identity changed")
+os.lseek(source, 0, os.SEEK_SET)
+with zipfile.ZipFile(f"/proc/self/fd/{source}") as archive:
+    names = archive.namelist()
+    if (
+        len(names) != len(set(names))
+        or "saturnin/attestation_service.py" not in names
+        or "yaml/__init__.py" not in names
+        or any(
+            name.startswith("/")
+            or ".." in name.split("/")
+            or not name.endswith(".py")
+            or not (
+                name.startswith("saturnin/")
+                or name.startswith("yaml/")
+            )
+            for name in names
+        )
+    ):
+        raise SystemExit("governed runtime archive manifest is invalid")
 '
 }
 
@@ -693,7 +674,20 @@ cleanup() {
 trap cleanup EXIT
 "$MKDIR" -m 0700 "$TRANSACTION" "$BACKUP"
 snapshot_trusted_file "$RUNTIME" "$RUNTIME_SNAPSHOT" 0500
-snapshot_runtime_tree "$RUNTIME_TREE_SNAPSHOT"
+if [[ "$action" == install ]]; then
+  snapshot_governed_runtime \
+    "$SATURNIN_GOVERNED_RUNTIME_FD" "$RUNTIME_TREE_SNAPSHOT"
+else
+  DESTINATION_PATH="$RUNTIME_TREE_SNAPSHOT" "$PYTHON" -I -c '
+import os
+descriptor = os.open(
+    os.environ["DESTINATION_PATH"],
+    os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_CLOEXEC | os.O_NOFOLLOW,
+    0o400,
+)
+os.close(descriptor)
+'
+fi
 exec {RUNTIME_TREE_FD}<"$RUNTIME_TREE_SNAPSHOT"
 readonly RUNTIME_TREE_FD
 RUNTIME_TREE_ID="$(trusted_fd_identity "$RUNTIME_TREE_FD" 0400)"
