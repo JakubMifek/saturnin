@@ -1290,6 +1290,47 @@ def _open_runtime_source_root(
         raise
 
 
+def _read_runtime_source_file(
+    data_root: Path, relative: Path, expected_uid: int
+) -> bytes:
+    parent = _open_runtime_source_root(data_root, relative.parent, expected_uid)
+    try:
+        metadata = os.stat(relative.name, dir_fd=parent, follow_symlinks=False)
+        descriptor = os.open(
+            relative.name,
+            os.O_RDONLY | os.O_CLOEXEC | os.O_NOFOLLOW,
+            dir_fd=parent,
+        )
+        try:
+            before = os.fstat(descriptor)
+            content = bytearray()
+            while chunk := os.read(descriptor, 64 * 1024):
+                content.extend(chunk)
+            after = os.fstat(descriptor)
+        finally:
+            os.close(descriptor)
+    finally:
+        os.close(parent)
+    identity = lambda value: (
+        value.st_dev,
+        value.st_ino,
+        value.st_size,
+        value.st_mtime_ns,
+        value.st_ctime_ns,
+    )
+    if (
+        identity(metadata) != identity(before)
+        or identity(before) != identity(after)
+        or not stat.S_ISREG(before.st_mode)
+        or before.st_uid != expected_uid
+        or not _safe_runtime_write_access(before, expected_uid)
+    ):
+        raise WorkerCallbackError(
+            "governed runtime policy changed during authorization"
+        )
+    return bytes(content)
+
+
 def _open_governed_runtime(config: Config, parts: Sequence[str]) -> int | None:
     if not parts or not Path(parts[0]).is_absolute():
         return None
@@ -1361,6 +1402,33 @@ def _open_governed_runtime(config: Config, parts: Sequence[str]) -> int | None:
                 )
             entries.extend(package_entries)
             seen_roots.add(archive_root)
+        runtime_files = operation.get("runtime_files")
+        if not isinstance(runtime_files, list) or not runtime_files:
+            raise WorkerCallbackError("governed runtime file manifest is invalid")
+        for runtime_file in runtime_files:
+            if not isinstance(runtime_file, dict):
+                raise WorkerCallbackError("governed runtime file manifest is invalid")
+            source_text = runtime_file.get("source")
+            archive_name = runtime_file.get("archive")
+            if (
+                not isinstance(source_text, str)
+                or not isinstance(archive_name, str)
+                or not archive_name
+                or archive_name.startswith("/")
+                or ".." in Path(archive_name).parts
+            ):
+                raise WorkerCallbackError("governed runtime file manifest is invalid")
+            source_path = Path(source_text)
+            if source_path.is_absolute() or ".." in source_path.parts:
+                raise WorkerCallbackError("governed runtime file path is invalid")
+            entries.append(
+                (
+                    archive_name,
+                    _read_runtime_source_file(
+                        config.data_root, source_path, expected_uid
+                    ),
+                )
+            )
         names = [name for name, _ in entries]
         if (
             not entries

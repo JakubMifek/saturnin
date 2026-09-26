@@ -1685,14 +1685,30 @@ def _prepare_governed_runtime_sources(
                 encoding="utf-8",
             )
             path.chmod(0o644)
-    manifest = b"".join(
-        f"{package['archive']}/{relative}\0".encode()
-        + hashlib.sha256(
-            (roots[package["archive"]] / relative).read_bytes()
-        ).hexdigest().encode()
-        + b"\n"
+    for runtime_file in operation["runtime_files"]:
+        path = config.data_root / runtime_file["source"]
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.parent.chmod(0o755)
+        path.write_text("review: {}\n", encoding="utf-8")
+        path.chmod(0o644)
+    manifest_entries = {
+        f"{package['archive']}/{relative}": (
+            roots[package["archive"]] / relative
+        ).read_bytes()
         for package in operation["runtime_sources"]
         for relative in sorted(package["files"])
+    }
+    manifest_entries.update(
+        {
+            runtime_file["archive"]: (
+                config.data_root / runtime_file["source"]
+            ).read_bytes()
+            for runtime_file in operation["runtime_files"]
+        }
+    )
+    manifest = b"".join(
+        f"{name}\0{hashlib.sha256(content).hexdigest()}\n".encode()
+        for name, content in sorted(manifest_entries.items())
     )
     operation["runtime_manifest_sha256"] = hashlib.sha256(manifest).hexdigest()
     return [str(executable), "install"], roots
@@ -1712,6 +1728,9 @@ def test_governed_runtime_is_complete_sealed_and_survives_source_mutation(
     (roots["yaml"] / "__init__.py").write_text(
         "raise RuntimeError('replaced')\n", encoding="utf-8"
     )
+    governance = config.data_root / "policies" / "governance.yaml"
+    original_governance = governance.read_bytes()
+    governance.write_text("review: {attestation: {session_ttl_seconds: 999999}}\n")
     try:
         seals = fcntl.fcntl(descriptor, fcntl.F_GET_SEALS)
         required = (
@@ -1724,8 +1743,16 @@ def test_governed_runtime_is_complete_sealed_and_survives_source_mutation(
         with zipfile.ZipFile(f"/proc/self/fd/{descriptor}") as archive:
             assert archive.read("saturnin/attestation_service.py") == original
             assert "yaml/__init__.py" in archive.namelist()
+            assert (
+                archive.read("saturnin/governance.runtime.yaml")
+                == original_governance
+            )
             assert all(
-                name == "SATURNIN-RUNTIME-MANIFEST"
+                name
+                in {
+                    "SATURNIN-RUNTIME-MANIFEST",
+                    "saturnin/governance.runtime.yaml",
+                }
                 or (
                     name.startswith(("saturnin/", "yaml/"))
                     and name.endswith(".py")
@@ -1739,7 +1766,15 @@ def test_governed_runtime_is_complete_sealed_and_survives_source_mutation(
 
 @pytest.mark.parametrize(
     "change",
-    ["extra", "omitted", "symlink", "substitution", "saturnin-content", "yaml-content"],
+    [
+        "extra",
+        "omitted",
+        "symlink",
+        "substitution",
+        "saturnin-content",
+        "yaml-content",
+        "policy-content",
+    ],
 )
 def test_governed_runtime_rejects_manifest_and_tree_substitution(
     config: Config,
@@ -1766,9 +1801,14 @@ def test_governed_runtime_rejects_manifest_and_tree_substitution(
         (roots["saturnin"] / "review.py").write_text(
             "raise RuntimeError('replaced')\n", encoding="utf-8"
         )
-    else:
+    elif change == "yaml-content":
         (roots["yaml"] / "loader.py").write_text(
             "raise RuntimeError('replaced')\n", encoding="utf-8"
+        )
+    else:
+        (config.data_root / "policies" / "governance.yaml").write_text(
+            "review: {pr: {allowed_reviewer_roles: [attacker]}}\n",
+            encoding="utf-8",
         )
 
     with pytest.raises(

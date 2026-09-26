@@ -7,7 +7,7 @@ unset BASH_ENV ENV CDPATH PYTHONHOME PYTHONPATH
 IFS=$' \t\n'
 
 readonly UNIT=saturnin-attestation.service
-readonly EXPECTED_RUNTIME_MANIFEST_SHA256=1df8a966a2d7560e1a68ce4143ac367edcbd670a42e5782e5027d0dc46746e23
+readonly EXPECTED_RUNTIME_MANIFEST_SHA256=17b1317a5d0b04b93601a69e8dba7c3cdea297787187b8f8d9c4cb5afaaeb4c0
 readonly ID=/usr/bin/id
 readonly REALPATH=/usr/bin/realpath
 readonly STAT=/usr/bin/stat
@@ -404,6 +404,7 @@ with zipfile.ZipFile(f"/proc/self/fd/{source}") as archive:
                         or name.startswith("yaml/")
                     )
                 )
+                and name != "saturnin/governance.runtime.yaml"
             )
             for name in names
         )
@@ -588,6 +589,7 @@ expected = [
         f"WorkingDirectory={home}",
         f"Environment=SATURNIN_HOME=\"{home}\"",
         f"Environment=SATURNIN_RUNTIME_SHA256=\"{runtime_sha256}\"",
+        "Environment=SATURNIN_SEALED_GOVERNANCE=runtime-archive",
         "ExecStart=/usr/bin/python3 -I -c '\''import fcntl,hashlib,os,runpy,stat,sys;p=os.path.expanduser(\"~/.config/systemd/user/saturnin-attestation-runtime.pyz\");f=os.open(p,os.O_RDONLY|os.O_CLOEXEC|os.O_NOFOLLOW);a=os.fstat(f);assert stat.S_ISREG(a.st_mode) and a.st_uid==os.getuid() and stat.S_IMODE(a.st_mode)==0o400;s=os.memfd_create(\"saturnin-attestation-runtime\",os.MFD_CLOEXEC|os.MFD_ALLOW_SEALING);h=hashlib.sha256();exec(\"while b:=os.read(f,65536):\\\\n h.update(b)\\\\n v=memoryview(b)\\\\n while v:\\\\n  v=v[os.write(s,v):]\");z=os.fstat(f);assert (a.st_dev,a.st_ino,a.st_size,a.st_mtime_ns,a.st_ctime_ns)==(z.st_dev,z.st_ino,z.st_size,z.st_mtime_ns,z.st_ctime_ns) and h.hexdigest()==os.environ[\"SATURNIN_RUNTIME_SHA256\"];fcntl.fcntl(s,fcntl.F_ADD_SEALS,fcntl.F_SEAL_WRITE|fcntl.F_SEAL_GROW|fcntl.F_SEAL_SHRINK|fcntl.F_SEAL_SEAL);os.lseek(s,0,os.SEEK_SET);os.close(f);sys.path.insert(0,f\"/proc/self/fd/{s}\");runpy.run_module(\"saturnin.attestation_service\",run_name=\"__main__\")'\'' serve",
         "LoadCredentialEncrypted=saturnin-review-attestation-key:%h/.config/systemd/user/saturnin-credentials/saturnin-review-attestation-key.cred",
         "LoadCredentialEncrypted=saturnin-review-attestation-previous-key:%h/.config/systemd/user/saturnin-credentials/saturnin-review-attestation-previous-key.cred",
@@ -929,8 +931,9 @@ CURRENT_CREDENTIAL_ID="$(credential_identity "$CURRENT")"
 PREVIOUS_CREDENTIAL_ID="$(credential_identity "$PREVIOUS")"
 readonly CURRENT_CREDENTIAL_ID PREVIOUS_CREDENTIAL_ID
 credential_status="$(
-  PYTHONPATH="/proc/self/fd/$RUNTIME_TREE_FD" "$PYTHON" -P -m saturnin \
-    credential status review-attestation
+  SATURNIN_SEALED_GOVERNANCE=runtime-archive "$PYTHON" -I -c \
+    'import runpy,sys;sys.path.insert(0,sys.argv.pop(1));runpy.run_module("saturnin",run_name="__main__")' \
+    "/proc/self/fd/$RUNTIME_TREE_FD" credential status review-attestation
 )"
 if [[ "$credential_status" != *"rotation=ready"* || "$credential_status" != *"signer=ready"* ]]; then
   echo "Attestation provisioning must report rotation=ready and signer=ready." >&2

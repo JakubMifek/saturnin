@@ -7,6 +7,7 @@ replaceable without touching code.
 from __future__ import annotations
 
 import os
+import pkgutil
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
@@ -156,4 +157,13 @@ class Config:
 
 def default_config() -> Config:
     """Resolve the configuration fresh; ``SATURNIN_HOME`` may change at runtime."""
-    return Config.load()
+    config = Config.load()
+    if os.environ.get("SATURNIN_SEALED_GOVERNANCE") == "runtime-archive":
+        content = pkgutil.get_data("saturnin", "governance.runtime.yaml")
+        if content is None:
+            raise ConfigError("sealed governance policy is unavailable")
+        loaded = yaml.safe_load(content)
+        if not isinstance(loaded, dict):
+            raise ConfigError("sealed governance policy must be a mapping")
+        config._cache["governance"] = loaded
+    return config

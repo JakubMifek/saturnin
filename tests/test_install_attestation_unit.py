@@ -41,6 +41,7 @@ def signer_install(tmp_path: Path) -> tuple[Path, dict[str, str], Path, Path]:
     checkout = tmp_path / "checkout"
     (checkout / "scripts" / "lib").mkdir(parents=True)
     (checkout / "systemd").mkdir()
+    (checkout / "policies").mkdir()
     (checkout / ".venv" / "bin").mkdir(parents=True)
     shutil.copytree(REPO_ROOT / "src" / "saturnin", checkout / "src" / "saturnin")
     yaml_destination = (
@@ -75,6 +76,11 @@ def signer_install(tmp_path: Path) -> tuple[Path, dict[str, str], Path, Path]:
         REPO_ROOT / "systemd" / "saturnin-attestation.service",
         checkout / "systemd" / "saturnin-attestation.service",
     )
+    shutil.copy2(
+        REPO_ROOT / "policies" / "governance.yaml",
+        checkout / "policies" / "governance.yaml",
+    )
+    (checkout / "policies" / "governance.yaml").chmod(0o644)
     (checkout / "systemd" / "saturnin-attestation.service").chmod(0o644)
     runtime = checkout / ".venv" / "bin" / "saturnin"
     runtime.write_text(
@@ -125,8 +131,8 @@ def signer_install(tmp_path: Path) -> tuple[Path, dict[str, str], Path, Path]:
     fake_python = fake_bin / "python3"
     fake_python.write_text(
         "#!/bin/sh\n"
-        "if [ \"${1:-}\" = -P ] && [ \"${2:-}\" = -m ] "
-        "&& [ \"${3:-}\" = saturnin ] && [ \"${4:-}\" = credential ]; then\n"
+        "if [ \"${1:-}\" = -I ] && [ \"${2:-}\" = -c ] "
+        "&& [ \"${5:-}\" = credential ]; then\n"
         "  if [ -n \"${RACE_RUNTIME_ARCHIVE:-}\" ]; then\n"
         "    archive=$(/usr/bin/find \"$HOME/.config/systemd/user\" "
         "-name saturnin-attestation-runtime.pyz -type f -print -quit)\n"
@@ -295,6 +301,12 @@ def _authorized_fds(
         "executable": "scripts/install_attestation_unit.sh",
         "sha256": hashlib.sha256(executable.read_bytes()).hexdigest(),
         "runtime_sources": [],
+        "runtime_files": [
+            {
+                "source": "policies/governance.yaml",
+                "archive": "saturnin/governance.runtime.yaml",
+            }
+        ],
     }
     for source, archive in (
         ("src/saturnin", "saturnin"),
@@ -314,21 +326,24 @@ def _authorized_fds(
                 ],
             }
         )
-    manifest = b"".join(
-        f"{package['archive']}/{relative}\0".encode()
-        + hashlib.sha256(
-            (
-                checkout
-                / package["source"].replace(
-                    "{python_version}",
-                    f"python{sys.version_info.major}.{sys.version_info.minor}",
-                )
-                / relative
-            ).read_bytes()
-        ).hexdigest().encode()
-        + b"\n"
+    manifest_entries = {
+        f"{package['archive']}/{relative}": (
+            checkout
+            / package["source"].replace(
+                "{python_version}",
+                f"python{sys.version_info.major}.{sys.version_info.minor}",
+            )
+            / relative
+        ).read_bytes()
         for package in operation["runtime_sources"]
         for relative in sorted(package["files"])
+    }
+    manifest_entries["saturnin/governance.runtime.yaml"] = (
+        checkout / "policies" / "governance.yaml"
+    ).read_bytes()
+    manifest = b"".join(
+        f"{name}\0{hashlib.sha256(content).hexdigest()}\n".encode()
+        for name, content in sorted(manifest_entries.items())
     )
     operation["runtime_manifest_sha256"] = hashlib.sha256(manifest).hexdigest()
     config = SimpleNamespace(
