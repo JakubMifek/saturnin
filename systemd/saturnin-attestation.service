@@ -6,8 +6,8 @@ Documentation=file://@SATURNIN_HOME@/docs/runbooks/ops-safety.md
 Type=simple
 WorkingDirectory=@SATURNIN_HOME@
 Environment=SATURNIN_HOME="@SATURNIN_HOME_ENV@"
-Environment=PYTHONPATH="%h/.config/systemd/user/saturnin-attestation-runtime.pyz"
-ExecStart=/usr/bin/python3 -m saturnin.attestation_service serve
+Environment=SATURNIN_RUNTIME_SHA256="@SATURNIN_RUNTIME_SHA256@"
+ExecStart=/usr/bin/python3 -I -c 'import hashlib,os,runpy,stat,sys;p=os.path.expanduser("~/.config/systemd/user/saturnin-attestation-runtime.pyz");f=os.open(p,os.O_RDONLY|os.O_CLOEXEC|os.O_NOFOLLOW);m=os.fstat(f);d=hashlib.file_digest(os.fdopen(os.dup(f),"rb"),"sha256").hexdigest();assert stat.S_ISREG(m.st_mode) and m.st_uid==os.getuid() and stat.S_IMODE(m.st_mode)==0o400 and d==os.environ["SATURNIN_RUNTIME_SHA256"];sys.path.insert(0,f"/proc/self/fd/{f}");runpy.run_module("saturnin.attestation_service",run_name="__main__")' serve
 LoadCredentialEncrypted=saturnin-review-attestation-key:%h/.config/systemd/user/saturnin-credentials/saturnin-review-attestation-key.cred
 LoadCredentialEncrypted=saturnin-review-attestation-previous-key:%h/.config/systemd/user/saturnin-credentials/saturnin-review-attestation-previous-key.cred
 RuntimeDirectory=saturnin-attestation

@@ -1232,13 +1232,15 @@ def run_server_command(
         command_environment.pop(name, None)
     execution_parts = list(parts)
     pass_fds: tuple[int, ...] = ()
+    execution_cwd = worktree
     if governed_fd is not None:
         execution_parts[0] = f"/proc/self/fd/{governed_fd}"
         pass_fds = (governed_fd,)
+        execution_cwd = config.data_root
     try:
         result = _run_bounded_command(
             execution_parts,
-            cwd=worktree,
+            cwd=execution_cwd,
             env=command_environment,
             pass_fds=pass_fds,
         )

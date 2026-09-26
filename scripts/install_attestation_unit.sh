@@ -97,7 +97,7 @@ readonly INSTALLED_RUNTIME="$UNIT_DIR/saturnin-attestation-runtime.pyz"
 readonly WANTS="$UNIT_DIR/default.target.wants/$UNIT"
 
 validate_parent_chain() {
-  "$PYTHON" - "$1" "$CURRENT_UID" "$CURRENT_GID" <<'PY'
+  "$PYTHON" -I - "$1" "$CURRENT_UID" "$CURRENT_GID" <<'PY'
 import grp
 import os
 import pwd
@@ -148,7 +148,7 @@ done
 
 snapshot_trusted_file() {
   SOURCE_PATH="$1" DESTINATION_PATH="$2" DESTINATION_MODE="$3" \
-    EXPECTED_UID="$CURRENT_UID" "$PYTHON" -c '
+    EXPECTED_UID="$CURRENT_UID" "$PYTHON" -I -c '
 import hashlib
 import os
 import stat
@@ -209,7 +209,7 @@ finally:
 snapshot_runtime_tree() {
   SOURCE_PATH="$SOURCE" HOME_PATH="$SATURNIN_HOME" DESTINATION_PATH="$1" \
     EXPECTED_UID="$CURRENT_UID" \
-    "$PYTHON" -c '
+    "$PYTHON" -I -c '
 import os
 import stat
 import sys
@@ -303,7 +303,7 @@ os.chmod(destination, 0o400)
 }
 
 credential_identity() {
-  CREDENTIAL_PATH="$1" EXPECTED_UID="$CURRENT_UID" "$PYTHON" -c '
+  CREDENTIAL_PATH="$1" EXPECTED_UID="$CURRENT_UID" "$PYTHON" -I -c '
 import hashlib
 import os
 import stat
@@ -344,7 +344,7 @@ finally:
 }
 
 trusted_file_identity() {
-  TRUSTED_PATH="$1" EXPECTED_MODE="$2" EXPECTED_UID="$CURRENT_UID" "$PYTHON" -c '
+  TRUSTED_PATH="$1" EXPECTED_MODE="$2" EXPECTED_UID="$CURRENT_UID" "$PYTHON" -I -c '
 import hashlib
 import os
 import stat
@@ -379,7 +379,7 @@ print(f"{before.st_dev}:{before.st_ino}:{digest.hexdigest()}")
 }
 
 trusted_fd_identity() {
-  TRUSTED_FD="$1" EXPECTED_MODE="$2" EXPECTED_UID="$CURRENT_UID" "$PYTHON" -c '
+  TRUSTED_FD="$1" EXPECTED_MODE="$2" EXPECTED_UID="$CURRENT_UID" "$PYTHON" -I -c '
 import hashlib
 import os
 import stat
@@ -411,7 +411,7 @@ print(f"{before.st_dev}:{before.st_ino}:{digest.hexdigest()}")
 }
 
 stable_symlink_target() {
-  LINK_PATH="$1" EXPECTED_UID="$CURRENT_UID" "$PYTHON" -c '
+  LINK_PATH="$1" EXPECTED_UID="$CURRENT_UID" "$PYTHON" -I -c '
 import os
 import stat
 
@@ -437,8 +437,9 @@ print(target)
 }
 
 verify_unit_identity() {
-  UNIT_PATH="$1" EXPECTED_MODE="$2" EXPECTED_UID="$CURRENT_UID" \
-    HOME_VALUE="$SATURNIN_HOME" "$PYTHON" -c '
+  UNIT_PATH="$1" EXPECTED_MODE="$2" RUNTIME_SHA256_VALUE="$3" \
+    EXPECTED_UID="$CURRENT_UID" \
+    HOME_VALUE="$SATURNIN_HOME" "$PYTHON" -I -c '
 import os
 import stat
 
@@ -474,6 +475,7 @@ if (
     raise SystemExit("rendered attestation unit changed during validation")
 lines = content.decode("utf-8").splitlines()
 home = os.environ["HOME_VALUE"]
+runtime_sha256 = os.environ["RUNTIME_SHA256_VALUE"]
 expected = [
     ("Unit", [
         "Description=Saturnin private review attestation signer",
@@ -483,8 +485,8 @@ expected = [
         "Type=simple",
         f"WorkingDirectory={home}",
         f"Environment=SATURNIN_HOME=\"{home}\"",
-        "Environment=PYTHONPATH=\"%h/.config/systemd/user/saturnin-attestation-runtime.pyz\"",
-        "ExecStart=/usr/bin/python3 -m saturnin.attestation_service serve",
+        f"Environment=SATURNIN_RUNTIME_SHA256=\"{runtime_sha256}\"",
+        "ExecStart=/usr/bin/python3 -I -c '\''import hashlib,os,runpy,stat,sys;p=os.path.expanduser(\"~/.config/systemd/user/saturnin-attestation-runtime.pyz\");f=os.open(p,os.O_RDONLY|os.O_CLOEXEC|os.O_NOFOLLOW);m=os.fstat(f);d=hashlib.file_digest(os.fdopen(os.dup(f),\"rb\"),\"sha256\").hexdigest();assert stat.S_ISREG(m.st_mode) and m.st_uid==os.getuid() and stat.S_IMODE(m.st_mode)==0o400 and d==os.environ[\"SATURNIN_RUNTIME_SHA256\"];sys.path.insert(0,f\"/proc/self/fd/{f}\");runpy.run_module(\"saturnin.attestation_service\",run_name=\"__main__\")'\'' serve",
         "LoadCredentialEncrypted=saturnin-review-attestation-key:%h/.config/systemd/user/saturnin-credentials/saturnin-review-attestation-key.cred",
         "LoadCredentialEncrypted=saturnin-review-attestation-previous-key:%h/.config/systemd/user/saturnin-credentials/saturnin-review-attestation-previous-key.cred",
         "RuntimeDirectory=saturnin-attestation",
@@ -523,7 +525,7 @@ print(f"{before.st_dev}:{before.st_ino}")
 verify_manager_loaded_unit() {
   local manager_view=$1 expected_unit=${2:-$INSTALLED_SNAPSHOT}
   MANAGER_VIEW_PATH="$manager_view" UNIT_PATH="$expected_unit" \
-    INSTALLED_PATH="$INSTALLED" "$PYTHON" -c '
+    INSTALLED_PATH="$INSTALLED" "$PYTHON" -I -c '
 import os
 from pathlib import Path
 
@@ -567,8 +569,8 @@ verify_unit_directory() {
 
 if [[ "$action" == status ]]; then
   verify_unit_directory
-  verify_unit_identity "$INSTALLED" 0644 >/dev/null
-  trusted_file_identity "$INSTALLED_RUNTIME" 0400 >/dev/null
+  STATUS_RUNTIME_ID="$(trusted_file_identity "$INSTALLED_RUNTIME" 0400)"
+  verify_unit_identity "$INSTALLED" 0644 "${STATUS_RUNTIME_ID##*:}" >/dev/null
   exec "$SYSTEMCTL" --user status --no-pager "$UNIT"
 fi
 
@@ -593,6 +595,8 @@ exec {RUNTIME_TREE_FD}<"$RUNTIME_TREE_SNAPSHOT"
 readonly RUNTIME_TREE_FD
 RUNTIME_TREE_ID="$(trusted_fd_identity "$RUNTIME_TREE_FD" 0400)"
 readonly RUNTIME_TREE_ID
+RUNTIME_TREE_SHA256="${RUNTIME_TREE_ID##*:}"
+readonly RUNTIME_TREE_SHA256
 if [[ "$(trusted_file_identity "$RUNTIME_TREE_SNAPSHOT" 0400)" != "$RUNTIME_TREE_ID" ]]; then
   echo "Attestation runtime path changed after snapshot construction." >&2
   exit 1
@@ -635,7 +639,7 @@ rollback() {
     "$runtime_backup_identity" || return
   "$RM" -f "$WANTS"
   if [[ "$had_wants" -eq 1 ]]; then
-    WANT_PATH="$WANTS" WANT_TARGET="$wants_target" "$PYTHON" -c \
+    WANT_PATH="$WANTS" WANT_TARGET="$wants_target" "$PYTHON" -I -c \
       'import os; os.symlink(os.environ["WANT_TARGET"], os.environ["WANT_PATH"])'
   fi
   if [[ "$had_wants_dir" -eq 0 ]]; then
@@ -645,7 +649,7 @@ rollback() {
   if [[ "$was_active" -eq 1 ]] \
     && [[ "$unit_was_valid" -eq 1 ]] \
     && verify_unit_directory \
-    && verify_unit_identity "$INSTALLED" 0644 >/dev/null \
+    && verify_unit_identity "$INSTALLED" 0644 "${runtime_backup_identity##*:}" >/dev/null \
     && trusted_file_identity "$INSTALLED_RUNTIME" 0400 >/dev/null \
     && "$SYSTEMCTL" --user cat --no-pager "$UNIT" >"$MANAGER_VIEW" \
     && verify_manager_loaded_unit "$MANAGER_VIEW" "$BACKUP/unit" \
@@ -667,10 +671,17 @@ trap on_exit EXIT
 if "$SYSTEMCTL" --user is-active --quiet "$UNIT"; then
   was_active=1
 fi
+if [[ -e "$INSTALLED_RUNTIME" || -L "$INSTALLED_RUNTIME" ]]; then
+  had_runtime=1
+  snapshot_trusted_file "$INSTALLED_RUNTIME" "$BACKUP/runtime" 0400
+  runtime_backup_identity="$(trusted_file_identity "$BACKUP/runtime" 0400)"
+fi
 if [[ -e "$INSTALLED" || -L "$INSTALLED" ]]; then
   had_unit=1
   trusted_file_identity "$INSTALLED" 0644 >/dev/null
-  if verify_unit_identity "$INSTALLED" 0644 >/dev/null 2>&1; then
+  if [[ "$had_runtime" -eq 1 ]] \
+    && verify_unit_identity "$INSTALLED" 0644 \
+      "${runtime_backup_identity##*:}" >/dev/null 2>&1; then
     unit_was_valid=1
   elif [[ "$was_active" -eq 1 ]]; then
     echo "Refusing to replace an active unvalidated attestation unit." >&2
@@ -678,11 +689,6 @@ if [[ -e "$INSTALLED" || -L "$INSTALLED" ]]; then
   fi
   snapshot_trusted_file "$INSTALLED" "$BACKUP/unit" 0644
   unit_backup_identity="$(trusted_file_identity "$BACKUP/unit" 0644)"
-fi
-if [[ -e "$INSTALLED_RUNTIME" || -L "$INSTALLED_RUNTIME" ]]; then
-  had_runtime=1
-  snapshot_trusted_file "$INSTALLED_RUNTIME" "$BACKUP/runtime" 0400
-  runtime_backup_identity="$(trusted_file_identity "$BACKUP/runtime" 0400)"
 fi
 if [[ -e "$WANTS" || -L "$WANTS" ]]; then
   had_wants=1
@@ -722,7 +728,7 @@ CURRENT_CREDENTIAL_ID="$(credential_identity "$CURRENT")"
 PREVIOUS_CREDENTIAL_ID="$(credential_identity "$PREVIOUS")"
 readonly CURRENT_CREDENTIAL_ID PREVIOUS_CREDENTIAL_ID
 credential_status="$(
-  PYTHONPATH="/proc/self/fd/$RUNTIME_TREE_FD" "$PYTHON" -m saturnin \
+  PYTHONPATH="/proc/self/fd/$RUNTIME_TREE_FD" "$PYTHON" -P -m saturnin \
     credential status review-attestation
 )"
 if [[ "$credential_status" != *"rotation=ready"* || "$credential_status" != *"signer=ready"* ]]; then
@@ -737,7 +743,8 @@ if [[ "$(credential_identity "$CURRENT")" != "$CURRENT_CREDENTIAL_ID" ]] \
 fi
 
 TEMPLATE_PATH="$TEMPLATE_SNAPSHOT" DESTINATION="$STAGE" \
-  HOME_VALUE="$SATURNIN_HOME" "$PYTHON" -c '
+  HOME_VALUE="$SATURNIN_HOME" RUNTIME_SHA256_VALUE="$RUNTIME_TREE_SHA256" \
+  "$PYTHON" -I -c '
 import os
 from pathlib import Path
 
@@ -745,10 +752,10 @@ template = Path(os.environ["TEMPLATE_PATH"]).read_text(encoding="utf-8")
 home = os.environ["HOME_VALUE"]
 rendered = template.replace("@SATURNIN_HOME@", home).replace(
     "@SATURNIN_HOME_ENV@", home
-)
+).replace("@SATURNIN_RUNTIME_SHA256@", os.environ["RUNTIME_SHA256_VALUE"])
 Path(os.environ["DESTINATION"]).write_text(rendered, encoding="utf-8")
 '
-verify_unit_identity "$STAGE" 0600 >/dev/null
+verify_unit_identity "$STAGE" 0600 "$RUNTIME_TREE_SHA256" >/dev/null
 "$SYSTEMD_ANALYZE" --user verify "$STAGE"
 
 "$CHMOD" 0644 "$STAGE"
@@ -768,20 +775,22 @@ if [[ "$INSTALLED_RUNTIME_ID" != "$RUNTIME_TREE_ID" ]]; then
   echo "Installed attestation runtime does not match the validated snapshot." >&2
   exit 1
 fi
-INSTALLED_DEVICE_INODE="$(verify_unit_identity "$INSTALLED" 0644)"
+INSTALLED_DEVICE_INODE="$(
+  verify_unit_identity "$INSTALLED" 0644 "$RUNTIME_TREE_SHA256"
+)"
 readonly INSTALLED_DEVICE_INODE
 snapshot_trusted_file "$INSTALLED" "$INSTALLED_SNAPSHOT" 0400
 "$SYSTEMCTL" --user daemon-reload
 verify_unit_directory
 "$SYSTEMCTL" --user cat --no-pager "$UNIT" >"$MANAGER_VIEW"
 verify_manager_loaded_unit "$MANAGER_VIEW"
-if [[ "$(verify_unit_identity "$INSTALLED" 0644)" != "$INSTALLED_DEVICE_INODE" ]]; then
+if [[ "$(verify_unit_identity "$INSTALLED" 0644 "$RUNTIME_TREE_SHA256")" != "$INSTALLED_DEVICE_INODE" ]]; then
   echo "Installed attestation unit identity drifted after daemon-reload." >&2
   exit 1
 fi
 "$SYSTEMCTL" --user enable "$UNIT"
 verify_unit_directory
-if [[ "$(verify_unit_identity "$INSTALLED" 0644)" != "$INSTALLED_DEVICE_INODE" ]]; then
+if [[ "$(verify_unit_identity "$INSTALLED" 0644 "$RUNTIME_TREE_SHA256")" != "$INSTALLED_DEVICE_INODE" ]]; then
   echo "Installed attestation unit identity drifted before start." >&2
   exit 1
 fi

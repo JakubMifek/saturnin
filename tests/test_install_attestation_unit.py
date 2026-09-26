@@ -116,8 +116,8 @@ def signer_install(tmp_path: Path) -> tuple[Path, dict[str, str], Path, Path]:
     fake_python = fake_bin / "python3"
     fake_python.write_text(
         "#!/bin/sh\n"
-        "if [ \"${1:-}\" = -m ] && [ \"${2:-}\" = saturnin ] "
-        "&& [ \"${3:-}\" = credential ]; then\n"
+        "if [ \"${1:-}\" = -P ] && [ \"${2:-}\" = -m ] "
+        "&& [ \"${3:-}\" = saturnin ] && [ \"${4:-}\" = credential ]; then\n"
         "  if [ -n \"${RACE_RUNTIME_ARCHIVE:-}\" ]; then\n"
         "    archive=$(/usr/bin/find \"$HOME/.config/systemd/user\" "
         "-name saturnin-attestation-runtime.pyz -type f -print -quit)\n"
