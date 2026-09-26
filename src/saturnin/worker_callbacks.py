@@ -3,15 +3,21 @@
 from __future__ import annotations
 
 import hashlib
+import fcntl
+import grp
 import json
 import os
+import pwd
 import re
 import secrets
 import selectors
 import shlex
 import signal
+import stat
 import subprocess
+import sys
 import time
+import zipfile
 from argparse import Namespace
 from dataclasses import dataclass
 from pathlib import Path
@@ -1073,6 +1079,417 @@ def _fsync_directory(path: Path) -> None:
         os.close(descriptor)
 
 
+def _open_governed_executable(config: Config, parts: Sequence[str]) -> int | None:
+    if not parts or not Path(parts[0]).is_absolute():
+        return None
+    for operation in config.server_scope.get("operations", {}).values():
+        if not isinstance(operation, dict):
+            continue
+        relative = Path(str(operation.get("executable", "")))
+        expected = Path(os.path.abspath(config.data_root / relative))
+        if Path(parts[0]) != expected:
+            continue
+        digest = operation.get("sha256")
+        if not isinstance(digest, str) or not re.fullmatch(r"[0-9a-f]{64}", digest):
+            raise WorkerCallbackError("governed executable has no approved digest")
+        try:
+            source_descriptor = os.open(
+                expected, os.O_RDONLY | os.O_CLOEXEC | os.O_NOFOLLOW
+            )
+            before = os.fstat(source_descriptor)
+            descriptor = os.memfd_create(
+                "saturnin-governed-operation",
+                os.MFD_CLOEXEC | os.MFD_ALLOW_SEALING,
+            )
+            content = hashlib.sha256()
+            while chunk := os.read(source_descriptor, 64 * 1024):
+                content.update(chunk)
+                view = memoryview(chunk)
+                while view:
+                    view = view[os.write(descriptor, view):]
+            after = os.fstat(source_descriptor)
+        except OSError as exc:
+            if "descriptor" in locals():
+                os.close(descriptor)
+            if "source_descriptor" in locals():
+                os.close(source_descriptor)
+            raise WorkerCallbackError(
+                "governed executable could not be pinned for execution"
+            ) from exc
+        os.close(source_descriptor)
+        if (
+            (before.st_dev, before.st_ino, before.st_size, before.st_mtime_ns)
+            != (after.st_dev, after.st_ino, after.st_size, after.st_mtime_ns)
+            or not stat.S_ISREG(before.st_mode)
+            or before.st_uid != os.geteuid()
+            or before.st_mode & 0o022
+            or content.hexdigest() != digest
+        ):
+            os.close(descriptor)
+            raise WorkerCallbackError(
+                "governed executable changed after authorization"
+            )
+        os.fchmod(descriptor, 0o500)
+        fcntl.fcntl(
+            descriptor,
+            fcntl.F_ADD_SEALS,
+            fcntl.F_SEAL_SEAL
+            | fcntl.F_SEAL_SHRINK
+            | fcntl.F_SEAL_GROW
+            | fcntl.F_SEAL_WRITE,
+        )
+        os.lseek(descriptor, 0, os.SEEK_SET)
+        return descriptor
+    return None
+
+
+def _runtime_source_entries(
+    root_descriptor: int,
+    *,
+    archive_root: str,
+    expected_uid: int,
+) -> list[tuple[str, bytes]]:
+    entries: list[tuple[str, bytes]] = []
+
+    def visit(directory_descriptor: int, relative: tuple[str, ...]) -> None:
+        directory = os.fstat(directory_descriptor)
+        if not _safe_runtime_directory(directory, expected_uid):
+            raise WorkerCallbackError("governed runtime directory is unsafe")
+        names = sorted(os.listdir(directory_descriptor))
+        for name in names:
+            if name in {"", ".", ".."} or "/" in name:
+                raise WorkerCallbackError("governed runtime entry has an invalid name")
+            metadata = os.stat(name, dir_fd=directory_descriptor, follow_symlinks=False)
+            if stat.S_ISLNK(metadata.st_mode):
+                raise WorkerCallbackError("governed runtime contains a symlink")
+            if stat.S_ISDIR(metadata.st_mode):
+                if name == "__pycache__":
+                    continue
+                child = os.open(
+                    name,
+                    os.O_RDONLY | os.O_CLOEXEC | os.O_NOFOLLOW | os.O_DIRECTORY,
+                    dir_fd=directory_descriptor,
+                )
+                try:
+                    visit(child, (*relative, name))
+                finally:
+                    os.close(child)
+                continue
+            if not stat.S_ISREG(metadata.st_mode):
+                raise WorkerCallbackError("governed runtime contains a special file")
+            if not name.endswith(".py"):
+                continue
+            descriptor = os.open(
+                name,
+                os.O_RDONLY | os.O_CLOEXEC | os.O_NOFOLLOW,
+                dir_fd=directory_descriptor,
+            )
+            try:
+                before = os.fstat(descriptor)
+                content = bytearray()
+                while chunk := os.read(descriptor, 64 * 1024):
+                    content.extend(chunk)
+                after = os.fstat(descriptor)
+            finally:
+                os.close(descriptor)
+            identity = lambda value: (
+                value.st_dev,
+                value.st_ino,
+                value.st_size,
+                value.st_mtime_ns,
+                value.st_ctime_ns,
+            )
+            if (
+                identity(metadata) != identity(before)
+                or identity(before) != identity(after)
+                or before.st_uid != expected_uid
+                or not _safe_runtime_write_access(before, expected_uid)
+            ):
+                raise WorkerCallbackError(
+                    "governed runtime source changed during authorization"
+                )
+            entries.append(
+                ("/".join((archive_root, *relative, name)), bytes(content))
+            )
+        after = os.fstat(directory_descriptor)
+        identity = lambda value: (
+            value.st_dev,
+            value.st_ino,
+            value.st_size,
+            value.st_mtime_ns,
+            value.st_ctime_ns,
+        )
+        if identity(directory) != identity(after) or names != sorted(
+            os.listdir(directory_descriptor)
+        ):
+            raise WorkerCallbackError(
+                "governed runtime directory changed during authorization"
+            )
+
+    visit(root_descriptor, ())
+    return entries
+
+
+def _safe_runtime_write_access(
+    metadata: os.stat_result, expected_uid: int
+) -> bool:
+    if metadata.st_mode & 0o002:
+        return False
+    if not metadata.st_mode & 0o020:
+        return True
+    if metadata.st_uid != expected_uid or metadata.st_gid != os.getegid():
+        return False
+    group = grp.getgrgid(metadata.st_gid)
+    primary_users = {
+        entry.pw_uid for entry in pwd.getpwall() if entry.pw_gid == metadata.st_gid
+    }
+    return not group.gr_mem and primary_users == {expected_uid}
+
+
+def _safe_runtime_directory(metadata: os.stat_result, expected_uid: int) -> bool:
+    if not stat.S_ISDIR(metadata.st_mode) or metadata.st_uid not in {
+        0,
+        expected_uid,
+    }:
+        return False
+    if metadata.st_uid == 0 and metadata.st_mode & stat.S_ISVTX:
+        return True
+    return _safe_runtime_write_access(metadata, expected_uid)
+
+
+def _open_runtime_source_root(
+    data_root: Path, relative: Path, expected_uid: int
+) -> int:
+    descriptor = os.open(
+        data_root,
+        os.O_RDONLY | os.O_CLOEXEC | os.O_NOFOLLOW | os.O_DIRECTORY,
+    )
+    try:
+        for part in relative.parts:
+            metadata = os.fstat(descriptor)
+            if not _safe_runtime_directory(metadata, expected_uid):
+                raise WorkerCallbackError(
+                    "governed runtime source parent is unsafe"
+                )
+            child = os.open(
+                part,
+                os.O_RDONLY | os.O_CLOEXEC | os.O_NOFOLLOW | os.O_DIRECTORY,
+                dir_fd=descriptor,
+            )
+            os.close(descriptor)
+            descriptor = child
+        metadata = os.fstat(descriptor)
+        if (
+            metadata.st_uid != expected_uid
+            or not _safe_runtime_directory(metadata, expected_uid)
+        ):
+            raise WorkerCallbackError("governed runtime source root is unsafe")
+        return descriptor
+    except BaseException:
+        os.close(descriptor)
+        raise
+
+
+def _read_runtime_source_file(
+    data_root: Path, relative: Path, expected_uid: int
+) -> bytes:
+    parent = _open_runtime_source_root(data_root, relative.parent, expected_uid)
+    try:
+        metadata = os.stat(relative.name, dir_fd=parent, follow_symlinks=False)
+        descriptor = os.open(
+            relative.name,
+            os.O_RDONLY | os.O_CLOEXEC | os.O_NOFOLLOW,
+            dir_fd=parent,
+        )
+        try:
+            before = os.fstat(descriptor)
+            content = bytearray()
+            while chunk := os.read(descriptor, 64 * 1024):
+                content.extend(chunk)
+            after = os.fstat(descriptor)
+        finally:
+            os.close(descriptor)
+    finally:
+        os.close(parent)
+    identity = lambda value: (
+        value.st_dev,
+        value.st_ino,
+        value.st_size,
+        value.st_mtime_ns,
+        value.st_ctime_ns,
+    )
+    if (
+        identity(metadata) != identity(before)
+        or identity(before) != identity(after)
+        or not stat.S_ISREG(before.st_mode)
+        or before.st_uid != expected_uid
+        or not _safe_runtime_write_access(before, expected_uid)
+    ):
+        raise WorkerCallbackError(
+            "governed runtime policy changed during authorization"
+        )
+    return bytes(content)
+
+
+def _open_governed_runtime(config: Config, parts: Sequence[str]) -> int | None:
+    if not parts or not Path(parts[0]).is_absolute():
+        return None
+    operation = next(
+        (
+            value
+            for value in config.server_scope.get("operations", {}).values()
+            if isinstance(value, dict)
+            and Path(os.path.abspath(config.data_root / str(value.get("executable", ""))))
+            == Path(parts[0])
+        ),
+        None,
+    )
+    if operation is None:
+        return None
+    sources = operation.get("runtime_sources")
+    if not isinstance(sources, list) or not sources:
+        raise WorkerCallbackError("governed operation has no runtime source manifest")
+    expected_uid = os.geteuid()
+    entries: list[tuple[str, bytes]] = []
+    seen_roots: set[str] = set()
+    try:
+        for source in sources:
+            if not isinstance(source, dict):
+                raise WorkerCallbackError("governed runtime source manifest is invalid")
+            archive_root = source.get("archive")
+            relative_text = source.get("source")
+            expected_files = source.get("files")
+            if (
+                not isinstance(archive_root, str)
+                or not re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", archive_root)
+                or archive_root in seen_roots
+                or not isinstance(relative_text, str)
+                or not isinstance(expected_files, list)
+                or not expected_files
+                or not all(
+                    isinstance(name, str)
+                    and name.endswith(".py")
+                    and not Path(name).is_absolute()
+                    and ".." not in Path(name).parts
+                    for name in expected_files
+                )
+                or len(expected_files) != len(set(expected_files))
+            ):
+                raise WorkerCallbackError("governed runtime source manifest is invalid")
+            relative_text = relative_text.replace(
+                "{python_version}",
+                f"python{sys.version_info.major}.{sys.version_info.minor}",
+            )
+            relative = Path(relative_text)
+            if relative.is_absolute() or ".." in relative.parts:
+                raise WorkerCallbackError("governed runtime source path is invalid")
+            descriptor = _open_runtime_source_root(
+                config.data_root, relative, expected_uid
+            )
+            try:
+                package_entries = _runtime_source_entries(
+                    descriptor,
+                    archive_root=archive_root,
+                    expected_uid=expected_uid,
+                )
+            finally:
+                os.close(descriptor)
+            prefix = f"{archive_root}/"
+            actual_files = [name.removeprefix(prefix) for name, _ in package_entries]
+            if sorted(actual_files) != sorted(expected_files):
+                raise WorkerCallbackError(
+                    f"governed runtime package {archive_root!r} differs from manifest"
+                )
+            entries.extend(package_entries)
+            seen_roots.add(archive_root)
+        runtime_files = operation.get("runtime_files")
+        if not isinstance(runtime_files, list) or not runtime_files:
+            raise WorkerCallbackError("governed runtime file manifest is invalid")
+        for runtime_file in runtime_files:
+            if not isinstance(runtime_file, dict):
+                raise WorkerCallbackError("governed runtime file manifest is invalid")
+            source_text = runtime_file.get("source")
+            archive_name = runtime_file.get("archive")
+            if (
+                not isinstance(source_text, str)
+                or not isinstance(archive_name, str)
+                or not archive_name
+                or archive_name.startswith("/")
+                or ".." in Path(archive_name).parts
+            ):
+                raise WorkerCallbackError("governed runtime file manifest is invalid")
+            source_path = Path(source_text)
+            if source_path.is_absolute() or ".." in source_path.parts:
+                raise WorkerCallbackError("governed runtime file path is invalid")
+            entries.append(
+                (
+                    archive_name,
+                    _read_runtime_source_file(
+                        config.data_root, source_path, expected_uid
+                    ),
+                )
+            )
+        names = [name for name, _ in entries]
+        if (
+            not entries
+            or len(names) != len(set(names))
+            or "saturnin/attestation_service.py" not in names
+            or "yaml/__init__.py" not in names
+        ):
+            raise WorkerCallbackError("governed runtime source manifest is incomplete")
+        descriptor = os.memfd_create(
+            "saturnin-governed-runtime", os.MFD_CLOEXEC | os.MFD_ALLOW_SEALING
+        )
+        manifest = "".join(
+            f"{name}\0{hashlib.sha256(content).hexdigest()}\n"
+            for name, content in sorted(entries)
+        ).encode()
+        expected_manifest_digest = operation.get("runtime_manifest_sha256")
+        if (
+            not isinstance(expected_manifest_digest, str)
+            or not re.fullmatch(r"[0-9a-f]{64}", expected_manifest_digest)
+            or hashlib.sha256(manifest).hexdigest() != expected_manifest_digest
+        ):
+            raise WorkerCallbackError(
+                "governed runtime bytes differ from the authorized manifest"
+            )
+        with os.fdopen(os.dup(descriptor), "w+b") as output:
+            with zipfile.ZipFile(
+                output, "w", compression=zipfile.ZIP_DEFLATED
+            ) as archive:
+                for name, content in sorted(entries):
+                    info = zipfile.ZipInfo(name, date_time=(1980, 1, 1, 0, 0, 0))
+                    info.external_attr = 0o400 << 16
+                    archive.writestr(info, content)
+                manifest_info = zipfile.ZipInfo(
+                    "SATURNIN-RUNTIME-MANIFEST", date_time=(1980, 1, 1, 0, 0, 0)
+                )
+                manifest_info.external_attr = 0o400 << 16
+                archive.writestr(manifest_info, manifest)
+            output.flush()
+            os.fsync(output.fileno())
+        os.fchmod(descriptor, 0o400)
+        fcntl.fcntl(
+            descriptor,
+            fcntl.F_ADD_SEALS,
+            fcntl.F_SEAL_SEAL
+            | fcntl.F_SEAL_SHRINK
+            | fcntl.F_SEAL_GROW
+            | fcntl.F_SEAL_WRITE,
+        )
+        os.lseek(descriptor, 0, os.SEEK_SET)
+        return descriptor
+    except (OSError, zipfile.BadZipFile) as exc:
+        if "descriptor" in locals() and isinstance(descriptor, int):
+            try:
+                os.close(descriptor)
+            except OSError:
+                pass
+        raise WorkerCallbackError(
+            "governed runtime could not be pinned for execution"
+        ) from exc
+
+
 def run_server_command(
     config: Config,
     board: Board,
@@ -1097,6 +1514,8 @@ def run_server_command(
         raise WorkerCallbackError(
             "callback ID must be a 32-64 character lowercase hex value"
         )
+    governed_fd: int | None = None
+    governed_runtime_fd: int | None = None
     with board.edit(task_id) as task:
         if task.role != actor:
             raise WorkerCallbackError(
@@ -1177,6 +1596,9 @@ def run_server_command(
             command=cmdline,
             service=service,
         )
+        governed_fd = _open_governed_executable(config, parts)
+        if governed_fd is not None and parts[-1] == "install":
+            governed_runtime_fd = _open_governed_runtime(config, parts)
     command_environment = os.environ.copy()
     for name in (
         "GIT_COMMON_DIR",
@@ -1185,11 +1607,32 @@ def run_server_command(
         "GIT_WORK_TREE",
     ):
         command_environment.pop(name, None)
-    result = _run_bounded_command(
-        parts,
-        cwd=worktree,
-        env=command_environment,
-    )
+    execution_parts = list(parts)
+    pass_fds: tuple[int, ...] = ()
+    execution_cwd = worktree
+    if governed_fd is not None:
+        execution_parts[0] = f"/proc/self/fd/{governed_fd}"
+        pass_fds = (governed_fd,)
+        execution_cwd = config.data_root
+        command_environment["SATURNIN_HOME"] = str(config.data_root)
+        command_environment["SATURNIN_GOVERNED_EXECUTION"] = "sealed-memfd"
+        if governed_runtime_fd is not None:
+            pass_fds = (governed_fd, governed_runtime_fd)
+            command_environment["SATURNIN_GOVERNED_RUNTIME_FD"] = str(
+                governed_runtime_fd
+            )
+    try:
+        result = _run_bounded_command(
+            execution_parts,
+            cwd=execution_cwd,
+            env=command_environment,
+            pass_fds=pass_fds,
+        )
+    finally:
+        if governed_fd is not None:
+            os.close(governed_fd)
+        if governed_runtime_fd is not None:
+            os.close(governed_runtime_fd)
     failure: WorkerCallbackError | None = None
     if result.timed_out:
         failure = WorkerCallbackError(
@@ -1249,6 +1692,7 @@ def _run_bounded_command(
     env: dict[str, str],
     timeout: float = _COMMAND_TIMEOUT_SECONDS,
     output_limit: int = _COMMAND_OUTPUT_LIMIT_BYTES,
+    pass_fds: tuple[int, ...] = (),
 ) -> _BoundedCommandResult:
     process = subprocess.Popen(
         list(args),
@@ -1257,6 +1701,7 @@ def _run_bounded_command(
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,
         start_new_session=True,
+        pass_fds=pass_fds,
     )
     assert process.stdout is not None
     assert process.stderr is not None

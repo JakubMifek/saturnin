@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import secrets
@@ -1337,6 +1338,126 @@ def test_in_scope_server_commands(
     governance: Governance, command: str, trusted_python3_lookup: None
 ) -> None:
     assert governance.check_server_command(command).allowed
+
+
+def test_signer_user_unit_operation_is_exact_and_canonical(
+    governance: Governance, config: Config
+) -> None:
+    executable = config.data_root / "scripts" / "install_attestation_unit.sh"
+    executable.parent.mkdir(parents=True, exist_ok=True)
+    executable.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+    executable.chmod(0o755)
+    config.server_scope["operations"]["signer_user_unit"]["sha256"] = (
+        hashlib.sha256(executable.read_bytes()).hexdigest()
+    )
+    runtime = config.data_root / ".venv" / "bin" / "saturnin"
+    runtime.parent.mkdir(parents=True, exist_ok=True)
+    runtime.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+    runtime.chmod(0o755)
+    template = config.data_root / "systemd" / "saturnin-attestation.service"
+    template.parent.mkdir(parents=True, exist_ok=True)
+    template.write_text("[Unit]\nDescription=test\n", encoding="utf-8")
+    template.chmod(0o644)
+
+    for action in ("install", "status", "uninstall"):
+        assert governance.check_server_command(f"{executable} {action}").allowed
+    for command in (
+        f"{executable}",
+        f"{executable} install extra",
+        f"{executable} restart",
+        "install_attestation_unit.sh install",
+        "scripts/install_attestation_unit.sh install",
+    ):
+        assert not governance.check_server_command(command).allowed
+    assert not governance.check_server_command(
+        "scripts/install_attestation_unit.sh install",
+        cwd=config.data_root,
+    ).allowed
+
+
+def test_signer_user_unit_operation_rejects_symlink(
+    governance: Governance, config: Config, tmp_path: Path
+) -> None:
+    real = tmp_path / "installer"
+    real.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+    real.chmod(0o755)
+    executable = config.data_root / "scripts" / "install_attestation_unit.sh"
+    executable.parent.mkdir(parents=True, exist_ok=True)
+    executable.unlink(missing_ok=True)
+    executable.symlink_to(real)
+
+    assert not governance.check_server_command(f"{executable} install").allowed
+
+
+@pytest.mark.parametrize("unsafe", ["symlink", "group-writable"])
+def test_signer_user_unit_operation_rejects_unsafe_dependency(
+    governance: Governance, config: Config, tmp_path: Path, unsafe: str
+) -> None:
+    executable = config.data_root / "scripts" / "install_attestation_unit.sh"
+    executable.chmod(0o755)
+    dependency = config.data_root / ".venv" / "bin" / "saturnin"
+    dependency.parent.mkdir(parents=True, exist_ok=True)
+    dependency.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+    dependency.chmod(0o755)
+    if unsafe == "symlink":
+        replacement = tmp_path / "runtime"
+        replacement.write_text(":\n", encoding="utf-8")
+        dependency.unlink()
+        dependency.symlink_to(replacement)
+    else:
+        dependency.chmod(0o775)
+
+    decision = governance.check_server_command(f"{executable} install")
+
+    assert not decision.allowed
+    assert "dependency" in decision.reasons[0]
+
+
+def test_signer_user_unit_operation_rejects_untrusted_tool(
+    governance: Governance, config: Config, tmp_path: Path
+) -> None:
+    executable = config.data_root / "scripts" / "install_attestation_unit.sh"
+    executable.chmod(0o755)
+    runtime = config.data_root / ".venv" / "bin" / "saturnin"
+    runtime.parent.mkdir(parents=True, exist_ok=True)
+    runtime.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+    runtime.chmod(0o755)
+    template = config.data_root / "systemd" / "saturnin-attestation.service"
+    template.parent.mkdir(parents=True, exist_ok=True)
+    template.write_text("[Unit]\nDescription=test\n", encoding="utf-8")
+    template.chmod(0o644)
+    fake_tool = tmp_path / "systemctl"
+    fake_tool.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+    fake_tool.chmod(0o755)
+    config.server_scope["operations"]["signer_user_unit"]["trusted_tools"] = [
+        str(fake_tool)
+    ]
+
+    decision = governance.check_server_command(f"{executable} install")
+
+    assert not decision.allowed
+    assert "trusted tool" in decision.reasons[0]
+
+
+def test_signer_user_unit_operation_rejects_writable_parent(
+    governance: Governance, config: Config
+) -> None:
+    executable = config.data_root / "scripts" / "install_attestation_unit.sh"
+    executable.chmod(0o755)
+    runtime = config.data_root / ".venv" / "bin" / "saturnin"
+    runtime.parent.mkdir(parents=True, exist_ok=True)
+    runtime.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+    runtime.chmod(0o755)
+    template = config.data_root / "systemd" / "saturnin-attestation.service"
+    template.parent.mkdir(parents=True, exist_ok=True)
+    template.write_text("[Unit]\nDescription=test\n", encoding="utf-8")
+    template.chmod(0o644)
+    executable.parent.chmod(0o777)
+
+    decision = governance.check_server_command(f"{executable} install")
+
+    assert not decision.allowed
+    assert "parent" in decision.reasons[0]
 
 
 def test_bootstrap_runtime_saturnin_executable_is_trusted(

@@ -6,8 +6,9 @@ Documentation=file://@SATURNIN_HOME@/docs/runbooks/ops-safety.md
 Type=simple
 WorkingDirectory=@SATURNIN_HOME@
 Environment=SATURNIN_HOME="@SATURNIN_HOME_ENV@"
-Environment=PYTHONPATH="@SATURNIN_HOME_ENV@/src"
-ExecStart=@SATURNIN_HOME@/.venv/bin/python -m saturnin.attestation_service serve
+Environment=SATURNIN_RUNTIME_SHA256="@SATURNIN_RUNTIME_SHA256@"
+Environment=SATURNIN_SEALED_GOVERNANCE=runtime-archive
+ExecStart=/usr/bin/python3 -I -c 'import fcntl,hashlib,os,runpy,stat,sys;p=os.path.expanduser("~/.config/systemd/user/saturnin-attestation-runtime.pyz");f=os.open(p,os.O_RDONLY|os.O_CLOEXEC|os.O_NOFOLLOW);a=os.fstat(f);assert stat.S_ISREG(a.st_mode) and a.st_uid==os.getuid() and stat.S_IMODE(a.st_mode)==0o400;s=os.memfd_create("saturnin-attestation-runtime",os.MFD_CLOEXEC|os.MFD_ALLOW_SEALING);h=hashlib.sha256();exec("while b:=os.read(f,65536):\\n h.update(b)\\n v=memoryview(b)\\n while v:\\n  v=v[os.write(s,v):]");z=os.fstat(f);assert (a.st_dev,a.st_ino,a.st_size,a.st_mtime_ns,a.st_ctime_ns)==(z.st_dev,z.st_ino,z.st_size,z.st_mtime_ns,z.st_ctime_ns) and h.hexdigest()==os.environ["SATURNIN_RUNTIME_SHA256"];fcntl.fcntl(s,fcntl.F_ADD_SEALS,fcntl.F_SEAL_WRITE|fcntl.F_SEAL_GROW|fcntl.F_SEAL_SHRINK|fcntl.F_SEAL_SEAL);os.lseek(s,0,os.SEEK_SET);os.close(f);sys.path.insert(0,f"/proc/self/fd/{s}");runpy.run_module("saturnin.attestation_service",run_name="__main__")' serve
 LoadCredentialEncrypted=saturnin-review-attestation-key:%h/.config/systemd/user/saturnin-credentials/saturnin-review-attestation-key.cred
 LoadCredentialEncrypted=saturnin-review-attestation-previous-key:%h/.config/systemd/user/saturnin-credentials/saturnin-review-attestation-previous-key.cred
 RuntimeDirectory=saturnin-attestation

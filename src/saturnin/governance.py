@@ -8,6 +8,9 @@ pass through here first. The rules themselves live in
 from __future__ import annotations
 
 import os
+import grp
+import hashlib
+import pwd
 import re
 import shlex
 import shutil
@@ -413,6 +416,9 @@ class Governance:
             return Decision.deny("environment variable assignments are not allowed")
         executable = parts[0]
         binary = Path(executable).name
+        operation = _governed_operation(parts, self.config.server_scope, self.config.data_root)
+        if operation is not None:
+            return operation
         executable_decision = _check_executable_location(
             executable,
             binary,
@@ -781,8 +787,14 @@ def _check_executable_location(
     cwd: Path | None = None,
 ) -> Decision:
     filesystem = scope.get("filesystem", {})
+    operation_names = {
+        Path(str(operation.get("executable", ""))).name
+        for operation in scope.get("operations", {}).values()
+        if isinstance(operation, dict)
+    }
     classified = (
         binary in _SPECIAL_EXECUTABLES
+        or binary in operation_names
         or binary in set(filesystem.get("executable_allowlist", []))
         or binary in set(scope.get("user", {}).get("forbidden_prefixes", []))
         or binary == "apt"
@@ -861,6 +873,183 @@ def _check_executable_location(
             f"executable {str(resolved)!r} is outside trusted system executable roots"
         )
     return Decision.ok(f"executable {str(resolved)!r} is under a trusted system root")
+
+
+def _governed_operation(
+    parts: Sequence[str], scope: dict[str, Any], runtime_root: Path
+) -> Decision | None:
+    binary = Path(parts[0]).name
+    for name, operation in scope.get("operations", {}).items():
+        if not isinstance(operation, dict):
+            continue
+        relative = Path(str(operation.get("executable", "")))
+        if binary != relative.name:
+            continue
+        if relative.is_absolute() or ".." in relative.parts:
+            return Decision.deny(f"invalid governed operation path for {name}")
+        expected = Path(os.path.abspath(runtime_root / relative))
+        supplied = Path(parts[0])
+        if not supplied.is_absolute():
+            return Decision.deny(
+                f"governed operation {name} requires the absolute canonical "
+                f"executable {expected}"
+            )
+        if supplied != expected:
+            return Decision.deny(
+                f"governed operation {name} must use canonical executable {expected}"
+            )
+        executable_decision = _validate_governed_operation_file(
+            supplied,
+            label="executable",
+            executable=True,
+            expected_sha256=operation.get("sha256"),
+        )
+        if executable_decision is not None:
+            return executable_decision
+        dependencies = operation.get("dependencies", [])
+        if not isinstance(dependencies, list) or not all(
+            isinstance(dependency, str) and dependency for dependency in dependencies
+        ):
+            return Decision.deny(f"governed operation {name} has invalid dependencies")
+        for dependency in dependencies:
+            relative_dependency = Path(dependency)
+            if relative_dependency.is_absolute() or ".." in relative_dependency.parts:
+                return Decision.deny(
+                    f"governed operation {name} has invalid dependency path {dependency!r}"
+                )
+            dependency_path = Path(os.path.abspath(runtime_root / relative_dependency))
+            dependency_decision = _validate_governed_operation_file(
+                dependency_path, label=f"dependency {dependency!r}", executable=False
+            )
+            if dependency_decision is not None:
+                return dependency_decision
+        trusted_tools = operation.get("trusted_tools", [])
+        if not isinstance(trusted_tools, list) or not all(
+            isinstance(tool, str) and Path(tool).is_absolute()
+            for tool in trusted_tools
+        ):
+            return Decision.deny(f"governed operation {name} has invalid trusted tools")
+        for tool in trusted_tools:
+            tool_path = Path(tool)
+            try:
+                resolved_tool = tool_path.resolve(strict=True)
+            except (OSError, RuntimeError, ValueError):
+                return Decision.deny(
+                    f"governed operation trusted tool {tool_path} does not exist"
+                )
+            tool_decision = _validate_governed_operation_file(
+                resolved_tool,
+                label=f"trusted tool {tool!r}",
+                executable=True,
+                owner_uid=0,
+            )
+            if tool_decision is not None:
+                return tool_decision
+            if resolved_tool.stat().st_uid != 0:
+                return Decision.deny(
+                    f"governed operation trusted tool {tool_path} must be root-owned"
+                )
+        actions = operation.get("allowed_actions", [])
+        if len(parts) != 2 or parts[1] not in actions:
+            return Decision.deny(
+                f"governed operation {name} requires exactly one action from {actions}"
+            )
+        return Decision.ok(
+            f"governed operation {name} is limited to {operation.get('scope')} "
+            f"{operation.get('unit')}"
+        )
+    return None
+
+
+def _validate_governed_operation_file(
+    path: Path,
+    *,
+    label: str,
+    executable: bool,
+    owner_uid: int | None = None,
+    expected_sha256: object = None,
+) -> Decision | None:
+    parent_decision = _validate_governed_parent_chain(path.parent, label=label)
+    if parent_decision is not None:
+        return parent_decision
+    try:
+        if path.is_symlink():
+            return Decision.deny(f"governed operation {label} {path} must not be a symlink")
+        resolved = path.resolve(strict=True)
+        metadata = path.stat()
+    except (OSError, RuntimeError, ValueError):
+        return Decision.deny(f"governed operation {label} {path} does not exist")
+    if resolved != path or not path.is_file():
+        return Decision.deny(
+            f"governed operation {label} {path} must have canonical regular-file identity"
+        )
+    expected_owner = os.geteuid() if owner_uid is None else owner_uid
+    if metadata.st_uid != expected_owner or metadata.st_mode & 0o022:
+        return Decision.deny(
+            f"governed operation {label} {path} must be owner-controlled and "
+            "not group/world writable"
+        )
+    if executable and not os.access(path, os.X_OK):
+        return Decision.deny(f"governed operation {label} {path} must be executable")
+    if expected_sha256 is not None:
+        if not isinstance(expected_sha256, str) or not re.fullmatch(
+            r"[0-9a-f]{64}", expected_sha256
+        ):
+            return Decision.deny(
+                f"governed operation {label} has an invalid SHA-256 identity"
+            )
+        try:
+            descriptor = os.open(path, os.O_RDONLY | os.O_CLOEXEC | os.O_NOFOLLOW)
+            with os.fdopen(descriptor, "rb") as stream:
+                actual_sha256 = hashlib.file_digest(stream, "sha256").hexdigest()
+        except OSError:
+            return Decision.deny(
+                f"governed operation {label} {path} could not be opened safely"
+            )
+        if actual_sha256 != expected_sha256:
+            return Decision.deny(
+                f"governed operation {label} {path} does not match its approved digest"
+            )
+    return None
+
+
+def _validate_governed_parent_chain(path: Path, *, label: str) -> Decision | None:
+    current = Path(path.anchor)
+    for part in path.parts[1:]:
+        current /= part
+        try:
+            metadata = current.lstat()
+        except (OSError, RuntimeError, ValueError):
+            return Decision.deny(
+                f"governed operation {label} parent {current} does not exist"
+            )
+        if current.is_symlink() or not current.is_dir():
+            return Decision.deny(
+                f"governed operation {label} parent {current} must be a real directory"
+            )
+        writable = metadata.st_mode & 0o022
+        sticky_root = metadata.st_uid == 0 and metadata.st_mode & 0o1000
+        private_group = False
+        if (
+            metadata.st_uid == os.geteuid()
+            and metadata.st_gid == os.getegid()
+            and metadata.st_mode & 0o020
+        ):
+            group = grp.getgrgid(os.getegid())
+            primary_users = {
+                entry.pw_uid for entry in pwd.getpwall() if entry.pw_gid == os.getegid()
+            }
+            private_group = not group.gr_mem and primary_users == {os.geteuid()}
+        unsafe_write = metadata.st_mode & 0o002 or (
+            metadata.st_mode & 0o020 and not private_group
+        )
+        if metadata.st_uid not in {0, os.geteuid()} or (
+            unsafe_write and not sticky_root
+        ):
+            return Decision.deny(
+                f"governed operation {label} parent {current} is not owner-controlled"
+            )
+    return None
 
 
 def _trusted_executable_roots(

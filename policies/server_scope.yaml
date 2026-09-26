@@ -37,6 +37,89 @@ services:
   scheduling_scope: user
   allowed_schedulers: [systemd-user-timer]
 
+# Canonical compound operations are checked as exact executable/action pairs.
+# They may internally perform only the bounded user-unit lifecycle named here.
+operations:
+  signer_user_unit:
+    executable: scripts/install_attestation_unit.sh
+    sha256: 28131e4f5b17abcff3f10c11361a79cdf5afa3d4ca5766a6a7aaa867f5e7bf27
+    dependencies:
+      - .venv/bin/saturnin
+      - systemd/saturnin-attestation.service
+    runtime_sources:
+      - source: src/saturnin
+        archive: saturnin
+        files:
+          - __init__.py
+          - __main__.py
+          - attestation_service.py
+          - automation.py
+          - board.py
+          - checkpoints.py
+          - cli.py
+          - config.py
+          - contracts.py
+          - credentials.py
+          - disclosure.py
+          - discovery.py
+          - docsync.py
+          - escalation.py
+          - governance.py
+          - improve.py
+          - issues.py
+          - jsonlines.py
+          - launcher.py
+          - locking.py
+          - mcp.py
+          - review.py
+          - routing.py
+          - telemetry.py
+          - worker_callbacks.py
+          - worktrees.py
+      - source: .venv/lib/{python_version}/site-packages/yaml
+        archive: yaml
+        files:
+          - __init__.py
+          - composer.py
+          - constructor.py
+          - cyaml.py
+          - dumper.py
+          - emitter.py
+          - error.py
+          - events.py
+          - loader.py
+          - nodes.py
+          - parser.py
+          - reader.py
+          - representer.py
+          - resolver.py
+          - scanner.py
+          - serializer.py
+          - tokens.py
+    runtime_files:
+      - source: policies/governance.yaml
+        archive: saturnin/governance.runtime.yaml
+    runtime_manifest_sha256: 17b1317a5d0b04b93601a69e8dba7c3cdea297787187b8f8d9c4cb5afaaeb4c0
+    trusted_tools:
+      - /usr/bin/bash
+      - /usr/bin/chmod
+      - /usr/bin/cp
+      - /usr/bin/flock
+      - /usr/bin/id
+      - /usr/bin/mkdir
+      - /usr/bin/mv
+      - /usr/bin/python3
+      - /usr/bin/realpath
+      - /usr/bin/rm
+      - /usr/bin/rmdir
+      - /usr/bin/stat
+      - /usr/bin/systemctl
+      - /usr/bin/systemd-analyze
+    allowed_actions: [install, status, uninstall]
+    unit: saturnin-attestation.service
+    runtime_snapshot: "%h/.config/systemd/user/saturnin-attestation-runtime.pyz"
+    scope: user
+
 filesystem:
   # Basename-specific command rules only apply to executables resolved from
   # administrator-controlled system locations.

@@ -78,13 +78,21 @@ installation.
 
 Once status is valid:
 
+<!-- generated:signer-unit-interface -->
+This interface is restricted to the `user`-scoped `saturnin-attestation.service` unit.
+
 ```bash
-scripts/install_user_units.sh
-systemctl --user daemon-reload
-systemctl --user restart saturnin-attestation.service
-systemctl --user restart saturnin-improve.timer saturnin-resume.timer saturnin-discovery.timer
-systemctl --user status saturnin-attestation.service
+scripts/install_attestation_unit.sh install
+scripts/install_attestation_unit.sh status
+scripts/install_attestation_unit.sh uninstall
 ```
+
+Install is retry-safe and restores the prior signer definition and state after a partial failure. Status performs no mutation. Uninstall removes only the signer definition, enablement link, and pinned runtime snapshot `%h/.config/systemd/user/saturnin-attestation-runtime.pyz`, leaves encrypted credentials in place, and is safe to repeat.
+<!-- /generated:signer-unit-interface -->
+
+The uninstall action is the selective rollback for the signer installation.
+It does not revoke or delete credentials. Use the credential lifecycle commands
+below separately when revocation is intended.
 
 <!-- generated:attestation-boundary -->
 During autonomous operation, the master and previous keys are loaded only by `saturnin-attestation.service` in its private mount, network, runtime, and credential namespace. Supervisor and worker units do not load either credential. Explicit owner lifecycle commands may decrypt them in bounded process memory only while the signer and supervisors are stopped.
