@@ -197,6 +197,14 @@ def signer_install(tmp_path: Path) -> tuple[Path, dict[str, str], Path, Path]:
         "    [ \"${FAIL_ON:-}\" != enable ]\n"
         "    ;;\n"
         "  start)\n"
+        "    if [ -n \"${RACE_ROLLBACK:-}\" ]; then\n"
+        "      backup=$(/usr/bin/find \"$unit_dir\" "
+        "-path '*/backup/unit' -type f -print -quit)\n"
+        "      printf '%s\\n' '[Unit]' 'Description=raced rollback' > \"$backup\"\n"
+        "      chmod 0644 \"$backup\"\n"
+        "      rm -f \"$state/active\"\n"
+        "      exit 1\n"
+        "    fi\n"
         "    touch \"$state/active\"\n"
         "    [ \"${FAIL_ON:-}\" != start ]\n"
         "    ;;\n"
@@ -359,7 +367,9 @@ def test_symlinked_wants_directory_blocks_uninstall_without_escape(
     assert result.returncode != 0
     assert installed.read_text(encoding="utf-8") == "old unit\n"
     assert victim.read_text(encoding="utf-8") == "unrelated\n"
-    assert not calls.exists()
+    assert calls.read_text(encoding="utf-8").splitlines() == [
+        "--user is-active --quiet saturnin-attestation.service"
+    ]
 
 
 def test_failed_initial_reload_never_changes_existing_installation(
