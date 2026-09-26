@@ -29,7 +29,6 @@ HOST_CREDENTIAL_SECRET = Path("/var/lib/systemd/credential.secret")
 ROTATION_STATE = ".attestation-rotation.json"
 ROTATION_CURRENT_BACKUP = ".saturnin-review-attestation-key.rollback.cred"
 ROTATION_PREVIOUS_BACKUP = ".saturnin-review-attestation-previous-key.rollback.cred"
-LIFECYCLE_LOCK = ".lifecycle"
 CREDENTIAL_GENERATION = ".generation"
 EXECUTION_SIGNER_ENABLEMENT = ".execution-signer-enabled"
 HOST_SCOPED_CREDENTIAL_ID = bytes.fromhex("55b9ed1d38594d43a8319d2ebb332ac6")
@@ -43,20 +42,18 @@ class CredentialError(RuntimeError):
 def _lifecycle_lock(*, exclusive: bool) -> object:
     directory = encrypted_credential_dir()
     _secure_directory(directory)
-    path = directory / LIFECYCLE_LOCK
     descriptor = os.open(
-        path,
-        os.O_RDWR | os.O_CREAT | os.O_NOFOLLOW,
-        PRIVATE_FILE_MODE,
+        directory,
+        os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW,
     )
     try:
         metadata = os.fstat(descriptor)
         if (
-            not stat.S_ISREG(metadata.st_mode)
+            not stat.S_ISDIR(metadata.st_mode)
             or metadata.st_uid != os.getuid()
+            or stat.S_IMODE(metadata.st_mode) != 0o700
         ):
             raise CredentialError("credential lifecycle lock is unsafe")
-        os.fchmod(descriptor, PRIVATE_FILE_MODE)
         fcntl.flock(
             descriptor,
             fcntl.LOCK_EX if exclusive else fcntl.LOCK_SH,

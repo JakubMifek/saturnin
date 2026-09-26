@@ -44,6 +44,20 @@ class AttestationServiceError(RuntimeError):
     pass
 
 
+def _notify_ready() -> None:
+    address = os.environ.get("NOTIFY_SOCKET")
+    if not address:
+        return
+    if address.startswith("@"):
+        address = "\0" + address[1:]
+    notifier = socket.socket(socket.AF_UNIX, socket.SOCK_DGRAM)
+    try:
+        notifier.connect(address)
+        notifier.sendall(b"READY=1")
+    finally:
+        notifier.close()
+
+
 def _disable_process_dump() -> None:
     libc = ctypes.CDLL(None, use_errno=True)
     if libc.prctl(4, 0, 0, 0, 0) != 0:
@@ -343,6 +357,19 @@ class SigningService:
         self.previous = systemd_credential(PREVIOUS_ATTESTATION_CREDENTIAL)
         if not self.current or not self.previous:
             raise AttestationServiceError("attestation service credentials are unavailable")
+        expected_current = os.environ.get("SATURNIN_CURRENT_KEY_ID", "")
+        expected_previous = os.environ.get("SATURNIN_PREVIOUS_KEY_ID", "")
+        if (
+            not hmac.compare_digest(
+                hashlib.sha256(self.current.encode()).hexdigest(), expected_current
+            )
+            or not hmac.compare_digest(
+                hashlib.sha256(self.previous.encode()).hexdigest(), expected_previous
+            )
+        ):
+            raise AttestationServiceError(
+                "attestation service credential generation mismatch"
+            )
         with _lifecycle_lock(exclusive=False):
             self.generation = credential_generation()
             if not execution_signer_ready():
@@ -670,6 +697,7 @@ class SigningService:
             listener.bind(str(path))
             os.chmod(path, 0o600)
             listener.listen(16)
+            _notify_ready()
             while True:
                 connection, _ = listener.accept()
                 with connection:

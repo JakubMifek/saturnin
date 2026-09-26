@@ -147,6 +147,12 @@ def signer_install(tmp_path: Path) -> tuple[Path, dict[str, str], Path, Path]:
         "  [ -z \"${FAIL_PROCESS_IDENTITY:-}\" ]\n"
         "  exit\n"
         "fi\n"
+        "case \"${3:-}\" in\n"
+        "  *systemd_credential*)\n"
+        "    printf '%064d %064d\\n' 0 1\n"
+        "    exit 0\n"
+        "    ;;\n"
+        "esac\n"
         "exec /usr/bin/python3 \"$@\"\n",
         encoding="utf-8",
     )
@@ -220,7 +226,7 @@ def signer_install(tmp_path: Path) -> tuple[Path, dict[str, str], Path, Path]:
         "\"$unit_dir/default.target.wants/saturnin-attestation.service\"\n"
         "    [ \"${FAIL_ON:-}\" != enable ]\n"
         "    ;;\n"
-        "  start)\n"
+        "  start|restart)\n"
         "    if [ -n \"${RACE_ROLLBACK:-}\" ]; then\n"
         "      backup=$(/usr/bin/find \"$unit_dir\" "
         "-path '*/backup/unit' -type f -print -quit)\n"
@@ -489,6 +495,26 @@ def test_install_rejects_forged_self_consistent_sealed_runtime(
     assert not calls.exists()
 
 
+def test_install_serializes_with_credential_lifecycle(
+    signer_install: tuple[Path, dict[str, str], Path, Path],
+) -> None:
+    _, _, unit_dir, calls = signer_install
+    credential_dir = unit_dir / "saturnin-credentials"
+    descriptor = os.open(credential_dir, os.O_RDONLY | os.O_DIRECTORY)
+    fcntl.flock(descriptor, fcntl.LOCK_EX)
+    try:
+        result = _run(signer_install, "install")
+    finally:
+        fcntl.flock(descriptor, fcntl.LOCK_UN)
+        os.close(descriptor)
+
+    assert result.returncode != 0
+    assert "credential lifecycle operation" in result.stderr
+    assert calls.read_text(encoding="utf-8").splitlines() == [
+        "--user is-active --quiet saturnin-attestation.service"
+    ]
+
+
 def test_start_failure_restores_preexisting_entries(
     signer_install: tuple[Path, dict[str, str], Path, Path]
 ) -> None:
@@ -638,7 +664,7 @@ def test_changed_rollback_snapshot_is_never_restored_or_restarted(
 
     assert result.returncode != 0
     assert calls.read_text(encoding="utf-8").splitlines().count(
-        "--user start saturnin-attestation.service"
+        "--user restart saturnin-attestation.service"
     ) == 1
     installed = unit_dir / "saturnin-attestation.service"
     assert not installed.exists() or "Description=raced rollback" not in (
@@ -760,8 +786,8 @@ def test_status_rejects_tampered_unit_without_systemctl(
 @pytest.mark.parametrize(
     ("needle", "replacement"),
     [
-        ("Type=simple", "Type=simple\nExecStartPre=/bin/true"),
-        ("Type=simple", "Type=simple\nExecStartPost=/bin/true"),
+        ("Type=notify", "Type=notify\nExecStartPre=/bin/true"),
+        ("Type=notify", "Type=notify\nExecStartPost=/bin/true"),
         (
             "ExecStart=",
             "ExecStart=/bin/true\nExecStart=",
@@ -773,8 +799,8 @@ def test_status_rejects_tampered_unit_without_systemctl(
             "LoadCredentialEncrypted=saturnin-review-attestation-key:",
         ),
         (
-            "[Service]\nType=simple",
-            "ProtectSystem=strict\n[Service]\nType=simple",
+            "[Service]\nType=notify",
+            "ProtectSystem=strict\n[Service]\nType=notify",
         ),
     ],
 )
@@ -1089,7 +1115,7 @@ def test_invalid_template_rolls_back_without_replacing_preexisting_unit(
     template = checkout / "systemd" / "saturnin-attestation.service"
     template.write_text(
         template.read_text(encoding="utf-8").replace(
-            "Type=simple", "Type=simple\nExecStartPre=/bin/true"
+            "Type=notify", "Type=notify\nExecStartPre=/bin/true"
         ),
         encoding="utf-8",
     )

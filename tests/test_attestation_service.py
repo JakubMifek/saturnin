@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import hashlib
 import os
 import socket
 import subprocess
@@ -192,7 +193,31 @@ def test_signer_startup_requires_completed_rotation(
         "saturnin.attestation_service.execution_signer_ready",
         lambda: False,
     )
+    monkeypatch.setenv(
+        "SATURNIN_CURRENT_KEY_ID",
+        hashlib.sha256(b"saturnin-review-attestation-key-test-value").hexdigest(),
+    )
+    monkeypatch.setenv(
+        "SATURNIN_PREVIOUS_KEY_ID",
+        hashlib.sha256(
+            b"saturnin-review-attestation-previous-key-test-value"
+        ).hexdigest(),
+    )
     with pytest.raises(AttestationServiceError, match="rotation and migration"):
+        SigningService(config)
+
+
+def test_signer_startup_rejects_loaded_credential_generation(
+    config: Config, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(
+        "saturnin.attestation_service.systemd_credential",
+        lambda name: f"{name}-test-value",
+    )
+    monkeypatch.setenv("SATURNIN_CURRENT_KEY_ID", "0" * 64)
+    monkeypatch.setenv("SATURNIN_PREVIOUS_KEY_ID", "1" * 64)
+
+    with pytest.raises(AttestationServiceError, match="generation mismatch"):
         SigningService(config)
 
 

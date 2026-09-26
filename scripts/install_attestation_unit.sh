@@ -7,7 +7,7 @@ unset BASH_ENV ENV CDPATH PYTHONHOME PYTHONPATH
 IFS=$' \t\n'
 
 readonly UNIT=saturnin-attestation.service
-readonly EXPECTED_RUNTIME_MANIFEST_SHA256=17b1317a5d0b04b93601a69e8dba7c3cdea297787187b8f8d9c4cb5afaaeb4c0
+readonly EXPECTED_RUNTIME_MANIFEST_SHA256=c0f5a8a1d107d1cdfa1d32e8b9a8afe45e8aee381a945e95860170a0990eb591
 readonly ID=/usr/bin/id
 readonly REALPATH=/usr/bin/realpath
 readonly STAT=/usr/bin/stat
@@ -542,7 +542,8 @@ verify_wants_link() {
 verify_unit_identity() {
   UNIT_PATH="$1" EXPECTED_MODE="$2" RUNTIME_SHA256_VALUE="$3" \
     EXPECTED_UID="$CURRENT_UID" \
-    HOME_VALUE="$SATURNIN_HOME" "$PYTHON" -I -c '
+    HOME_VALUE="$SATURNIN_HOME" CURRENT_KEY_ID_VALUE="${CURRENT_KEY_ID:-}" \
+    PREVIOUS_KEY_ID_VALUE="${PREVIOUS_KEY_ID:-}" "$PYTHON" -I -c '
 import os
 import stat
 
@@ -579,17 +580,35 @@ if (
 lines = content.decode("utf-8").splitlines()
 home = os.environ["HOME_VALUE"]
 runtime_sha256 = os.environ["RUNTIME_SHA256_VALUE"]
+current_key_id = os.environ["CURRENT_KEY_ID_VALUE"]
+previous_key_id = os.environ["PREVIOUS_KEY_ID_VALUE"]
+if not current_key_id or not previous_key_id:
+    for line in lines:
+        if line.startswith("Environment=SATURNIN_CURRENT_KEY_ID="):
+            current_key_id = line.rsplit("=", 1)[-1].strip("\"")
+        elif line.startswith("Environment=SATURNIN_PREVIOUS_KEY_ID="):
+            previous_key_id = line.rsplit("=", 1)[-1].strip("\"")
+if (
+    len(current_key_id) != 64
+    or len(previous_key_id) != 64
+    or any(character not in "0123456789abcdef" for character in current_key_id)
+    or any(character not in "0123456789abcdef" for character in previous_key_id)
+):
+    raise SystemExit("rendered attestation unit key identifiers are invalid")
 expected = [
     ("Unit", [
         "Description=Saturnin private review attestation signer",
         f"Documentation=file://{home}/docs/runbooks/ops-safety.md",
     ]),
     ("Service", [
-        "Type=simple",
+        "Type=notify",
+        "NotifyAccess=main",
         f"WorkingDirectory={home}",
         f"Environment=SATURNIN_HOME=\"{home}\"",
         f"Environment=SATURNIN_RUNTIME_SHA256=\"{runtime_sha256}\"",
         "Environment=SATURNIN_SEALED_GOVERNANCE=runtime-archive",
+        f"Environment=SATURNIN_CURRENT_KEY_ID=\"{current_key_id}\"",
+        f"Environment=SATURNIN_PREVIOUS_KEY_ID=\"{previous_key_id}\"",
         "ExecStart=/usr/bin/python3 -I -c '\''import fcntl,hashlib,os,runpy,stat,sys;p=os.path.expanduser(\"~/.config/systemd/user/saturnin-attestation-runtime.pyz\");f=os.open(p,os.O_RDONLY|os.O_CLOEXEC|os.O_NOFOLLOW);a=os.fstat(f);assert stat.S_ISREG(a.st_mode) and a.st_uid==os.getuid() and stat.S_IMODE(a.st_mode)==0o400;s=os.memfd_create(\"saturnin-attestation-runtime\",os.MFD_CLOEXEC|os.MFD_ALLOW_SEALING);h=hashlib.sha256();exec(\"while b:=os.read(f,65536):\\\\n h.update(b)\\\\n v=memoryview(b)\\\\n while v:\\\\n  v=v[os.write(s,v):]\");z=os.fstat(f);assert (a.st_dev,a.st_ino,a.st_size,a.st_mtime_ns,a.st_ctime_ns)==(z.st_dev,z.st_ino,z.st_size,z.st_mtime_ns,z.st_ctime_ns) and h.hexdigest()==os.environ[\"SATURNIN_RUNTIME_SHA256\"];fcntl.fcntl(s,fcntl.F_ADD_SEALS,fcntl.F_SEAL_WRITE|fcntl.F_SEAL_GROW|fcntl.F_SEAL_SHRINK|fcntl.F_SEAL_SEAL);os.lseek(s,0,os.SEEK_SET);os.close(f);sys.path.insert(0,f\"/proc/self/fd/{s}\");runpy.run_module(\"saturnin.attestation_service\",run_name=\"__main__\")'\'' serve",
         "LoadCredentialEncrypted=saturnin-review-attestation-key:%h/.config/systemd/user/saturnin-credentials/saturnin-review-attestation-key.cred",
         "LoadCredentialEncrypted=saturnin-review-attestation-previous-key:%h/.config/systemd/user/saturnin-credentials/saturnin-review-attestation-previous-key.cred",
@@ -927,6 +946,12 @@ if [[ -L "$CREDENTIAL_DIR" || ! -d "$CREDENTIAL_DIR" ]] \
   echo "Attestation credential directory is missing or unsafe." >&2
   exit 1
 fi
+exec {CREDENTIAL_LOCK_FD}<"$CREDENTIAL_DIR"
+readonly CREDENTIAL_LOCK_FD
+if ! "$FLOCK" --exclusive --nonblock "$CREDENTIAL_LOCK_FD"; then
+  echo "Another credential lifecycle operation is in progress." >&2
+  exit 1
+fi
 CURRENT_CREDENTIAL_ID="$(credential_identity "$CURRENT")"
 PREVIOUS_CREDENTIAL_ID="$(credential_identity "$PREVIOUS")"
 readonly CURRENT_CREDENTIAL_ID PREVIOUS_CREDENTIAL_ID
@@ -940,6 +965,17 @@ if [[ "$credential_status" != *"rotation=ready"* || "$credential_status" != *"si
   exit 1
 fi
 unset credential_status
+read -r CURRENT_KEY_ID PREVIOUS_KEY_ID < <(
+  SATURNIN_SEALED_GOVERNANCE=runtime-archive "$PYTHON" -I -c \
+    'import hashlib,runpy,sys;sys.path.insert(0,sys.argv.pop(1));from saturnin.credentials import ATTESTATION_CREDENTIAL,PREVIOUS_ATTESTATION_CREDENTIAL,systemd_credential;print(hashlib.sha256(systemd_credential(ATTESTATION_CREDENTIAL).encode()).hexdigest(),hashlib.sha256(systemd_credential(PREVIOUS_ATTESTATION_CREDENTIAL).encode()).hexdigest())' \
+    "/proc/self/fd/$RUNTIME_TREE_FD"
+)
+if [[ ! "$CURRENT_KEY_ID" =~ ^[0-9a-f]{64}$ ]] \
+  || [[ ! "$PREVIOUS_KEY_ID" =~ ^[0-9a-f]{64}$ ]]; then
+  echo "Attestation credential key identifiers are invalid." >&2
+  exit 1
+fi
+readonly CURRENT_KEY_ID PREVIOUS_KEY_ID
 if [[ "$(credential_identity "$CURRENT")" != "$CURRENT_CREDENTIAL_ID" ]] \
   || [[ "$(credential_identity "$PREVIOUS")" != "$PREVIOUS_CREDENTIAL_ID" ]]; then
   echo "Attestation credential identity changed during readiness validation." >&2
@@ -948,6 +984,7 @@ fi
 
 TEMPLATE_PATH="$TEMPLATE_SNAPSHOT" DESTINATION="$STAGE" \
   HOME_VALUE="$SATURNIN_HOME" RUNTIME_SHA256_VALUE="$RUNTIME_TREE_SHA256" \
+  CURRENT_KEY_ID_VALUE="$CURRENT_KEY_ID" PREVIOUS_KEY_ID_VALUE="$PREVIOUS_KEY_ID" \
   "$PYTHON" -I -c '
 import os
 from pathlib import Path
@@ -957,6 +994,9 @@ home = os.environ["HOME_VALUE"]
 rendered = template.replace("@SATURNIN_HOME@", home).replace(
     "@SATURNIN_HOME_ENV@", home
 ).replace("@SATURNIN_RUNTIME_SHA256@", os.environ["RUNTIME_SHA256_VALUE"])
+rendered = rendered.replace(
+    "@SATURNIN_CURRENT_KEY_ID@", os.environ["CURRENT_KEY_ID_VALUE"]
+).replace("@SATURNIN_PREVIOUS_KEY_ID@", os.environ["PREVIOUS_KEY_ID_VALUE"])
 Path(os.environ["DESTINATION"]).write_text(rendered, encoding="utf-8")
 '
 verify_unit_identity "$STAGE" 0600 "$RUNTIME_TREE_SHA256" >/dev/null
@@ -1017,7 +1057,11 @@ verify_unit_directory
 verify_wants_link
 "$SYSTEMCTL" --user cat --no-pager "$UNIT" >"$MANAGER_VIEW"
 verify_manager_loaded_unit "$MANAGER_VIEW"
-"$SYSTEMCTL" --user start "$UNIT"
+if [[ "$was_active" -eq 1 ]]; then
+  "$SYSTEMCTL" --user restart "$UNIT"
+else
+  "$SYSTEMCTL" --user start "$UNIT"
+fi
 "$SYSTEMCTL" --user cat --no-pager "$UNIT" >"$MANAGER_VIEW"
 verify_manager_loaded_unit "$MANAGER_VIEW"
 "$SYSTEMCTL" --user show --no-pager \

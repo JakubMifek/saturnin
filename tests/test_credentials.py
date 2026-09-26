@@ -104,7 +104,7 @@ def test_parallel_provision_is_serialized_without_partial_ready_state(
     assert "already provisioned" in str(failures[0])
     credential_dir = destinations[0].parent
     assert (credential_dir / f"{PREVIOUS_ATTESTATION_CREDENTIAL}.cred").is_file()
-    assert (credential_dir / ".lifecycle").stat().st_mode & 0o777 == 0o600
+    assert credential_dir.stat().st_mode & 0o777 == 0o700
 
 
 def test_systemd_credential_requires_private_owner_file(
