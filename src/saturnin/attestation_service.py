@@ -68,6 +68,13 @@ def _send(connection: socket.socket, payload: dict[str, Any]) -> None:
     )
 
 
+def _send_response(connection: socket.socket, payload: dict[str, Any]) -> None:
+    try:
+        _send(connection, payload)
+    except OSError:
+        pass
+
+
 def _receive(connection: socket.socket) -> dict[str, Any]:
     data = bytearray()
     while len(data) <= MAX_MESSAGE:
@@ -579,7 +586,7 @@ class SigningService:
                 response = self._verify_manifest(request)
             else:
                 raise AttestationServiceError("unknown attestation service action")
-            _send(connection, response)
+            _send_response(connection, response)
         finally:
             peer.close()
 
@@ -669,7 +676,7 @@ class SigningService:
                     try:
                         self.handle(connection)
                     except AttestationServiceError as exc:
-                        _send(connection, {"error": str(exc)})
+                        _send_response(connection, {"error": str(exc)})
         finally:
             listener.close()
             path.unlink(missing_ok=True)

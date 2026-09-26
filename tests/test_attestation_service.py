@@ -11,6 +11,7 @@ from pathlib import Path
 
 import pytest
 
+import saturnin.attestation_service as attestation_service
 from saturnin.attestation_service import (
     AttestationServiceError,
     _ProcessIdentity,
@@ -402,3 +403,102 @@ def test_attestation_server_missing_proc_identity_fails_closed(
     finally:
         client.close()
         server.close()
+
+
+def test_disconnected_malformed_clients_cannot_terminate_service(
+    config: Config, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    runtime = tmp_path / "runtime"
+    monkeypatch.setenv("XDG_RUNTIME_DIR", str(runtime))
+    config.governance["review"]["attestation"][
+        "service_socket"
+    ] = "%t/control.sock"
+    path = service_socket(config)
+    hostile_pairs = [socket.socketpair() for _ in range(3)]
+    valid_client, valid_server = socket.socketpair()
+    accepted = [server for _, server in hostile_pairs] + [valid_server]
+
+    class TestComplete(RuntimeError):
+        pass
+
+    class Listener:
+        def __init__(self) -> None:
+            self.closed = False
+
+        def bind(self, address: str) -> None:
+            Path(address).touch()
+
+        def listen(self, backlog: int) -> None:
+            assert backlog == 16
+
+        def accept(self) -> tuple[socket.socket, None]:
+            if accepted:
+                return accepted.pop(0), None
+            raise TestComplete
+
+        def close(self) -> None:
+            self.closed = True
+
+    listener = Listener()
+    original_send = attestation_service._send
+    failures = iter(
+        (
+            BrokenPipeError("disconnected"),
+            ConnectionResetError("reset"),
+            OSError("socket write failed"),
+        )
+    )
+
+    def send_with_failures(
+        connection: socket.socket, payload: dict[str, object]
+    ) -> None:
+        if "error" in payload:
+            raise next(failures)
+        original_send(connection, payload)
+
+    monkeypatch.setattr(
+        attestation_service.socket, "socket", lambda *args: listener
+    )
+    monkeypatch.setattr(
+        attestation_service,
+        "_peer_identity",
+        lambda connection: _ProcessIdentity(10, 100, -1, (1, 20), (10,), ("/",)),
+    )
+    monkeypatch.setattr(attestation_service, "_trusted_supervisor", lambda *args: True)
+    monkeypatch.setattr(attestation_service, "_send", send_with_failures)
+
+    for client, _ in hostile_pairs:
+        client.sendall(b"{]\n")
+        client.close()
+    valid_client.sendall(b'{"action":"cancel","nonce":"missing"}\n')
+
+    try:
+        with pytest.raises(TestComplete):
+            _service(config).serve()
+        assert json.loads(valid_client.recv(1024)) == {"status": "cancelled"}
+        assert listener.closed
+        assert not path.exists()
+        assert all(server.fileno() == -1 for _, server in hostile_pairs)
+        assert valid_server.fileno() == -1
+    finally:
+        valid_client.close()
+        valid_server.close()
+        for client, server in hostile_pairs:
+            client.close()
+            server.close()
+
+
+def test_response_delivery_does_not_hide_non_connection_faults(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    def fail(connection: socket.socket, payload: dict[str, object]) -> None:
+        raise RuntimeError("internal fault")
+
+    monkeypatch.setattr(attestation_service, "_send", fail)
+    sender, receiver = socket.socketpair()
+    try:
+        with pytest.raises(RuntimeError, match="internal fault"):
+            attestation_service._send_response(sender, {"status": "ignored"})
+    finally:
+        sender.close()
+        receiver.close()
