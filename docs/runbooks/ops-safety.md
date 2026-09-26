@@ -87,7 +87,7 @@ scripts/install_attestation_unit.sh status
 scripts/install_attestation_unit.sh uninstall
 ```
 
-Install is retry-safe and restores the prior signer definition and state after a partial failure. Status performs no mutation. Uninstall removes only the signer definition and enablement link, leaves encrypted credentials in place, and is safe to repeat.
+Install is retry-safe and restores the prior signer definition and state after a partial failure. Status performs no mutation. Uninstall removes only the signer definition, enablement link, and pinned runtime snapshot `%h/.config/systemd/user/saturnin-attestation-runtime.pyz`, leaves encrypted credentials in place, and is safe to repeat.
 <!-- /generated:signer-unit-interface -->
 
 The uninstall action is the selective rollback for the signer installation.

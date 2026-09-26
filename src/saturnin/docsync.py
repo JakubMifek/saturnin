@@ -256,12 +256,14 @@ def _signer_unit_interface(config: Config) -> str:
     executable = operation.get("executable")
     actions = operation.get("allowed_actions")
     unit = operation.get("unit")
+    runtime_snapshot = operation.get("runtime_snapshot")
     scope = operation.get("scope")
     if (
         not isinstance(executable, str)
         or not isinstance(actions, list)
         or not all(isinstance(action, str) for action in actions)
         or not isinstance(unit, str)
+        or not isinstance(runtime_snapshot, str)
         or not isinstance(scope, str)
     ):
         raise GeneratedBlockError("server_scope signer_user_unit operation is invalid")
@@ -271,8 +273,9 @@ def _signer_unit_interface(config: Config) -> str:
         f"```bash\n{commands}\n```\n\n"
         "Install is retry-safe and restores the prior signer definition and state "
         "after a partial failure. Status performs no mutation. Uninstall removes "
-        "only the signer definition and enablement link, leaves encrypted "
-        "credentials in place, and is safe to repeat."
+        f"only the signer definition, enablement link, and pinned runtime snapshot "
+        f"`{runtime_snapshot}`, leaves encrypted credentials in place, and is safe "
+        "to repeat."
     )
 
 

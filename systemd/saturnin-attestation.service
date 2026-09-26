@@ -6,8 +6,8 @@ Documentation=file://@SATURNIN_HOME@/docs/runbooks/ops-safety.md
 Type=simple
 WorkingDirectory=@SATURNIN_HOME@
 Environment=SATURNIN_HOME="@SATURNIN_HOME_ENV@"
-Environment=PYTHONPATH="@SATURNIN_HOME_ENV@/src"
-ExecStart=@SATURNIN_HOME@/.venv/bin/python -m saturnin.attestation_service serve
+Environment=PYTHONPATH="%h/.config/systemd/user/saturnin-attestation-runtime.pyz"
+ExecStart=/usr/bin/python3 -m saturnin.attestation_service serve
 LoadCredentialEncrypted=saturnin-review-attestation-key:%h/.config/systemd/user/saturnin-credentials/saturnin-review-attestation-key.cred
 LoadCredentialEncrypted=saturnin-review-attestation-previous-key:%h/.config/systemd/user/saturnin-credentials/saturnin-review-attestation-previous-key.cred
 RuntimeDirectory=saturnin-attestation

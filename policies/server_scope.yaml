@@ -62,6 +62,7 @@ operations:
       - /usr/bin/systemd-analyze
     allowed_actions: [install, status, uninstall]
     unit: saturnin-attestation.service
+    runtime_snapshot: "%h/.config/systemd/user/saturnin-attestation-runtime.pyz"
     scope: user
 
 filesystem:

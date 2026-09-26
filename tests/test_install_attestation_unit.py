@@ -3,10 +3,13 @@ from __future__ import annotations
 import os
 import shutil
 import subprocess
+import sys
 import time
+import zipfile
 from pathlib import Path
 
 import pytest
+import yaml
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 
@@ -30,6 +33,16 @@ def signer_install(tmp_path: Path) -> tuple[Path, dict[str, str], Path, Path]:
     (checkout / "scripts" / "lib").mkdir(parents=True)
     (checkout / "systemd").mkdir()
     (checkout / ".venv" / "bin").mkdir(parents=True)
+    shutil.copytree(REPO_ROOT / "src" / "saturnin", checkout / "src" / "saturnin")
+    yaml_destination = (
+        checkout
+        / ".venv"
+        / "lib"
+        / f"python{sys.version_info.major}.{sys.version_info.minor}"
+        / "site-packages"
+        / "yaml"
+    )
+    shutil.copytree(Path(yaml.__file__).parent, yaml_destination)
     shutil.copy2(
         REPO_ROOT / "scripts" / "install_attestation_unit.sh",
         checkout / "scripts" / "install_attestation_unit.sh",
@@ -92,7 +105,14 @@ def signer_install(tmp_path: Path) -> tuple[Path, dict[str, str], Path, Path]:
     fake_cp.chmod(0o755)
     fake_python = fake_bin / "python3"
     fake_python.write_text(
-        "#!/bin/sh\nexec /usr/bin/python3 \"$@\"\n", encoding="utf-8"
+        "#!/bin/sh\n"
+        "if [ \"${1:-}\" = -m ] && [ \"${2:-}\" = saturnin ] "
+        "&& [ \"${3:-}\" = credential ]; then\n"
+        "  printf '%s\\n' 'rotation=ready; signer=ready'\n"
+        "  exit 0\n"
+        "fi\n"
+        "exec /usr/bin/python3 \"$@\"\n",
+        encoding="utf-8",
     )
     fake_python.chmod(0o755)
     calls = tmp_path / "systemctl-calls"
@@ -110,6 +130,12 @@ def signer_install(tmp_path: Path) -> tuple[Path, dict[str, str], Path, Path]:
         "case \"$sub\" in\n"
         "  is-active) [ -e \"$state/active\" ] ;;\n"
         "  daemon-reload)\n"
+        "    if [ -n \"${REPLACE_UNIT_DIR:-}\" ] "
+        "&& [ ! -e \"$state/unit-dir-replaced\" ]; then\n"
+        "      touch \"$state/unit-dir-replaced\"\n"
+        "      mv \"$unit_dir\" \"$unit_dir.replaced\"\n"
+        "      mkdir -m 0700 \"$unit_dir\"\n"
+        "    fi\n"
         "    if [ -n \"${REPLACE_AFTER_MOVE:-}\" ] "
         "&& [ ! -e \"$state/replaced\" ]; then\n"
         "      touch \"$state/replaced\"\n"
@@ -132,6 +158,14 @@ def signer_install(tmp_path: Path) -> tuple[Path, dict[str, str], Path, Path]:
         "    fi\n"
         "    ;;\n"
         "  enable)\n"
+        "    if [ -n \"${RACE_ROLLBACK:-}\" ]; then\n"
+        "      backup=$(/usr/bin/find \"$unit_dir\" "
+        "-path '*/backup/unit' -type f -print -quit)\n"
+        "      printf '%s\\n' '[Unit]' 'Description=raced rollback' > \"$backup\"\n"
+        "      chmod 0644 \"$backup\"\n"
+        "      rm -f \"$state/active\"\n"
+        "      exit 1\n"
+        "    fi\n"
         "    mkdir -p \"$unit_dir/default.target.wants\"\n"
         "    ln -sf \"../saturnin-attestation.service\" "
         "\"$unit_dir/default.target.wants/saturnin-attestation.service\"\n"
@@ -157,6 +191,11 @@ def signer_install(tmp_path: Path) -> tuple[Path, dict[str, str], Path, Path]:
         "  printf '%s\\n' '[Unit]' 'Description=replaced' "
         "> \"${TEMPLATE_TO_REPLACE}\"\n"
         "  chmod 0644 \"${TEMPLATE_TO_REPLACE}\"\n"
+        "  if [ -n \"${SOURCE_TO_REPLACE:-}\" ]; then\n"
+        "    printf '%s\\n' 'raise RuntimeError(\"reopened source\")' "
+        "> \"${SOURCE_TO_REPLACE}\"\n"
+        "    chmod 0644 \"${SOURCE_TO_REPLACE}\"\n"
+        "  fi\n"
         "fi\n"
         "exit 0\n",
         encoding="utf-8",
@@ -293,6 +332,36 @@ def test_manager_loaded_mismatch_is_detected_and_rolled_back(
 
     assert result.returncode != 0
     assert _topology(unit_dir) == before
+
+
+def test_replaced_unit_directory_fails_closed_without_pathname_rollback(
+    signer_install: tuple[Path, dict[str, str], Path, Path],
+) -> None:
+    _, _, unit_dir, calls = signer_install
+    installed = unit_dir / "saturnin-attestation.service"
+    installed.write_text("old unit\n", encoding="utf-8")
+
+    result = _run(signer_install, "install", REPLACE_UNIT_DIR="1")
+
+    assert result.returncode != 0
+    assert not (unit_dir / "saturnin-attestation.service").exists()
+    assert "start saturnin-attestation.service" not in calls.read_text(encoding="utf-8")
+
+
+def test_changed_rollback_snapshot_is_never_restored_or_restarted(
+    signer_install: tuple[Path, dict[str, str], Path, Path],
+) -> None:
+    _, _, unit_dir, calls = signer_install
+    assert _run(signer_install, "install").returncode == 0
+    calls.unlink()
+
+    result = _run(signer_install, "install", RACE_ROLLBACK="1")
+
+    assert result.returncode != 0
+    assert "start saturnin-attestation.service" not in calls.read_text(encoding="utf-8")
+    assert "Description=raced rollback" not in (
+        unit_dir / "saturnin-attestation.service"
+    ).read_text(encoding="utf-8")
 
 
 def test_lifecycle_lock_excludes_concurrent_uninstall_and_rollback(
@@ -608,6 +677,43 @@ def test_runtime_and_template_path_replacement_uses_private_snapshots(
     assert "Description=Saturnin private review attestation signer" in (
         unit_dir / "saturnin-attestation.service"
     ).read_text(encoding="utf-8")
+
+
+def test_service_uses_source_snapshot_not_reopened_checkout(
+    signer_install: tuple[Path, dict[str, str], Path, Path],
+) -> None:
+    checkout, _, unit_dir, _ = signer_install
+    source = checkout / "src" / "saturnin" / "attestation_service.py"
+
+    result = _run(
+        signer_install,
+        "install",
+        RACE_SOURCES="1",
+        RUNTIME_TO_REPLACE=str(checkout / ".venv" / "bin" / "saturnin"),
+        TEMPLATE_TO_REPLACE=str(
+            checkout / "systemd" / "saturnin-attestation.service"
+        ),
+        SOURCE_TO_REPLACE=str(source),
+    )
+
+    assert result.returncode == 0
+    with zipfile.ZipFile(unit_dir / "saturnin-attestation-runtime.pyz") as archive:
+        installed_source = archive.read("saturnin/attestation_service.py")
+    assert b"reopened source" not in installed_source
+
+
+def test_unsafe_source_fails_before_credential_or_unit_mutation(
+    signer_install: tuple[Path, dict[str, str], Path, Path],
+) -> None:
+    checkout, _, unit_dir, calls = signer_install
+    source = checkout / "src" / "saturnin" / "attestation_service.py"
+    source.chmod(0o664)
+
+    result = _run(signer_install, "install")
+
+    assert result.returncode != 0
+    assert not (unit_dir / "saturnin-attestation.service").exists()
+    assert not calls.exists()
 
 
 def test_runtime_in_place_mutation_fails_before_credential_execution(
