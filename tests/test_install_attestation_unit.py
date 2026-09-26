@@ -37,6 +37,7 @@ def signer_install(tmp_path: Path) -> tuple[Path, dict[str, str], Path, Path]:
         REPO_ROOT / "scripts" / "lib" / "user_unit_install.sh",
         checkout / "scripts" / "lib" / "user_unit_install.sh",
     )
+    (checkout / "scripts" / "lib" / "user_unit_install.sh").chmod(0o755)
     shutil.copy2(
         REPO_ROOT / "systemd" / "saturnin-attestation.service",
         checkout / "systemd" / "saturnin-attestation.service",
@@ -101,6 +102,7 @@ def signer_install(tmp_path: Path) -> tuple[Path, dict[str, str], Path, Path]:
     env = {
         **os.environ,
         "HOME": str(home),
+        "XDG_CONFIG_HOME": str(home / ".config"),
         "SATURNIN_HOME": str(checkout),
         "PATH": f"{fake_bin}:{os.environ['PATH']}",
     }
@@ -247,6 +249,76 @@ def test_status_rejects_tampered_unit_without_systemctl(
     assert not calls.exists()
 
 
+@pytest.mark.parametrize(
+    ("needle", "replacement"),
+    [
+        ("Type=simple", "Type=simple\nExecStartPre=/bin/true"),
+        ("Type=simple", "Type=simple\nExecStartPost=/bin/true"),
+        (
+            "ExecStart=",
+            "ExecStart=/bin/true\nExecStart=",
+        ),
+        ("PrivateNetwork=yes", "PrivateNetwork=no"),
+        (
+            "LoadCredentialEncrypted=saturnin-review-attestation-key:",
+            "LoadCredentialEncrypted=unexpected:/unsafe\n"
+            "LoadCredentialEncrypted=saturnin-review-attestation-key:",
+        ),
+        (
+            "[Service]\nType=simple",
+            "ProtectSystem=strict\n[Service]\nType=simple",
+        ),
+    ],
+)
+def test_status_rejects_any_unit_directive_injection_or_override(
+    signer_install: tuple[Path, dict[str, str], Path, Path],
+    needle: str,
+    replacement: str,
+) -> None:
+    _, _, unit_dir, calls = signer_install
+    assert _run(signer_install, "install").returncode == 0
+    installed = unit_dir / "saturnin-attestation.service"
+    installed.write_text(
+        installed.read_text(encoding="utf-8").replace(needle, replacement, 1),
+        encoding="utf-8",
+    )
+    calls.unlink()
+
+    result = _run(signer_install, "status")
+
+    assert result.returncode != 0
+    assert not calls.exists()
+
+
+@pytest.mark.parametrize("unsafe", ["mode", "owner"])
+def test_status_rejects_unsafe_installed_unit_metadata(
+    signer_install: tuple[Path, dict[str, str], Path, Path], unsafe: str
+) -> None:
+    checkout, env, unit_dir, calls = signer_install
+    assert _run(signer_install, "install").returncode == 0
+    installed = unit_dir / "saturnin-attestation.service"
+    calls.unlink()
+    if unsafe == "mode":
+        installed.chmod(0o664)
+    else:
+        fake_stat = Path(env["PATH"].split(":", 1)[0]) / "stat"
+        fake_stat.write_text(
+            "#!/bin/sh\n"
+            f"if [ \"$1\" = -c ] && [ \"$2\" = %u ] && [ \"$3\" = '{installed}' ]; then\n"
+            "  printf '0\\n'\n"
+            "  exit 0\n"
+            "fi\n"
+            "exec /usr/bin/stat \"$@\"\n",
+            encoding="utf-8",
+        )
+        fake_stat.chmod(0o755)
+
+    result = _run((checkout, env, unit_dir, calls), "status")
+
+    assert result.returncode != 0
+    assert not calls.exists()
+
+
 def test_status_does_not_create_missing_unit_directory(
     signer_install: tuple[Path, dict[str, str], Path, Path],
 ) -> None:
@@ -258,6 +330,98 @@ def test_status_does_not_create_missing_unit_directory(
     assert result.returncode != 0
     assert not unit_dir.exists()
     assert not calls.exists()
+
+
+@pytest.mark.parametrize("unsafe", ["symlink", "group-writable", "owner"])
+def test_rejects_unsafe_helper_before_sourcing_or_systemctl(
+    signer_install: tuple[Path, dict[str, str], Path, Path],
+    unsafe: str,
+    tmp_path: Path,
+) -> None:
+    checkout, _, unit_dir, calls = signer_install
+    helper = checkout / "scripts" / "lib" / "user_unit_install.sh"
+    if unsafe == "symlink":
+        replacement = tmp_path / "malicious-helper"
+        replacement.write_text("touch \"$HOME/helper-executed\"\n", encoding="utf-8")
+        helper.unlink()
+        helper.symlink_to(replacement)
+    elif unsafe == "group-writable":
+        helper.chmod(0o775)
+    else:
+        fake_stat = Path(signer_install[1]["PATH"].split(":", 1)[0]) / "stat"
+        fake_stat.write_text(
+            "#!/bin/sh\n"
+            f"if [ \"$1\" = -c ] && [ \"$2\" = %u ] && [ \"$3\" = '{helper}' ]; then\n"
+            "  printf '0\\n'\n"
+            "  exit 0\n"
+            "fi\n"
+            "exec /usr/bin/stat \"$@\"\n",
+            encoding="utf-8",
+        )
+        fake_stat.chmod(0o755)
+
+    result = _run(signer_install, "install")
+
+    assert result.returncode != 0
+    assert not (Path(signer_install[1]["HOME"]) / "helper-executed").exists()
+    assert not (unit_dir / "saturnin-attestation.service").exists()
+    assert not calls.exists()
+
+
+def test_helper_path_replacement_after_open_cannot_change_sourced_identity(
+    signer_install: tuple[Path, dict[str, str], Path, Path],
+) -> None:
+    checkout, env, unit_dir, calls = signer_install
+    helper = checkout / "scripts" / "lib" / "user_unit_install.sh"
+    marker = checkout / "helper-replaced"
+    fake_stat = Path(env["PATH"].split(":", 1)[0]) / "stat"
+    fake_stat.write_text(
+        "#!/bin/sh\n"
+        f"helper='{helper}'\n"
+        f"marker='{marker}'\n"
+        "if [ \"$1\" = -Lc ] && [ \"$2\" = %u ] && [ ! -e \"$marker\" ]; then\n"
+        "  mv \"$helper\" \"$helper.original\"\n"
+        "  printf '%s\\n' 'touch \"$HOME/helper-executed\"' > \"$helper\"\n"
+        "  chmod 0755 \"$helper\"\n"
+        "  touch \"$marker\"\n"
+        "fi\n"
+        "exec /usr/bin/stat \"$@\"\n",
+        encoding="utf-8",
+    )
+    fake_stat.chmod(0o755)
+
+    result = _run(signer_install, "install")
+
+    assert result.returncode == 0
+    assert marker.exists()
+    assert not (Path(env["HOME"]) / "helper-executed").exists()
+    assert (unit_dir / "saturnin-attestation.service").is_file()
+    assert not any(
+        "saturnin-improve" in call
+        for call in calls.read_text(encoding="utf-8").splitlines()
+    )
+
+
+def test_invalid_template_rolls_back_without_replacing_preexisting_unit(
+    signer_install: tuple[Path, dict[str, str], Path, Path],
+) -> None:
+    checkout, _, unit_dir, _ = signer_install
+    installed = unit_dir / "saturnin-attestation.service"
+    installed.write_text("old unit\n", encoding="utf-8")
+    before = _topology(unit_dir)
+    template = checkout / "systemd" / "saturnin-attestation.service"
+    template.write_text(
+        template.read_text(encoding="utf-8").replace(
+            "Type=simple", "Type=simple\nExecStartPre=/bin/true"
+        ),
+        encoding="utf-8",
+    )
+    template.chmod(0o644)
+
+    result = _run(signer_install, "install")
+
+    assert result.returncode != 0
+    assert _topology(unit_dir) == before
 
 
 def test_rejects_noncanonical_home_and_path_injection(

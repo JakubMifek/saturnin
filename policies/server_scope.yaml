@@ -42,6 +42,7 @@ services:
 operations:
   signer_user_unit:
     executable: scripts/install_attestation_unit.sh
+    dependencies: [scripts/lib/user_unit_install.sh]
     allowed_actions: [install, status, uninstall]
     unit: saturnin-attestation.service
     scope: user

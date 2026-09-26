@@ -892,14 +892,28 @@ def _governed_operation(
             return Decision.deny(
                 f"governed operation {name} must use canonical executable {expected}"
             )
-        try:
-            resolved = supplied.resolve(strict=True)
-        except (OSError, RuntimeError, ValueError):
-            return Decision.deny(f"governed operation executable {supplied} does not exist")
-        if resolved != supplied or not resolved.is_file() or not os.access(resolved, os.X_OK):
-            return Decision.deny(
-                f"governed operation executable {supplied} must be a regular executable, not a symlink"
+        executable_decision = _validate_governed_operation_file(
+            supplied, label="executable", executable=True
+        )
+        if executable_decision is not None:
+            return executable_decision
+        dependencies = operation.get("dependencies", [])
+        if not isinstance(dependencies, list) or not all(
+            isinstance(dependency, str) and dependency for dependency in dependencies
+        ):
+            return Decision.deny(f"governed operation {name} has invalid dependencies")
+        for dependency in dependencies:
+            relative_dependency = Path(dependency)
+            if relative_dependency.is_absolute() or ".." in relative_dependency.parts:
+                return Decision.deny(
+                    f"governed operation {name} has invalid dependency path {dependency!r}"
+                )
+            dependency_path = Path(os.path.abspath(runtime_root / relative_dependency))
+            dependency_decision = _validate_governed_operation_file(
+                dependency_path, label=f"dependency {dependency!r}", executable=False
             )
+            if dependency_decision is not None:
+                return dependency_decision
         actions = operation.get("allowed_actions", [])
         if len(parts) != 2 or parts[1] not in actions:
             return Decision.deny(
@@ -909,6 +923,30 @@ def _governed_operation(
             f"governed operation {name} is limited to {operation.get('scope')} "
             f"{operation.get('unit')}"
         )
+    return None
+
+
+def _validate_governed_operation_file(
+    path: Path, *, label: str, executable: bool
+) -> Decision | None:
+    try:
+        if path.is_symlink():
+            return Decision.deny(f"governed operation {label} {path} must not be a symlink")
+        resolved = path.resolve(strict=True)
+        metadata = path.stat()
+    except (OSError, RuntimeError, ValueError):
+        return Decision.deny(f"governed operation {label} {path} does not exist")
+    if resolved != path or not path.is_file():
+        return Decision.deny(
+            f"governed operation {label} {path} must have canonical regular-file identity"
+        )
+    if metadata.st_uid != os.geteuid() or metadata.st_mode & 0o022:
+        return Decision.deny(
+            f"governed operation {label} {path} must be owner-controlled and "
+            "not group/world writable"
+        )
+    if executable and not os.access(path, os.X_OK):
+        return Decision.deny(f"governed operation {label} {path} must be executable")
     return None
 
 

@@ -1372,6 +1372,27 @@ def test_signer_user_unit_operation_rejects_symlink(
     assert not governance.check_server_command(f"{executable} install").allowed
 
 
+@pytest.mark.parametrize("unsafe", ["symlink", "group-writable"])
+def test_signer_user_unit_operation_rejects_unsafe_dependency(
+    governance: Governance, config: Config, tmp_path: Path, unsafe: str
+) -> None:
+    executable = config.data_root / "scripts" / "install_attestation_unit.sh"
+    executable.chmod(0o755)
+    helper = config.data_root / "scripts" / "lib" / "user_unit_install.sh"
+    if unsafe == "symlink":
+        replacement = tmp_path / "helper"
+        replacement.write_text(":\n", encoding="utf-8")
+        helper.unlink()
+        helper.symlink_to(replacement)
+    else:
+        helper.chmod(0o775)
+
+    decision = governance.check_server_command(f"{executable} install")
+
+    assert not decision.allowed
+    assert "dependency" in decision.reasons[0]
+
+
 def test_bootstrap_runtime_saturnin_executable_is_trusted(
     governance: Governance,
     config: Config,

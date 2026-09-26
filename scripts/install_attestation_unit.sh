@@ -6,8 +6,6 @@ readonly UNIT=saturnin-attestation.service
 readonly SCRIPT_PATH="${BASH_SOURCE[0]}"
 readonly SCRIPT_DIR="$(cd "$(dirname "$SCRIPT_PATH")" && pwd -P)"
 readonly DETECTED_HOME="$(cd "$SCRIPT_DIR/.." && pwd -P)"
-# shellcheck source=scripts/lib/user_unit_install.sh
-source "$SCRIPT_DIR/lib/user_unit_install.sh"
 
 action="${1:-}"
 if [[ "$#" -ne 1 || ! "$action" =~ ^(install|status|uninstall)$ ]]; then
@@ -15,9 +13,15 @@ if [[ "$#" -ne 1 || ! "$action" =~ ^(install|status|uninstall)$ ]]; then
   exit 2
 fi
 
-saturnin_require_unprivileged_user
+if [[ "$(id -u)" -eq 0 ]]; then
+  echo "Refusing to manage user units as root." >&2
+  exit 1
+fi
 SATURNIN_HOME="${SATURNIN_HOME:-$DETECTED_HOME}"
-saturnin_validate_render_path "$SATURNIN_HOME"
+if [[ ! "$SATURNIN_HOME" =~ ^/[A-Za-z0-9/._-]+$ ]]; then
+  echo "SATURNIN_HOME must be an absolute canonical path using only [A-Za-z0-9/._-]." >&2
+  exit 1
+fi
 if [[ "$SATURNIN_HOME" != "$DETECTED_HOME" ]] \
   || [[ "$(realpath "$SATURNIN_HOME")" != "$SATURNIN_HOME" ]]; then
   echo "SATURNIN_HOME must identify the canonical checkout containing this installer." >&2
@@ -25,9 +29,10 @@ if [[ "$SATURNIN_HOME" != "$DETECTED_HOME" ]] \
 fi
 
 readonly EXPECTED_SCRIPT="$SATURNIN_HOME/scripts/install_attestation_unit.sh"
+readonly HELPER="$SATURNIN_HOME/scripts/lib/user_unit_install.sh"
 readonly RUNTIME="$SATURNIN_HOME/.venv/bin/saturnin"
 readonly TEMPLATE="$SATURNIN_HOME/systemd/$UNIT"
-for trusted in "$EXPECTED_SCRIPT" "$RUNTIME" "$TEMPLATE"; do
+for trusted in "$EXPECTED_SCRIPT" "$RUNTIME" "$TEMPLATE" "$HELPER"; do
   if [[ -L "$trusted" || ! -f "$trusted" ]]; then
     echo "Refusing unsafe or missing trusted file: $trusted" >&2
     exit 1
@@ -42,6 +47,17 @@ if [[ "$(realpath "$SCRIPT_PATH")" != "$EXPECTED_SCRIPT" || ! -x "$RUNTIME" ]]; 
   echo "Refusing untrusted installer or Saturnin runtime executable identity." >&2
   exit 1
 fi
+exec {HELPER_FD}<"$HELPER"
+readonly HELPER_FD
+readonly HELPER_FD_PATH="/proc/$$/fd/$HELPER_FD"
+if [[ "$(realpath "$HELPER_FD_PATH")" != "$HELPER" ]] \
+  || [[ "$(stat -Lc %u "$HELPER_FD_PATH")" -ne "$(id -u)" ]] \
+  || (( 8#$(stat -Lc %a "$HELPER_FD_PATH") & 8#022 )); then
+  echo "Refusing unstable or unsafe installer helper identity." >&2
+  exit 1
+fi
+# shellcheck source=scripts/lib/user_unit_install.sh
+source "$HELPER_FD_PATH"
 
 readonly CONFIG_HOME="${XDG_CONFIG_HOME:-$HOME/.config}"
 if [[ "$CONFIG_HOME" != "$HOME/.config" ]]; then
@@ -64,34 +80,68 @@ done
 
 verify_unit_identity() {
   UNIT_PATH="$1" HOME_VALUE="$SATURNIN_HOME" python3 -c '
-from pathlib import Path
 import os
+from pathlib import Path
 
 lines = Path(os.environ["UNIT_PATH"]).read_text(encoding="utf-8").splitlines()
 home = os.environ["HOME_VALUE"]
-expected = {
-    "WorkingDirectory": [home],
-    "Environment": [
-        f"SATURNIN_HOME=\"{home}\"",
-        f"PYTHONPATH=\"{home}/src\"",
-    ],
-    "ExecStart": [f"{home}/.venv/bin/python -m saturnin.attestation_service serve"],
-    "LoadCredentialEncrypted": [
-        "saturnin-review-attestation-key:%h/.config/systemd/user/saturnin-credentials/saturnin-review-attestation-key.cred",
-        "saturnin-review-attestation-previous-key:%h/.config/systemd/user/saturnin-credentials/saturnin-review-attestation-previous-key.cred",
-    ],
-}
-actual = {
-    key: [line.split("=", 1)[1] for line in lines if line.startswith(f"{key}=")]
-    for key in expected
-}
-if "@SATURNIN_HOME" in "\n".join(lines) or actual != expected:
+expected = [
+    ("Unit", [
+        "Description=Saturnin private review attestation signer",
+        f"Documentation=file://{home}/docs/runbooks/ops-safety.md",
+    ]),
+    ("Service", [
+        "Type=simple",
+        f"WorkingDirectory={home}",
+        f"Environment=SATURNIN_HOME=\"{home}\"",
+        f"Environment=PYTHONPATH=\"{home}/src\"",
+        f"ExecStart={home}/.venv/bin/python -m saturnin.attestation_service serve",
+        "LoadCredentialEncrypted=saturnin-review-attestation-key:%h/.config/systemd/user/saturnin-credentials/saturnin-review-attestation-key.cred",
+        "LoadCredentialEncrypted=saturnin-review-attestation-previous-key:%h/.config/systemd/user/saturnin-credentials/saturnin-review-attestation-previous-key.cred",
+        "RuntimeDirectory=saturnin-attestation",
+        "RuntimeDirectoryMode=0700",
+        "PrivateMounts=yes",
+        "PrivateTmp=yes",
+        "PrivateNetwork=yes",
+        "ProtectHome=read-only",
+        "ProtectSystem=strict",
+        "ProtectProc=invisible",
+        "NoNewPrivileges=yes",
+        "RestrictAddressFamilies=AF_UNIX",
+    ]),
+    ("Install", [
+        "WantedBy=default.target",
+    ]),
+]
+actual = []
+current = None
+for line in lines:
+    if not line:
+        continue
+    if line.startswith("[") and line.endswith("]"):
+        current = (line[1:-1], [])
+        actual.append(current)
+    elif current is None or line.startswith("#") or "=" not in line:
+        raise SystemExit("rendered attestation unit has invalid structure")
+    else:
+        current[1].append(line)
+if actual != expected:
     raise SystemExit("rendered attestation unit identity mismatch")
 '
 }
 
+validate_installed_unit() {
+  if [[ -L "$INSTALLED" || ! -f "$INSTALLED" ]] \
+    || [[ "$(stat -c %u "$INSTALLED")" -ne "$(id -u)" ]] \
+    || [[ "$(stat -c %a "$INSTALLED")" != 644 ]]; then
+    echo "Canonical attestation unit is not installed with trusted identity and mode." >&2
+    return 1
+  fi
+  verify_unit_identity "$INSTALLED"
+}
+
 if [[ "$action" == status ]]; then
-  if [[ ! -d "$UNIT_DIR" || -L "$INSTALLED" || ! -f "$INSTALLED" ]]; then
+  if [[ ! -d "$UNIT_DIR" ]]; then
     echo "Canonical attestation unit is not installed safely." >&2
     exit 1
   fi
@@ -100,7 +150,7 @@ if [[ "$action" == status ]]; then
     echo "User-unit directory must be owner-controlled and not group/world writable." >&2
     exit 1
   fi
-  verify_unit_identity "$INSTALLED"
+  validate_installed_unit
   exec systemctl --user status --no-pager "$UNIT"
 fi
 
