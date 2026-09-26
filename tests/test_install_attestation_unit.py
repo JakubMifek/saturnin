@@ -149,7 +149,7 @@ def signer_install(tmp_path: Path) -> tuple[Path, dict[str, str], Path, Path]:
         "fi\n"
         "case \"${3:-}\" in\n"
         "  *systemd_credential*)\n"
-        "    printf '%064d %064d\\n' 0 1\n"
+        "    printf '%064d %064d %064d\\n' 0 1 2\n"
         "    exit 0\n"
         "    ;;\n"
         "esac\n"
@@ -638,6 +638,24 @@ def test_running_process_identity_failure_rolls_back_before_success(
     assert calls.read_text(encoding="utf-8").splitlines()[-1] == (
         "--user daemon-reload"
     )
+
+
+def test_failed_active_restart_stops_new_process_and_restores_old_service(
+    signer_install: tuple[Path, dict[str, str], Path, Path],
+) -> None:
+    _, _, unit_dir, calls = signer_install
+    assert _run(signer_install, "install").returncode == 0
+    before = _topology(unit_dir)
+    calls.unlink()
+
+    result = _run(signer_install, "install", FAIL_PROCESS_IDENTITY="1")
+
+    assert result.returncode != 0
+    assert _topology(unit_dir) == before
+    recorded = calls.read_text(encoding="utf-8").splitlines()
+    assert "--user restart saturnin-attestation.service" in recorded
+    assert "--user stop saturnin-attestation.service" in recorded
+    assert recorded[-1] == "--user start saturnin-attestation.service"
 
 
 def test_replaced_unit_directory_fails_closed_without_pathname_rollback(

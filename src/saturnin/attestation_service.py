@@ -372,6 +372,13 @@ class SigningService:
             )
         with _lifecycle_lock(exclusive=False):
             self.generation = credential_generation()
+            if not hmac.compare_digest(
+                self.generation,
+                os.environ.get("SATURNIN_CREDENTIAL_GENERATION", ""),
+            ):
+                raise AttestationServiceError(
+                    "attestation service credential generation mismatch"
+                )
             if not execution_signer_ready():
                 raise AttestationServiceError(
                     "master rotation and migration sealing are required before signer startup"

@@ -37,6 +37,7 @@ from saturnin.config import Config
 
 @pytest.fixture(autouse=True)
 def stable_generation(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("SATURNIN_CREDENTIAL_GENERATION", "test-generation")
     monkeypatch.setattr(
         "saturnin.attestation_service.credential_generation",
         lambda: "test-generation",
