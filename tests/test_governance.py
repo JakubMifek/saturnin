@@ -1362,8 +1362,13 @@ def test_signer_user_unit_operation_is_exact_and_canonical(
         f"{executable} install extra",
         f"{executable} restart",
         "install_attestation_unit.sh install",
+        "scripts/install_attestation_unit.sh install",
     ):
         assert not governance.check_server_command(command).allowed
+    assert not governance.check_server_command(
+        "scripts/install_attestation_unit.sh install",
+        cwd=config.data_root,
+    ).allowed
 
 
 def test_signer_user_unit_operation_rejects_symlink(

@@ -239,12 +239,14 @@ for package, package_name in ((source, "saturnin"), (yaml_candidates[0], "yaml")
         metadata = path.lstat()
         if stat.S_ISLNK(metadata.st_mode):
             raise SystemExit(f"refusing symlinked attestation runtime source: {path}")
-        if metadata.st_uid != expected_uid or metadata.st_mode & 0o022:
-            raise SystemExit(f"attestation runtime source has unsafe metadata: {path}")
         if stat.S_ISDIR(metadata.st_mode):
+            if metadata.st_uid != expected_uid or metadata.st_mode & 0o022:
+                raise SystemExit(f"attestation runtime directory has unsafe metadata: {path}")
             continue
         if not stat.S_ISREG(metadata.st_mode) or path.suffix != ".py":
             continue
+        if metadata.st_uid != expected_uid or metadata.st_mode & 0o022:
+            raise SystemExit(f"attestation runtime source has unsafe metadata: {path}")
         descriptor = os.open(path, os.O_RDONLY | os.O_CLOEXEC | os.O_NOFOLLOW)
         try:
             before = os.fstat(descriptor)

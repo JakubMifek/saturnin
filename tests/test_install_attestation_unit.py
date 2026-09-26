@@ -43,6 +43,16 @@ def signer_install(tmp_path: Path) -> tuple[Path, dict[str, str], Path, Path]:
         / "yaml"
     )
     shutil.copytree(Path(yaml.__file__).parent, yaml_destination)
+    for directory in (
+        checkout / "src" / "saturnin",
+        yaml_destination,
+    ):
+        directory.chmod(0o755)
+        for path in directory.rglob("*"):
+            if path.is_dir():
+                path.chmod(0o755)
+            elif path.suffix == ".py":
+                path.chmod(0o644)
     shutil.copy2(
         REPO_ROOT / "scripts" / "install_attestation_unit.sh",
         checkout / "scripts" / "install_attestation_unit.sh",

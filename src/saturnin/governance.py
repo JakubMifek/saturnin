@@ -889,7 +889,10 @@ def _governed_operation(
         expected = Path(os.path.abspath(runtime_root / relative))
         supplied = Path(parts[0])
         if not supplied.is_absolute():
-            supplied = Path(os.path.abspath(supplied))
+            return Decision.deny(
+                f"governed operation {name} requires the absolute canonical "
+                f"executable {expected}"
+            )
         if supplied != expected:
             return Decision.deny(
                 f"governed operation {name} must use canonical executable {expected}"
