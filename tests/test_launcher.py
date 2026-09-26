@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import hashlib
 import os
 import subprocess
 import sys
@@ -1623,6 +1624,38 @@ def test_bounded_command_caps_output_and_times_out(git_repo: Path) -> None:
 
     assert timed_out.timed_out
     assert timed_out.returncode != 0
+
+
+def test_governed_command_executes_the_authorized_descriptor(
+    config: Config, tmp_path: Path
+) -> None:
+    executable = config.data_root / "scripts" / "install_attestation_unit.sh"
+    executable.parent.mkdir(parents=True, exist_ok=True)
+    executable.write_text("#!/bin/sh\nprintf original\n", encoding="utf-8")
+    executable.chmod(0o755)
+    config.server_scope["operations"]["signer_user_unit"]["sha256"] = (
+        hashlib.sha256(executable.read_bytes()).hexdigest()
+    )
+    parts = [str(executable), "status"]
+
+    descriptor = worker_callbacks._open_governed_executable(config, parts)
+    assert descriptor is not None
+    replacement = tmp_path / "replacement"
+    replacement.write_text("#!/bin/sh\nprintf replaced\n", encoding="utf-8")
+    replacement.chmod(0o755)
+    replacement.replace(executable)
+    try:
+        result = worker_callbacks._run_bounded_command(
+            [f"/proc/self/fd/{descriptor}", "status"],
+            cwd=config.data_root,
+            env=os.environ.copy(),
+            pass_fds=(descriptor,),
+        )
+    finally:
+        os.close(descriptor)
+
+    assert result.returncode == 0
+    assert result.stdout == "original"
 
 
 def test_bounded_command_tracks_closed_pipes_and_kills_descendants(

@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import os
 import grp
+import hashlib
 import pwd
 import re
 import shlex
@@ -898,7 +899,10 @@ def _governed_operation(
                 f"governed operation {name} must use canonical executable {expected}"
             )
         executable_decision = _validate_governed_operation_file(
-            supplied, label="executable", executable=True
+            supplied,
+            label="executable",
+            executable=True,
+            expected_sha256=operation.get("sha256"),
         )
         if executable_decision is not None:
             return executable_decision
@@ -958,7 +962,12 @@ def _governed_operation(
 
 
 def _validate_governed_operation_file(
-    path: Path, *, label: str, executable: bool, owner_uid: int | None = None
+    path: Path,
+    *,
+    label: str,
+    executable: bool,
+    owner_uid: int | None = None,
+    expected_sha256: object = None,
 ) -> Decision | None:
     parent_decision = _validate_governed_parent_chain(path.parent, label=label)
     if parent_decision is not None:
@@ -982,6 +991,25 @@ def _validate_governed_operation_file(
         )
     if executable and not os.access(path, os.X_OK):
         return Decision.deny(f"governed operation {label} {path} must be executable")
+    if expected_sha256 is not None:
+        if not isinstance(expected_sha256, str) or not re.fullmatch(
+            r"[0-9a-f]{64}", expected_sha256
+        ):
+            return Decision.deny(
+                f"governed operation {label} has an invalid SHA-256 identity"
+            )
+        try:
+            descriptor = os.open(path, os.O_RDONLY | os.O_CLOEXEC | os.O_NOFOLLOW)
+            with os.fdopen(descriptor, "rb") as stream:
+                actual_sha256 = hashlib.file_digest(stream, "sha256").hexdigest()
+        except OSError:
+            return Decision.deny(
+                f"governed operation {label} {path} could not be opened safely"
+            )
+        if actual_sha256 != expected_sha256:
+            return Decision.deny(
+                f"governed operation {label} {path} does not match its approved digest"
+            )
     return None
 
 

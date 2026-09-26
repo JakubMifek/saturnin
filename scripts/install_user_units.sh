@@ -85,25 +85,11 @@ on_exit() {
 }
 trap on_exit EXIT
 
-CREDENTIAL_DIR="${XDG_CONFIG_HOME:-$HOME/.config}/systemd/user/saturnin-credentials"
-current="$CREDENTIAL_DIR/saturnin-review-attestation-key.cred"
-previous="$CREDENTIAL_DIR/saturnin-review-attestation-previous-key.cred"
-INSTALL_ATTESTATION_SERVICE=0
-if [[ -e "$current" || -e "$previous" ]]; then
-  if [[ ! -f "$current" || -L "$current" || ! -f "$previous" || -L "$previous" ]]; then
-    echo "Attestation credential pair is incomplete or unsafe; refusing unit replacement." >&2
-    exit 1
-  fi
-  credential_status="$("$SATURNIN_HOME/.venv/bin/saturnin" credential status review-attestation)"
-  if [[ "$credential_status" != *"signer=ready"* ]]; then
-    echo "Attestation master rotation and migration sealing are required before unit replacement." >&2
-    exit 1
-  fi
-  INSTALL_ATTESTATION_SERVICE=1
-fi
-
 for unit in "$SATURNIN_HOME"/systemd/saturnin-*; do
   name="$(basename "$unit")"
+  if [[ "$name" == saturnin-attestation.service ]]; then
+    continue
+  fi
   MANAGED_UNITS+=("$name")
   saturnin_render_unit "$unit" "$STAGE_DIR/$name" "$SATURNIN_HOME"
   if command -v systemd-analyze >/dev/null 2>&1; then
@@ -145,11 +131,6 @@ for staged in "$STAGE_DIR"/saturnin-*; do
 done
 
 systemctl --user daemon-reload
-if [[ "$INSTALL_ATTESTATION_SERVICE" -eq 1 ]]; then
-  systemctl --user enable --now saturnin-attestation.service
-else
-  systemctl --user disable --now saturnin-attestation.service 2>/dev/null || true
-fi
 systemctl --user enable --now "${ENABLED_TIMERS[@]}"
 installing=0
 systemctl --user list-timers 'saturnin-*' || true

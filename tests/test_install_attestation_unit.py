@@ -118,6 +118,13 @@ def signer_install(tmp_path: Path) -> tuple[Path, dict[str, str], Path, Path]:
         "#!/bin/sh\n"
         "if [ \"${1:-}\" = -m ] && [ \"${2:-}\" = saturnin ] "
         "&& [ \"${3:-}\" = credential ]; then\n"
+        "  if [ -n \"${RACE_RUNTIME_ARCHIVE:-}\" ]; then\n"
+        "    archive=$(/usr/bin/find \"$HOME/.config/systemd/user\" "
+        "-name saturnin-attestation-runtime.pyz -type f -print -quit)\n"
+        "    printf malicious > \"$archive.replacement\"\n"
+        "    chmod 0400 \"$archive.replacement\"\n"
+        "    mv -f \"$archive.replacement\" \"$archive\"\n"
+        "  fi\n"
         "  printf '%s\\n' 'rotation=ready; signer=ready'\n"
         "  exit 0\n"
         "fi\n"
@@ -369,9 +376,10 @@ def test_changed_rollback_snapshot_is_never_restored_or_restarted(
 
     assert result.returncode != 0
     assert "start saturnin-attestation.service" not in calls.read_text(encoding="utf-8")
-    assert "Description=raced rollback" not in (
-        unit_dir / "saturnin-attestation.service"
-    ).read_text(encoding="utf-8")
+    installed = unit_dir / "saturnin-attestation.service"
+    assert not installed.exists() or "Description=raced rollback" not in (
+        installed.read_text(encoding="utf-8")
+    )
 
 
 def test_lifecycle_lock_excludes_concurrent_uninstall_and_rollback(
@@ -710,6 +718,18 @@ def test_service_uses_source_snapshot_not_reopened_checkout(
     with zipfile.ZipFile(unit_dir / "saturnin-attestation-runtime.pyz") as archive:
         installed_source = archive.read("saturnin/attestation_service.py")
     assert b"reopened source" not in installed_source
+
+
+def test_replaced_runtime_archive_is_rejected_before_installation(
+    signer_install: tuple[Path, dict[str, str], Path, Path],
+) -> None:
+    _, _, unit_dir, _ = signer_install
+
+    result = _run(signer_install, "install", RACE_RUNTIME_ARCHIVE="1")
+
+    assert result.returncode != 0
+    assert not (unit_dir / "saturnin-attestation.service").exists()
+    assert not (unit_dir / "saturnin-attestation-runtime.pyz").exists()
 
 
 def test_unsafe_source_fails_before_credential_or_unit_mutation(

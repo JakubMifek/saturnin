@@ -227,50 +227,69 @@ if len(yaml_candidates) != 1:
 
 entries = []
 for package, package_name in ((source, "saturnin"), (yaml_candidates[0], "yaml")):
-    root = package.lstat()
-    if (
-        not stat.S_ISDIR(root.st_mode)
-        or root.st_uid != expected_uid
-        or root.st_mode & 0o022
+    for root_path, directory_names, file_names, root_fd in os.fwalk(
+        package, topdown=True, follow_symlinks=False
     ):
-        raise SystemExit(f"attestation runtime directory has unsafe metadata: {package}")
-    for path in sorted(package.rglob("*")):
-        relative = path.relative_to(package)
-        metadata = path.lstat()
-        if stat.S_ISLNK(metadata.st_mode):
-            raise SystemExit(f"refusing symlinked attestation runtime source: {path}")
-        if stat.S_ISDIR(metadata.st_mode):
-            if metadata.st_uid != expected_uid or metadata.st_mode & 0o022:
-                raise SystemExit(f"attestation runtime directory has unsafe metadata: {path}")
-            continue
-        if not stat.S_ISREG(metadata.st_mode) or path.suffix != ".py":
-            continue
-        if metadata.st_uid != expected_uid or metadata.st_mode & 0o022:
-            raise SystemExit(f"attestation runtime source has unsafe metadata: {path}")
-        descriptor = os.open(path, os.O_RDONLY | os.O_CLOEXEC | os.O_NOFOLLOW)
-        try:
-            before = os.fstat(descriptor)
-            content = bytearray()
-            while chunk := os.read(descriptor, 65536):
-                content.extend(chunk)
-            after = os.fstat(descriptor)
-        finally:
-            os.close(descriptor)
-        identity = lambda value: (
-            value.st_dev,
-            value.st_ino,
-            value.st_size,
-            value.st_mtime_ns,
-            value.st_ctime_ns,
-        )
+        root_metadata = os.fstat(root_fd)
         if (
-            identity(before) != identity(after)
-            or not stat.S_ISREG(before.st_mode)
-            or before.st_uid != expected_uid
-            or before.st_mode & 0o022
+            not stat.S_ISDIR(root_metadata.st_mode)
+            or root_metadata.st_uid != expected_uid
+            or root_metadata.st_mode & 0o022
         ):
-            raise SystemExit(f"attestation runtime changed during snapshot: {path}")
-        entries.append((f"{package_name}/{relative}", bytes(content)))
+            raise SystemExit(
+                f"attestation runtime directory has unsafe metadata: {root_path}"
+            )
+        for name in directory_names:
+            metadata = os.stat(name, dir_fd=root_fd, follow_symlinks=False)
+            if stat.S_ISLNK(metadata.st_mode):
+                raise SystemExit(
+                    f"refusing symlinked attestation runtime source: {root_path}/{name}"
+                )
+        relative_root = Path(root_path).relative_to(package)
+        for name in sorted(file_names):
+            metadata = os.stat(name, dir_fd=root_fd, follow_symlinks=False)
+            if stat.S_ISLNK(metadata.st_mode):
+                raise SystemExit(
+                    f"refusing symlinked attestation runtime source: {root_path}/{name}"
+                )
+            if not stat.S_ISREG(metadata.st_mode) or Path(name).suffix != ".py":
+                continue
+            if metadata.st_uid != expected_uid or metadata.st_mode & 0o022:
+                raise SystemExit(
+                    f"attestation runtime source has unsafe metadata: {root_path}/{name}"
+                )
+            descriptor = os.open(
+                name,
+                os.O_RDONLY | os.O_CLOEXEC | os.O_NOFOLLOW,
+                dir_fd=root_fd,
+            )
+            try:
+                before = os.fstat(descriptor)
+                content = bytearray()
+                while chunk := os.read(descriptor, 65536):
+                    content.extend(chunk)
+                after = os.fstat(descriptor)
+            finally:
+                os.close(descriptor)
+            identity = lambda value: (
+                value.st_dev,
+                value.st_ino,
+                value.st_size,
+                value.st_mtime_ns,
+                value.st_ctime_ns,
+            )
+            if (
+                identity(metadata) != identity(before)
+                or identity(before) != identity(after)
+                or not stat.S_ISREG(before.st_mode)
+                or before.st_uid != expected_uid
+                or before.st_mode & 0o022
+            ):
+                raise SystemExit(
+                    f"attestation runtime changed during snapshot: {root_path}/{name}"
+                )
+            relative = relative_root / name
+            entries.append((f"{package_name}/{relative}", bytes(content)))
 
 if not entries or not any(name == "saturnin/attestation_service.py" for name, _ in entries):
     raise SystemExit("attestation source snapshot is incomplete")
@@ -355,6 +374,38 @@ if (
     or stat.S_IMODE(before.st_mode) != int(os.environ["EXPECTED_MODE"], 8)
 ):
     raise SystemExit("trusted file identity mismatch")
+print(f"{before.st_dev}:{before.st_ino}:{digest.hexdigest()}")
+'
+}
+
+trusted_fd_identity() {
+  TRUSTED_FD="$1" EXPECTED_MODE="$2" EXPECTED_UID="$CURRENT_UID" "$PYTHON" -c '
+import hashlib
+import os
+import stat
+
+descriptor = int(os.environ["TRUSTED_FD"])
+os.lseek(descriptor, 0, os.SEEK_SET)
+before = os.fstat(descriptor)
+digest = hashlib.sha256()
+while chunk := os.read(descriptor, 65536):
+    digest.update(chunk)
+after = os.fstat(descriptor)
+os.lseek(descriptor, 0, os.SEEK_SET)
+identity = lambda value: (
+    value.st_dev,
+    value.st_ino,
+    value.st_size,
+    value.st_mtime_ns,
+    value.st_ctime_ns,
+)
+if (
+    identity(before) != identity(after)
+    or not stat.S_ISREG(before.st_mode)
+    or before.st_uid != int(os.environ["EXPECTED_UID"])
+    or stat.S_IMODE(before.st_mode) != int(os.environ["EXPECTED_MODE"], 8)
+):
+    raise SystemExit("trusted descriptor identity mismatch")
 print(f"{before.st_dev}:{before.st_ino}:{digest.hexdigest()}")
 '
 }
@@ -538,6 +589,14 @@ trap cleanup EXIT
 "$MKDIR" -m 0700 "$TRANSACTION" "$BACKUP"
 snapshot_trusted_file "$RUNTIME" "$RUNTIME_SNAPSHOT" 0500
 snapshot_runtime_tree "$RUNTIME_TREE_SNAPSHOT"
+exec {RUNTIME_TREE_FD}<"$RUNTIME_TREE_SNAPSHOT"
+readonly RUNTIME_TREE_FD
+RUNTIME_TREE_ID="$(trusted_fd_identity "$RUNTIME_TREE_FD" 0400)"
+readonly RUNTIME_TREE_ID
+if [[ "$(trusted_file_identity "$RUNTIME_TREE_SNAPSHOT" 0400)" != "$RUNTIME_TREE_ID" ]]; then
+  echo "Attestation runtime path changed after snapshot construction." >&2
+  exit 1
+fi
 snapshot_trusted_file "$TEMPLATE" "$TEMPLATE_SNAPSHOT" 0400
 mutating=0
 was_active=0
@@ -663,7 +722,7 @@ CURRENT_CREDENTIAL_ID="$(credential_identity "$CURRENT")"
 PREVIOUS_CREDENTIAL_ID="$(credential_identity "$PREVIOUS")"
 readonly CURRENT_CREDENTIAL_ID PREVIOUS_CREDENTIAL_ID
 credential_status="$(
-  PYTHONPATH="$RUNTIME_TREE_SNAPSHOT" "$PYTHON" -m saturnin \
+  PYTHONPATH="/proc/self/fd/$RUNTIME_TREE_FD" "$PYTHON" -m saturnin \
     credential status review-attestation
 )"
 if [[ "$credential_status" != *"rotation=ready"* || "$credential_status" != *"signer=ready"* ]]; then
@@ -695,11 +754,20 @@ verify_unit_identity "$STAGE" 0600 >/dev/null
 "$CHMOD" 0644 "$STAGE"
 mutating=1
 verify_unit_directory
+if [[ "$(trusted_file_identity "$RUNTIME_TREE_SNAPSHOT" 0400)" != "$RUNTIME_TREE_ID" ]] \
+  || [[ "$(trusted_fd_identity "$RUNTIME_TREE_FD" 0400)" != "$RUNTIME_TREE_ID" ]]; then
+  echo "Attestation runtime changed before installation." >&2
+  exit 1
+fi
 "$MV" -f "$RUNTIME_TREE_SNAPSHOT" "$INSTALLED_RUNTIME"
 "$MV" -f "$STAGE" "$INSTALLED"
 verify_unit_directory
 INSTALLED_RUNTIME_ID="$(trusted_file_identity "$INSTALLED_RUNTIME" 0400)"
 readonly INSTALLED_RUNTIME_ID
+if [[ "$INSTALLED_RUNTIME_ID" != "$RUNTIME_TREE_ID" ]]; then
+  echo "Installed attestation runtime does not match the validated snapshot." >&2
+  exit 1
+fi
 INSTALLED_DEVICE_INODE="$(verify_unit_identity "$INSTALLED" 0644)"
 readonly INSTALLED_DEVICE_INODE
 snapshot_trusted_file "$INSTALLED" "$INSTALLED_SNAPSHOT" 0400
@@ -717,7 +785,8 @@ if [[ "$(verify_unit_identity "$INSTALLED" 0644)" != "$INSTALLED_DEVICE_INODE" ]
   echo "Installed attestation unit identity drifted before start." >&2
   exit 1
 fi
-if [[ "$(trusted_file_identity "$INSTALLED_RUNTIME" 0400)" != "$INSTALLED_RUNTIME_ID" ]]; then
+if [[ "$(trusted_file_identity "$INSTALLED_RUNTIME" 0400)" != "$RUNTIME_TREE_ID" ]] \
+  || [[ "$(trusted_fd_identity "$RUNTIME_TREE_FD" 0400)" != "$RUNTIME_TREE_ID" ]]; then
   echo "Installed attestation runtime identity drifted before signer start." >&2
   exit 1
 fi

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import secrets
@@ -1346,6 +1347,9 @@ def test_signer_user_unit_operation_is_exact_and_canonical(
     executable.parent.mkdir(parents=True, exist_ok=True)
     executable.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
     executable.chmod(0o755)
+    config.server_scope["operations"]["signer_user_unit"]["sha256"] = (
+        hashlib.sha256(executable.read_bytes()).hexdigest()
+    )
     runtime = config.data_root / ".venv" / "bin" / "saturnin"
     runtime.parent.mkdir(parents=True, exist_ok=True)
     runtime.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")

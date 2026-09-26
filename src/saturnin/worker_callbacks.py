@@ -10,6 +10,7 @@ import secrets
 import selectors
 import shlex
 import signal
+import stat
 import subprocess
 import time
 from argparse import Namespace
@@ -1073,6 +1074,48 @@ def _fsync_directory(path: Path) -> None:
         os.close(descriptor)
 
 
+def _open_governed_executable(config: Config, parts: Sequence[str]) -> int | None:
+    if not parts or not Path(parts[0]).is_absolute():
+        return None
+    for operation in config.server_scope.get("operations", {}).values():
+        if not isinstance(operation, dict):
+            continue
+        relative = Path(str(operation.get("executable", "")))
+        expected = Path(os.path.abspath(config.data_root / relative))
+        if Path(parts[0]) != expected:
+            continue
+        digest = operation.get("sha256")
+        if not isinstance(digest, str) or not re.fullmatch(r"[0-9a-f]{64}", digest):
+            raise WorkerCallbackError("governed executable has no approved digest")
+        try:
+            descriptor = os.open(
+                expected, os.O_RDONLY | os.O_CLOEXEC | os.O_NOFOLLOW
+            )
+            metadata = os.fstat(descriptor)
+            content = hashlib.sha256()
+            while chunk := os.read(descriptor, 64 * 1024):
+                content.update(chunk)
+            os.lseek(descriptor, 0, os.SEEK_SET)
+        except OSError as exc:
+            if "descriptor" in locals():
+                os.close(descriptor)
+            raise WorkerCallbackError(
+                "governed executable could not be pinned for execution"
+            ) from exc
+        if (
+            not stat.S_ISREG(metadata.st_mode)
+            or metadata.st_uid != os.geteuid()
+            or metadata.st_mode & 0o022
+            or content.hexdigest() != digest
+        ):
+            os.close(descriptor)
+            raise WorkerCallbackError(
+                "governed executable changed after authorization"
+            )
+        return descriptor
+    return None
+
+
 def run_server_command(
     config: Config,
     board: Board,
@@ -1097,6 +1140,7 @@ def run_server_command(
         raise WorkerCallbackError(
             "callback ID must be a 32-64 character lowercase hex value"
         )
+    governed_fd: int | None = None
     with board.edit(task_id) as task:
         if task.role != actor:
             raise WorkerCallbackError(
@@ -1177,6 +1221,7 @@ def run_server_command(
             command=cmdline,
             service=service,
         )
+        governed_fd = _open_governed_executable(config, parts)
     command_environment = os.environ.copy()
     for name in (
         "GIT_COMMON_DIR",
@@ -1185,11 +1230,21 @@ def run_server_command(
         "GIT_WORK_TREE",
     ):
         command_environment.pop(name, None)
-    result = _run_bounded_command(
-        parts,
-        cwd=worktree,
-        env=command_environment,
-    )
+    execution_parts = list(parts)
+    pass_fds: tuple[int, ...] = ()
+    if governed_fd is not None:
+        execution_parts[0] = f"/proc/self/fd/{governed_fd}"
+        pass_fds = (governed_fd,)
+    try:
+        result = _run_bounded_command(
+            execution_parts,
+            cwd=worktree,
+            env=command_environment,
+            pass_fds=pass_fds,
+        )
+    finally:
+        if governed_fd is not None:
+            os.close(governed_fd)
     failure: WorkerCallbackError | None = None
     if result.timed_out:
         failure = WorkerCallbackError(
@@ -1249,6 +1304,7 @@ def _run_bounded_command(
     env: dict[str, str],
     timeout: float = _COMMAND_TIMEOUT_SECONDS,
     output_limit: int = _COMMAND_OUTPUT_LIMIT_BYTES,
+    pass_fds: tuple[int, ...] = (),
 ) -> _BoundedCommandResult:
     process = subprocess.Popen(
         list(args),
@@ -1257,6 +1313,7 @@ def _run_bounded_command(
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,
         start_new_session=True,
+        pass_fds=pass_fds,
     )
     assert process.stdout is not None
     assert process.stderr is not None
