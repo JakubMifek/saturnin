@@ -438,7 +438,9 @@ def test_changed_rollback_snapshot_is_never_restored_or_restarted(
     result = _run(signer_install, "install", RACE_ROLLBACK="1")
 
     assert result.returncode != 0
-    assert "start saturnin-attestation.service" not in calls.read_text(encoding="utf-8")
+    assert calls.read_text(encoding="utf-8").splitlines().count(
+        "--user start saturnin-attestation.service"
+    ) == 1
     installed = unit_dir / "saturnin-attestation.service"
     assert not installed.exists() or "Description=raced rollback" not in (
         installed.read_text(encoding="utf-8")
