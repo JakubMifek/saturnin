@@ -23,6 +23,7 @@ import yaml
 from . import escalation as escalation_mod
 from . import telemetry
 from .automation import AutomationLibrary
+from .attestation_service import AttestationServiceError, sign_from_session
 from .board import CONTAINER_KINDS, TRANSITIONS, Board, BoardError, Task
 from .checkpoints import Checkpoint, CheckpointStore
 from .config import Config, ConfigError, find_root, load_yaml
@@ -31,6 +32,17 @@ from .contracts import (
     audit as audit_contracts,
     mcp_authorization_problem,
     project_agent_path,
+)
+from .credentials import (
+    CredentialError,
+    complete_attestation_rotation,
+    credential_prerequisites,
+    credential_status,
+    provision_attestation_key,
+    revoke_credential,
+    rollback_attestation_rotation,
+    rotate_attestation_key,
+    seal_attestation_rotation,
 )
 from .discovery import DiscoveryError, IssueDiscovery
 from .disclosure import audit as audit_disclosure
@@ -46,7 +58,6 @@ from .review import (
     ReviewLedger,
     issue_content_digest,
     review_attestation_signing_key,
-    sign_review_attestation,
 )
 from .routing import Router, RoutingError
 from .worktrees import CleanupPlan, GitError, WorktreeManager
@@ -365,6 +376,45 @@ def build_parser() -> argparse.ArgumentParser:
     docs_render = docs_cmd.add_parser("render", help="regenerate policy tables inside the docs")
     docs_render.add_argument(
         "--check", action="store_true", help="fail instead of writing when docs are stale"
+    )
+
+    credential = sub.add_parser(
+        "credential", help="manage systemd encrypted supervisor credentials"
+    ).add_subparsers(dest="credential_command", required=True)
+    credential.add_parser(
+        "provision-attestation",
+        help="generate and encrypt a new review attestation master key",
+    )
+    credential.add_parser(
+        "rotate-attestation",
+        help="retain the encrypted previous key and generate a new current key",
+    )
+    credential.add_parser(
+        "seal-attestation-rotation",
+        help="seal previous-key review records using encrypted credentials",
+    )
+    credential.add_parser(
+        "rollback-attestation-rotation",
+        help="restore encrypted current and previous keys after a failed rotation",
+    )
+    credential.add_parser(
+        "prerequisites",
+        help="check systemd user credential prerequisites without changing the host",
+    )
+    credential_status = credential.add_parser(
+        "status", help="validate encrypted credentials without disclosing values"
+    )
+    credential_status.add_argument(
+        "kind",
+        choices=["review-attestation", "all"],
+        default="all",
+        nargs="?",
+    )
+    credential_revoke = credential.add_parser(
+        "revoke", help="remove an encrypted credential after stopping supervisors"
+    )
+    credential_revoke.add_argument(
+        "kind", choices=["review-attestation"]
     )
 
     sub.add_parser("doctor", help="validate policies and installation")
@@ -908,6 +958,98 @@ def _run(args: argparse.Namespace, config: Config) -> int:  # noqa: C901 - flat 
     as_json = args.json
     if args.command == "doctor":
         return _run_doctor(config, as_json)
+    if args.command == "credential":
+        try:
+            if args.credential_command == "provision-attestation":
+                path = provision_attestation_key()
+                _emit(
+                    {"credential": "review-attestation", "path": str(path)},
+                    as_json,
+                    f"provisioned review-attestation at {path}",
+                )
+                return 0
+            if args.credential_command == "rotate-attestation":
+                ledger = ReviewLedger(config)
+                path = rotate_attestation_key(
+                    previous_key_in_use=ledger.has_records_signed_by,
+                )
+                _emit(
+                    {"credential": "review-attestation", "path": str(path)},
+                    as_json,
+                    f"rotated review-attestation at {path}",
+                )
+                return 0
+            if args.credential_command == "seal-attestation-rotation":
+                status = credential_status("review-attestation")
+                if status.get("rotation") == "sealed-cleanup":
+                    complete_attestation_rotation()
+                    _emit(
+                        {"rotation": "ready"},
+                        as_json,
+                        "completed sealed attestation rotation cleanup",
+                    )
+                    return 0
+                ledger = ReviewLedger(config)
+                manifest = seal_attestation_rotation(
+                    lambda current, previous: ledger.seal_rotation_manifest(
+                        current_master=current,
+                        previous_master=previous,
+                    )
+                )
+                _emit(
+                    {"rotation_manifest": str(manifest)},
+                    as_json,
+                    f"sealed attestation rotation in {manifest}",
+                )
+                return 0
+            if args.credential_command == "rollback-attestation-rotation":
+                path = rollback_attestation_rotation()
+                _emit(
+                    {"credential": "review-attestation", "path": str(path)},
+                    as_json,
+                    f"rolled back review-attestation rotation at {path}",
+                )
+                return 0
+            if args.credential_command == "prerequisites":
+                status = credential_prerequisites()
+                _emit(
+                    status,
+                    as_json,
+                    "credential prerequisites: ready",
+                )
+                return 0
+            if args.credential_command == "revoke":
+                paths = revoke_credential(args.kind)
+                _emit(
+                    {"credential": args.kind, "removed": [str(path) for path in paths]},
+                    as_json,
+                    f"revoked {args.kind}",
+                )
+                return 0
+            kinds = ["review-attestation"] if args.kind == "all" else [args.kind]
+            paths = {kind: credential_status(kind) for kind in kinds}
+            _emit(
+                paths,
+                as_json,
+                "\n".join(
+                    f"{kind}: {details['status']} ({details['path']})"
+                    + (
+                        f"; rotation={details['rotation']}"
+                        if "rotation" in details
+                        else ""
+                    )
+                    + (
+                        f"; signer={details['signer']}"
+                        if "signer" in details
+                        else ""
+                    )
+                    for kind, details in paths.items()
+                ),
+            )
+            return 0
+        except CredentialError as exc:
+            print(f"saturnin: {exc}", file=sys.stderr)
+            return 2
     board = Board(config)
 
     if args.command == "task":
@@ -1687,18 +1829,22 @@ def _run_review(args: argparse.Namespace, config: Config, as_json: bool) -> int:
         )
         return 0
     if args.review_command == "attest":
-        attestation = sign_review_attestation(
-            key=_review_attestation_key(config, args.reviewer),
-            subject=args.subject,
-            kind=args.kind,
-            author=args.author,
-            reviewer=args.reviewer,
-            verdict=args.verdict,
-            zero_context=not args.with_context,
-            head_sha=args.head_sha,
-            issue_digest=args.issue_digest,
-            destination_repo=args.repo,
-        )
+        try:
+            attestation = sign_from_session(
+                {
+                    "subject": args.subject,
+                    "kind": args.kind,
+                    "author": args.author,
+                    "reviewer": args.reviewer,
+                    "verdict": args.verdict,
+                    "zero_context": not args.with_context,
+                    "head_sha": args.head_sha,
+                    "issue_digest": args.issue_digest,
+                    "destination_repo": args.repo,
+                }
+            )
+        except AttestationServiceError as exc:
+            raise ReviewError(str(exc)) from exc
         _emit({"attestation": attestation}, as_json, attestation)
         return 0
     if args.review_command == "record":

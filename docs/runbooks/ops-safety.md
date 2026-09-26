@@ -27,27 +27,182 @@ Disable a misbehaving worker: `systemctl --user disable --now saturnin-<name>.ti
 
 ## Review attestation key
 
-Keep `SATURNIN_REVIEW_ATTESTATION_KEY` outside the checkout and outside worker
-unit environments. Only trusted supervisor processes (for example CI jobs or a
-dedicated supervisor shell profile) should load it. Worker launches derive
-role-scoped signing keys and pass them only to configured reviewer roles.
+### Host prerequisites
 
-To rotate the key, stop `saturnin-*` timers, retain the old master key as the
-previous verification key, and install the new current key:
+The credential owner must have systemd 256 or newer, a running systemd user
+manager, a persistent machine ID, and a system credential host key owned by
+root with mode `0400`. User-scoped encryption is bound to that host key plus
+the owner's numeric UID, account name, and machine ID. It is not portable to a
+different identity or freshly installed host.
+
+Creating the host key is a one-time administrator action, not an operation
+Saturnin may perform. A human administrator runs:
+
+<!-- generated:credential-admin-setup -->
+This is a bounded human-administrator operation; Saturnin and its workers remain forbidden from using privilege elevation.
 
 ```bash
-export SATURNIN_REVIEW_ATTESTATION_PREVIOUS_KEY='old-secret'
-export SATURNIN_REVIEW_ATTESTATION_KEY='new-secret'
-saturnin review seal-rotation
+sudo systemd-creds setup
+sudo stat -c '%U %G %a %n' /var/lib/systemd/credential.secret
 ```
 
-Run the sealing command before restarting timers. It writes a manifest
-authenticated by a dedicated derivation of the current master key and seals
-the exact reviewer, attestation ID, and signature tuples retained from the old
-key. Previous-key records fail closed if this manifest is absent, malformed,
-or altered; newly minted old-key attestations are never accepted. Keep master
-and previous keys only in the trusted supervisor environment. Rotate again
-only after retiring or archiving records signed by the previous key.
+The metadata check must report `root root 400`. Never print the host key contents.
+<!-- /generated:credential-admin-setup -->
+
+On systemd 256 and newer, unprivileged `--user` operations
+are brokered to the system credential service; there is no separate
+Saturnin-owned plaintext master or exportable user keyring to initialize.
+Recovery therefore depends on the root-owned host master and the bound host
+and account identity described below. After the reviewed PR is merged, the
+unprivileged Saturnin owner runs:
+
+```bash
+cd /home/saturnin/saturnin
+saturnin credential prerequisites
+umask 077
+saturnin credential provision-attestation
+saturnin credential status review-attestation
+saturnin credential rotate-attestation
+saturnin credential seal-attestation-rotation
+saturnin credential status review-attestation
+```
+
+`provision-attestation` generates both current and initial previous-slot keys
+inside the process and streams them to `systemd-creds` over stdin. Neither key
+is accepted in argv, a prompt, an environment variable, or a plaintext file.
+Status decrypts only into captured process memory and prints status and paths,
+never values. Encrypted files are owner-owned `0600` files in an owner-owned
+`0700` directory. The first status reports `signer=rotation-required`; the
+final status must report `rotation=ready; signer=ready` before unit
+installation.
+
+Once status is valid:
+
+```bash
+scripts/install_user_units.sh
+systemctl --user daemon-reload
+systemctl --user restart saturnin-attestation.service
+systemctl --user restart saturnin-improve.timer saturnin-resume.timer saturnin-discovery.timer
+systemctl --user status saturnin-attestation.service
+```
+
+<!-- generated:attestation-boundary -->
+During autonomous operation, the master and previous keys are loaded only by `saturnin-attestation.service` in its private mount, network, runtime, and credential namespace. Supervisor and worker units do not load either credential. Explicit owner lifecycle commands may decrypt them in bounded process memory only while the signer and supervisors are stopped.
+
+The signer remains disabled until the owner rotates the master and seals a version-2 migration manifest. That manifest enumerates the exact immutable historical attestations, records a signed ledger digest and timestamp cutoff, and never permits a legacy role-scoped signature to authorize a new record.
+
+For a routed reviewer task, the trusted launcher asks the service for a session bound to task, role, author, subject, immutable head or issue digest, a random nonce, and the launched process identity. The session expires after 900 seconds, accepts one signature, and verifies that the connecting process descends from that exact launch. Its Unix socket is bind-mounted only into that reviewer's sandbox; `/run` and `/proc` remain isolated for all workers.
+
+No worker receives a master or derived key in argv, environment, files, descriptors, logs, board data, or Git. Ordinary workers do not receive the session socket. The signed ledger retains only scope, key identifier, nonce, and signature, never plaintext key material.
+<!-- /generated:attestation-boundary -->
+
+GitHub MCP credential storage and injection are deliberately not part of this
+bootstrap. GitHub access requires a separately reviewed external-broker design.
+
+### Rotation, sealing, and rollback
+
+Stop supervisors and verify a clean starting state:
+
+```bash
+systemctl --user stop saturnin-improve.timer saturnin-resume.timer saturnin-discovery.timer saturnin-attestation.service
+saturnin credential status review-attestation
+saturnin credential rotate-attestation
+saturnin credential seal-attestation-rotation
+saturnin credential status review-attestation
+systemctl --user start saturnin-attestation.service
+systemctl --user start saturnin-improve.timer saturnin-resume.timer saturnin-discovery.timer
+```
+
+The first status must say `rotation=ready`; the last must also return to
+`rotation=ready`. Rotation saves owner-only ciphertext rollback copies, moves
+the old current key to the previous slot in memory, generates a new current
+key internally, and enters `pending-seal`. Sealing passes both decrypted values
+directly to the review ledger API, without environment variables, then deletes
+rollback artifacts. A second rotation is refused while any rotation is pending.
+
+If rotation or sealing fails, keep the timers stopped. Retry sealing when
+status is `pending-seal`, or restore both encrypted slots:
+
+```bash
+saturnin credential rollback-attestation-rotation
+saturnin credential status review-attestation
+```
+
+Rollback is retry-safe and removes its recovery artifacts only after both
+restored slots decrypt successfully. Once sealing completes, rollback is
+intentionally unavailable. Do not rotate again until records requiring the
+previous key have been retired or archived.
+
+### Backup and recovery
+
+The ciphertext alone is not a recoverable backup. Recovery requires all of:
+
+- the complete `saturnin-credentials` directory from a `rotation=ready` state;
+- the root-only `/var/lib/systemd/credential.secret` host master;
+- the same machine ID, numeric UID, and account name.
+
+Use a mounted encrypted, offline or separate-filesystem backup destination.
+The owner chooses that destination interactively and backs up ciphertext
+without decrypting it:
+
+```bash
+saturnin credential status all
+read -r -p 'Encrypted backup mount: ' SATURNIN_ENCRYPTED_BACKUP
+test -n "$SATURNIN_ENCRYPTED_BACKUP" && test "${SATURNIN_ENCRYPTED_BACKUP#/}" != "$SATURNIN_ENCRYPTED_BACKUP"
+install -d -m 0700 "$SATURNIN_ENCRYPTED_BACKUP/saturnin/credentials"
+cp --archive ~/.config/systemd/user/saturnin-credentials/. "$SATURNIN_ENCRYPTED_BACKUP/saturnin/credentials/"
+chmod -R go-rwx "$SATURNIN_ENCRYPTED_BACKUP/saturnin/credentials"
+```
+
+A human administrator separately backs up the host master and identity
+metadata to that encrypted destination without displaying them:
+
+<!-- generated:credential-admin-recovery -->
+The destination must be a mounted, encrypted, offline or separate filesystem. Set its path in the administrator shell and reject an empty or relative value:
+
+```bash
+read -r -p 'Encrypted backup mount: ' SATURNIN_ENCRYPTED_BACKUP
+test -n "${SATURNIN_ENCRYPTED_BACKUP}" && test "${SATURNIN_ENCRYPTED_BACKUP#/}" != "${SATURNIN_ENCRYPTED_BACKUP}"
+sudo install -d -o root -g root -m 0700 "${SATURNIN_ENCRYPTED_BACKUP}/saturnin/systemd"
+sudo install -m 0400 /var/lib/systemd/credential.secret "${SATURNIN_ENCRYPTED_BACKUP}/saturnin/systemd/credential.secret"
+sudo install -m 0444 /etc/machine-id "${SATURNIN_ENCRYPTED_BACKUP}/saturnin/systemd/machine-id"
+id -u saturnin
+```
+
+Record the reported UID and account name in the protected backup inventory. For recovery, keep all Saturnin timers stopped and run:
+
+```bash
+read -r -p 'Encrypted backup mount: ' SATURNIN_ENCRYPTED_BACKUP
+test -n "${SATURNIN_ENCRYPTED_BACKUP}" && test "${SATURNIN_ENCRYPTED_BACKUP#/}" != "${SATURNIN_ENCRYPTED_BACKUP}"
+sudo cmp --silent /etc/machine-id "${SATURNIN_ENCRYPTED_BACKUP}/saturnin/systemd/machine-id"
+id -u saturnin
+sudo install -o root -g root -m 0400 "${SATURNIN_ENCRYPTED_BACKUP}/saturnin/systemd/credential.secret" /var/lib/systemd/credential.secret
+```
+
+The administrator must verify the recorded UID and account name before restoring the host key.
+<!-- /generated:credential-admin-recovery -->
+
+The owner then restores and validates ciphertext:
+
+```bash
+read -r -p 'Encrypted backup mount: ' SATURNIN_ENCRYPTED_BACKUP
+test -n "$SATURNIN_ENCRYPTED_BACKUP" && test "${SATURNIN_ENCRYPTED_BACKUP#/}" != "$SATURNIN_ENCRYPTED_BACKUP"
+install -d -m 0700 ~/.config/systemd/user/saturnin-credentials
+cp --archive "$SATURNIN_ENCRYPTED_BACKUP/saturnin/credentials/." ~/.config/systemd/user/saturnin-credentials/
+chmod 0700 ~/.config/systemd/user/saturnin-credentials
+chmod 0600 ~/.config/systemd/user/saturnin-credentials/*
+saturnin credential prerequisites
+saturnin credential status all
+```
+
+If the identity or machine ID differs, do not overwrite it merely to recover a
+credential. Provision fresh credentials and treat old attestations as an
+explicit governance recovery requiring human review.
+
+To revoke a compromised credential, stop the `saturnin-*` timers and signer,
+run `saturnin credential revoke review-attestation`, and leave them stopped
+until a replacement is provisioned and validated. Revocation removes the
+encrypted files and does not print their contents.
 
 ## Cleanup safety model
 
