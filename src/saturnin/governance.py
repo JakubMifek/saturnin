@@ -542,6 +542,12 @@ class Governance:
                 )
             if not units and sub not in ("list-timers", "status", "daemon-reload"):
                 return Decision.deny("systemctl needs an explicit Saturnin unit name")
+            governed_units = set(services.get("governed_units", []))
+            protected_actions = {"start", "stop", "restart", "enable", "disable"}
+            if sub in protected_actions and governed_units.intersection(units):
+                return Decision.deny(
+                    "governed units may only be changed by their registered operation"
+                )
             return Decision.ok("systemctl limited to Saturnin-dedicated units")
         if binary == "journalctl":
             if not services.get("journalctl_allowed", False):
@@ -1106,6 +1112,11 @@ def _check_filesystem_targets(
 ) -> Decision:
     forbidden_roots = _policy_roots(filesystem.get("forbidden_roots", []))
     writable_roots = _writable_roots(filesystem, runtime_root)
+    governed_paths = [
+        Path(value.replace("%h", str(Path.home()))).resolve(strict=False)
+        for value in filesystem.get("governed_write_paths", [])
+        if isinstance(value, str)
+    ]
     for raw_path in targets:
         path = _resolve_command_path(raw_path, cwd=cwd)
         forbidden = _containing_root(path, forbidden_roots)
@@ -1117,6 +1128,15 @@ def _check_filesystem_targets(
         if _containing_root(path, writable_roots) is None:
             return Decision.deny(
                 f"filesystem write target {str(path)!r} is outside writable roots"
+            )
+        if any(
+            path == governed
+            or path.is_relative_to(governed)
+            or governed.is_relative_to(path)
+            for governed in governed_paths
+        ):
+            return Decision.deny(
+                f"filesystem write target {str(path)!r} is reserved for a governed operation"
             )
     return Decision.ok("filesystem write targets are within writable roots")
 

@@ -148,7 +148,7 @@ def signer_install(tmp_path: Path) -> tuple[Path, dict[str, str], Path, Path]:
         "  exit\n"
         "fi\n"
         "case \"${3:-}\" in\n"
-        "  *systemd_credential*)\n"
+        "  *_decrypt_encrypted_credential*)\n"
         "    printf '%064d %064d %064d\\n' 0 1 2\n"
         "    exit 0\n"
         "    ;;\n"

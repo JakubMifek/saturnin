@@ -36,13 +36,14 @@ services:
   # Timers live in the Saturnin user scope only.
   scheduling_scope: user
   allowed_schedulers: [systemd-user-timer]
+  governed_units: [saturnin-attestation.service]
 
 # Canonical compound operations are checked as exact executable/action pairs.
 # They may internally perform only the bounded user-unit lifecycle named here.
 operations:
   signer_user_unit:
     executable: scripts/install_attestation_unit.sh
-    sha256: d52f31f8d87fd7f2e74d6a10bfc5eb5636b2e605236c3ee4f6142dd99261747a
+    sha256: 4795ce237ab15e0377320065f7fa6c6d5ecf6b2c2c4e965d7169e892ab02e6c1
     dependencies:
       - .venv/bin/saturnin
       - systemd/saturnin-attestation.service
@@ -99,7 +100,7 @@ operations:
     runtime_files:
       - source: policies/governance.yaml
         archive: saturnin/governance.runtime.yaml
-    runtime_manifest_sha256: bfa3494251d0b78360fcc86168a4c1c0f998d913049a7fc6dee8ef92641313c0
+    runtime_manifest_sha256: fda2b1f30ebe9f8e11a42f126dabf5dbc6f5e8fd8efd3c21aece1481cb6cd88b
     trusted_tools:
       - /usr/bin/bash
       - /usr/bin/chmod
@@ -121,6 +122,12 @@ operations:
     scope: user
 
 filesystem:
+  governed_write_paths:
+    - "%h/.config/systemd/user/saturnin-attestation.service"
+    - "%h/.config/systemd/user/saturnin-attestation.service.d"
+    - "%h/.config/systemd/user/saturnin-attestation-runtime.pyz"
+    - "%h/.config/systemd/user/default.target.wants/saturnin-attestation.service"
+    - "%h/.config/systemd/user/saturnin-credentials"
   # Basename-specific command rules only apply to executables resolved from
   # administrator-controlled system locations.
   trusted_executable_roots:

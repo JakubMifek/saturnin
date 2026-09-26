@@ -7,7 +7,7 @@ unset BASH_ENV ENV CDPATH PYTHONHOME PYTHONPATH
 IFS=$' \t\n'
 
 readonly UNIT=saturnin-attestation.service
-readonly EXPECTED_RUNTIME_MANIFEST_SHA256=bfa3494251d0b78360fcc86168a4c1c0f998d913049a7fc6dee8ef92641313c0
+readonly EXPECTED_RUNTIME_MANIFEST_SHA256=fda2b1f30ebe9f8e11a42f126dabf5dbc6f5e8fd8efd3c21aece1481cb6cd88b
 readonly ID=/usr/bin/id
 readonly REALPATH=/usr/bin/realpath
 readonly STAT=/usr/bin/stat
@@ -975,7 +975,7 @@ if ! "$FLOCK" --exclusive --nonblock "$CREDENTIAL_LOCK_FD"; then
 fi
 read -r CURRENT_KEY_ID PREVIOUS_KEY_ID CREDENTIAL_GENERATION < <(
   SATURNIN_SEALED_GOVERNANCE=runtime-archive "$PYTHON" -I -c \
-    'import hashlib,sys;sys.path.insert(0,sys.argv.pop(1));from saturnin.credentials import ATTESTATION_CREDENTIAL,PREVIOUS_ATTESTATION_CREDENTIAL,credential_generation,systemd_credential;print(hashlib.sha256(systemd_credential(ATTESTATION_CREDENTIAL).encode()).hexdigest(),hashlib.sha256(systemd_credential(PREVIOUS_ATTESTATION_CREDENTIAL).encode()).hexdigest(),credential_generation())' \
+    'import hashlib,sys;sys.path.insert(0,sys.argv.pop(1));from saturnin.credentials import _decrypt_encrypted_credential,credential_generation;print(hashlib.sha256(_decrypt_encrypted_credential("review-attestation").encode()).hexdigest(),hashlib.sha256(_decrypt_encrypted_credential("review-attestation-previous").encode()).hexdigest(),credential_generation())' \
     "/proc/self/fd/$RUNTIME_TREE_FD"
 )
 if [[ ! "$CURRENT_KEY_ID" =~ ^[0-9a-f]{64}$ ]] \
