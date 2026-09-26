@@ -4,6 +4,9 @@ set -Eeuo pipefail
 umask 077
 
 SATURNIN_HOME="${SATURNIN_HOME:-$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)}"
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd -P)"
+# shellcheck source=scripts/lib/user_unit_install.sh
+source "$SCRIPT_DIR/lib/user_unit_install.sh"
 UNIT_DIR="${XDG_CONFIG_HOME:-$HOME/.config}/systemd/user"
 ENABLED_TIMERS=(
   saturnin-janitor.timer
@@ -15,12 +18,9 @@ ENABLED_TIMERS=(
 MANAGED_UNITS=()
 declare -A WAS_ACTIVE=()
 
-if [[ "$(id -u)" -eq 0 ]]; then
-  echo "Refusing to install units as root; Saturnin units are user scoped." >&2
-  exit 1
-fi
+saturnin_require_unprivileged_user
 
-if [[ ! "$SATURNIN_HOME" =~ ^[A-Za-z0-9/._-]+$ ]]; then
+if ! saturnin_validate_render_path "$SATURNIN_HOME"; then
   cat >&2 <<'ERR'
 SATURNIN_HOME contains characters that cannot be rendered safely for all
 systemd directives used by Saturnin units.
@@ -105,16 +105,7 @@ fi
 for unit in "$SATURNIN_HOME"/systemd/saturnin-*; do
   name="$(basename "$unit")"
   MANAGED_UNITS+=("$name")
-  SATURNIN_HOME_ESCAPED="$SATURNIN_HOME" SATURNIN_HOME_ENV_ESCAPED="$SATURNIN_HOME" \
-    TEMPLATE="$unit" DEST="$STAGE_DIR/$name" python3 -c '
-from pathlib import Path
-import os
-template = Path(os.environ["TEMPLATE"]).read_text()
-Path(os.environ["DEST"]).write_text(
-    template.replace("@SATURNIN_HOME@", os.environ["SATURNIN_HOME_ESCAPED"])
-    .replace("@SATURNIN_HOME_ENV@", os.environ["SATURNIN_HOME_ENV_ESCAPED"])
-)
-'
+  saturnin_render_unit "$unit" "$STAGE_DIR/$name" "$SATURNIN_HOME"
   if command -v systemd-analyze >/dev/null 2>&1; then
     if ! systemd-analyze --user verify "$STAGE_DIR/$name"; then
       echo "systemd-analyze verify failed for $name; refusing to enable invalid units" >&2

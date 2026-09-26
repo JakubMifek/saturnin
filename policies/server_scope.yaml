@@ -37,6 +37,15 @@ services:
   scheduling_scope: user
   allowed_schedulers: [systemd-user-timer]
 
+# Canonical compound operations are checked as exact executable/action pairs.
+# They may internally perform only the bounded user-unit lifecycle named here.
+operations:
+  signer_user_unit:
+    executable: scripts/install_attestation_unit.sh
+    allowed_actions: [install, status, uninstall]
+    unit: saturnin-attestation.service
+    scope: user
+
 filesystem:
   # Basename-specific command rules only apply to executables resolved from
   # administrator-controlled system locations.

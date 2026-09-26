@@ -247,6 +247,35 @@ def _credential_admin_recovery(config: Config) -> str:
     )
 
 
+def _signer_unit_interface(config: Config) -> str:
+    operation = config.policy("server_scope").get("operations", {}).get(
+        "signer_user_unit"
+    )
+    if not isinstance(operation, dict):
+        raise GeneratedBlockError("server_scope signer_user_unit operation is required")
+    executable = operation.get("executable")
+    actions = operation.get("allowed_actions")
+    unit = operation.get("unit")
+    scope = operation.get("scope")
+    if (
+        not isinstance(executable, str)
+        or not isinstance(actions, list)
+        or not all(isinstance(action, str) for action in actions)
+        or not isinstance(unit, str)
+        or not isinstance(scope, str)
+    ):
+        raise GeneratedBlockError("server_scope signer_user_unit operation is invalid")
+    commands = "\n".join(f"{executable} {action}" for action in actions)
+    return (
+        f"This interface is restricted to the `{scope}`-scoped `{unit}` unit.\n\n"
+        f"```bash\n{commands}\n```\n\n"
+        "Install is retry-safe and restores the prior signer definition and state "
+        "after a partial failure. Status performs no mutation. Uninstall removes "
+        "only the signer definition and enablement link, leaves encrypted "
+        "credentials in place, and is safe to repeat."
+    )
+
+
 def _attestation_boundary(config: Config) -> str:
     policy = config.governance.get("review", {}).get("attestation", {})
     if (
@@ -348,6 +377,7 @@ GENERATORS: dict[str, Callable[[Config], str]] = {
     "issue-review-flow": _issue_review_flow,
     "credential-admin-setup": _credential_admin_setup,
     "credential-admin-recovery": _credential_admin_recovery,
+    "signer-unit-interface": _signer_unit_interface,
     "attestation-boundary": _attestation_boundary,
     "roles": _roles_table,
     "routing": _routing_table,

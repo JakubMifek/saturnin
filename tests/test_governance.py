@@ -1339,6 +1339,39 @@ def test_in_scope_server_commands(
     assert governance.check_server_command(command).allowed
 
 
+def test_signer_user_unit_operation_is_exact_and_canonical(
+    governance: Governance, config: Config
+) -> None:
+    executable = config.data_root / "scripts" / "install_attestation_unit.sh"
+    executable.parent.mkdir(parents=True, exist_ok=True)
+    executable.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+    executable.chmod(0o755)
+
+    for action in ("install", "status", "uninstall"):
+        assert governance.check_server_command(f"{executable} {action}").allowed
+    for command in (
+        f"{executable}",
+        f"{executable} install extra",
+        f"{executable} restart",
+        "install_attestation_unit.sh install",
+    ):
+        assert not governance.check_server_command(command).allowed
+
+
+def test_signer_user_unit_operation_rejects_symlink(
+    governance: Governance, config: Config, tmp_path: Path
+) -> None:
+    real = tmp_path / "installer"
+    real.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+    real.chmod(0o755)
+    executable = config.data_root / "scripts" / "install_attestation_unit.sh"
+    executable.parent.mkdir(parents=True, exist_ok=True)
+    executable.unlink(missing_ok=True)
+    executable.symlink_to(real)
+
+    assert not governance.check_server_command(f"{executable} install").allowed
+
+
 def test_bootstrap_runtime_saturnin_executable_is_trusted(
     governance: Governance,
     config: Config,

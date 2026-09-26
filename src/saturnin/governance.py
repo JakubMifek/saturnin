@@ -413,6 +413,9 @@ class Governance:
             return Decision.deny("environment variable assignments are not allowed")
         executable = parts[0]
         binary = Path(executable).name
+        operation = _governed_operation(parts, self.config.server_scope, self.config.data_root)
+        if operation is not None:
+            return operation
         executable_decision = _check_executable_location(
             executable,
             binary,
@@ -781,8 +784,14 @@ def _check_executable_location(
     cwd: Path | None = None,
 ) -> Decision:
     filesystem = scope.get("filesystem", {})
+    operation_names = {
+        Path(str(operation.get("executable", ""))).name
+        for operation in scope.get("operations", {}).values()
+        if isinstance(operation, dict)
+    }
     classified = (
         binary in _SPECIAL_EXECUTABLES
+        or binary in operation_names
         or binary in set(filesystem.get("executable_allowlist", []))
         or binary in set(scope.get("user", {}).get("forbidden_prefixes", []))
         or binary == "apt"
@@ -861,6 +870,46 @@ def _check_executable_location(
             f"executable {str(resolved)!r} is outside trusted system executable roots"
         )
     return Decision.ok(f"executable {str(resolved)!r} is under a trusted system root")
+
+
+def _governed_operation(
+    parts: Sequence[str], scope: dict[str, Any], runtime_root: Path
+) -> Decision | None:
+    binary = Path(parts[0]).name
+    for name, operation in scope.get("operations", {}).items():
+        if not isinstance(operation, dict):
+            continue
+        relative = Path(str(operation.get("executable", "")))
+        if binary != relative.name:
+            continue
+        if relative.is_absolute() or ".." in relative.parts:
+            return Decision.deny(f"invalid governed operation path for {name}")
+        expected = Path(os.path.abspath(runtime_root / relative))
+        supplied = Path(parts[0])
+        if not supplied.is_absolute():
+            supplied = Path(os.path.abspath(supplied))
+        if supplied != expected:
+            return Decision.deny(
+                f"governed operation {name} must use canonical executable {expected}"
+            )
+        try:
+            resolved = supplied.resolve(strict=True)
+        except (OSError, RuntimeError, ValueError):
+            return Decision.deny(f"governed operation executable {supplied} does not exist")
+        if resolved != supplied or not resolved.is_file() or not os.access(resolved, os.X_OK):
+            return Decision.deny(
+                f"governed operation executable {supplied} must be a regular executable, not a symlink"
+            )
+        actions = operation.get("allowed_actions", [])
+        if len(parts) != 2 or parts[1] not in actions:
+            return Decision.deny(
+                f"governed operation {name} requires exactly one action from {actions}"
+            )
+        return Decision.ok(
+            f"governed operation {name} is limited to {operation.get('scope')} "
+            f"{operation.get('unit')}"
+        )
+    return None
 
 
 def _trusted_executable_roots(
