@@ -473,7 +473,7 @@ def test_status_rejects_tampered_unit_without_systemctl(
     installed = unit_dir / "saturnin-attestation.service"
     installed.write_text(
         installed.read_text(encoding="utf-8").replace(
-            "saturnin.attestation_service serve", "saturnin.cli doctor"
+            "SATURNIN_RUNTIME_SHA256", "UNTRUSTED_RUNTIME_SHA256"
         ),
         encoding="utf-8",
     )
