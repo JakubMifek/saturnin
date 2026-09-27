@@ -14,6 +14,7 @@ import pwd
 import re
 import shlex
 import shutil
+import sys
 from fnmatch import fnmatchcase
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -768,7 +769,7 @@ def _check_filesystem_scope(
     except _WriteScopeError as exc:
         return Decision.deny(str(exc))
     if _creates_hard_links(binary, arguments) and _arguments_touch_governed_paths(
-        arguments, filesystem, cwd=cwd
+        arguments, filesystem, runtime_root=runtime_root, cwd=cwd
     ):
         return Decision.deny(
             "hard links may not reference governed filesystem objects"
@@ -857,13 +858,21 @@ def _arguments_touch_governed_paths(
     arguments: Sequence[str],
     filesystem: dict[str, Any],
     *,
+    runtime_root: Path,
     cwd: Path | None,
 ) -> bool:
-    governed_paths = [
-        Path(value.replace("%h", str(Path.home()))).resolve(strict=False)
-        for value in filesystem.get("governed_write_paths", [])
-        if isinstance(value, str)
-    ]
+    governed_paths = []
+    for value in filesystem.get("governed_write_paths", []):
+        if not isinstance(value, str):
+            continue
+        expanded = value.replace("%h", str(Path.home())).replace(
+            "{python_version}",
+            f"python{sys.version_info.major}.{sys.version_info.minor}",
+        )
+        governed = Path(expanded)
+        if not governed.is_absolute():
+            governed = runtime_root / governed
+        governed_paths.append(governed.resolve(strict=False))
     governed_identities: set[tuple[int, int]] = set()
     for path in governed_paths:
         try:
@@ -1225,11 +1234,18 @@ def _check_filesystem_targets(
 ) -> Decision:
     forbidden_roots = _policy_roots(filesystem.get("forbidden_roots", []))
     writable_roots = _writable_roots(filesystem, runtime_root)
-    governed_paths = [
-        Path(value.replace("%h", str(Path.home()))).resolve(strict=False)
-        for value in filesystem.get("governed_write_paths", [])
-        if isinstance(value, str)
-    ]
+    governed_paths = []
+    for value in filesystem.get("governed_write_paths", []):
+        if not isinstance(value, str):
+            continue
+        expanded = value.replace("%h", str(Path.home())).replace(
+            "{python_version}",
+            f"python{sys.version_info.major}.{sys.version_info.minor}",
+        )
+        governed = Path(expanded)
+        if not governed.is_absolute():
+            governed = runtime_root / governed
+        governed_paths.append(governed.resolve(strict=False))
     for raw_path in targets:
         path = _resolve_command_path(raw_path, cwd=cwd)
         forbidden = _containing_root(path, forbidden_roots)

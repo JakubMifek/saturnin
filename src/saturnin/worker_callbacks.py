@@ -1352,6 +1352,7 @@ def _open_governed_runtime(config: Config, parts: Sequence[str]) -> int | None:
     expected_uid = os.geteuid()
     entries: list[tuple[str, bytes]] = []
     seen_roots: set[str] = set()
+    descriptor: int | None = None
     try:
         for source in sources:
             if not isinstance(source, dict):
@@ -1479,12 +1480,16 @@ def _open_governed_runtime(config: Config, parts: Sequence[str]) -> int | None:
         )
         os.lseek(descriptor, 0, os.SEEK_SET)
         return descriptor
-    except (OSError, zipfile.BadZipFile) as exc:
-        if "descriptor" in locals() and isinstance(descriptor, int):
+    except BaseException as exc:
+        if descriptor is not None:
             try:
                 os.close(descriptor)
             except OSError:
                 pass
+        if isinstance(exc, WorkerCallbackError):
+            raise
+        if not isinstance(exc, (OSError, zipfile.BadZipFile)):
+            raise
         raise WorkerCallbackError(
             "governed runtime could not be pinned for execution"
         ) from exc
@@ -1638,7 +1643,7 @@ def run_server_command(
             cwd=execution_cwd,
             env=command_environment,
             pass_fds=pass_fds,
-            hard_kill_on_timeout=governed_fd is None,
+            termination_grace=60 if governed_fd is not None else 10,
         )
     finally:
         if governed_fd is not None:
@@ -1647,8 +1652,14 @@ def run_server_command(
             os.close(governed_runtime_fd)
     failure: WorkerCallbackError | None = None
     if result.timed_out:
+        detail = (
+            "; forced termination was required and manual recovery is required"
+            if result.forced_termination and governed_fd is not None
+            else ""
+        )
         failure = WorkerCallbackError(
-            f"host command timed out after {_COMMAND_TIMEOUT_SECONDS:g}s; see {log_path}"
+            f"host command timed out after {_COMMAND_TIMEOUT_SECONDS:g}s{detail}; "
+            f"see {log_path}"
         )
     elif result.returncode:
         failure = WorkerCallbackError(
@@ -1665,6 +1676,7 @@ def run_server_command(
             log=str(log_path),
             timed_out=result.timed_out,
             output_truncated=result.output_truncated,
+            forced_termination=result.forced_termination,
         )
     record = {
         "task_id": task_id,
@@ -1676,6 +1688,7 @@ def run_server_command(
         "stderr": result.stderr,
         "timed_out": result.timed_out,
         "output_truncated": result.output_truncated,
+        "forced_termination": result.forced_termination,
     }
     durable_append_text(log_path, json.dumps(record, sort_keys=True) + "\n")
     if failure is not None:
@@ -1695,6 +1708,7 @@ class _BoundedCommandResult:
     stderr: str
     timed_out: bool
     output_truncated: bool
+    forced_termination: bool = False
 
 
 def _run_bounded_command(
@@ -1705,7 +1719,7 @@ def _run_bounded_command(
     timeout: float = _COMMAND_TIMEOUT_SECONDS,
     output_limit: int = _COMMAND_OUTPUT_LIMIT_BYTES,
     pass_fds: tuple[int, ...] = (),
-    hard_kill_on_timeout: bool = True,
+    termination_grace: float = 10,
 ) -> _BoundedCommandResult:
     process = subprocess.Popen(
         list(args),
@@ -1728,6 +1742,7 @@ def _run_bounded_command(
     termination_sent = False
     kill_deadline: float | None = None
     timed_out = False
+    forced_termination = False
     while selector.get_map() or process.poll() is None:
         now = time.monotonic()
         if not termination_sent and now >= deadline:
@@ -1737,17 +1752,19 @@ def _run_bounded_command(
                 os.killpg(process.pid, signal.SIGTERM)
             except ProcessLookupError:
                 pass
-            if hard_kill_on_timeout:
-                kill_deadline = now + 10
+            kill_deadline = now + termination_grace
         if kill_deadline is not None and now >= kill_deadline:
-            try:
-                os.killpg(process.pid, signal.SIGKILL)
-            except ProcessLookupError:
-                pass
-            for key in list(selector.get_map().values()):
-                selector.unregister(key.fileobj)
-                key.fileobj.close()
-            break
+            if process.poll() is None:
+                forced_termination = True
+                try:
+                    os.killpg(process.pid, signal.SIGKILL)
+                except ProcessLookupError:
+                    pass
+                for key in list(selector.get_map().values()):
+                    selector.unregister(key.fileobj)
+                    key.fileobj.close()
+                break
+            kill_deadline = None
         wait_until = (
             kill_deadline
             if kill_deadline is not None
@@ -1795,6 +1812,7 @@ def _run_bounded_command(
         stderr=stderr,
         timed_out=timed_out,
         output_truncated=bool(truncated),
+        forced_termination=forced_termination,
     )
 
 

@@ -5,6 +5,7 @@ import json
 import os
 import secrets
 import shutil
+import sys
 import threading
 from contextlib import contextmanager
 from concurrent.futures import ThreadPoolExecutor
@@ -1435,6 +1436,40 @@ def test_signer_files_are_reserved_for_governed_operation(
     )
 
     assert not decision.allowed
+
+
+@pytest.mark.parametrize(
+    "relative",
+    [
+        "policies/server_scope.yaml",
+        "policies/governance.yaml",
+        "scripts/install_attestation_unit.sh",
+        "systemd/saturnin-attestation.service",
+        ".venv/bin/saturnin",
+        "src/saturnin/worker_callbacks.py",
+        f".venv/lib/python{sys.version_info.major}.{sys.version_info.minor}"
+        "/site-packages/yaml/__init__.py",
+    ],
+)
+def test_governed_operation_trust_sources_are_reserved(
+    governance: Governance,
+    config: Config,
+    relative: str,
+) -> None:
+    filesystem = config.server_scope["filesystem"]
+    filesystem["writable_root_sources"] = ["data_root"]
+    filesystem["governed_write_paths"] = [relative]
+    source = config.data_root / "payload"
+    source.write_text("payload", encoding="utf-8")
+    decision = governance.check_server_command(
+        f"cp {source} {config.data_root / relative}"
+    )
+
+    assert not decision.allowed
+    assert any(
+        "reserved for a governed operation" in reason
+        for reason in decision.reasons
+    )
 
 
 def test_signer_user_unit_operation_is_exact_and_canonical(

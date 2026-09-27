@@ -8,7 +8,7 @@ unset BASH_ENV ENV CDPATH PYTHONHOME PYTHONPATH
 IFS=$' \t\n'
 
 readonly UNIT=saturnin-attestation.service
-readonly EXPECTED_RUNTIME_MANIFEST_SHA256=831fec78692ad8f9c2e5db818a4032f57d35cae369a58a1d6862f7df64487fdb
+readonly EXPECTED_RUNTIME_MANIFEST_SHA256=bc187986169218f94589a7e793afd7467688da62cddd2db34a5322f6c4f9b7ce
 readonly ID=/usr/bin/id
 readonly REALPATH=/usr/bin/realpath
 readonly STAT=/usr/bin/stat
@@ -24,6 +24,7 @@ readonly CP=/usr/bin/cp
 readonly MV=/usr/bin/mv
 readonly CHMOD=/usr/bin/chmod
 readonly SLEEP=/usr/bin/sleep
+readonly TIMEOUT=/usr/bin/timeout
 readonly RAW_SCRIPT_PATH="${BASH_SOURCE[0]}"
 SCRIPT_PATH="$("$REALPATH" -- "$RAW_SCRIPT_PATH")"
 readonly SCRIPT_PATH
@@ -78,7 +79,8 @@ readonly RUNTIME="$SATURNIN_HOME/.venv/bin/saturnin"
 readonly TEMPLATE="$SATURNIN_HOME/systemd/$UNIT"
 
 for tool in "$ID" "$REALPATH" "$STAT" "$PYTHON" "$SYSTEMCTL" \
-  "$SYSTEMD_ANALYZE" "$SYSTEMD_CREDS" "$FLOCK" "$MKDIR" "$RM" "$CP" "$MV" "$CHMOD"; do
+  "$SYSTEMD_ANALYZE" "$SYSTEMD_CREDS" "$FLOCK" "$MKDIR" "$RM" "$CP" "$MV" \
+  "$CHMOD" "$SLEEP" "$TIMEOUT"; do
   if [[ -L "$tool" || ! -x "$tool" ]] \
     || [[ "$("$STAT" -c %u "$tool")" -ne 0 ]] \
     || (( 8#$("$STAT" -c %a "$tool") & 8#022 )); then
@@ -86,6 +88,10 @@ for tool in "$ID" "$REALPATH" "$STAT" "$PYTHON" "$SYSTEMCTL" \
     exit 1
   fi
 done
+
+systemctl_bounded() {
+  "$TIMEOUT" --signal=TERM --kill-after=10s 30s "$SYSTEMCTL" "$@"
+}
 
 for trusted in "$EXPECTED_SCRIPT" "$RUNTIME" "$TEMPLATE"; do
   if [[ -L "$trusted" || ! -f "$trusted" ]]; then
@@ -792,7 +798,7 @@ if not matched:
 }
 
 verify_stopped_service() {
-  "$SYSTEMCTL" --user show --no-pager \
+  systemctl_bounded --user show --no-pager \
     --property=ActiveState --property=SubState \
     --property=MainPID --property=ExecMainPID --property=ControlGroup \
     "$UNIT" >"$MANAGER_STATE" || return 1
@@ -864,7 +870,8 @@ if [[ "$action" == status ]]; then
   verify_unit_directory
   STATUS_RUNTIME_ID="$(trusted_file_identity "$FILE_INSTALLED_RUNTIME" 0400)"
   verify_unit_identity "$FILE_INSTALLED" 0644 "${STATUS_RUNTIME_ID##*:}" >/dev/null
-  exec "$SYSTEMCTL" --user status --no-pager "$UNIT"
+  exec "$TIMEOUT" --signal=TERM --kill-after=10s 30s \
+    "$SYSTEMCTL" --user status --no-pager "$UNIT"
 fi
 
 readonly TRANSACTION="$PINNED_UNIT_DIR/.saturnin-attestation-transaction.$$"
@@ -936,7 +943,7 @@ restore_file() {
 
 rollback() {
   set +e
-  if ! "$SYSTEMCTL" --user stop "$UNIT" >/dev/null 2>&1 \
+  if ! systemctl_bounded --user stop "$UNIT" >/dev/null 2>&1 \
     || ! verify_stopped_service; then
     echo "ROLLBACK FAILURE: rejected signer termination was not proven; prior files were not restored." >&2
     return 1
@@ -957,7 +964,7 @@ rollback() {
   if [[ "$had_wants_dir" -eq 0 && "$wants_dir_identity" != missing ]]; then
     wants_operation rmdir "$wants_dir_identity" || return 1
   fi
-  if ! "$SYSTEMCTL" --user daemon-reload >/dev/null 2>&1; then
+  if ! systemctl_bounded --user daemon-reload >/dev/null 2>&1; then
     echo "ROLLBACK FAILURE: systemd did not reload the restored signer definition." >&2
     return 1
   fi
@@ -973,15 +980,15 @@ rollback() {
     || ! verify_unit_identity "$FILE_INSTALLED" 0644 \
       "${runtime_backup_identity##*:}" >/dev/null \
     || ! trusted_file_identity "$FILE_INSTALLED_RUNTIME" 0400 >/dev/null \
-    || ! "$SYSTEMCTL" --user cat --no-pager "$UNIT" >"$MANAGER_VIEW" \
+    || ! systemctl_bounded --user cat --no-pager "$UNIT" >"$MANAGER_VIEW" \
     || ! verify_manager_loaded_unit "$MANAGER_VIEW" "$BACKUP/unit" \
-    || ! "$SYSTEMCTL" --user start "$UNIT" >/dev/null 2>&1 \
-    || ! "$SYSTEMCTL" --user cat --no-pager "$UNIT" >"$MANAGER_VIEW" \
+    || ! systemctl_bounded --user start "$UNIT" >/dev/null 2>&1 \
+    || ! systemctl_bounded --user cat --no-pager "$UNIT" >"$MANAGER_VIEW" \
     || ! verify_manager_loaded_unit "$MANAGER_VIEW" "$BACKUP/unit"; then
     echo "ROLLBACK FAILURE: prior signer definition could not be restarted safely." >&2
     return 1
   fi
-  "$SYSTEMCTL" --user show --no-pager \
+  systemctl_bounded --user show --no-pager \
     --property=LoadState --property=ActiveState --property=SubState \
     --property=FragmentPath --property=DropInPaths \
     --property=MainPID --property=ExecMainPID --property=ControlGroup \
@@ -1008,7 +1015,7 @@ on_exit() {
 }
 trap on_exit EXIT
 
-if "$SYSTEMCTL" --user is-active --quiet "$UNIT"; then
+if systemctl_bounded --user is-active --quiet "$UNIT"; then
   was_active=1
 fi
 if [[ -e "$FILE_INSTALLED_RUNTIME" || -L "$FILE_INSTALLED_RUNTIME" ]]; then
@@ -1044,16 +1051,16 @@ if [[ "$action" == uninstall ]]; then
   mutating=1
   verify_unit_directory
   if [[ "$was_active" -eq 1 ]]; then
-    "$SYSTEMCTL" --user stop "$UNIT"
+    systemctl_bounded --user stop "$UNIT"
   else
-    "$SYSTEMCTL" --user stop "$UNIT" >/dev/null 2>&1 || true
+    systemctl_bounded --user stop "$UNIT" >/dev/null 2>&1 || true
   fi
   if [[ "$had_wants_dir" -eq 1 ]]; then
     wants_operation unlink "$wants_dir_identity"
   fi
   "$RM" -f "$FILE_INSTALLED" "$FILE_INSTALLED_RUNTIME"
   verify_unit_directory
-  "$SYSTEMCTL" --user daemon-reload
+  systemctl_bounded --user daemon-reload
   mutating=0
   echo "uninstalled $UNIT; encrypted credentials were left untouched"
   exit 0
@@ -1244,6 +1251,7 @@ def decrypt(key, credential_name):
         check=False,
         capture_output=True,
         pass_fds=(descriptor,),
+        timeout=30,
     )
     if result.returncode != 0 or not result.stdout or len(result.stdout) > 65536:
         raise SystemExit(f"credential snapshot cannot be decrypted: {key}")
@@ -1326,7 +1334,8 @@ rendered = rendered.replace(
 Path(os.environ["DESTINATION"]).write_text(rendered, encoding="utf-8")
 '
 verify_unit_identity "$STAGE" 0600 "$RUNTIME_TREE_SHA256" >/dev/null
-"$SYSTEMD_ANALYZE" --user verify "$STAGE"
+"$TIMEOUT" --signal=TERM --kill-after=10s 30s \
+  "$SYSTEMD_ANALYZE" --user verify "$STAGE"
 
 "$CHMOD" 0644 "$STAGE"
 mutating=1
@@ -1353,9 +1362,9 @@ INSTALLED_DEVICE_INODE="$(
 )"
 readonly INSTALLED_DEVICE_INODE
 snapshot_trusted_file "$FILE_INSTALLED" "$INSTALLED_SNAPSHOT" 0400
-"$SYSTEMCTL" --user daemon-reload
+systemctl_bounded --user daemon-reload
 verify_unit_directory
-"$SYSTEMCTL" --user cat --no-pager "$UNIT" >"$MANAGER_VIEW"
+systemctl_bounded --user cat --no-pager "$UNIT" >"$MANAGER_VIEW"
 verify_manager_loaded_unit "$MANAGER_VIEW"
 if [[ "$(verify_unit_identity "$FILE_INSTALLED" 0644 "$RUNTIME_TREE_SHA256")" != "$INSTALLED_DEVICE_INODE" ]]; then
   echo "Installed attestation unit identity drifted after daemon-reload." >&2
@@ -1376,16 +1385,16 @@ if [[ "$(trusted_file_identity "$FILE_INSTALLED_RUNTIME" 0400)" != "$RUNTIME_TRE
 fi
 verify_unit_directory
 verify_wants_link
-"$SYSTEMCTL" --user cat --no-pager "$UNIT" >"$MANAGER_VIEW"
+systemctl_bounded --user cat --no-pager "$UNIT" >"$MANAGER_VIEW"
 verify_manager_loaded_unit "$MANAGER_VIEW"
 if [[ "$was_active" -eq 1 ]]; then
-  "$SYSTEMCTL" --user restart "$UNIT"
+  systemctl_bounded --user restart "$UNIT"
 else
-  "$SYSTEMCTL" --user start "$UNIT"
+  systemctl_bounded --user start "$UNIT"
 fi
-"$SYSTEMCTL" --user cat --no-pager "$UNIT" >"$MANAGER_VIEW"
+systemctl_bounded --user cat --no-pager "$UNIT" >"$MANAGER_VIEW"
 verify_manager_loaded_unit "$MANAGER_VIEW"
-"$SYSTEMCTL" --user show --no-pager \
+systemctl_bounded --user show --no-pager \
   --property=LoadState --property=ActiveState --property=SubState \
   --property=FragmentPath --property=DropInPaths \
   --property=MainPID --property=ExecMainPID --property=ControlGroup \

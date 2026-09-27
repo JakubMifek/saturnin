@@ -1645,7 +1645,7 @@ def test_governed_timeout_allows_cooperative_transaction_cleanup(
         cwd=git_repo,
         env=os.environ.copy(),
         timeout=0.05,
-        hard_kill_on_timeout=False,
+        termination_grace=1,
     )
 
     assert result.timed_out
@@ -1789,6 +1789,25 @@ def test_governed_runtime_is_complete_sealed_and_survives_source_mutation(
         os.close(descriptor)
 
 
+def test_governed_runtime_manifest_rejection_closes_memfd(
+    config: Config,
+) -> None:
+    parts, _ = _prepare_governed_runtime_sources(config)
+    config.server_scope["operations"]["signer_user_unit"][
+        "runtime_manifest_sha256"
+    ] = "0" * 64
+    before = len(list(Path("/proc/self/fd").iterdir()))
+
+    for _ in range(20):
+        with pytest.raises(
+            WorkerCallbackError,
+            match="authorized manifest",
+        ):
+            worker_callbacks._open_governed_runtime(config, parts)
+
+    assert len(list(Path("/proc/self/fd").iterdir())) == before
+
+
 @pytest.mark.parametrize(
     "change",
     [
@@ -1861,6 +1880,7 @@ def test_bounded_command_tracks_closed_pipes_and_kills_descendants(
         cwd=git_repo,
         env=os.environ.copy(),
         timeout=0.05,
+        termination_grace=0.05,
     )
 
     assert result.timed_out
@@ -1869,6 +1889,27 @@ def test_bounded_command_tracks_closed_pipes_and_kills_descendants(
     while _process_is_running(child_pid) and time.monotonic() < deadline:
         time.sleep(0.01)
     assert not _process_is_running(child_pid)
+
+
+def test_bounded_command_force_kills_after_termination_grace(
+    git_repo: Path,
+) -> None:
+    result = worker_callbacks._run_bounded_command(
+        [
+            sys.executable,
+            "-c",
+            "import signal,time;signal.signal(signal.SIGTERM,signal.SIG_IGN);"
+            "time.sleep(30)",
+        ],
+        cwd=git_repo,
+        env=os.environ.copy(),
+        timeout=0.05,
+        termination_grace=0.05,
+    )
+
+    assert result.timed_out
+    assert result.forced_termination
+    assert result.returncode != 0
 
 
 def _process_is_running(pid: int) -> bool:
@@ -1948,7 +1989,10 @@ def test_ops_host_git_command_cannot_escape_task_worktree(
     ]
     monkeypatch.setattr("saturnin.governance.os.geteuid", lambda: 1000)
 
-    with pytest.raises(WorkerCallbackError, match="outside task worktree"):
+    with pytest.raises(
+        WorkerCallbackError,
+        match="outside task worktree|reserved for a governed operation",
+    ):
         run_server_command(
             config,
             board,

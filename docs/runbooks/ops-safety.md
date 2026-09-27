@@ -90,10 +90,12 @@ saturnin check command "$SATURNIN_HOME/scripts/install_attestation_unit.sh unins
 Install is retry-safe and restores the prior signer definition and state after a partial failure. Status performs no mutation. Uninstall removes only the signer definition, enablement link, and pinned runtime snapshot `%h/.config/systemd/user/saturnin-attestation-runtime.pyz`, leaves encrypted credentials in place, and is safe to repeat.
 <!-- /generated:signer-unit-interface -->
 
-The governed callback timeout sends a cooperative termination signal and does
-not hard-kill this transaction. The installer retains its lifecycle and
-credential locks while its exit trap stops and verifies any candidate signer,
-restores the prior definition, and reports rollback failure distinctly.
+The governed callback timeout first sends a cooperative termination signal and
+allows a 60-second rollback grace period. The installer retains its lifecycle
+and credential locks while its exit trap stops and verifies any candidate
+signer and restores the prior definition. If that grace period is exhausted,
+the broker force-terminates the process group and records that manual recovery
+is required rather than reporting an ordinary retry-safe failure.
 
 The uninstall action is the selective rollback for the signer installation.
 It does not revoke or delete credentials. Use the credential lifecycle commands
