@@ -1547,8 +1547,56 @@ def test_hardlink_aliases_of_governed_sources_are_denied(
     assert not decision.allowed
     assert any(
         "aliases a governed operation object" in item
+        or "governed trust directory" in item
         for item in decision.reasons
     ), decision.reasons
+
+
+@pytest.mark.parametrize(
+    "command",
+    [
+        "truncate --size=0 {alias}",
+        "chmod --reference={source} {alias}",
+        "cp {source} {alias}",
+        "tee {alias}",
+    ],
+)
+def test_production_runtime_descendant_aliases_are_denied(
+    governance: Governance,
+    config: Config,
+    command: str,
+) -> None:
+    filesystem = config.server_scope["filesystem"]
+    filesystem["writable_root_sources"] = ["data_root"]
+    filesystem["executable_allowlist"] = [
+        *filesystem.get("executable_allowlist", []),
+        "chmod",
+        "cp",
+        "tee",
+        "truncate",
+    ]
+    operation = config.server_scope["operations"]["signer_user_unit"]
+    operation["runtime_sources"] = [
+        {
+            "source": "src/saturnin",
+            "archive": "saturnin",
+            "files": ["worker_callbacks.py"],
+        }
+    ]
+    governed = config.data_root / "src/saturnin/worker_callbacks.py"
+    governed.parent.mkdir(parents=True, exist_ok=True)
+    governed.write_text("trusted", encoding="utf-8")
+    alias = config.data_root / "worker-alias"
+    os.link(governed, alias)
+    source = config.data_root / "payload"
+    source.write_text("payload", encoding="utf-8")
+
+    decision = governance.check_server_command(
+        command.format(alias=alias, source=source)
+    )
+
+    assert not decision.allowed
+    assert any("governed trust directory" in reason for reason in decision.reasons)
 
 
 def test_signer_user_unit_operation_is_exact_and_canonical(

@@ -57,7 +57,7 @@ services:
 operations:
   signer_user_unit:
     executable: scripts/install_attestation_unit.sh
-    sha256: 980b46be307e40a5c780da4ca1d81a849f1ce586c8044976afb71abe678b59de
+    sha256: 34861a7a38ca1d7170c91e1e2afb42a3ee1314b200a314d10e184ae4b5c00bea
     dependencies:
       - .venv/bin/saturnin
       - systemd/saturnin-attestation.service
@@ -93,6 +93,8 @@ operations:
           - worktrees.py
       - source: .venv/lib/{python_version}/site-packages/yaml
         archive: yaml
+        excluded_files:
+          - _yaml{extension_suffix}
         files:
           - __init__.py
           - composer.py
@@ -114,7 +116,7 @@ operations:
     runtime_files:
       - source: policies/governance.yaml
         archive: saturnin/governance.runtime.yaml
-    runtime_manifest_sha256: 5aefb9eb047a10f49d48e85e1fb1388504f4f345a262fbfc36d4e000b8da436a
+    runtime_manifest_sha256: 016baf901fbbf3db5e8092e8296b7fbaa5a4f8aafe7172ca02bee28205aac9a5
     trusted_tools:
       - /usr/bin/bash
       - /usr/bin/chmod

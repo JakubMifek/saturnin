@@ -408,6 +408,11 @@ def _authorized_fds(
                     str(path.relative_to(package))
                     for path in sorted(package.rglob("*.py"))
                 ],
+                "excluded_files": [
+                    str(path.relative_to(package))
+                    for path in sorted(package.iterdir())
+                    if path.is_file() and path.suffix != ".py"
+                ],
             }
         )
     manifest_entries = {

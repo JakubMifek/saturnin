@@ -16,6 +16,7 @@ import signal
 import stat
 import subprocess
 import sys
+import sysconfig
 import time
 import zipfile
 from argparse import Namespace
@@ -28,7 +29,13 @@ from .board import Board, Task
 from .checkpoints import Checkpoint, CheckpointStore
 from .config import Config
 from .contracts import load_contracts
-from .governance import Governance, _git_targets, github_repo_slug
+from .governance import (
+    Governance,
+    _TrustedDirectoryError,
+    _git_targets,
+    _trusted_directory_entries,
+    github_repo_slug,
+)
 from .jsonlines import PRIVATE_FILE_MODE, atomic_replace_text, durable_append_text, objects
 from .locking import file_lock
 from .review import ReviewLedger, normalize_repository_slug
@@ -1122,6 +1129,7 @@ def _open_governed_executable(config: Config, parts: Sequence[str]) -> int | Non
             != (after.st_dev, after.st_ino, after.st_size, after.st_mtime_ns)
             or not stat.S_ISREG(before.st_mode)
             or before.st_uid != os.geteuid()
+            or before.st_nlink != 1
             or before.st_mode & 0o022
             or content.hexdigest() != digest
         ):
@@ -1147,87 +1155,23 @@ def _runtime_source_entries(
     root_descriptor: int,
     *,
     archive_root: str,
+    expected_files: set[str],
+    excluded_files: set[str],
     expected_uid: int,
 ) -> list[tuple[str, bytes]]:
-    entries: list[tuple[str, bytes]] = []
-
-    def visit(directory_descriptor: int, relative: tuple[str, ...]) -> None:
-        directory = os.fstat(directory_descriptor)
-        if not _safe_runtime_directory(directory, expected_uid):
-            raise WorkerCallbackError("governed runtime directory is unsafe")
-        names = sorted(os.listdir(directory_descriptor))
-        for name in names:
-            if name in {"", ".", ".."} or "/" in name:
-                raise WorkerCallbackError("governed runtime entry has an invalid name")
-            metadata = os.stat(name, dir_fd=directory_descriptor, follow_symlinks=False)
-            if stat.S_ISLNK(metadata.st_mode):
-                raise WorkerCallbackError("governed runtime contains a symlink")
-            if stat.S_ISDIR(metadata.st_mode):
-                if name == "__pycache__":
-                    continue
-                child = os.open(
-                    name,
-                    os.O_RDONLY | os.O_CLOEXEC | os.O_NOFOLLOW | os.O_DIRECTORY,
-                    dir_fd=directory_descriptor,
-                )
-                try:
-                    visit(child, (*relative, name))
-                finally:
-                    os.close(child)
-                continue
-            if not stat.S_ISREG(metadata.st_mode):
-                raise WorkerCallbackError("governed runtime contains a special file")
-            if not name.endswith(".py"):
-                continue
-            descriptor = os.open(
-                name,
-                os.O_RDONLY | os.O_CLOEXEC | os.O_NOFOLLOW,
-                dir_fd=directory_descriptor,
-            )
-            try:
-                before = os.fstat(descriptor)
-                content = bytearray()
-                while chunk := os.read(descriptor, 64 * 1024):
-                    content.extend(chunk)
-                after = os.fstat(descriptor)
-            finally:
-                os.close(descriptor)
-            identity = lambda value: (
-                value.st_dev,
-                value.st_ino,
-                value.st_size,
-                value.st_mtime_ns,
-                value.st_ctime_ns,
-            )
-            if (
-                identity(metadata) != identity(before)
-                or identity(before) != identity(after)
-                or before.st_uid != expected_uid
-                or not _safe_runtime_write_access(before, expected_uid)
-            ):
-                raise WorkerCallbackError(
-                    "governed runtime source changed during authorization"
-                )
-            entries.append(
-                ("/".join((archive_root, *relative, name)), bytes(content))
-            )
-        after = os.fstat(directory_descriptor)
-        identity = lambda value: (
-            value.st_dev,
-            value.st_ino,
-            value.st_size,
-            value.st_mtime_ns,
-            value.st_ctime_ns,
+    try:
+        entries = _trusted_directory_entries(
+            root_descriptor,
+            expected_files=expected_files | excluded_files,
+            expected_uid=expected_uid,
         )
-        if identity(directory) != identity(after) or names != sorted(
-            os.listdir(directory_descriptor)
-        ):
-            raise WorkerCallbackError(
-                "governed runtime directory changed during authorization"
-            )
-
-    visit(root_descriptor, ())
-    return entries
+    except _TrustedDirectoryError as exc:
+        raise WorkerCallbackError(str(exc)) from exc
+    return [
+        (f"{archive_root}/{relative_name}", content)
+        for relative_name, content, _ in entries
+        if relative_name in expected_files
+    ]
 
 
 def _safe_runtime_write_access(
@@ -1323,6 +1267,7 @@ def _read_runtime_source_file(
         or identity(before) != identity(after)
         or not stat.S_ISREG(before.st_mode)
         or before.st_uid != expected_uid
+        or before.st_nlink != 1
         or not _safe_runtime_write_access(before, expected_uid)
     ):
         raise WorkerCallbackError(
@@ -1360,6 +1305,7 @@ def _open_governed_runtime(config: Config, parts: Sequence[str]) -> int | None:
             archive_root = source.get("archive")
             relative_text = source.get("source")
             expected_files = source.get("files")
+            excluded_files = source.get("excluded_files", [])
             if (
                 not isinstance(archive_root, str)
                 or not re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", archive_root)
@@ -1375,12 +1321,29 @@ def _open_governed_runtime(config: Config, parts: Sequence[str]) -> int | None:
                     for name in expected_files
                 )
                 or len(expected_files) != len(set(expected_files))
+                or not isinstance(excluded_files, list)
+                or not all(
+                    isinstance(name, str)
+                    and not Path(name).is_absolute()
+                    and ".." not in Path(name).parts
+                    for name in excluded_files
+                )
+                or len(excluded_files) != len(set(excluded_files))
             ):
                 raise WorkerCallbackError("governed runtime source manifest is invalid")
             relative_text = relative_text.replace(
                 "{python_version}",
                 f"python{sys.version_info.major}.{sys.version_info.minor}",
             )
+            extension_suffix = sysconfig.get_config_var("EXT_SUFFIX") or ""
+            excluded_files = [
+                name.replace("{extension_suffix}", extension_suffix)
+                for name in excluded_files
+            ]
+            if set(expected_files) & set(excluded_files):
+                raise WorkerCallbackError(
+                    "governed runtime source exclusions overlap its manifest"
+                )
             relative = Path(relative_text)
             if relative.is_absolute() or ".." in relative.parts:
                 raise WorkerCallbackError("governed runtime source path is invalid")
@@ -1391,6 +1354,8 @@ def _open_governed_runtime(config: Config, parts: Sequence[str]) -> int | None:
                 package_entries = _runtime_source_entries(
                     descriptor,
                     archive_root=archive_root,
+                    expected_files=set(expected_files),
+                    excluded_files=set(excluded_files),
                     expected_uid=expected_uid,
                 )
             finally:

@@ -8,7 +8,7 @@ unset BASH_ENV ENV CDPATH PYTHONHOME PYTHONPATH
 IFS=$' \t\n'
 
 readonly UNIT=saturnin-attestation.service
-readonly EXPECTED_RUNTIME_MANIFEST_SHA256=5aefb9eb047a10f49d48e85e1fb1388504f4f345a262fbfc36d4e000b8da436a
+readonly EXPECTED_RUNTIME_MANIFEST_SHA256=016baf901fbbf3db5e8092e8296b7fbaa5a4f8aafe7172ca02bee28205aac9a5
 readonly ID=/usr/bin/id
 readonly REALPATH=/usr/bin/realpath
 readonly STAT=/usr/bin/stat

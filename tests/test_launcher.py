@@ -6,6 +6,7 @@ import json
 import os
 import subprocess
 import sys
+import sysconfig
 import threading
 import time
 import zipfile
@@ -17,6 +18,7 @@ from types import SimpleNamespace
 import pytest
 import yaml
 
+from saturnin import governance as governance_module
 from saturnin import worker_callbacks
 from saturnin.board import Board, utcnow
 from saturnin.checkpoints import Checkpoint, CheckpointStore
@@ -1710,6 +1712,14 @@ def _prepare_governed_runtime_sources(
                 encoding="utf-8",
             )
             path.chmod(0o644)
+        for relative in package.get("excluded_files", []):
+            relative = relative.replace(
+                "{extension_suffix}",
+                sysconfig.get_config_var("EXT_SUFFIX") or "",
+            )
+            path = root / relative
+            path.write_bytes(b"excluded native extension")
+            path.chmod(0o644)
     for runtime_file in operation["runtime_files"]:
         path = config.data_root / runtime_file["source"]
         path.parent.mkdir(parents=True, exist_ok=True)
@@ -1812,8 +1822,12 @@ def test_governed_runtime_manifest_rejection_closes_memfd(
     "change",
     [
         "extra",
+        "unexpected-non-python",
         "omitted",
+        "external-hardlink",
+        "internal-hardlink",
         "symlink",
+        "special",
         "substitution",
         "saturnin-content",
         "yaml-content",
@@ -1833,12 +1847,29 @@ def test_governed_runtime_rejects_manifest_and_tree_substitution(
             "raise RuntimeError('injected')\n", encoding="utf-8"
         )
         injected.chmod(0o644)
+    elif change == "unexpected-non-python":
+        (roots["saturnin"] / "payload.txt").write_text(
+            "not an authorized source\n", encoding="utf-8"
+        )
     elif change == "omitted":
         (roots["yaml"] / "loader.py").unlink()
+    elif change == "external-hardlink":
+        os.link(
+            roots["saturnin"] / "worker_callbacks.py",
+            config.data_root / "worker-callbacks-alias.py",
+        )
+    elif change == "internal-hardlink":
+        target = roots["saturnin"] / "review.py"
+        target.unlink()
+        os.link(roots["saturnin"] / "routing.py", target)
     elif change == "symlink":
         target = roots["saturnin"] / "review.py"
         target.unlink()
         target.symlink_to(tmp_path / "outside.py")
+    elif change == "special":
+        target = roots["saturnin"] / "review.py"
+        target.unlink()
+        os.mkfifo(target)
     elif change == "substitution":
         operation["runtime_sources"][1]["archive"] = "saturnin"
     elif change == "saturnin-content":
@@ -1857,9 +1888,47 @@ def test_governed_runtime_rejects_manifest_and_tree_substitution(
 
     with pytest.raises(
         WorkerCallbackError,
-        match="manifest|symlink|differs|authorized",
+        match="manifest|symlink|differs|authorized|unexpected|unsafe|special",
     ):
         worker_callbacks._open_governed_runtime(config, parts)
+
+
+def test_trusted_directory_rejects_descendant_swap_between_stat_and_open(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    root = tmp_path / "trusted"
+    root.mkdir()
+    target = root / "worker_callbacks.py"
+    target.write_text("trusted\n", encoding="utf-8")
+    replacement = tmp_path / "replacement"
+    replacement.write_text("trusted\n", encoding="utf-8")
+    descriptor = os.open(root, os.O_RDONLY | os.O_DIRECTORY)
+    real_open = os.open
+    swapped = False
+
+    def swapping_open(path: object, flags: int, *args: object, **kwargs: object) -> int:
+        nonlocal swapped
+        if path == "worker_callbacks.py" and kwargs.get("dir_fd") == descriptor:
+            swapped = True
+            target.rename(tmp_path / "original")
+            replacement.rename(target)
+        return real_open(path, flags, *args, **kwargs)
+
+    monkeypatch.setattr(governance_module.os, "open", swapping_open)
+    try:
+        with pytest.raises(
+            governance_module._TrustedDirectoryError,
+            match="changed during acquisition|unsafe or unstable",
+        ):
+            governance_module._trusted_directory_entries(
+                descriptor,
+                expected_files={"worker_callbacks.py"},
+                expected_uid=os.geteuid(),
+            )
+    finally:
+        os.close(descriptor)
+    assert swapped
 
 
 def test_bounded_command_tracks_closed_pipes_and_kills_descendants(

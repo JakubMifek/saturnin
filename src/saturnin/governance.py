@@ -14,7 +14,9 @@ import pwd
 import re
 import shlex
 import shutil
+import stat
 import sys
+import sysconfig
 from fnmatch import fnmatchcase
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -81,6 +83,153 @@ _SPECIAL_EXECUTABLES = (
         "xargs",
     }
 )
+
+
+class _TrustedDirectoryError(ValueError):
+    pass
+
+
+def _safe_trusted_write_access(
+    metadata: os.stat_result, expected_uid: int
+) -> bool:
+    if metadata.st_mode & 0o002:
+        return False
+    if not metadata.st_mode & 0o020:
+        return True
+    if metadata.st_uid != expected_uid or metadata.st_gid != os.getegid():
+        return False
+    group = grp.getgrgid(metadata.st_gid)
+    primary_users = {
+        entry.pw_uid for entry in pwd.getpwall() if entry.pw_gid == metadata.st_gid
+    }
+    return not group.gr_mem and primary_users == {expected_uid}
+
+
+def _safe_trusted_directory(
+    metadata: os.stat_result, expected_uid: int
+) -> bool:
+    if not stat.S_ISDIR(metadata.st_mode) or metadata.st_uid not in {
+        0,
+        expected_uid,
+    }:
+        return False
+    if metadata.st_uid == 0 and metadata.st_mode & stat.S_ISVTX:
+        return True
+    return _safe_trusted_write_access(metadata, expected_uid)
+
+
+def _trusted_directory_entries(
+    root_descriptor: int,
+    *,
+    expected_files: set[str],
+    expected_uid: int,
+) -> list[tuple[str, bytes, tuple[int, int]]]:
+    entries: list[tuple[str, bytes, tuple[int, int]]] = []
+    seen_inodes: set[tuple[int, int]] = set()
+    expected_directories = {
+        "/".join(Path(name).parts[:index])
+        for name in expected_files
+        for index in range(1, len(Path(name).parts))
+    }
+
+    def identity(value: os.stat_result) -> tuple[int, int, int, int, int]:
+        return (
+            value.st_dev,
+            value.st_ino,
+            value.st_size,
+            value.st_mtime_ns,
+            value.st_ctime_ns,
+        )
+
+    def visit(directory_descriptor: int, relative: tuple[str, ...]) -> None:
+        before_directory = os.fstat(directory_descriptor)
+        if not _safe_trusted_directory(before_directory, expected_uid):
+            raise _TrustedDirectoryError("governed trust directory is unsafe")
+        names = sorted(os.listdir(directory_descriptor))
+        for name in names:
+            if name in {"", ".", ".."} or "/" in name:
+                raise _TrustedDirectoryError(
+                    "governed trust directory has an invalid entry name"
+                )
+            relative_name = "/".join((*relative, name))
+            metadata = os.stat(
+                name, dir_fd=directory_descriptor, follow_symlinks=False
+            )
+            if stat.S_ISLNK(metadata.st_mode):
+                raise _TrustedDirectoryError(
+                    "governed trust directory contains a symlink"
+                )
+            if stat.S_ISDIR(metadata.st_mode):
+                if name == "__pycache__":
+                    continue
+                if relative_name not in expected_directories:
+                    raise _TrustedDirectoryError(
+                        "governed trust directory contains an unexpected directory"
+                    )
+                child = os.open(
+                    name,
+                    os.O_RDONLY | os.O_CLOEXEC | os.O_NOFOLLOW | os.O_DIRECTORY,
+                    dir_fd=directory_descriptor,
+                )
+                try:
+                    opened = os.fstat(child)
+                    if identity(metadata) != identity(opened):
+                        raise _TrustedDirectoryError(
+                            "governed trust directory changed during acquisition"
+                        )
+                    visit(child, (*relative, name))
+                finally:
+                    os.close(child)
+                continue
+            if not stat.S_ISREG(metadata.st_mode):
+                raise _TrustedDirectoryError(
+                    "governed trust directory contains a special file"
+                )
+            if relative_name not in expected_files:
+                raise _TrustedDirectoryError(
+                    "governed trust directory contains an unexpected file"
+                )
+            descriptor = os.open(
+                name,
+                os.O_RDONLY | os.O_CLOEXEC | os.O_NOFOLLOW,
+                dir_fd=directory_descriptor,
+            )
+            try:
+                before = os.fstat(descriptor)
+                content = bytearray()
+                while chunk := os.read(descriptor, 64 * 1024):
+                    content.extend(chunk)
+                after = os.fstat(descriptor)
+            finally:
+                os.close(descriptor)
+            inode = (before.st_dev, before.st_ino)
+            if (
+                identity(metadata) != identity(before)
+                or identity(before) != identity(after)
+                or before.st_uid != expected_uid
+                or before.st_nlink != 1
+                or not _safe_trusted_write_access(before, expected_uid)
+                or inode in seen_inodes
+            ):
+                raise _TrustedDirectoryError(
+                    "governed trust file has unsafe or unstable identity"
+                )
+            seen_inodes.add(inode)
+            entries.append((relative_name, bytes(content), inode))
+        after_directory = os.fstat(directory_descriptor)
+        if identity(before_directory) != identity(after_directory) or names != sorted(
+            os.listdir(directory_descriptor)
+        ):
+            raise _TrustedDirectoryError(
+                "governed trust directory changed during enumeration"
+            )
+
+    visit(root_descriptor, ())
+    if {name for name, _, _ in entries} != expected_files:
+        raise _TrustedDirectoryError(
+            "governed trust directory differs from its manifest"
+        )
+    return entries
 
 
 def _repo_slug_key(repo: object) -> str:
@@ -469,10 +618,17 @@ class Governance:
         scope = self.config.server_scope
         services = scope.get("services", {})
         packages = scope.get("packages", {})
+        filesystem = dict(scope.get("filesystem", {}))
+        try:
+            filesystem["_governed_trust_directories"] = (
+                _governed_trust_directories(scope, self.config.data_root)
+            )
+        except ValueError as error:
+            return Decision.deny(f"invalid governed trust policy: {error}")
         filesystem_decision = _check_filesystem_scope(
             binary,
             parts[1:],
-            scope.get("filesystem", {}),
+            filesystem,
             runtime_root=self.config.data_root,
             cwd=cwd,
         )
@@ -880,6 +1036,10 @@ def _arguments_touch_governed_paths(
         except OSError:
             continue
         governed_identities.add((metadata.st_dev, metadata.st_ino))
+    try:
+        governed_identities.update(_governed_trust_identities(filesystem))
+    except (OSError, _TrustedDirectoryError):
+        return True
     candidates = list(arguments)
     candidates.extend(
         argument.split("=", 1)[1]
@@ -1112,10 +1272,14 @@ def _validate_governed_operation_file(
             f"governed operation {label} {path} must have canonical regular-file identity"
         )
     expected_owner = os.geteuid() if owner_uid is None else owner_uid
-    if metadata.st_uid != expected_owner or metadata.st_mode & 0o022:
+    if (
+        metadata.st_uid != expected_owner
+        or metadata.st_nlink != 1
+        or metadata.st_mode & 0o022
+    ):
         return Decision.deny(
-            f"governed operation {label} {path} must be owner-controlled and "
-            "not group/world writable"
+            f"governed operation {label} {path} must be single-linked, "
+            "owner-controlled and not group/world writable"
         )
     if executable and not os.access(path, os.X_OK):
         return Decision.deny(f"governed operation {label} {path} must be executable")
@@ -1225,6 +1389,98 @@ def _trusted_runtime_executable(filesystem: dict[str, Any], runtime_root: Path) 
     return Path(os.path.abspath(runtime_root / relative))
 
 
+def _governed_trust_directories(
+    scope: dict[str, Any], runtime_root: Path
+) -> list[tuple[Path, set[str]]]:
+    directories: list[tuple[Path, set[str]]] = []
+    operations = scope.get("operations", {})
+    if not isinstance(operations, dict):
+        raise ValueError("operations must be a mapping")
+    for operation in operations.values():
+        if not isinstance(operation, dict):
+            continue
+        sources = operation.get("runtime_sources", [])
+        if not isinstance(sources, list):
+            raise ValueError("runtime_sources must be a list")
+        for source in sources:
+            if not isinstance(source, dict):
+                raise ValueError("runtime source must be a mapping")
+            source_text = source.get("source")
+            files = source.get("files")
+            excluded_files = source.get("excluded_files", [])
+            if (
+                not isinstance(source_text, str)
+                or not isinstance(files, list)
+                or not files
+                or not all(
+                    isinstance(name, str)
+                    and name.endswith(".py")
+                    and not Path(name).is_absolute()
+                    and ".." not in Path(name).parts
+                    for name in files
+                )
+                or len(files) != len(set(files))
+                or not isinstance(excluded_files, list)
+                or not all(
+                    isinstance(name, str)
+                    and not Path(name).is_absolute()
+                    and ".." not in Path(name).parts
+                    for name in excluded_files
+                )
+                or len(excluded_files) != len(set(excluded_files))
+            ):
+                raise ValueError("runtime source trust manifest is invalid")
+            source_text = source_text.replace(
+                "{python_version}",
+                f"python{sys.version_info.major}.{sys.version_info.minor}",
+            )
+            relative = Path(source_text)
+            if relative.is_absolute() or ".." in relative.parts:
+                raise ValueError("runtime source trust path is invalid")
+            extension_suffix = sysconfig.get_config_var("EXT_SUFFIX") or ""
+            expanded_exclusions = {
+                name.replace("{extension_suffix}", extension_suffix)
+                for name in excluded_files
+            }
+            if set(files) & expanded_exclusions:
+                raise ValueError("runtime source exclusions overlap its manifest")
+            directories.append(
+                (
+                    Path(os.path.abspath(runtime_root / relative)),
+                    set(files) | expanded_exclusions,
+                )
+            )
+    return directories
+
+
+def _governed_trust_identities(
+    filesystem: dict[str, Any],
+) -> set[tuple[int, int]]:
+    identities: set[tuple[int, int]] = set()
+    for root, expected_files in filesystem.get(
+        "_governed_trust_directories", []
+    ):
+        try:
+            descriptor = os.open(
+                root,
+                os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC,
+            )
+        except FileNotFoundError:
+            continue
+        try:
+            identities.update(
+                inode
+                for _, _, inode in _trusted_directory_entries(
+                    descriptor,
+                    expected_files=expected_files,
+                    expected_uid=os.geteuid(),
+                )
+            )
+        finally:
+            os.close(descriptor)
+    return identities
+
+
 def _check_filesystem_targets(
     targets: Sequence[str],
     filesystem: dict[str, Any],
@@ -1260,6 +1516,12 @@ def _check_filesystem_targets(
             governed_identities.add((metadata.st_dev, metadata.st_ino))
         finally:
             os.close(descriptor)
+    try:
+        governed_identities.update(_governed_trust_identities(filesystem))
+    except (OSError, _TrustedDirectoryError) as exc:
+        return Decision.deny(
+            f"governed trust directory could not be inventoried safely: {exc}"
+        )
     for raw_path in targets:
         path = _resolve_command_path(raw_path, cwd=cwd)
         forbidden = _containing_root(path, forbidden_roots)
