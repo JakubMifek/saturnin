@@ -433,8 +433,27 @@ def test_install_rejects_execution_without_governed_runtime_descriptor(
     )
 
     assert result.returncode != 0
-    assert "governed sealed runtime descriptor" in result.stderr
+    assert "governed sealed execution" in result.stderr
     assert not (unit_dir / "saturnin-attestation.service").exists()
+    assert not calls.exists()
+
+
+@pytest.mark.parametrize("action", ["status", "uninstall"])
+def test_all_actions_reject_direct_execution(
+    signer_install: tuple[Path, dict[str, str], Path, Path], action: str
+) -> None:
+    checkout, env, _, calls = signer_install
+
+    result = subprocess.run(
+        [str(checkout / "scripts" / "install_attestation_unit.sh"), action],
+        check=False,
+        capture_output=True,
+        text=True,
+        env=env,
+    )
+
+    assert result.returncode != 0
+    assert "governed sealed execution" in result.stderr
     assert not calls.exists()
 
 
@@ -1176,6 +1195,9 @@ def test_rejects_noncanonical_home_and_path_injection(
         "unit-dir-mode",
         "checkout-mode",
         "config-symlink",
+        "credential-hardlink",
+        "runtime-hardlink",
+        "template-hardlink",
     ],
 )
 def test_rejects_symlinks_and_unsafe_permissions_before_mutation(
@@ -1201,6 +1223,20 @@ def test_rejects_symlinks_and_unsafe_permissions_before_mutation(
         unit_dir.chmod(0o777)
     elif unsafe == "checkout-mode":
         checkout.chmod(0o777)
+    elif unsafe == "credential-hardlink":
+        credential = (
+            unit_dir
+            / "saturnin-credentials"
+            / "saturnin-review-attestation-key.cred"
+        )
+        os.link(credential, tmp_path / "credential-alias")
+    elif unsafe == "runtime-hardlink":
+        os.link(checkout / ".venv" / "bin" / "saturnin", tmp_path / "runtime-alias")
+    elif unsafe == "template-hardlink":
+        os.link(
+            checkout / "systemd" / "saturnin-attestation.service",
+            tmp_path / "template-alias",
+        )
     else:
         config = Path(signer_install[1]["HOME"]) / ".config"
         real_config = config.with_name("real-config")

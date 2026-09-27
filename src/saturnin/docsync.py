@@ -267,7 +267,11 @@ def _signer_unit_interface(config: Config) -> str:
         or not isinstance(scope, str)
     ):
         raise GeneratedBlockError("server_scope signer_user_unit operation is invalid")
-    commands = "\n".join(f"{executable} {action}" for action in actions)
+    commands = "\n".join(
+        'saturnin check command "$SATURNIN_HOME/'
+        f'{executable} {action}" --execute --task <task-id>'
+        for action in actions
+    )
     return (
         f"This interface is restricted to the `{scope}`-scoped `{unit}` unit.\n\n"
         f"```bash\n{commands}\n```\n\n"

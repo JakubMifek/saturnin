@@ -82,9 +82,9 @@ Once status is valid:
 This interface is restricted to the `user`-scoped `saturnin-attestation.service` unit.
 
 ```bash
-scripts/install_attestation_unit.sh install
-scripts/install_attestation_unit.sh status
-scripts/install_attestation_unit.sh uninstall
+saturnin check command "$SATURNIN_HOME/scripts/install_attestation_unit.sh install" --execute --task <task-id>
+saturnin check command "$SATURNIN_HOME/scripts/install_attestation_unit.sh status" --execute --task <task-id>
+saturnin check command "$SATURNIN_HOME/scripts/install_attestation_unit.sh uninstall" --execute --task <task-id>
 ```
 
 Install is retry-safe and restores the prior signer definition and state after a partial failure. Status performs no mutation. Uninstall removes only the signer definition, enablement link, and pinned runtime snapshot `%h/.config/systemd/user/saturnin-attestation-runtime.pyz`, leaves encrypted credentials in place, and is safe to repeat.

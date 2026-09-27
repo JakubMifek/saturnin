@@ -1356,6 +1356,48 @@ def test_signer_unit_lifecycle_is_reserved_for_governed_operation(
     assert not governance.check_server_command(command).allowed
 
 
+def test_suffixless_signer_unit_lifecycle_is_reserved(
+    governance: Governance,
+) -> None:
+    assert not governance.check_server_command(
+        "systemctl --user restart saturnin-attestation"
+    ).allowed
+
+
+def test_generic_writes_cannot_create_sibling_user_units(
+    governance: Governance,
+) -> None:
+    assert not governance.check_server_command(
+        f"curl -o {Path.home() / '.config/systemd/user/saturnin-proxy.service'} "
+        "https://example.test/unit"
+    ).allowed
+
+
+@pytest.mark.parametrize(
+    "command",
+    [
+        f"ln {Path.home() / '.config/systemd/user/saturnin-attestation.service'} "
+        f"{Path.home() / 'unit-alias'}",
+        f"cp -l {Path.home() / '.config/systemd/user/saturnin-attestation.service'} "
+        f"{Path.home() / 'unit-alias'}",
+        f"cp --link {Path.home() / '.config/systemd/user/saturnin-attestation-runtime.pyz'} "
+        f"{Path.home() / 'runtime-alias'}",
+        f"rsync --link-dest={Path.home() / '.config/systemd/user'} source/ destination/",
+    ],
+)
+def test_hard_link_creation_is_denied(
+    governance: Governance, command: str
+) -> None:
+    assert not governance.check_server_command(command).allowed
+
+
+def test_symbolic_link_creation_remains_path_checked(
+    governance: Governance,
+) -> None:
+    decision = governance.check_server_command("ln -s source /home/saturnin/ordinary-link")
+    assert decision.allowed
+
+
 @pytest.mark.parametrize(
     "relative",
     [

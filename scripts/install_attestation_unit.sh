@@ -7,7 +7,7 @@ unset BASH_ENV ENV CDPATH PYTHONHOME PYTHONPATH
 IFS=$' \t\n'
 
 readonly UNIT=saturnin-attestation.service
-readonly EXPECTED_RUNTIME_MANIFEST_SHA256=fda2b1f30ebe9f8e11a42f126dabf5dbc6f5e8fd8efd3c21aece1481cb6cd88b
+readonly EXPECTED_RUNTIME_MANIFEST_SHA256=0e48bc60f2d422042e0364a5261895ee55c3132175486b14caaade9619aa2338
 readonly ID=/usr/bin/id
 readonly REALPATH=/usr/bin/realpath
 readonly STAT=/usr/bin/stat
@@ -41,9 +41,12 @@ if [[ "$#" -ne 1 || ! "$action" =~ ^(install|status|uninstall)$ ]]; then
   echo "Usage: scripts/install_attestation_unit.sh {install|status|uninstall}" >&2
   exit 2
 fi
+if [[ "$GOVERNED_EXECUTION" -ne 1 ]]; then
+  echo "Signer operations require governed sealed execution." >&2
+  exit 1
+fi
 if [[ "$action" == install ]] \
-  && { [[ "$GOVERNED_EXECUTION" -ne 1 ]] \
-    || [[ ! "${SATURNIN_GOVERNED_RUNTIME_FD:-}" =~ ^[0-9]+$ ]] \
+  && { [[ ! "${SATURNIN_GOVERNED_RUNTIME_FD:-}" =~ ^[0-9]+$ ]] \
     || [[ ! -e "/proc/self/fd/$SATURNIN_GOVERNED_RUNTIME_FD" ]]; }; then
   echo "Signer installation requires a governed sealed runtime descriptor." >&2
   exit 1
@@ -92,11 +95,7 @@ for trusted in "$EXPECTED_SCRIPT" "$RUNTIME" "$TEMPLATE"; do
     exit 1
   fi
 done
-if [[ "$GOVERNED_EXECUTION" -eq 0 ]] \
-  && [[ -L "$RAW_SCRIPT_PATH" || "$SCRIPT_PATH" != "$EXPECTED_SCRIPT" ]]; then
-  echo "Refusing untrusted installer executable identity." >&2
-  exit 1
-fi
+
 if [[ ! -x "$RUNTIME" ]]; then
   echo "Refusing untrusted installer or Saturnin runtime executable identity." >&2
   exit 1
@@ -182,6 +181,7 @@ try:
     if (
         not stat.S_ISREG(before.st_mode)
         or before.st_uid != expected_uid
+        or before.st_nlink != 1
         or before.st_mode & 0o022
     ):
         raise SystemExit("trusted source descriptor has unsafe metadata")
@@ -239,6 +239,7 @@ try:
     if (
         not stat.S_ISREG(before.st_mode)
         or before.st_uid != expected_uid
+        or before.st_nlink != 1
         or stat.S_IMODE(before.st_mode) != 0o600
     ):
         raise SystemExit("credential descriptor metadata mismatch")
@@ -294,6 +295,7 @@ if (
     identity(before) != identity(after)
     or not stat.S_ISREG(before.st_mode)
     or before.st_uid != int(os.environ["EXPECTED_UID"])
+    or before.st_nlink != 1
     or stat.S_IMODE(before.st_mode) != int(os.environ["EXPECTED_MODE"], 8)
 ):
     raise SystemExit("trusted file identity mismatch")
@@ -556,6 +558,7 @@ before = os.fstat(descriptor)
 if (
     not stat.S_ISREG(before.st_mode)
     or before.st_uid != expected_uid
+    or before.st_nlink != 1
     or stat.S_IMODE(before.st_mode) != expected_mode
 ):
     raise SystemExit("rendered attestation unit descriptor metadata mismatch")
@@ -619,7 +622,7 @@ expected = [
         f"Environment=SATURNIN_CURRENT_KEY_ID=\"{current_key_id}\"",
         f"Environment=SATURNIN_PREVIOUS_KEY_ID=\"{previous_key_id}\"",
         f"Environment=SATURNIN_CREDENTIAL_GENERATION=\"{credential_generation}\"",
-        "ExecStart=/usr/bin/python3 -I -c '\''import fcntl,hashlib,os,runpy,stat,sys;p=os.path.expanduser(\"~/.config/systemd/user/saturnin-attestation-runtime.pyz\");f=os.open(p,os.O_RDONLY|os.O_CLOEXEC|os.O_NOFOLLOW);a=os.fstat(f);assert stat.S_ISREG(a.st_mode) and a.st_uid==os.getuid() and stat.S_IMODE(a.st_mode)==0o400;s=os.memfd_create(\"saturnin-attestation-runtime\",os.MFD_CLOEXEC|os.MFD_ALLOW_SEALING);h=hashlib.sha256();exec(\"while b:=os.read(f,65536):\\\\n h.update(b)\\\\n v=memoryview(b)\\\\n while v:\\\\n  v=v[os.write(s,v):]\");z=os.fstat(f);assert (a.st_dev,a.st_ino,a.st_size,a.st_mtime_ns,a.st_ctime_ns)==(z.st_dev,z.st_ino,z.st_size,z.st_mtime_ns,z.st_ctime_ns) and h.hexdigest()==os.environ[\"SATURNIN_RUNTIME_SHA256\"];fcntl.fcntl(s,fcntl.F_ADD_SEALS,fcntl.F_SEAL_WRITE|fcntl.F_SEAL_GROW|fcntl.F_SEAL_SHRINK|fcntl.F_SEAL_SEAL);os.lseek(s,0,os.SEEK_SET);os.close(f);sys.path.insert(0,f\"/proc/self/fd/{s}\");runpy.run_module(\"saturnin.attestation_service\",run_name=\"__main__\")'\'' serve",
+        "ExecStart=/usr/bin/python3 -I -c '\''import fcntl,hashlib,os,runpy,stat,sys;p=os.path.expanduser(\"~/.config/systemd/user/saturnin-attestation-runtime.pyz\");f=os.open(p,os.O_RDONLY|os.O_CLOEXEC|os.O_NOFOLLOW);a=os.fstat(f);assert stat.S_ISREG(a.st_mode) and a.st_uid==os.getuid() and a.st_nlink==1 and stat.S_IMODE(a.st_mode)==0o400;s=os.memfd_create(\"saturnin-attestation-runtime\",os.MFD_CLOEXEC|os.MFD_ALLOW_SEALING);h=hashlib.sha256();exec(\"while b:=os.read(f,65536):\\\\n h.update(b)\\\\n v=memoryview(b)\\\\n while v:\\\\n  v=v[os.write(s,v):]\");z=os.fstat(f);assert (a.st_dev,a.st_ino,a.st_size,a.st_mtime_ns,a.st_ctime_ns)==(z.st_dev,z.st_ino,z.st_size,z.st_mtime_ns,z.st_ctime_ns) and h.hexdigest()==os.environ[\"SATURNIN_RUNTIME_SHA256\"];fcntl.fcntl(s,fcntl.F_ADD_SEALS,fcntl.F_SEAL_WRITE|fcntl.F_SEAL_GROW|fcntl.F_SEAL_SHRINK|fcntl.F_SEAL_SEAL);os.lseek(s,0,os.SEEK_SET);os.close(f);sys.path.insert(0,f\"/proc/self/fd/{s}\");runpy.run_module(\"saturnin.attestation_service\",run_name=\"__main__\")'\'' serve",
         "LoadCredentialEncrypted=saturnin-review-attestation-key:%h/.config/systemd/user/saturnin-credentials/saturnin-review-attestation-key.cred",
         "LoadCredentialEncrypted=saturnin-review-attestation-previous-key:%h/.config/systemd/user/saturnin-credentials/saturnin-review-attestation-previous-key.cred",
         "RuntimeDirectory=saturnin-attestation",

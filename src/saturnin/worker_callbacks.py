@@ -1614,8 +1614,19 @@ def run_server_command(
         execution_parts[0] = f"/proc/self/fd/{governed_fd}"
         pass_fds = (governed_fd,)
         execution_cwd = config.data_root
-        command_environment["SATURNIN_HOME"] = str(config.data_root)
-        command_environment["SATURNIN_GOVERNED_EXECUTION"] = "sealed-memfd"
+        account = pwd.getpwuid(os.geteuid())
+        runtime_dir = f"/run/user/{os.geteuid()}"
+        command_environment = {
+            "DBUS_SESSION_BUS_ADDRESS": f"unix:path={runtime_dir}/bus",
+            "HOME": account.pw_dir,
+            "LANG": "C.UTF-8",
+            "LOGNAME": account.pw_name,
+            "PATH": "/usr/bin:/bin",
+            "SATURNIN_GOVERNED_EXECUTION": "sealed-memfd",
+            "SATURNIN_HOME": str(config.data_root),
+            "USER": account.pw_name,
+            "XDG_RUNTIME_DIR": runtime_dir,
+        }
         if governed_runtime_fd is not None:
             pass_fds = (governed_fd, governed_runtime_fd)
             command_environment["SATURNIN_GOVERNED_RUNTIME_FD"] = str(

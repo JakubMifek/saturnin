@@ -14,6 +14,7 @@ import pwd
 import re
 import shlex
 import shutil
+from fnmatch import fnmatchcase
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Iterable, Sequence
@@ -544,7 +545,22 @@ class Governance:
                 return Decision.deny("systemctl needs an explicit Saturnin unit name")
             governed_units = set(services.get("governed_units", []))
             protected_actions = {"start", "stop", "restart", "enable", "disable"}
-            if sub in protected_actions and governed_units.intersection(units):
+            governed_references = governed_units | {
+                unit.removesuffix(".service")
+                for unit in governed_units
+                if unit.endswith(".service")
+            }
+            governed_patterns = [
+                unit
+                for unit in units
+                if any(character in unit for character in "*?[]")
+                and any(fnmatchcase(governed, unit) for governed in governed_references)
+            ]
+            if governed_patterns:
+                return Decision.deny(
+                    "systemctl patterns may not resolve to governed units"
+                )
+            if sub in protected_actions and governed_references.intersection(units):
                 return Decision.deny(
                     "governed units may only be changed by their registered operation"
                 )
@@ -736,6 +752,12 @@ def _check_filesystem_scope(
         targets = _writable_targets(binary, arguments)
     except _WriteScopeError as exc:
         return Decision.deny(str(exc))
+    if _creates_hard_links(binary, arguments) and _arguments_touch_governed_paths(
+        arguments, filesystem, cwd=cwd
+    ):
+        return Decision.deny(
+            "hard links may not reference governed filesystem objects"
+        )
     if not targets:
         # No explicit write targets detected.  Interpreters and shells can
         # perform arbitrary filesystem writes that argument inspection cannot
@@ -782,6 +804,82 @@ def _check_filesystem_scope(
         runtime_root=runtime_root,
         cwd=cwd,
     )
+
+
+def _creates_hard_links(binary: str, arguments: Sequence[str]) -> bool:
+    if binary == "ln":
+        symbolic = any(
+            argument == "--symbolic"
+            or (
+                argument.startswith("-")
+                and not argument.startswith("--")
+                and "s" in argument[1:]
+            )
+            for argument in arguments
+            if argument != "--"
+        )
+        return not symbolic
+    if binary == "cp":
+        return any(
+            argument == "--link"
+            or (
+                argument.startswith("-")
+                and not argument.startswith("--")
+                and "l" in argument[1:]
+            )
+            for argument in arguments
+            if argument != "--"
+        )
+    if binary == "rsync":
+        return any(
+            argument == "--link-dest" or argument.startswith("--link-dest=")
+            for argument in arguments
+        )
+    return False
+
+
+def _arguments_touch_governed_paths(
+    arguments: Sequence[str],
+    filesystem: dict[str, Any],
+    *,
+    cwd: Path | None,
+) -> bool:
+    governed_paths = [
+        Path(value.replace("%h", str(Path.home()))).resolve(strict=False)
+        for value in filesystem.get("governed_write_paths", [])
+        if isinstance(value, str)
+    ]
+    governed_identities: set[tuple[int, int]] = set()
+    for path in governed_paths:
+        try:
+            metadata = path.stat()
+        except OSError:
+            continue
+        governed_identities.add((metadata.st_dev, metadata.st_ino))
+    candidates = list(arguments)
+    candidates.extend(
+        argument.split("=", 1)[1]
+        for argument in arguments
+        if argument.startswith("--link-dest=")
+    )
+    for argument in candidates:
+        if argument == "--" or argument.startswith("-"):
+            continue
+        path = _resolve_command_path(argument, cwd=cwd)
+        if any(
+            path == governed
+            or path.is_relative_to(governed)
+            or governed.is_relative_to(path)
+            for governed in governed_paths
+        ):
+            return True
+        try:
+            metadata = path.stat()
+        except OSError:
+            continue
+        if (metadata.st_dev, metadata.st_ino) in governed_identities:
+            return True
+    return False
 
 
 def _check_executable_location(

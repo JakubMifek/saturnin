@@ -161,9 +161,15 @@ def default_config() -> Config:
     if os.environ.get("SATURNIN_SEALED_GOVERNANCE") == "runtime-archive":
         content = pkgutil.get_data("saturnin", "governance.runtime.yaml")
         if content is None:
-            raise ConfigError("sealed governance policy is unavailable")
+            raise ConfigError(
+                Path("saturnin/governance.runtime.yaml"),
+                "sealed governance policy is unavailable",
+            )
         loaded = yaml.safe_load(content)
         if not isinstance(loaded, dict):
-            raise ConfigError("sealed governance policy must be a mapping")
+            raise ConfigError(
+                Path("saturnin/governance.runtime.yaml"),
+                "sealed governance policy must be a mapping",
+            )
         config._cache["governance"] = loaded
     return config
