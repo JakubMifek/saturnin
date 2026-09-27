@@ -149,6 +149,13 @@ def signer_install(tmp_path: Path) -> tuple[Path, dict[str, str], Path, Path]:
         "  [ -z \"${FAIL_PROCESS_IDENTITY:-}\" ]\n"
         "  exit\n"
         "fi\n"
+        "if [ -n \"${VERIFY_STOPPED_SERVICE:-}\" ]; then\n"
+        "  if [ -n \"${USE_REAL_STOP_VERIFY:-}\" ]; then\n"
+        "    exec /usr/bin/python3 \"$@\"\n"
+        "  fi\n"
+        "  [ -z \"${STOP_REMAINS_ACTIVE:-}\" ]\n"
+        "  exit\n"
+        "fi\n"
         "if [ -n \"${SNAPSHOT_CREDENTIALS:-}\" ]; then\n"
         "  if [ -n \"${USE_REAL_CREDENTIAL_SNAPSHOT:-}\" ]; then\n"
         "    exec /usr/bin/python3 \"$@\"\n"
@@ -248,6 +255,8 @@ def signer_install(tmp_path: Path) -> tuple[Path, dict[str, str], Path, Path]:
         "      touch \"${HOLD_ENTERED}\"\n"
         "      while [ -e \"${HOLD_DAEMON}\" ]; do /usr/bin/sleep 0.01; done\n"
         "    fi\n"
+        "    if [ -n \"${FAIL_ROLLBACK_DAEMON_RELOAD:-}\" ] "
+        "&& [ -e \"$state/rollback-stopped\" ]; then exit 1; fi\n"
         "    [ \"${FAIL_ON:-}\" != daemon-reload ]\n"
         "    ;;\n"
         "  cat)\n"
@@ -259,9 +268,17 @@ def signer_install(tmp_path: Path) -> tuple[Path, dict[str, str], Path, Path]:
         "    fi\n"
         "    ;;\n"
         "  show)\n"
-        "    printf '%s\\n' 'LoadState=loaded' 'ActiveState=active' "
+        "    if [ -e \"$state/active\" ] || [ -n \"${STOP_REMAINS_ACTIVE:-}\" ]; then\n"
+        "      printf '%s\\n' 'LoadState=loaded' 'ActiveState=active' "
         "'SubState=running' \"FragmentPath=$unit_dir/saturnin-attestation.service\" "
-        "'DropInPaths=' 'MainPID=1234' 'ExecMainPID=1234'\n"
+        "'DropInPaths=' 'MainPID=1234' 'ExecMainPID=1234' "
+        "'ControlGroup=/user.slice/saturnin-attestation.service'\n"
+        "    else\n"
+        "      printf '%s\\n' 'LoadState=loaded' 'ActiveState=inactive' "
+        "'SubState=dead' \"FragmentPath=$unit_dir/saturnin-attestation.service\" "
+        "'DropInPaths=' 'MainPID=0' 'ExecMainPID=0' "
+        "'ControlGroup=/user.slice/saturnin-attestation.service'\n"
+        "    fi\n"
         "    ;;\n"
         "  enable)\n"
         "    if [ -n \"${RACE_ROLLBACK:-}\" ]; then\n"
@@ -287,9 +304,15 @@ def signer_install(tmp_path: Path) -> tuple[Path, dict[str, str], Path, Path]:
         "      exit 1\n"
         "    fi\n"
         "    touch \"$state/active\"\n"
+        "    if [ \"$sub\" = start ] "
+        "&& [ -n \"${FAIL_ROLLBACK_START:-}\" ]; then exit 1; fi\n"
         "    [ \"${FAIL_ON:-}\" != start ]\n"
         "    ;;\n"
-        "  stop) rm -f \"$state/active\" ;;\n"
+        "  stop)\n"
+        "    if [ -n \"${FAIL_ROLLBACK_STOP:-}\" ]; then exit 1; fi\n"
+        "    rm -f \"$state/active\"\n"
+        "    touch \"$state/rollback-stopped\"\n"
+        "    ;;\n"
         "  status) printf '%s\\n' 'signer status only' ;;\n"
         "esac\n",
         encoding="utf-8",
@@ -709,9 +732,27 @@ def test_running_process_identity_failure_rolls_back_before_success(
     assert result.returncode != 0
     assert not (unit_dir / "saturnin-attestation.service").exists()
     assert not (unit_dir / "saturnin-attestation-runtime.pyz").exists()
-    assert calls.read_text(encoding="utf-8").splitlines()[-1] == (
-        "--user daemon-reload"
+    assert calls.read_text(encoding="utf-8").splitlines()[-1].startswith(
+        "--user show --no-pager"
     )
+
+
+def test_real_stopped_state_parser_proves_candidate_termination(
+    signer_install: tuple[Path, dict[str, str], Path, Path],
+) -> None:
+    _, _, unit_dir, _ = signer_install
+
+    result = _run(
+        signer_install,
+        "install",
+        FAIL_PROCESS_IDENTITY="1",
+        USE_REAL_STOP_VERIFY="1",
+    )
+
+    assert result.returncode != 0
+    assert result.returncode != 125
+    assert not (unit_dir / "saturnin-attestation.service").exists()
+    assert not (unit_dir / "saturnin-attestation-runtime.pyz").exists()
 
 
 def test_failed_active_restart_stops_new_process_and_restores_old_service(
@@ -729,7 +770,78 @@ def test_failed_active_restart_stops_new_process_and_restores_old_service(
     recorded = calls.read_text(encoding="utf-8").splitlines()
     assert "--user restart saturnin-attestation.service" in recorded
     assert "--user stop saturnin-attestation.service" in recorded
-    assert recorded[-1] == "--user start saturnin-attestation.service"
+    assert "--user start saturnin-attestation.service" in recorded
+    assert recorded[-1].startswith("--user show --no-pager")
+
+
+@pytest.mark.parametrize(
+    ("failure", "message"),
+    [
+        (
+            {"FAIL_ROLLBACK_STOP": "1"},
+            "rejected signer termination was not proven",
+        ),
+        (
+            {"STOP_REMAINS_ACTIVE": "1"},
+            "rejected signer termination was not proven",
+        ),
+    ],
+)
+def test_rollback_never_restores_while_candidate_termination_is_unproven(
+    signer_install: tuple[Path, dict[str, str], Path, Path],
+    failure: dict[str, str],
+    message: str,
+) -> None:
+    _, _, unit_dir, _ = signer_install
+
+    result = _run(
+        signer_install,
+        "install",
+        FAIL_PROCESS_IDENTITY="1",
+        **failure,
+    )
+
+    assert result.returncode == 125
+    assert message in result.stderr
+    assert (unit_dir / "saturnin-attestation.service").exists()
+    assert (unit_dir / "saturnin-attestation-runtime.pyz").exists()
+
+
+def test_rollback_reload_failure_is_distinct_and_fail_closed(
+    signer_install: tuple[Path, dict[str, str], Path, Path],
+) -> None:
+    _, _, unit_dir, _ = signer_install
+
+    result = _run(
+        signer_install,
+        "install",
+        FAIL_PROCESS_IDENTITY="1",
+        FAIL_ROLLBACK_DAEMON_RELOAD="1",
+    )
+
+    assert result.returncode == 125
+    assert "systemd did not reload" in result.stderr
+    assert not (unit_dir / "saturnin-attestation.service").exists()
+    assert not (unit_dir / "saturnin-attestation-runtime.pyz").exists()
+
+
+def test_prior_signer_restart_failure_is_distinct(
+    signer_install: tuple[Path, dict[str, str], Path, Path],
+) -> None:
+    _, _, unit_dir, _ = signer_install
+    assert _run(signer_install, "install").returncode == 0
+    before = _topology(unit_dir)
+
+    result = _run(
+        signer_install,
+        "install",
+        FAIL_PROCESS_IDENTITY="1",
+        FAIL_ROLLBACK_START="1",
+    )
+
+    assert result.returncode == 125
+    assert "prior signer definition could not be restarted safely" in result.stderr
+    assert _topology(unit_dir) == before
 
 
 def test_replaced_unit_directory_fails_closed_without_pathname_rollback(
@@ -828,13 +940,15 @@ def test_failed_uninstall_reload_restores_unit_and_active_state(
     _, _, unit_dir, calls = signer_install
     assert _run(signer_install, "install").returncode == 0
     before = _topology(unit_dir)
+    calls.unlink()
 
     result = _run(signer_install, "uninstall", FAIL_ON="daemon-reload")
 
-    assert result.returncode != 0
+    assert result.returncode == 125
+    assert "systemd did not reload" in result.stderr
     assert _topology(unit_dir) == before
     assert calls.read_text(encoding="utf-8").splitlines()[-1] == (
-        "--user start saturnin-attestation.service"
+        "--user daemon-reload"
     )
 
 

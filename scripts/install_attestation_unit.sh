@@ -657,8 +657,9 @@ if manager[1:] != expected:
 
 verify_running_service() {
   local manager_state=$1 runtime_sha256=$2
+  local expected_unit=${3:-$INSTALLED_SNAPSHOT}
   MANAGER_STATE_PATH="$manager_state" INSTALLED_PATH="$INSTALLED" \
-    EXPECTED_UNIT_PATH="$INSTALLED_SNAPSHOT" \
+    EXPECTED_UNIT_PATH="$expected_unit" \
     PYTHON_PATH="$PYTHON" RUNTIME_SHA256_VALUE="$runtime_sha256" \
     VERIFY_RUNNING_SERVICE=1 "$PYTHON" -I -c '
 import fcntl
@@ -788,6 +789,37 @@ if not matched:
 '
 }
 
+verify_stopped_service() {
+  "$SYSTEMCTL" --user show --no-pager \
+    --property=ActiveState --property=SubState \
+    --property=MainPID --property=ExecMainPID --property=ControlGroup \
+    "$UNIT" >"$MANAGER_STATE" || return 1
+  MANAGER_STATE_PATH="$MANAGER_STATE" VERIFY_STOPPED_SERVICE=1 \
+    "$PYTHON" -I -c '
+import os
+from pathlib import Path
+
+properties = {}
+for line in Path(os.environ["MANAGER_STATE_PATH"]).read_text(
+    encoding="utf-8"
+).splitlines():
+    key, separator, value = line.partition("=")
+    if not separator or key in properties:
+        raise SystemExit("systemd reported invalid stopped signer state")
+    properties[key] = value
+if (
+    properties.get("ActiveState") != "inactive"
+    or properties.get("SubState") != "dead"
+    or properties.get("MainPID") != "0"
+    or properties.get("ExecMainPID") != "0"
+):
+    raise SystemExit("rejected signer process is not proven stopped")
+control_group = properties.get("ControlGroup", "")
+if control_group and not control_group.endswith("/saturnin-attestation.service"):
+    raise SystemExit("stopped signer control-group identity is invalid")
+'
+}
+
 if [[ ! -d "$UNIT_DIR" ]]; then
   if [[ "$action" == status ]]; then
     echo "Canonical attestation unit is not installed safely." >&2
@@ -902,40 +934,72 @@ restore_file() {
 
 rollback() {
   set +e
-  "$SYSTEMCTL" --user stop "$UNIT" >/dev/null 2>&1
+  if ! "$SYSTEMCTL" --user stop "$UNIT" >/dev/null 2>&1 \
+    || ! verify_stopped_service; then
+    echo "ROLLBACK FAILURE: rejected signer termination was not proven; prior files were not restored." >&2
+    return 1
+  fi
   if ! verify_unit_directory; then
     echo "Rollback stopped because the user-unit directory was replaced." >&2
-    return
+    return 1
   fi
-  restore_file "$FILE_INSTALLED" "$BACKUP/unit" "$had_unit" 0644 "$unit_backup_identity" || return
+  restore_file "$FILE_INSTALLED" "$BACKUP/unit" "$had_unit" 0644 "$unit_backup_identity" || return 1
   restore_file "$FILE_INSTALLED_RUNTIME" "$BACKUP/runtime" "$had_runtime" 0400 \
-    "$runtime_backup_identity" || return
+    "$runtime_backup_identity" || return 1
   if [[ "$wants_dir_identity" != missing ]]; then
-    wants_operation unlink "$wants_dir_identity" || return
+    wants_operation unlink "$wants_dir_identity" || return 1
     if [[ "$had_wants" -eq 1 ]]; then
-      wants_operation link "$wants_dir_identity" "$wants_target_b64" || return
+      wants_operation link "$wants_dir_identity" "$wants_target_b64" || return 1
     fi
   fi
   if [[ "$had_wants_dir" -eq 0 && "$wants_dir_identity" != missing ]]; then
-    wants_operation rmdir "$wants_dir_identity" || return
+    wants_operation rmdir "$wants_dir_identity" || return 1
   fi
-  "$SYSTEMCTL" --user daemon-reload >/dev/null 2>&1
-  if [[ "$was_active" -eq 1 ]] \
-    && [[ "$unit_was_valid" -eq 1 ]] \
-    && verify_unit_directory \
-    && verify_unit_identity "$FILE_INSTALLED" 0644 "${runtime_backup_identity##*:}" >/dev/null \
-    && trusted_file_identity "$FILE_INSTALLED_RUNTIME" 0400 >/dev/null \
-    && "$SYSTEMCTL" --user cat --no-pager "$UNIT" >"$MANAGER_VIEW" \
-    && verify_manager_loaded_unit "$MANAGER_VIEW" "$BACKUP/unit" \
-    && ! "$SYSTEMCTL" --user is-active --quiet "$UNIT"; then
-    "$SYSTEMCTL" --user start "$UNIT" >/dev/null 2>&1
+  if ! "$SYSTEMCTL" --user daemon-reload >/dev/null 2>&1; then
+    echo "ROLLBACK FAILURE: systemd did not reload the restored signer definition." >&2
+    return 1
   fi
+  if [[ "$was_active" -eq 0 ]]; then
+    verify_stopped_service || {
+      echo "ROLLBACK FAILURE: restored signer unexpectedly became active." >&2
+      return 1
+    }
+    return 0
+  fi
+  if [[ "$unit_was_valid" -ne 1 ]] \
+    || ! verify_unit_directory \
+    || ! verify_unit_identity "$FILE_INSTALLED" 0644 \
+      "${runtime_backup_identity##*:}" >/dev/null \
+    || ! trusted_file_identity "$FILE_INSTALLED_RUNTIME" 0400 >/dev/null \
+    || ! "$SYSTEMCTL" --user cat --no-pager "$UNIT" >"$MANAGER_VIEW" \
+    || ! verify_manager_loaded_unit "$MANAGER_VIEW" "$BACKUP/unit" \
+    || ! "$SYSTEMCTL" --user start "$UNIT" >/dev/null 2>&1 \
+    || ! "$SYSTEMCTL" --user cat --no-pager "$UNIT" >"$MANAGER_VIEW" \
+    || ! verify_manager_loaded_unit "$MANAGER_VIEW" "$BACKUP/unit"; then
+    echo "ROLLBACK FAILURE: prior signer definition could not be restarted safely." >&2
+    return 1
+  fi
+  "$SYSTEMCTL" --user show --no-pager \
+    --property=LoadState --property=ActiveState --property=SubState \
+    --property=FragmentPath --property=DropInPaths \
+    --property=MainPID --property=ExecMainPID --property=ControlGroup \
+    --property=PrivateMounts --property=PrivateTmp --property=PrivateNetwork \
+    --property=ProtectHome --property=ProtectSystem --property=ProtectProc \
+    --property=NoNewPrivileges --property=RestrictAddressFamilies \
+    "$UNIT" >"$MANAGER_STATE" \
+    && verify_running_service "$MANAGER_STATE" \
+      "${runtime_backup_identity##*:}" "$BACKUP/unit" || {
+    echo "ROLLBACK FAILURE: prior signer process identity was not restored." >&2
+    return 1
+  }
 }
 
 on_exit() {
   local status=$?
   if [[ "$mutating" -eq 1 && "$status" -ne 0 ]]; then
-    rollback
+    if ! rollback; then
+      status=125
+    fi
   fi
   cleanup
   exit "$status"
