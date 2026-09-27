@@ -1,5 +1,6 @@
 #!/usr/bin/bash
 set -Eeuo pipefail
+trap 'exit 124' TERM INT HUP
 umask 077
 PATH=/usr/bin:/bin
 export PATH
@@ -7,7 +8,7 @@ unset BASH_ENV ENV CDPATH PYTHONHOME PYTHONPATH
 IFS=$' \t\n'
 
 readonly UNIT=saturnin-attestation.service
-readonly EXPECTED_RUNTIME_MANIFEST_SHA256=7214f1547db4e68b75ccf702fa725cbd561ffc21165336e99779fba788db74c2
+readonly EXPECTED_RUNTIME_MANIFEST_SHA256=831fec78692ad8f9c2e5db818a4032f57d35cae369a58a1d6862f7df64487fdb
 readonly ID=/usr/bin/id
 readonly REALPATH=/usr/bin/realpath
 readonly STAT=/usr/bin/stat
@@ -22,6 +23,7 @@ readonly RM=/usr/bin/rm
 readonly CP=/usr/bin/cp
 readonly MV=/usr/bin/mv
 readonly CHMOD=/usr/bin/chmod
+readonly SLEEP=/usr/bin/sleep
 readonly RAW_SCRIPT_PATH="${BASH_SOURCE[0]}"
 SCRIPT_PATH="$("$REALPATH" -- "$RAW_SCRIPT_PATH")"
 readonly SCRIPT_PATH
@@ -1057,13 +1059,86 @@ if [[ "$action" == uninstall ]]; then
   exit 0
 fi
 
+readonly CREDENTIAL_LOCK_READY="$TRANSACTION/credential-lock-ready"
+: >"$CREDENTIAL_LOCK_READY"
+"$CHMOD" 0600 "$CREDENTIAL_LOCK_READY"
+exec {CREDENTIAL_LOCK_READY_FD}>"$CREDENTIAL_LOCK_READY"
+readonly CREDENTIAL_LOCK_READY_FD
+UNIT_DIRECTORY_FD="$UNIT_DIR_FD" EXPECTED_UID="$CURRENT_UID" \
+  EXPECTED_UNIT_DIRECTORY="$UNIT_DIR_DEVICE_INODE" \
+  READY_FD="$CREDENTIAL_LOCK_READY_FD" PARENT_PID="$$" \
+  "$PYTHON" -I -c '
+import fcntl
+import os
+import signal
+import stat
+import time
+
+for signum in (signal.SIGTERM, signal.SIGINT, signal.SIGHUP):
+    signal.signal(signum, signal.SIG_IGN)
+unit_fd = int(os.environ["UNIT_DIRECTORY_FD"])
+expected_uid = int(os.environ["EXPECTED_UID"])
+unit_metadata = os.fstat(unit_fd)
+if (
+    f"{unit_metadata.st_dev}:{unit_metadata.st_ino}"
+    != os.environ["EXPECTED_UNIT_DIRECTORY"]
+    or not stat.S_ISDIR(unit_metadata.st_mode)
+    or unit_metadata.st_uid != expected_uid
+    or unit_metadata.st_mode & 0o022
+):
+    raise SystemExit("pinned user-unit directory identity mismatch")
+credential_fd = os.open(
+    "saturnin-credentials",
+    os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC,
+    dir_fd=unit_fd,
+)
+metadata = os.fstat(credential_fd)
+if (
+    not stat.S_ISDIR(metadata.st_mode)
+    or metadata.st_uid != expected_uid
+    or stat.S_IMODE(metadata.st_mode) != 0o700
+):
+    raise SystemExit("credential directory descriptor metadata mismatch")
+try:
+    fcntl.flock(credential_fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+except BlockingIOError:
+    raise SystemExit("another credential lifecycle operation is in progress")
+os.write(
+    int(os.environ["READY_FD"]),
+    f"{metadata.st_dev}:{metadata.st_ino}\n".encode(),
+)
+parent = f"/proc/{int(os.environ['"'"'PARENT_PID'"'"'])}"
+while os.path.exists(parent):
+    try:
+        with open(f"{parent}/stat", encoding="ascii") as status:
+            state = status.read().split(") ", 1)[1].split(" ", 1)[0]
+    except (FileNotFoundError, IndexError):
+        break
+    if state == "Z":
+        break
+    time.sleep(0.05)
+' &
+readonly CREDENTIAL_LOCK_HOLDER=$!
+CREDENTIAL_DIRECTORY_ID=
+for _ in {1..100}; do
+  if IFS= read -r CREDENTIAL_DIRECTORY_ID <"$CREDENTIAL_LOCK_READY"; then
+    break
+  fi
+  "$SLEEP" 0.05
+done
+if [[ ! "$CREDENTIAL_DIRECTORY_ID" =~ ^[0-9]+:[0-9]+$ ]]; then
+  echo "Credential lifecycle lock could not be acquired safely." >&2
+  exit 1
+fi
+readonly CREDENTIAL_DIRECTORY_ID
+
 read -r CURRENT_KEY_ID PREVIOUS_KEY_ID CREDENTIAL_GENERATION \
   CURRENT_CREDENTIAL PREVIOUS_CREDENTIAL < <(
   UNIT_DIRECTORY_FD="$UNIT_DIR_FD" EXPECTED_UNIT_DIRECTORY="$UNIT_DIR_DEVICE_INODE" \
+    EXPECTED_CREDENTIAL_DIRECTORY="$CREDENTIAL_DIRECTORY_ID" \
     EXPECTED_UID="$CURRENT_UID" RUNTIME_ARCHIVE_FD="$RUNTIME_TREE_FD" \
     SYSTEMD_CREDS_PATH="$SYSTEMD_CREDS" SNAPSHOT_CREDENTIALS=1 \
     "$PYTHON" -I -c '
-import fcntl
 import hashlib
 import os
 import re
@@ -1092,12 +1167,10 @@ if (
     not stat.S_ISDIR(credential_metadata.st_mode)
     or credential_metadata.st_uid != expected_uid
     or stat.S_IMODE(credential_metadata.st_mode) != 0o700
+    or f"{credential_metadata.st_dev}:{credential_metadata.st_ino}"
+    != os.environ["EXPECTED_CREDENTIAL_DIRECTORY"]
 ):
     raise SystemExit("credential directory descriptor metadata mismatch")
-try:
-    fcntl.flock(credential_fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
-except BlockingIOError:
-    raise SystemExit("another credential lifecycle operation is in progress")
 
 def read_file(name):
     descriptor = os.open(

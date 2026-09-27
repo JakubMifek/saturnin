@@ -4,6 +4,7 @@ import fcntl
 import base64
 import hashlib
 import os
+import signal
 import shutil
 import subprocess
 import sys
@@ -146,6 +147,10 @@ def signer_install(tmp_path: Path) -> tuple[Path, dict[str, str], Path, Path]:
         "  exit 0\n"
         "fi\n"
         "if [ -n \"${VERIFY_RUNNING_SERVICE:-}\" ]; then\n"
+        "  if [ -n \"${HOLD_VERIFY:-}\" ]; then\n"
+        "    touch \"${VERIFY_ENTERED}\"\n"
+        "    while [ -e \"${HOLD_VERIFY}\" ]; do /usr/bin/sleep 0.01; done\n"
+        "  fi\n"
         "  [ -z \"${FAIL_PROCESS_IDENTITY:-}\" ]\n"
         "  exit\n"
         "fi\n"
@@ -170,11 +175,6 @@ def signer_install(tmp_path: Path) -> tuple[Path, dict[str, str], Path, Path]:
         "    [ -f \"$credential\" ] && [ ! -L \"$credential\" ] "
         "&& [ \"$(/usr/bin/stat -c %h \"$credential\")\" = 1 ] || exit 1\n"
         "  done\n"
-        "  if ! /usr/bin/flock --exclusive --nonblock "
-        "\"$HOME/.config/systemd/user/saturnin-credentials\" /usr/bin/true; then\n"
-        "    printf '%s\\n' 'another credential lifecycle operation is in progress' >&2\n"
-        "    exit 1\n"
-        "  fi\n"
         "  if [ -n \"${RACE_RUNTIME_ARCHIVE:-}\" ]; then\n"
         "    archive=$(/usr/bin/find \"$HOME/.config/systemd/user\" "
         "-name saturnin-attestation-runtime.pyz -type f -print -quit)\n"
@@ -917,6 +917,113 @@ def test_lifecycle_lock_excludes_concurrent_uninstall_and_rollback(
     assert (unit_dir / "saturnin-attestation.service").is_file()
 
 
+def test_credential_lock_is_retained_through_final_process_verification(
+    signer_install: tuple[Path, dict[str, str], Path, Path],
+) -> None:
+    checkout, env, unit_dir, _ = signer_install
+    hold = checkout / "hold-verification"
+    entered = checkout / "verification-entered"
+    hold.touch()
+    executable_fd, runtime_fd = _authorized_fds(checkout, "install")
+    process = subprocess.Popen(
+        [f"/proc/self/fd/{executable_fd}", "install"],
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+        env={
+            **env,
+            "SATURNIN_GOVERNED_EXECUTION": "sealed-memfd",
+            "SATURNIN_GOVERNED_RUNTIME_FD": str(runtime_fd),
+            "HOLD_VERIFY": str(hold),
+            "VERIFY_ENTERED": str(entered),
+        },
+        pass_fds=(executable_fd, runtime_fd),
+    )
+    try:
+        deadline = time.monotonic() + 5
+        while not entered.exists() and time.monotonic() < deadline:
+            time.sleep(0.01)
+        assert entered.exists()
+        credential_fd = os.open(
+            unit_dir / "saturnin-credentials",
+            os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW,
+        )
+        try:
+            with pytest.raises(BlockingIOError):
+                fcntl.flock(
+                    credential_fd,
+                    fcntl.LOCK_EX | fcntl.LOCK_NB,
+                )
+        finally:
+            os.close(credential_fd)
+        hold.unlink()
+        stdout, stderr = process.communicate(timeout=5)
+    finally:
+        if hold.exists():
+            hold.unlink()
+        if process.poll() is None:
+            process.terminate()
+            process.wait(timeout=5)
+        os.close(executable_fd)
+        os.close(runtime_fd)
+
+    assert process.returncode == 0, stdout + stderr
+
+
+@pytest.mark.parametrize(
+    ("hold_name", "entered_name"),
+    [
+        ("HOLD_DAEMON", "HOLD_ENTERED"),
+        ("HOLD_VERIFY", "VERIFY_ENTERED"),
+    ],
+)
+def test_cooperative_timeout_rolls_back_mutation_checkpoints(
+    signer_install: tuple[Path, dict[str, str], Path, Path],
+    hold_name: str,
+    entered_name: str,
+) -> None:
+    checkout, env, unit_dir, _ = signer_install
+    before = _topology(unit_dir)
+    hold = checkout / f"hold-{hold_name.lower()}"
+    entered = checkout / f"entered-{hold_name.lower()}"
+    hold.touch()
+    executable_fd, runtime_fd = _authorized_fds(checkout, "install")
+    process = subprocess.Popen(
+        [f"/proc/self/fd/{executable_fd}", "install"],
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+        env={
+            **env,
+            "SATURNIN_GOVERNED_EXECUTION": "sealed-memfd",
+            "SATURNIN_GOVERNED_RUNTIME_FD": str(runtime_fd),
+            hold_name: str(hold),
+            entered_name: str(entered),
+        },
+        pass_fds=(executable_fd, runtime_fd),
+        start_new_session=True,
+    )
+    try:
+        deadline = time.monotonic() + 5
+        while not entered.exists() and time.monotonic() < deadline:
+            time.sleep(0.01)
+        assert entered.exists()
+        os.killpg(process.pid, signal.SIGTERM)
+        hold.unlink()
+        stdout, stderr = process.communicate(timeout=10)
+    finally:
+        if hold.exists():
+            hold.unlink()
+        if process.poll() is None:
+            os.killpg(process.pid, signal.SIGKILL)
+            process.wait(timeout=5)
+        os.close(executable_fd)
+        os.close(runtime_fd)
+
+    assert process.returncode == 124, stdout + stderr
+    assert _topology(unit_dir) == before
+
+
 def test_uninstall_is_selective_and_repeatable(
     signer_install: tuple[Path, dict[str, str], Path, Path],
 ) -> None:
@@ -1505,6 +1612,57 @@ def test_real_descriptor_snapshot_binds_inline_credentials(
         f'Environment=SATURNIN_PREVIOUS_KEY_ID="{hashlib.sha256(b"previous-key").hexdigest()}"'
         in installed
     )
+
+
+def test_reinstall_refreshes_newly_sealed_credential_generation(
+    signer_install: tuple[Path, dict[str, str], Path, Path],
+) -> None:
+    _, _, unit_dir, _ = signer_install
+    credential_dir = unit_dir / "saturnin-credentials"
+
+    def seal(generation: str, suffix: bytes) -> tuple[str, str]:
+        current = base64.b64encode(
+            HOST_SCOPED_CREDENTIAL_ID + b"current-" + suffix
+        ).decode()
+        previous = base64.b64encode(
+            HOST_SCOPED_CREDENTIAL_ID + b"previous-" + suffix
+        ).decode()
+        values = {
+            "saturnin-review-attestation-key.cred": current,
+            "saturnin-review-attestation-previous-key.cred": previous,
+            ".generation": generation,
+            ".execution-signer-enabled": generation,
+        }
+        for name, value in values.items():
+            path = credential_dir / name
+            path.write_text(value + "\n", encoding="utf-8")
+            path.chmod(0o600)
+        return current, previous
+
+    old_current, old_previous = seal("5" * 64, b"old")
+    first = _run(
+        signer_install,
+        "install",
+        USE_REAL_CREDENTIAL_SNAPSHOT="1",
+    )
+    assert first.returncode == 0, first.stderr
+
+    new_current, new_previous = seal("6" * 64, b"new")
+    refreshed = _run(
+        signer_install,
+        "install",
+        USE_REAL_CREDENTIAL_SNAPSHOT="1",
+    )
+
+    assert refreshed.returncode == 0, refreshed.stderr
+    installed = (unit_dir / "saturnin-attestation.service").read_text(
+        encoding="utf-8"
+    )
+    assert old_current not in installed
+    assert old_previous not in installed
+    assert new_current in installed
+    assert new_previous in installed
+    assert f'Environment=SATURNIN_CREDENTIAL_GENERATION="{"6" * 64}"' in installed
 
 
 def test_debian_python_launcher_and_canonical_executable_identities() -> None:

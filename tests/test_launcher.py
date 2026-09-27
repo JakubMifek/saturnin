@@ -1628,6 +1628,31 @@ def test_bounded_command_caps_output_and_times_out(git_repo: Path) -> None:
     assert timed_out.returncode != 0
 
 
+def test_governed_timeout_allows_cooperative_transaction_cleanup(
+    git_repo: Path,
+) -> None:
+    marker = git_repo / "cooperative-cleanup"
+    script = (
+        "import pathlib,signal,sys,time;"
+        f"marker=pathlib.Path({str(marker)!r});"
+        "signal.signal(signal.SIGTERM,"
+        "lambda *_:(marker.write_text('rolled-back'),sys.exit(42)));"
+        "time.sleep(30)"
+    )
+
+    result = worker_callbacks._run_bounded_command(
+        [sys.executable, "-c", script],
+        cwd=git_repo,
+        env=os.environ.copy(),
+        timeout=0.05,
+        hard_kill_on_timeout=False,
+    )
+
+    assert result.timed_out
+    assert result.returncode == 42
+    assert marker.read_text(encoding="utf-8") == "rolled-back"
+
+
 def test_governed_command_executes_the_authorized_descriptor(
     config: Config, tmp_path: Path
 ) -> None:

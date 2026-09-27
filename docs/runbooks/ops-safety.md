@@ -90,6 +90,11 @@ saturnin check command "$SATURNIN_HOME/scripts/install_attestation_unit.sh unins
 Install is retry-safe and restores the prior signer definition and state after a partial failure. Status performs no mutation. Uninstall removes only the signer definition, enablement link, and pinned runtime snapshot `%h/.config/systemd/user/saturnin-attestation-runtime.pyz`, leaves encrypted credentials in place, and is safe to repeat.
 <!-- /generated:signer-unit-interface -->
 
+The governed callback timeout sends a cooperative termination signal and does
+not hard-kill this transaction. The installer retains its lifecycle and
+credential locks while its exit trap stops and verifies any candidate signer,
+restores the prior definition, and reports rollback failure distinctly.
+
 The uninstall action is the selective rollback for the signer installation.
 It does not revoke or delete credentials. Use the credential lifecycle commands
 below separately when revocation is intended.
@@ -117,7 +122,7 @@ saturnin credential status review-attestation
 saturnin credential rotate-attestation
 saturnin credential seal-attestation-rotation
 saturnin credential status review-attestation
-systemctl --user start saturnin-attestation.service
+saturnin check command "$SATURNIN_HOME/scripts/install_attestation_unit.sh install" --execute --task <task-id>
 systemctl --user start saturnin-improve.timer saturnin-resume.timer saturnin-discovery.timer
 ```
 
@@ -127,6 +132,9 @@ the old current key to the previous slot in memory, generates a new current
 key internally, and enters `pending-seal`. Sealing passes both decrypted values
 directly to the review ledger API, without environment variables, then deletes
 rollback artifacts. A second rotation is refused while any rotation is pending.
+The governed installer retains the credential lifecycle lock while atomically
+rerendering and reloading the signer with the newly sealed generation; do not
+restart the stale loaded fragment directly.
 
 If rotation or sealing fails, keep the timers stopped. Retry sealing when
 status is `pending-seal`, or restore both encrypted slots:

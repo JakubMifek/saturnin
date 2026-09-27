@@ -1638,6 +1638,7 @@ def run_server_command(
             cwd=execution_cwd,
             env=command_environment,
             pass_fds=pass_fds,
+            hard_kill_on_timeout=governed_fd is None,
         )
     finally:
         if governed_fd is not None:
@@ -1704,6 +1705,7 @@ def _run_bounded_command(
     timeout: float = _COMMAND_TIMEOUT_SECONDS,
     output_limit: int = _COMMAND_OUTPUT_LIMIT_BYTES,
     pass_fds: tuple[int, ...] = (),
+    hard_kill_on_timeout: bool = True,
 ) -> _BoundedCommandResult:
     process = subprocess.Popen(
         list(args),
@@ -1723,23 +1725,36 @@ def _run_bounded_command(
         os.set_blocking(stream.fileno(), False)
         selector.register(stream, selectors.EVENT_READ, name)
     deadline = time.monotonic() + timeout
+    termination_sent = False
     kill_deadline: float | None = None
     timed_out = False
     while selector.get_map() or process.poll() is None:
         now = time.monotonic()
-        if kill_deadline is None and now >= deadline:
+        if not termination_sent and now >= deadline:
             timed_out = True
+            termination_sent = True
+            try:
+                os.killpg(process.pid, signal.SIGTERM)
+            except ProcessLookupError:
+                pass
+            if hard_kill_on_timeout:
+                kill_deadline = now + 10
+        if kill_deadline is not None and now >= kill_deadline:
             try:
                 os.killpg(process.pid, signal.SIGKILL)
             except ProcessLookupError:
                 pass
-            kill_deadline = now + 1
-        if kill_deadline is not None and now >= kill_deadline:
             for key in list(selector.get_map().values()):
                 selector.unregister(key.fileobj)
                 key.fileobj.close()
             break
-        wait_until = kill_deadline if kill_deadline is not None else deadline
+        wait_until = (
+            kill_deadline
+            if kill_deadline is not None
+            else now + 0.1
+            if termination_sent
+            else deadline
+        )
         wait = min(0.1, max(0.0, wait_until - now))
         if not selector.get_map():
             time.sleep(wait)
