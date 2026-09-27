@@ -7,7 +7,7 @@ unset BASH_ENV ENV CDPATH PYTHONHOME PYTHONPATH
 IFS=$' \t\n'
 
 readonly UNIT=saturnin-attestation.service
-readonly EXPECTED_RUNTIME_MANIFEST_SHA256=7214f1547db4e68b75ccf702fa725cbd561ffc21165336e99779fba788db74c2
+readonly EXPECTED_RUNTIME_MANIFEST_SHA256=f08293930f3027888331a48c55ed7a8c7537434f91eb4763c53f4ef7c13b044f
 readonly ID=/usr/bin/id
 readonly REALPATH=/usr/bin/realpath
 readonly STAT=/usr/bin/stat
@@ -1021,11 +1021,14 @@ if [[ -L "$FILE_CREDENTIAL_DIR" || ! -d "$FILE_CREDENTIAL_DIR" ]] \
   echo "Attestation credential directory is missing or unsafe." >&2
   exit 1
 fi
+exec {CREDENTIAL_DIR_FD}<"$FILE_CREDENTIAL_DIR"
+readonly CREDENTIAL_DIR_FD
 CURRENT_CREDENTIAL_ID="$(credential_identity "$FILE_CURRENT")"
 PREVIOUS_CREDENTIAL_ID="$(credential_identity "$FILE_PREVIOUS")"
 readonly CURRENT_CREDENTIAL_ID PREVIOUS_CREDENTIAL_ID
 credential_status="$(
-  SATURNIN_SEALED_GOVERNANCE=runtime-archive "$PYTHON" -I -c \
+  SATURNIN_SEALED_GOVERNANCE=runtime-archive \
+    SATURNIN_CREDENTIAL_DIRECTORY_FD="$CREDENTIAL_DIR_FD" "$PYTHON" -I -c \
     'import runpy,sys;sys.path.insert(0,sys.argv.pop(1));runpy.run_module("saturnin",run_name="__main__")' \
     "/proc/self/fd/$RUNTIME_TREE_FD" credential status review-attestation
 )"
@@ -1034,14 +1037,13 @@ if [[ "$credential_status" != *"rotation=ready"* || "$credential_status" != *"si
   exit 1
 fi
 unset credential_status
-exec {CREDENTIAL_LOCK_FD}<"$FILE_CREDENTIAL_DIR"
-readonly CREDENTIAL_LOCK_FD
-if ! "$FLOCK" --exclusive --nonblock "$CREDENTIAL_LOCK_FD"; then
+if ! "$FLOCK" --exclusive --nonblock "$CREDENTIAL_DIR_FD"; then
   echo "Another credential lifecycle operation is in progress." >&2
   exit 1
 fi
 read -r CURRENT_KEY_ID PREVIOUS_KEY_ID CREDENTIAL_GENERATION < <(
-  SATURNIN_SEALED_GOVERNANCE=runtime-archive "$PYTHON" -I -c \
+  SATURNIN_SEALED_GOVERNANCE=runtime-archive \
+    SATURNIN_CREDENTIAL_DIRECTORY_FD="$CREDENTIAL_DIR_FD" "$PYTHON" -I -c \
     'import hashlib,sys;sys.path.insert(0,sys.argv.pop(1));from saturnin.credentials import _decrypt_encrypted_credential,credential_generation;print(hashlib.sha256(_decrypt_encrypted_credential("review-attestation").encode()).hexdigest(),hashlib.sha256(_decrypt_encrypted_credential("review-attestation-previous").encode()).hexdigest(),credential_generation())' \
     "/proc/self/fd/$RUNTIME_TREE_FD"
 )
