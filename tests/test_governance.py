@@ -1468,8 +1468,87 @@ def test_governed_operation_trust_sources_are_reserved(
     assert not decision.allowed
     assert any(
         "reserved for a governed operation" in reason
+        or "aliases a governed operation object" in reason
         for reason in decision.reasons
     )
+
+
+@pytest.mark.parametrize(
+    "command",
+    [
+        "sort -o {target} {source}",
+        "sort --output={target} {source}",
+        "uniq {source} {target}",
+    ],
+)
+def test_unmodeled_output_utilities_cannot_write_governed_sources(
+    governance: Governance,
+    config: Config,
+    command: str,
+) -> None:
+    target = config.data_root / "policies" / "server_scope.yaml"
+    source = config.data_root / "input"
+    source.write_text("payload\n", encoding="utf-8")
+
+    decision = governance.check_server_command(
+        command.format(target=target, source=source)
+    )
+
+    assert not decision.allowed
+
+
+@pytest.mark.parametrize(
+    "relative",
+    [
+        "policies/server_scope.yaml",
+        "scripts/install_attestation_unit.sh",
+        "systemd/saturnin-attestation.service",
+        ".venv/bin/saturnin",
+        "src/saturnin/worker_callbacks.py",
+    ],
+)
+@pytest.mark.parametrize(
+    "command",
+    [
+        "truncate --size=0 {alias}",
+        "chmod --reference={source} {alias}",
+        "cp {source} {alias}",
+        "tee {alias}",
+    ],
+)
+def test_hardlink_aliases_of_governed_sources_are_denied(
+    governance: Governance,
+    config: Config,
+    relative: str,
+    command: str,
+) -> None:
+    filesystem = config.server_scope["filesystem"]
+    filesystem["writable_root_sources"] = ["data_root"]
+    filesystem["governed_write_paths"] = [relative]
+    filesystem["executable_allowlist"] = [
+        *filesystem.get("executable_allowlist", []),
+        "chmod",
+        "cp",
+        "tee",
+        "truncate",
+    ]
+    governed = config.data_root / relative
+    governed.parent.mkdir(parents=True, exist_ok=True)
+    governed.write_text("trusted", encoding="utf-8")
+    alias = config.data_root / "worker-alias"
+    os.link(governed, alias)
+    source = config.data_root / "payload"
+    source.write_text("payload", encoding="utf-8")
+
+    decision = governance.check_server_command(
+        command.format(alias=alias, source=source)
+    )
+
+    assert not decision.allowed
+    assert any(
+        "aliases a governed operation object" in item
+        for item in decision.reasons
+    ), decision.reasons
 
 
 def test_signer_user_unit_operation_is_exact_and_canonical(

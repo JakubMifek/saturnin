@@ -1246,6 +1246,20 @@ def _check_filesystem_targets(
         if not governed.is_absolute():
             governed = runtime_root / governed
         governed_paths.append(governed.resolve(strict=False))
+    governed_identities: set[tuple[int, int]] = set()
+    for governed in governed_paths:
+        try:
+            descriptor = os.open(
+                governed,
+                os.O_PATH | os.O_NOFOLLOW | os.O_CLOEXEC,
+            )
+        except FileNotFoundError:
+            continue
+        try:
+            metadata = os.fstat(descriptor)
+            governed_identities.add((metadata.st_dev, metadata.st_ino))
+        finally:
+            os.close(descriptor)
     for raw_path in targets:
         path = _resolve_command_path(raw_path, cwd=cwd)
         forbidden = _containing_root(path, forbidden_roots)
@@ -1258,6 +1272,23 @@ def _check_filesystem_targets(
             return Decision.deny(
                 f"filesystem write target {str(path)!r} is outside writable roots"
             )
+        try:
+            descriptor = os.open(
+                path,
+                os.O_PATH | os.O_NOFOLLOW | os.O_CLOEXEC,
+            )
+        except FileNotFoundError:
+            descriptor = None
+        if descriptor is not None:
+            try:
+                metadata = os.fstat(descriptor)
+                if (metadata.st_dev, metadata.st_ino) in governed_identities:
+                    return Decision.deny(
+                        f"filesystem write target {str(path)!r} aliases a governed "
+                        "operation object"
+                    )
+            finally:
+                os.close(descriptor)
         if any(
             path == governed
             or path.is_relative_to(governed)
