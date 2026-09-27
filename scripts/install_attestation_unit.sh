@@ -7,7 +7,7 @@ unset BASH_ENV ENV CDPATH PYTHONHOME PYTHONPATH
 IFS=$' \t\n'
 
 readonly UNIT=saturnin-attestation.service
-readonly EXPECTED_RUNTIME_MANIFEST_SHA256=e8576bb9c51a03b9d61c1cfe7055a5aff8903b057a2f42e11a677e76c597b8f8
+readonly EXPECTED_RUNTIME_MANIFEST_SHA256=7214f1547db4e68b75ccf702fa725cbd561ffc21165336e99779fba788db74c2
 readonly ID=/usr/bin/id
 readonly REALPATH=/usr/bin/realpath
 readonly STAT=/usr/bin/stat
@@ -622,7 +622,7 @@ expected = [
         f"Environment=SATURNIN_CURRENT_KEY_ID=\"{current_key_id}\"",
         f"Environment=SATURNIN_PREVIOUS_KEY_ID=\"{previous_key_id}\"",
         f"Environment=SATURNIN_CREDENTIAL_GENERATION=\"{credential_generation}\"",
-        "ExecStart=/usr/bin/python3 -I -c '\''import fcntl,hashlib,os,runpy,stat,sys;p=os.path.expanduser(\"~/.config/systemd/user/saturnin-attestation-runtime.pyz\");f=os.open(p,os.O_RDONLY|os.O_CLOEXEC|os.O_NOFOLLOW);a=os.fstat(f);assert stat.S_ISREG(a.st_mode) and a.st_uid==os.getuid() and a.st_nlink==1 and stat.S_IMODE(a.st_mode)==0o400;s=os.memfd_create(\"saturnin-attestation-runtime\",os.MFD_CLOEXEC|os.MFD_ALLOW_SEALING);h=hashlib.sha256();exec(\"while b:=os.read(f,65536):\\\\n h.update(b)\\\\n v=memoryview(b)\\\\n while v:\\\\n  v=v[os.write(s,v):]\");z=os.fstat(f);assert (a.st_dev,a.st_ino,a.st_size,a.st_mtime_ns,a.st_ctime_ns)==(z.st_dev,z.st_ino,z.st_size,z.st_mtime_ns,z.st_ctime_ns) and h.hexdigest()==os.environ[\"SATURNIN_RUNTIME_SHA256\"];fcntl.fcntl(s,fcntl.F_ADD_SEALS,fcntl.F_SEAL_WRITE|fcntl.F_SEAL_GROW|fcntl.F_SEAL_SHRINK|fcntl.F_SEAL_SEAL);os.lseek(s,0,os.SEEK_SET);os.close(f);sys.path.insert(0,f\"/proc/self/fd/{s}\");runpy.run_module(\"saturnin.attestation_service\",run_name=\"__main__\")'\'' serve",
+        "ExecStart=/usr/bin/python3 -I -c '\''import fcntl,hashlib,os,runpy,stat,sys;p=os.path.expanduser(\"~/.config/systemd/user/saturnin-attestation-runtime.pyz\");f=os.open(p,os.O_RDONLY|os.O_CLOEXEC|os.O_NOFOLLOW);a=os.fstat(f);assert stat.S_ISREG(a.st_mode) and a.st_uid==os.getuid() and a.st_nlink==1 and stat.S_IMODE(a.st_mode)==0o400;s=os.memfd_create(\"saturnin-attestation-runtime\",os.MFD_CLOEXEC|os.MFD_ALLOW_SEALING);os.fchmod(s,0o400);h=hashlib.sha256();exec(\"while b:=os.read(f,65536):\\\\n h.update(b)\\\\n v=memoryview(b)\\\\n while v:\\\\n  v=v[os.write(s,v):]\");z=os.fstat(f);assert (a.st_dev,a.st_ino,a.st_size,a.st_mtime_ns,a.st_ctime_ns)==(z.st_dev,z.st_ino,z.st_size,z.st_mtime_ns,z.st_ctime_ns) and h.hexdigest()==os.environ[\"SATURNIN_RUNTIME_SHA256\"];fcntl.fcntl(s,fcntl.F_ADD_SEALS,fcntl.F_SEAL_WRITE|fcntl.F_SEAL_GROW|fcntl.F_SEAL_SHRINK|fcntl.F_SEAL_SEAL);os.lseek(s,0,os.SEEK_SET);os.close(f);sys.path.insert(0,f\"/proc/self/fd/{s}\");runpy.run_module(\"saturnin.attestation_service\",run_name=\"__main__\")'\'' serve",
         "LoadCredentialEncrypted=saturnin-review-attestation-key:%h/.config/systemd/user/saturnin-credentials/saturnin-review-attestation-key.cred",
         "LoadCredentialEncrypted=saturnin-review-attestation-previous-key:%h/.config/systemd/user/saturnin-credentials/saturnin-review-attestation-previous-key.cred",
         "RuntimeDirectory=saturnin-attestation",
@@ -677,8 +677,10 @@ if manager[1:] != expected:
 verify_running_service() {
   local manager_state=$1 runtime_sha256=$2
   MANAGER_STATE_PATH="$manager_state" INSTALLED_PATH="$INSTALLED" \
+    EXPECTED_UNIT_PATH="$INSTALLED_SNAPSHOT" \
     PYTHON_PATH="$PYTHON" RUNTIME_SHA256_VALUE="$runtime_sha256" \
     VERIFY_RUNNING_SERVICE=1 "$PYTHON" -I -c '
+import fcntl
 import hashlib
 import os
 import stat
@@ -714,15 +716,31 @@ if metadata.st_uid != os.getuid():
     raise SystemExit("systemd signer process owner mismatch")
 if Path(os.path.realpath(process / "exe")) != Path(os.environ["PYTHON_PATH"]):
     raise SystemExit("systemd signer executable identity mismatch")
-arguments = (process / "cmdline").read_bytes().split(b"\0")
-if (
-    len(arguments) < 5
-    or arguments[1:3] != [b"-I", b"-c"]
-    or arguments[-2:] != [b"serve", b""]
-    or b"saturnin-attestation-runtime.pyz" not in arguments[3]
-    or b"runpy.run_module" not in arguments[3]
-):
+exec_start = next(
+    line for line in Path(os.environ["EXPECTED_UNIT_PATH"]).read_text(
+        encoding="utf-8"
+    ).splitlines() if line.startswith("ExecStart=")
+)
+prefix = "ExecStart=/usr/bin/python3 -I -c " + chr(39)
+suffix = chr(39) + " serve"
+if not exec_start.startswith(prefix) or not exec_start.endswith(suffix):
+    raise SystemExit("systemd signer expected command identity is invalid")
+expected_arguments = [
+    os.environ["PYTHON_PATH"].encode(),
+    b"-I",
+    b"-c",
+    exec_start[len(prefix):-len(suffix)].encode(),
+    b"serve",
+    b"",
+]
+if (process / "cmdline").read_bytes().split(b"\0") != expected_arguments:
     raise SystemExit("systemd signer command identity mismatch")
+control_group = properties.get("ControlGroup", "")
+if not control_group.endswith("/saturnin-attestation.service"):
+    raise SystemExit("systemd signer control-group identity mismatch")
+memberships = (process / "cgroup").read_text(encoding="utf-8").splitlines()
+if not any(line.partition("::")[2] == control_group for line in memberships):
+    raise SystemExit("systemd signer process is outside its reported control group")
 runtime_digest = os.environ["RUNTIME_SHA256_VALUE"]
 matched = False
 for entry in (process / "fd").iterdir():
@@ -735,6 +753,7 @@ for entry in (process / "fd").iterdir():
     descriptor = os.open(entry, os.O_RDONLY | os.O_CLOEXEC)
     try:
         before = os.fstat(descriptor)
+        seals = fcntl.fcntl(descriptor, fcntl.F_GET_SEALS)
         digest = hashlib.sha256()
         while chunk := os.read(descriptor, 65536):
             digest.update(chunk)
@@ -744,6 +763,14 @@ for entry in (process / "fd").iterdir():
     if (
         stat.S_ISREG(before.st_mode)
         and before.st_uid == os.getuid()
+        and stat.S_IMODE(before.st_mode) == 0o400
+        and seals
+        == (
+            fcntl.F_SEAL_WRITE
+            | fcntl.F_SEAL_GROW
+            | fcntl.F_SEAL_SHRINK
+            | fcntl.F_SEAL_SEAL
+        )
         and (before.st_dev, before.st_ino, before.st_size)
         == (after.st_dev, after.st_ino, after.st_size)
         and digest.hexdigest() == runtime_digest
@@ -1083,7 +1110,8 @@ verify_manager_loaded_unit "$MANAGER_VIEW"
 "$SYSTEMCTL" --user show --no-pager \
   --property=LoadState --property=ActiveState --property=SubState \
   --property=FragmentPath --property=DropInPaths \
-  --property=MainPID --property=ExecMainPID "$UNIT" >"$MANAGER_STATE"
+  --property=MainPID --property=ExecMainPID --property=ControlGroup \
+  "$UNIT" >"$MANAGER_STATE"
 verify_running_service "$MANAGER_STATE" "$RUNTIME_TREE_SHA256"
 mutating=0
 echo "installed and started $UNIT"

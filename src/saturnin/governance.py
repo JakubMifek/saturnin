@@ -560,6 +560,21 @@ class Governance:
                 return Decision.deny(
                     "systemctl patterns may not resolve to governed units"
                 )
+            allowed_units = set(services.get("allowed_units", []))
+            unknown_units = [
+                unit
+                for unit in units
+                if unit not in allowed_units
+                and not (
+                    any(character in unit for character in "*?[]")
+                    and any(fnmatchcase(allowed, unit) for allowed in allowed_units)
+                )
+            ]
+            if unknown_units:
+                return Decision.deny(
+                    "systemctl unit identity is not registered: "
+                    + ", ".join(unknown_units)
+                )
             if sub in protected_actions and governed_references.intersection(units):
                 return Decision.deny(
                     "governed units may only be changed by their registered operation"

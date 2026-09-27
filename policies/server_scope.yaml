@@ -33,6 +33,20 @@ services:
   journalctl_allowed: true
   unit_prefix: saturnin-
   allowed_subcommands: [start, stop, restart, status, enable, disable, list-timers, daemon-reload]
+  allowed_units:
+    - saturnin-discovery.service
+    - saturnin-discovery.timer
+    - saturnin-improve.service
+    - saturnin-improve.timer
+    - saturnin-janitor.service
+    - saturnin-janitor.timer
+    - saturnin-mirror.service
+    - saturnin-mirror.timer
+    - saturnin-poller.service
+    - saturnin-poller.timer
+    - saturnin-resume.service
+    - saturnin-resume.timer
+    - saturnin-attestation.service
   # Timers live in the Saturnin user scope only.
   scheduling_scope: user
   allowed_schedulers: [systemd-user-timer]
@@ -43,7 +57,7 @@ services:
 operations:
   signer_user_unit:
     executable: scripts/install_attestation_unit.sh
-    sha256: 6ca3e6a050ea4af713e14af1a6e2dad137482b9118aae9e1984ac3f22b82a22b
+    sha256: 52fe14dce57886e330378101c6c1e09973b948ba107f432a1048a65e39209278
     dependencies:
       - .venv/bin/saturnin
       - systemd/saturnin-attestation.service
@@ -100,7 +114,7 @@ operations:
     runtime_files:
       - source: policies/governance.yaml
         archive: saturnin/governance.runtime.yaml
-    runtime_manifest_sha256: e8576bb9c51a03b9d61c1cfe7055a5aff8903b057a2f42e11a677e76c597b8f8
+    runtime_manifest_sha256: 7214f1547db4e68b75ccf702fa725cbd561ffc21165336e99779fba788db74c2
     trusted_tools:
       - /usr/bin/bash
       - /usr/bin/chmod

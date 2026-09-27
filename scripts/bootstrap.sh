@@ -14,9 +14,9 @@ fi
 python3 -m venv .venv
 # shellcheck disable=SC1091
 source .venv/bin/activate
-python -m pip install --upgrade pip >/dev/null
 python -m pip install --require-hashes -r requirements-governance.txt
-python -m pip install --no-deps -e ".[dev]"
+python -m pip install --require-hashes -r requirements-dev.txt
+python -m pip install --no-build-isolation --no-deps -e .
 runtime_yaml=$(python -c 'import pathlib, yaml; print(pathlib.Path(yaml.__file__).parent)')
 find src/saturnin "$runtime_yaml" -type d -exec chmod 0755 {} +
 find src/saturnin "$runtime_yaml" -type f -name '*.py' -exec chmod 0644 {} +

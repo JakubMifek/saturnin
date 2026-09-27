@@ -1364,6 +1364,22 @@ def test_suffixless_signer_unit_lifecycle_is_reserved(
     ).allowed
 
 
+@pytest.mark.parametrize(
+    "unit",
+    [
+        "saturnin-shadow.service",
+        "saturnin-attestation-alias.service",
+        "saturnin-janitor",
+    ],
+)
+def test_systemctl_rejects_unregistered_or_noncanonical_units(
+    governance: Governance, unit: str
+) -> None:
+    assert not governance.check_server_command(
+        f"systemctl --user restart {unit}"
+    ).allowed
+
+
 def test_generic_writes_cannot_create_sibling_user_units(
     governance: Governance,
 ) -> None:

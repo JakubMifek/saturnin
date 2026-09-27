@@ -1,0 +1,16 @@
+# Hash-locked test dependencies installed by scripts/bootstrap.sh.
+coverage==7.16.2 \
+    --hash=sha256:4358b9c8c0125b460407f3017c6cce8156e904b32772c5630d27112f52bdbfe5 \
+    --hash=sha256:ca64d9f1f384f151b9511bec01126072acd2f313439f8ed015a22d8790aab6fa
+iniconfig==2.3.0 \
+    --hash=sha256:f631c04d2c48c52b84d0d0549c99ff3859c98df65b3101406327ecc7d53fbf12
+packaging==26.3 \
+    --hash=sha256:d7193f7c8e4e93f444fde0262bf90af30e16fa0ad0ad44cb553c87339b23cd1c
+pluggy==1.6.0 \
+    --hash=sha256:e920276dd6813095e9377c0bc5566d94c932c33b27a3e3945d8389c374dd4746
+Pygments==2.21.0 \
+    --hash=sha256:2363c69b61c4a97c838da3b130dcd6468f4848992b21a82f2a63ec34377137d9
+pytest==9.1.1 \
+    --hash=sha256:37a86b45efb9a47a61a36449063e8e18d0cab3161329fc099eb21783169c4f0c
+pytest-cov==7.1.0 \
+    --hash=sha256:a0461110b7865f9a271aa1b51e516c9a95de9d696734a2f71e3e78f46e1d4678
