@@ -428,7 +428,8 @@ with zipfile.ZipFile(f"/proc/self/fd/{source}") as archive:
 wants_operation() {
   WANTS_OPERATION="$1" EXPECTED_UNIT_DIR_ID="$UNIT_DIR_DEVICE_INODE" \
     EXPECTED_WANTS_DIR_ID="${2:-}" LINK_TARGET_B64="${3:--}" \
-    UNIT_DIR_PATH="$UNIT_DIR" EXPECTED_UID="$CURRENT_UID" \
+    UNIT_DIR_PATH="${PINNED_UNIT_DIR:-$UNIT_DIR}" \
+    UNIT_DIR_DESCRIPTOR="${UNIT_DIR_FD:-}" EXPECTED_UID="$CURRENT_UID" \
     "$PYTHON" -I -c '
 import base64
 import os
@@ -436,10 +437,13 @@ import stat
 
 operation = os.environ["WANTS_OPERATION"]
 expected_uid = int(os.environ["EXPECTED_UID"])
-unit_fd = os.open(
-    os.environ["UNIT_DIR_PATH"],
-    os.O_RDONLY | os.O_CLOEXEC | os.O_NOFOLLOW | os.O_DIRECTORY,
-)
+if os.environ["UNIT_DIR_DESCRIPTOR"]:
+    unit_fd = os.dup(int(os.environ["UNIT_DIR_DESCRIPTOR"]))
+else:
+    unit_fd = os.open(
+        os.environ["UNIT_DIR_PATH"],
+        os.O_RDONLY | os.O_CLOEXEC | os.O_NOFOLLOW | os.O_DIRECTORY,
+    )
 unit_metadata = os.fstat(unit_fd)
 unit_identity = f"{unit_metadata.st_dev}:{unit_metadata.st_ino}"
 if (
@@ -700,6 +704,14 @@ expected = {
     "SubState": "running",
     "FragmentPath": os.environ["INSTALLED_PATH"],
     "DropInPaths": "",
+    "PrivateMounts": "yes",
+    "PrivateTmp": "yes",
+    "PrivateNetwork": "yes",
+    "ProtectHome": "read-only",
+    "ProtectSystem": "strict",
+    "ProtectProc": "invisible",
+    "NoNewPrivileges": "yes",
+    "RestrictAddressFamilies": "AF_UNIX",
 }
 if any(properties.get(key) != value for key, value in expected.items()):
     raise SystemExit("systemd signer loaded or active identity mismatch")
@@ -741,6 +753,19 @@ if not control_group.endswith("/saturnin-attestation.service"):
 memberships = (process / "cgroup").read_text(encoding="utf-8").splitlines()
 if not any(line.partition("::")[2] == control_group for line in memberships):
     raise SystemExit("systemd signer process is outside its reported control group")
+status = {}
+for line in (process / "status").read_text(encoding="utf-8").splitlines():
+    key, separator, value = line.partition(":")
+    if separator:
+        status[key] = value.strip()
+if status.get("NoNewPrivs") != "1":
+    raise SystemExit("systemd signer no-new-privileges state mismatch")
+if any(status.get(name, "").strip("0") for name in ("CapInh", "CapPrm", "CapEff")):
+    raise SystemExit("systemd signer retains process capabilities")
+if os.stat(process / "ns/net").st_ino == os.stat("/proc/self/ns/net").st_ino:
+    raise SystemExit("systemd signer private network namespace is missing")
+if os.stat(process / "ns/mnt").st_ino == os.stat("/proc/self/ns/mnt").st_ino:
+    raise SystemExit("systemd signer private mount namespace is missing")
 runtime_digest = os.environ["RUNTIME_SHA256_VALUE"]
 matched = False
 for entry in (process / "fd").iterdir():
@@ -804,6 +829,18 @@ if ! "$FLOCK" --exclusive --nonblock "$LIFECYCLE_LOCK_FD"; then
 fi
 UNIT_DIR_DEVICE_INODE="$("$STAT" -Lc %d:%i "$UNIT_DIR")"
 readonly UNIT_DIR_DEVICE_INODE
+exec {UNIT_DIR_FD}<"$UNIT_DIR"
+readonly UNIT_DIR_FD
+readonly PINNED_UNIT_DIR="/proc/self/fd/$UNIT_DIR_FD"
+if [[ "$("$STAT" -Lc %d:%i "$PINNED_UNIT_DIR")" != "$UNIT_DIR_DEVICE_INODE" ]]; then
+  echo "User-unit directory identity changed while it was pinned." >&2
+  exit 1
+fi
+readonly FILE_INSTALLED="$PINNED_UNIT_DIR/$UNIT"
+readonly FILE_INSTALLED_RUNTIME="$PINNED_UNIT_DIR/saturnin-attestation-runtime.pyz"
+readonly FILE_CREDENTIAL_DIR="$PINNED_UNIT_DIR/saturnin-credentials"
+readonly FILE_CURRENT="$FILE_CREDENTIAL_DIR/saturnin-review-attestation-key.cred"
+readonly FILE_PREVIOUS="$FILE_CREDENTIAL_DIR/saturnin-review-attestation-previous-key.cred"
 verify_unit_directory() {
   if [[ -L "$UNIT_DIR" || "$("$STAT" -Lc %d:%i "$UNIT_DIR")" != "$UNIT_DIR_DEVICE_INODE" ]]; then
     echo "User-unit directory identity changed during lifecycle operation." >&2
@@ -813,12 +850,12 @@ verify_unit_directory() {
 
 if [[ "$action" == status ]]; then
   verify_unit_directory
-  STATUS_RUNTIME_ID="$(trusted_file_identity "$INSTALLED_RUNTIME" 0400)"
-  verify_unit_identity "$INSTALLED" 0644 "${STATUS_RUNTIME_ID##*:}" >/dev/null
+  STATUS_RUNTIME_ID="$(trusted_file_identity "$FILE_INSTALLED_RUNTIME" 0400)"
+  verify_unit_identity "$FILE_INSTALLED" 0644 "${STATUS_RUNTIME_ID##*:}" >/dev/null
   exec "$SYSTEMCTL" --user status --no-pager "$UNIT"
 fi
 
-readonly TRANSACTION="$UNIT_DIR/.saturnin-attestation-transaction.$$"
+readonly TRANSACTION="$PINNED_UNIT_DIR/.saturnin-attestation-transaction.$$"
 readonly STAGE="$TRANSACTION/stage"
 readonly BACKUP="$TRANSACTION/backup"
 readonly MANAGER_VIEW="$TRANSACTION/manager-view"
@@ -892,8 +929,8 @@ rollback() {
     echo "Rollback stopped because the user-unit directory was replaced." >&2
     return
   fi
-  restore_file "$INSTALLED" "$BACKUP/unit" "$had_unit" 0644 "$unit_backup_identity" || return
-  restore_file "$INSTALLED_RUNTIME" "$BACKUP/runtime" "$had_runtime" 0400 \
+  restore_file "$FILE_INSTALLED" "$BACKUP/unit" "$had_unit" 0644 "$unit_backup_identity" || return
+  restore_file "$FILE_INSTALLED_RUNTIME" "$BACKUP/runtime" "$had_runtime" 0400 \
     "$runtime_backup_identity" || return
   if [[ "$wants_dir_identity" != missing ]]; then
     wants_operation unlink "$wants_dir_identity" || return
@@ -908,8 +945,8 @@ rollback() {
   if [[ "$was_active" -eq 1 ]] \
     && [[ "$unit_was_valid" -eq 1 ]] \
     && verify_unit_directory \
-    && verify_unit_identity "$INSTALLED" 0644 "${runtime_backup_identity##*:}" >/dev/null \
-    && trusted_file_identity "$INSTALLED_RUNTIME" 0400 >/dev/null \
+    && verify_unit_identity "$FILE_INSTALLED" 0644 "${runtime_backup_identity##*:}" >/dev/null \
+    && trusted_file_identity "$FILE_INSTALLED_RUNTIME" 0400 >/dev/null \
     && "$SYSTEMCTL" --user cat --no-pager "$UNIT" >"$MANAGER_VIEW" \
     && verify_manager_loaded_unit "$MANAGER_VIEW" "$BACKUP/unit" \
     && ! "$SYSTEMCTL" --user is-active --quiet "$UNIT"; then
@@ -930,23 +967,23 @@ trap on_exit EXIT
 if "$SYSTEMCTL" --user is-active --quiet "$UNIT"; then
   was_active=1
 fi
-if [[ -e "$INSTALLED_RUNTIME" || -L "$INSTALLED_RUNTIME" ]]; then
+if [[ -e "$FILE_INSTALLED_RUNTIME" || -L "$FILE_INSTALLED_RUNTIME" ]]; then
   had_runtime=1
-  snapshot_trusted_file "$INSTALLED_RUNTIME" "$BACKUP/runtime" 0400
+  snapshot_trusted_file "$FILE_INSTALLED_RUNTIME" "$BACKUP/runtime" 0400
   runtime_backup_identity="$(trusted_file_identity "$BACKUP/runtime" 0400)"
 fi
-if [[ -e "$INSTALLED" || -L "$INSTALLED" ]]; then
+if [[ -e "$FILE_INSTALLED" || -L "$FILE_INSTALLED" ]]; then
   had_unit=1
-  trusted_file_identity "$INSTALLED" 0644 >/dev/null
+  trusted_file_identity "$FILE_INSTALLED" 0644 >/dev/null
   if [[ "$had_runtime" -eq 1 ]] \
-    && verify_unit_identity "$INSTALLED" 0644 \
+    && verify_unit_identity "$FILE_INSTALLED" 0644 \
       "${runtime_backup_identity##*:}" >/dev/null 2>&1; then
     unit_was_valid=1
   elif [[ "$was_active" -eq 1 ]]; then
     echo "Refusing to replace an active unvalidated attestation unit." >&2
     exit 1
   fi
-  snapshot_trusted_file "$INSTALLED" "$BACKUP/unit" 0644
+  snapshot_trusted_file "$FILE_INSTALLED" "$BACKUP/unit" 0644
   unit_backup_identity="$(trusted_file_identity "$BACKUP/unit" 0644)"
 fi
 if [[ -e "$WANTS_DIR" || -L "$WANTS_DIR" ]]; then
@@ -970,7 +1007,7 @@ if [[ "$action" == uninstall ]]; then
   if [[ "$had_wants_dir" -eq 1 ]]; then
     wants_operation unlink "$wants_dir_identity"
   fi
-  "$RM" -f "$INSTALLED" "$INSTALLED_RUNTIME"
+  "$RM" -f "$FILE_INSTALLED" "$FILE_INSTALLED_RUNTIME"
   verify_unit_directory
   "$SYSTEMCTL" --user daemon-reload
   mutating=0
@@ -978,14 +1015,14 @@ if [[ "$action" == uninstall ]]; then
   exit 0
 fi
 
-if [[ -L "$CREDENTIAL_DIR" || ! -d "$CREDENTIAL_DIR" ]] \
-  || [[ "$("$STAT" -c %u "$CREDENTIAL_DIR")" -ne "$CURRENT_UID" ]] \
-  || [[ "$("$STAT" -c %a "$CREDENTIAL_DIR")" != 700 ]]; then
+if [[ -L "$FILE_CREDENTIAL_DIR" || ! -d "$FILE_CREDENTIAL_DIR" ]] \
+  || [[ "$("$STAT" -c %u "$FILE_CREDENTIAL_DIR")" -ne "$CURRENT_UID" ]] \
+  || [[ "$("$STAT" -c %a "$FILE_CREDENTIAL_DIR")" != 700 ]]; then
   echo "Attestation credential directory is missing or unsafe." >&2
   exit 1
 fi
-CURRENT_CREDENTIAL_ID="$(credential_identity "$CURRENT")"
-PREVIOUS_CREDENTIAL_ID="$(credential_identity "$PREVIOUS")"
+CURRENT_CREDENTIAL_ID="$(credential_identity "$FILE_CURRENT")"
+PREVIOUS_CREDENTIAL_ID="$(credential_identity "$FILE_PREVIOUS")"
 readonly CURRENT_CREDENTIAL_ID PREVIOUS_CREDENTIAL_ID
 credential_status="$(
   SATURNIN_SEALED_GOVERNANCE=runtime-archive "$PYTHON" -I -c \
@@ -997,7 +1034,7 @@ if [[ "$credential_status" != *"rotation=ready"* || "$credential_status" != *"si
   exit 1
 fi
 unset credential_status
-exec {CREDENTIAL_LOCK_FD}<"$CREDENTIAL_DIR"
+exec {CREDENTIAL_LOCK_FD}<"$FILE_CREDENTIAL_DIR"
 readonly CREDENTIAL_LOCK_FD
 if ! "$FLOCK" --exclusive --nonblock "$CREDENTIAL_LOCK_FD"; then
   echo "Another credential lifecycle operation is in progress." >&2
@@ -1015,8 +1052,8 @@ if [[ ! "$CURRENT_KEY_ID" =~ ^[0-9a-f]{64}$ ]] \
   exit 1
 fi
 readonly CURRENT_KEY_ID PREVIOUS_KEY_ID CREDENTIAL_GENERATION
-if [[ "$(credential_identity "$CURRENT")" != "$CURRENT_CREDENTIAL_ID" ]] \
-  || [[ "$(credential_identity "$PREVIOUS")" != "$PREVIOUS_CREDENTIAL_ID" ]]; then
+if [[ "$(credential_identity "$FILE_CURRENT")" != "$CURRENT_CREDENTIAL_ID" ]] \
+  || [[ "$(credential_identity "$FILE_PREVIOUS")" != "$PREVIOUS_CREDENTIAL_ID" ]]; then
   echo "Attestation credential identity changed during readiness validation." >&2
   exit 1
 fi
@@ -1056,25 +1093,25 @@ if [[ "$(trusted_file_identity "$RUNTIME_TREE_SNAPSHOT" 0400)" != "$RUNTIME_TREE
   echo "Attestation runtime changed before installation." >&2
   exit 1
 fi
-"$MV" -f "$RUNTIME_TREE_SNAPSHOT" "$INSTALLED_RUNTIME"
-"$MV" -f "$STAGE" "$INSTALLED"
+"$MV" -f "$RUNTIME_TREE_SNAPSHOT" "$FILE_INSTALLED_RUNTIME"
+"$MV" -f "$STAGE" "$FILE_INSTALLED"
 verify_unit_directory
-INSTALLED_RUNTIME_ID="$(trusted_file_identity "$INSTALLED_RUNTIME" 0400)"
+INSTALLED_RUNTIME_ID="$(trusted_file_identity "$FILE_INSTALLED_RUNTIME" 0400)"
 readonly INSTALLED_RUNTIME_ID
 if [[ "$INSTALLED_RUNTIME_ID" != "$RUNTIME_TREE_ID" ]]; then
   echo "Installed attestation runtime does not match the validated snapshot." >&2
   exit 1
 fi
 INSTALLED_DEVICE_INODE="$(
-  verify_unit_identity "$INSTALLED" 0644 "$RUNTIME_TREE_SHA256"
+  verify_unit_identity "$FILE_INSTALLED" 0644 "$RUNTIME_TREE_SHA256"
 )"
 readonly INSTALLED_DEVICE_INODE
-snapshot_trusted_file "$INSTALLED" "$INSTALLED_SNAPSHOT" 0400
+snapshot_trusted_file "$FILE_INSTALLED" "$INSTALLED_SNAPSHOT" 0400
 "$SYSTEMCTL" --user daemon-reload
 verify_unit_directory
 "$SYSTEMCTL" --user cat --no-pager "$UNIT" >"$MANAGER_VIEW"
 verify_manager_loaded_unit "$MANAGER_VIEW"
-if [[ "$(verify_unit_identity "$INSTALLED" 0644 "$RUNTIME_TREE_SHA256")" != "$INSTALLED_DEVICE_INODE" ]]; then
+if [[ "$(verify_unit_identity "$FILE_INSTALLED" 0644 "$RUNTIME_TREE_SHA256")" != "$INSTALLED_DEVICE_INODE" ]]; then
   echo "Installed attestation unit identity drifted after daemon-reload." >&2
   exit 1
 fi
@@ -1082,17 +1119,17 @@ wants_operation link "$wants_dir_identity" \
   "Li4vc2F0dXJuaW4tYXR0ZXN0YXRpb24uc2VydmljZQ=="
 verify_wants_link
 verify_unit_directory
-if [[ "$(verify_unit_identity "$INSTALLED" 0644 "$RUNTIME_TREE_SHA256")" != "$INSTALLED_DEVICE_INODE" ]]; then
+if [[ "$(verify_unit_identity "$FILE_INSTALLED" 0644 "$RUNTIME_TREE_SHA256")" != "$INSTALLED_DEVICE_INODE" ]]; then
   echo "Installed attestation unit identity drifted before start." >&2
   exit 1
 fi
-if [[ "$(trusted_file_identity "$INSTALLED_RUNTIME" 0400)" != "$RUNTIME_TREE_ID" ]] \
+if [[ "$(trusted_file_identity "$FILE_INSTALLED_RUNTIME" 0400)" != "$RUNTIME_TREE_ID" ]] \
   || [[ "$(trusted_fd_identity "$RUNTIME_TREE_FD" 0400)" != "$RUNTIME_TREE_ID" ]]; then
   echo "Installed attestation runtime identity drifted before signer start." >&2
   exit 1
 fi
-if [[ "$(credential_identity "$CURRENT")" != "$CURRENT_CREDENTIAL_ID" ]] \
-  || [[ "$(credential_identity "$PREVIOUS")" != "$PREVIOUS_CREDENTIAL_ID" ]]; then
+if [[ "$(credential_identity "$FILE_CURRENT")" != "$CURRENT_CREDENTIAL_ID" ]] \
+  || [[ "$(credential_identity "$FILE_PREVIOUS")" != "$PREVIOUS_CREDENTIAL_ID" ]]; then
   echo "Attestation credential identity drifted before signer start." >&2
   exit 1
 fi
@@ -1111,6 +1148,9 @@ verify_manager_loaded_unit "$MANAGER_VIEW"
   --property=LoadState --property=ActiveState --property=SubState \
   --property=FragmentPath --property=DropInPaths \
   --property=MainPID --property=ExecMainPID --property=ControlGroup \
+  --property=PrivateMounts --property=PrivateTmp --property=PrivateNetwork \
+  --property=ProtectHome --property=ProtectSystem --property=ProtectProc \
+  --property=NoNewPrivileges --property=RestrictAddressFamilies \
   "$UNIT" >"$MANAGER_STATE"
 verify_running_service "$MANAGER_STATE" "$RUNTIME_TREE_SHA256"
 mutating=0

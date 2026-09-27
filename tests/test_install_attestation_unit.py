@@ -875,10 +875,9 @@ def test_status_rejects_unsafe_installed_unit_metadata(
         fake_python = Path(env["PATH"].split(":", 1)[0]) / "python3"
         fake_python.write_text(
             "#!/bin/sh\n"
-            f"if [ \"${{UNIT_PATH:-}}\" = '{installed}' ] "
-            "&& [ \"${EXPECTED_MODE:-}\" = 0644 ]; then\n"
-            "  exit 1\n"
-            "fi\n"
+            "case \"${UNIT_PATH:-}:${EXPECTED_MODE:-}\" in\n"
+            "  */saturnin-attestation.service:0644) exit 1 ;;\n"
+            "esac\n"
             "exec /usr/bin/python3 \"$@\"\n",
             encoding="utf-8",
         )
