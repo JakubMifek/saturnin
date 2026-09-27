@@ -7,7 +7,7 @@ unset BASH_ENV ENV CDPATH PYTHONHOME PYTHONPATH
 IFS=$' \t\n'
 
 readonly UNIT=saturnin-attestation.service
-readonly EXPECTED_RUNTIME_MANIFEST_SHA256=f08293930f3027888331a48c55ed7a8c7537434f91eb4763c53f4ef7c13b044f
+readonly EXPECTED_RUNTIME_MANIFEST_SHA256=7214f1547db4e68b75ccf702fa725cbd561ffc21165336e99779fba788db74c2
 readonly ID=/usr/bin/id
 readonly REALPATH=/usr/bin/realpath
 readonly STAT=/usr/bin/stat
@@ -15,6 +15,7 @@ PYTHON="$("$REALPATH" /usr/bin/python3)"
 readonly PYTHON
 readonly SYSTEMCTL=/usr/bin/systemctl
 readonly SYSTEMD_ANALYZE=/usr/bin/systemd-analyze
+readonly SYSTEMD_CREDS=/usr/bin/systemd-creds
 readonly FLOCK=/usr/bin/flock
 readonly MKDIR=/usr/bin/mkdir
 readonly RM=/usr/bin/rm
@@ -75,7 +76,7 @@ readonly RUNTIME="$SATURNIN_HOME/.venv/bin/saturnin"
 readonly TEMPLATE="$SATURNIN_HOME/systemd/$UNIT"
 
 for tool in "$ID" "$REALPATH" "$STAT" "$PYTHON" "$SYSTEMCTL" \
-  "$SYSTEMD_ANALYZE" "$FLOCK" "$MKDIR" "$RM" "$CP" "$MV" "$CHMOD"; do
+  "$SYSTEMD_ANALYZE" "$SYSTEMD_CREDS" "$FLOCK" "$MKDIR" "$RM" "$CP" "$MV" "$CHMOD"; do
   if [[ -L "$tool" || ! -x "$tool" ]] \
     || [[ "$("$STAT" -c %u "$tool")" -ne 0 ]] \
     || (( 8#$("$STAT" -c %a "$tool") & 8#022 )); then
@@ -107,9 +108,6 @@ if [[ "$CONFIG_HOME" != "$HOME/.config" ]]; then
   exit 1
 fi
 readonly UNIT_DIR="$CONFIG_HOME/systemd/user"
-readonly CREDENTIAL_DIR="$UNIT_DIR/saturnin-credentials"
-readonly CURRENT="$CREDENTIAL_DIR/saturnin-review-attestation-key.cred"
-readonly PREVIOUS="$CREDENTIAL_DIR/saturnin-review-attestation-previous-key.cred"
 readonly INSTALLED="$UNIT_DIR/$UNIT"
 readonly INSTALLED_RUNTIME="$UNIT_DIR/saturnin-attestation-runtime.pyz"
 readonly WANTS_DIR="$UNIT_DIR/default.target.wants"
@@ -222,48 +220,6 @@ try:
         os.close(destination_fd)
 finally:
     os.close(source_fd)
-'
-}
-
-credential_identity() {
-  CREDENTIAL_PATH="$1" EXPECTED_UID="$CURRENT_UID" "$PYTHON" -I -c '
-import hashlib
-import os
-import stat
-
-path = os.environ["CREDENTIAL_PATH"]
-expected_uid = int(os.environ["EXPECTED_UID"])
-descriptor = os.open(path, os.O_RDONLY | os.O_CLOEXEC | os.O_NOFOLLOW)
-try:
-    before = os.fstat(descriptor)
-    if (
-        not stat.S_ISREG(before.st_mode)
-        or before.st_uid != expected_uid
-        or before.st_nlink != 1
-        or stat.S_IMODE(before.st_mode) != 0o600
-    ):
-        raise SystemExit("credential descriptor metadata mismatch")
-    digest = hashlib.sha256()
-    while chunk := os.read(descriptor, 65536):
-        digest.update(chunk)
-    after = os.fstat(descriptor)
-    if (
-        before.st_dev,
-        before.st_ino,
-        before.st_size,
-        before.st_mtime_ns,
-        before.st_ctime_ns,
-    ) != (
-        after.st_dev,
-        after.st_ino,
-        after.st_size,
-        after.st_mtime_ns,
-        after.st_ctime_ns,
-    ):
-        raise SystemExit("credential changed during validation")
-    print(f"{before.st_dev}:{before.st_ino}:{digest.hexdigest()}")
-finally:
-    os.close(descriptor)
 '
 }
 
@@ -550,7 +506,9 @@ verify_unit_identity() {
     EXPECTED_UID="$CURRENT_UID" \
     HOME_VALUE="$SATURNIN_HOME" CURRENT_KEY_ID_VALUE="${CURRENT_KEY_ID:-}" \
     PREVIOUS_KEY_ID_VALUE="${PREVIOUS_KEY_ID:-}" \
-    CREDENTIAL_GENERATION_VALUE="${CREDENTIAL_GENERATION:-}" "$PYTHON" -I -c '
+    CREDENTIAL_GENERATION_VALUE="${CREDENTIAL_GENERATION:-}" \
+    CURRENT_CREDENTIAL_VALUE="${CURRENT_CREDENTIAL:-}" \
+    PREVIOUS_CREDENTIAL_VALUE="${PREVIOUS_CREDENTIAL:-}" "$PYTHON" -I -c '
 import os
 import stat
 
@@ -591,6 +549,8 @@ runtime_sha256 = os.environ["RUNTIME_SHA256_VALUE"]
 current_key_id = os.environ["CURRENT_KEY_ID_VALUE"]
 previous_key_id = os.environ["PREVIOUS_KEY_ID_VALUE"]
 credential_generation = os.environ["CREDENTIAL_GENERATION_VALUE"]
+current_credential = os.environ["CURRENT_CREDENTIAL_VALUE"]
+previous_credential = os.environ["PREVIOUS_CREDENTIAL_VALUE"]
 if not current_key_id or not previous_key_id or not credential_generation:
     for line in lines:
         if line.startswith("Environment=SATURNIN_CURRENT_KEY_ID="):
@@ -599,6 +559,14 @@ if not current_key_id or not previous_key_id or not credential_generation:
             previous_key_id = line.rsplit("=", 1)[-1].strip("\"")
         elif line.startswith("Environment=SATURNIN_CREDENTIAL_GENERATION="):
             credential_generation = line.rsplit("=", 1)[-1].strip("\"")
+        elif line.startswith(
+            "SetCredentialEncrypted=saturnin-review-attestation-key:"
+        ):
+            current_credential = line.split(":", 1)[1]
+        elif line.startswith(
+            "SetCredentialEncrypted=saturnin-review-attestation-previous-key:"
+        ):
+            previous_credential = line.split(":", 1)[1]
 if (
     len(current_key_id) != 64
     or len(previous_key_id) != 64
@@ -611,6 +579,15 @@ if (
     )
 ):
     raise SystemExit("rendered attestation unit key identifiers are invalid")
+if (
+    not current_credential
+    or not previous_credential
+    or any(
+        character not in "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/="
+        for character in current_credential + previous_credential
+    )
+):
+    raise SystemExit("rendered encrypted credential literals are invalid")
 expected = [
     ("Unit", [
         "Description=Saturnin private review attestation signer",
@@ -627,8 +604,8 @@ expected = [
         f"Environment=SATURNIN_PREVIOUS_KEY_ID=\"{previous_key_id}\"",
         f"Environment=SATURNIN_CREDENTIAL_GENERATION=\"{credential_generation}\"",
         "ExecStart=/usr/bin/python3 -I -c '\''import fcntl,hashlib,os,runpy,stat,sys;p=os.path.expanduser(\"~/.config/systemd/user/saturnin-attestation-runtime.pyz\");f=os.open(p,os.O_RDONLY|os.O_CLOEXEC|os.O_NOFOLLOW);a=os.fstat(f);assert stat.S_ISREG(a.st_mode) and a.st_uid==os.getuid() and a.st_nlink==1 and stat.S_IMODE(a.st_mode)==0o400;s=os.memfd_create(\"saturnin-attestation-runtime\",os.MFD_CLOEXEC|os.MFD_ALLOW_SEALING);os.fchmod(s,0o400);h=hashlib.sha256();exec(\"while b:=os.read(f,65536):\\\\n h.update(b)\\\\n v=memoryview(b)\\\\n while v:\\\\n  v=v[os.write(s,v):]\");z=os.fstat(f);assert (a.st_dev,a.st_ino,a.st_size,a.st_mtime_ns,a.st_ctime_ns)==(z.st_dev,z.st_ino,z.st_size,z.st_mtime_ns,z.st_ctime_ns) and h.hexdigest()==os.environ[\"SATURNIN_RUNTIME_SHA256\"];fcntl.fcntl(s,fcntl.F_ADD_SEALS,fcntl.F_SEAL_WRITE|fcntl.F_SEAL_GROW|fcntl.F_SEAL_SHRINK|fcntl.F_SEAL_SEAL);os.lseek(s,0,os.SEEK_SET);os.close(f);sys.path.insert(0,f\"/proc/self/fd/{s}\");runpy.run_module(\"saturnin.attestation_service\",run_name=\"__main__\")'\'' serve",
-        "LoadCredentialEncrypted=saturnin-review-attestation-key:%h/.config/systemd/user/saturnin-credentials/saturnin-review-attestation-key.cred",
-        "LoadCredentialEncrypted=saturnin-review-attestation-previous-key:%h/.config/systemd/user/saturnin-credentials/saturnin-review-attestation-previous-key.cred",
+        f"SetCredentialEncrypted=saturnin-review-attestation-key:{current_credential}",
+        f"SetCredentialEncrypted=saturnin-review-attestation-previous-key:{previous_credential}",
         "RuntimeDirectory=saturnin-attestation",
         "RuntimeDirectoryMode=0700",
         "PrivateMounts=yes",
@@ -738,13 +715,17 @@ suffix = chr(39) + " serve"
 if not exec_start.startswith(prefix) or not exec_start.endswith(suffix):
     raise SystemExit("systemd signer expected command identity is invalid")
 expected_arguments = [
-    os.environ["PYTHON_PATH"].encode(),
+    b"/usr/bin/python3",
     b"-I",
     b"-c",
     exec_start[len(prefix):-len(suffix)].encode(),
     b"serve",
     b"",
 ]
+if Path(os.path.realpath(expected_arguments[0])) != Path(
+    os.environ["PYTHON_PATH"]
+):
+    raise SystemExit("systemd signer configured executable identity mismatch")
 if (process / "cmdline").read_bytes().split(b"\0") != expected_arguments:
     raise SystemExit("systemd signer command identity mismatch")
 control_group = properties.get("ControlGroup", "")
@@ -838,9 +819,6 @@ if [[ "$("$STAT" -Lc %d:%i "$PINNED_UNIT_DIR")" != "$UNIT_DIR_DEVICE_INODE" ]]; 
 fi
 readonly FILE_INSTALLED="$PINNED_UNIT_DIR/$UNIT"
 readonly FILE_INSTALLED_RUNTIME="$PINNED_UNIT_DIR/saturnin-attestation-runtime.pyz"
-readonly FILE_CREDENTIAL_DIR="$PINNED_UNIT_DIR/saturnin-credentials"
-readonly FILE_CURRENT="$FILE_CREDENTIAL_DIR/saturnin-review-attestation-key.cred"
-readonly FILE_PREVIOUS="$FILE_CREDENTIAL_DIR/saturnin-review-attestation-previous-key.cred"
 verify_unit_directory() {
   if [[ -L "$UNIT_DIR" || "$("$STAT" -Lc %d:%i "$UNIT_DIR")" != "$UNIT_DIR_DEVICE_INODE" ]]; then
     echo "User-unit directory identity changed during lifecycle operation." >&2
@@ -1015,55 +993,179 @@ if [[ "$action" == uninstall ]]; then
   exit 0
 fi
 
-if [[ -L "$FILE_CREDENTIAL_DIR" || ! -d "$FILE_CREDENTIAL_DIR" ]] \
-  || [[ "$("$STAT" -c %u "$FILE_CREDENTIAL_DIR")" -ne "$CURRENT_UID" ]] \
-  || [[ "$("$STAT" -c %a "$FILE_CREDENTIAL_DIR")" != 700 ]]; then
-  echo "Attestation credential directory is missing or unsafe." >&2
-  exit 1
-fi
-exec {CREDENTIAL_DIR_FD}<"$FILE_CREDENTIAL_DIR"
-readonly CREDENTIAL_DIR_FD
-CURRENT_CREDENTIAL_ID="$(credential_identity "$FILE_CURRENT")"
-PREVIOUS_CREDENTIAL_ID="$(credential_identity "$FILE_PREVIOUS")"
-readonly CURRENT_CREDENTIAL_ID PREVIOUS_CREDENTIAL_ID
-credential_status="$(
-  SATURNIN_SEALED_GOVERNANCE=runtime-archive \
-    SATURNIN_CREDENTIAL_DIRECTORY_FD="$CREDENTIAL_DIR_FD" "$PYTHON" -I -c \
-    'import runpy,sys;sys.path.insert(0,sys.argv.pop(1));runpy.run_module("saturnin",run_name="__main__")' \
-    "/proc/self/fd/$RUNTIME_TREE_FD" credential status review-attestation
-)"
-if [[ "$credential_status" != *"rotation=ready"* || "$credential_status" != *"signer=ready"* ]]; then
-  echo "Attestation provisioning must report rotation=ready and signer=ready." >&2
-  exit 1
-fi
-unset credential_status
-if ! "$FLOCK" --exclusive --nonblock "$CREDENTIAL_DIR_FD"; then
-  echo "Another credential lifecycle operation is in progress." >&2
-  exit 1
-fi
-read -r CURRENT_KEY_ID PREVIOUS_KEY_ID CREDENTIAL_GENERATION < <(
-  SATURNIN_SEALED_GOVERNANCE=runtime-archive \
-    SATURNIN_CREDENTIAL_DIRECTORY_FD="$CREDENTIAL_DIR_FD" "$PYTHON" -I -c \
-    'import hashlib,sys;sys.path.insert(0,sys.argv.pop(1));from saturnin.credentials import _decrypt_encrypted_credential,credential_generation;print(hashlib.sha256(_decrypt_encrypted_credential("review-attestation").encode()).hexdigest(),hashlib.sha256(_decrypt_encrypted_credential("review-attestation-previous").encode()).hexdigest(),credential_generation())' \
-    "/proc/self/fd/$RUNTIME_TREE_FD"
+read -r CURRENT_KEY_ID PREVIOUS_KEY_ID CREDENTIAL_GENERATION \
+  CURRENT_CREDENTIAL PREVIOUS_CREDENTIAL < <(
+  UNIT_DIRECTORY_FD="$UNIT_DIR_FD" EXPECTED_UNIT_DIRECTORY="$UNIT_DIR_DEVICE_INODE" \
+    EXPECTED_UID="$CURRENT_UID" RUNTIME_ARCHIVE_FD="$RUNTIME_TREE_FD" \
+    SYSTEMD_CREDS_PATH="$SYSTEMD_CREDS" SNAPSHOT_CREDENTIALS=1 \
+    "$PYTHON" -I -c '
+import fcntl
+import hashlib
+import os
+import re
+import stat
+import subprocess
+import sys
+
+unit_fd = int(os.environ["UNIT_DIRECTORY_FD"])
+expected_uid = int(os.environ["EXPECTED_UID"])
+unit_metadata = os.fstat(unit_fd)
+unit_identity = f"{unit_metadata.st_dev}:{unit_metadata.st_ino}"
+if (
+    unit_identity != os.environ["EXPECTED_UNIT_DIRECTORY"]
+    or not stat.S_ISDIR(unit_metadata.st_mode)
+    or unit_metadata.st_uid != expected_uid
+    or unit_metadata.st_mode & 0o022
+):
+    raise SystemExit("pinned user-unit directory identity mismatch")
+credential_fd = os.open(
+    "saturnin-credentials",
+    os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC,
+    dir_fd=unit_fd,
 )
+credential_metadata = os.fstat(credential_fd)
+if (
+    not stat.S_ISDIR(credential_metadata.st_mode)
+    or credential_metadata.st_uid != expected_uid
+    or stat.S_IMODE(credential_metadata.st_mode) != 0o700
+):
+    raise SystemExit("credential directory descriptor metadata mismatch")
+try:
+    fcntl.flock(credential_fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+except BlockingIOError:
+    raise SystemExit("another credential lifecycle operation is in progress")
+
+def read_file(name):
+    descriptor = os.open(
+        name,
+        os.O_RDONLY | os.O_NOFOLLOW | os.O_CLOEXEC,
+        dir_fd=credential_fd,
+    )
+    before = os.fstat(descriptor)
+    if (
+        not stat.S_ISREG(before.st_mode)
+        or before.st_uid != expected_uid
+        or before.st_nlink != 1
+        or stat.S_IMODE(before.st_mode) != 0o600
+    ):
+        raise SystemExit(f"credential snapshot metadata mismatch: {name}")
+    chunks = []
+    size = 0
+    while chunk := os.read(descriptor, 65536):
+        size += len(chunk)
+        if size > 65536:
+            raise SystemExit(f"credential snapshot is too large: {name}")
+        chunks.append(chunk)
+    after = os.fstat(descriptor)
+    identity = lambda value: (
+        value.st_dev,
+        value.st_ino,
+        value.st_size,
+        value.st_mtime_ns,
+        value.st_ctime_ns,
+    )
+    if identity(before) != identity(after):
+        raise SystemExit(f"credential snapshot changed while read: {name}")
+    os.lseek(descriptor, 0, os.SEEK_SET)
+    return descriptor, b"".join(chunks)
+
+names = {
+    "current": "saturnin-review-attestation-key.cred",
+    "previous": "saturnin-review-attestation-previous-key.cred",
+    "generation": ".generation",
+    "enabled": ".execution-signer-enabled",
+}
+files = {key: read_file(name) for key, name in names.items()}
+for artifact in (
+    ".attestation-rotation.json",
+    ".saturnin-review-attestation-key.rollback.cred",
+    ".saturnin-review-attestation-previous-key.rollback.cred",
+):
+    try:
+        os.stat(artifact, dir_fd=credential_fd, follow_symlinks=False)
+    except FileNotFoundError:
+        continue
+    raise SystemExit("attestation credential rotation is not ready")
+
+sys.path.insert(0, f"/proc/self/fd/{os.environ['"'"'RUNTIME_ARCHIVE_FD'"'"']}")
+from saturnin.credentials import _validate_encryption_model
+
+for key in ("current", "previous"):
+    _validate_encryption_model(files[key][1])
+
+def decrypt(key, credential_name):
+    descriptor = files[key][0]
+    result = subprocess.run(
+        [
+            os.environ["SYSTEMD_CREDS_PATH"],
+            "decrypt",
+            "--user",
+            f"--name={credential_name}",
+            f"/proc/self/fd/{descriptor}",
+            "-",
+        ],
+        check=False,
+        capture_output=True,
+        pass_fds=(descriptor,),
+    )
+    if result.returncode != 0 or not result.stdout or len(result.stdout) > 65536:
+        raise SystemExit(f"credential snapshot cannot be decrypted: {key}")
+    try:
+        value = result.stdout.decode("utf-8").rstrip("\n")
+    except UnicodeDecodeError:
+        raise SystemExit(f"credential snapshot is not text: {key}")
+    if not value or "\0" in value:
+        raise SystemExit(f"credential snapshot is invalid: {key}")
+    return value
+
+generation = files["generation"][1].decode("ascii").strip()
+enabled = files["enabled"][1].decode("ascii").strip()
+if not re.fullmatch(r"[0-9a-f]{64}", generation) or enabled != generation:
+    raise SystemExit("attestation credential generation is not signer-ready")
+current = b"".join(files["current"][1].split()).decode("ascii")
+previous = b"".join(files["previous"][1].split()).decode("ascii")
+if not re.fullmatch(r"[A-Za-z0-9+/=]+", current + previous):
+    raise SystemExit("encrypted credential literal is invalid")
+credential_after = os.fstat(credential_fd)
+credential_identity = lambda value: (
+    value.st_dev,
+    value.st_ino,
+    value.st_mode,
+    value.st_uid,
+    value.st_mtime_ns,
+    value.st_ctime_ns,
+)
+if credential_identity(credential_metadata) != credential_identity(credential_after):
+    raise SystemExit("credential directory changed during snapshot")
+print(
+    hashlib.sha256(
+        decrypt("current", "saturnin-review-attestation-key").encode()
+    ).hexdigest(),
+    hashlib.sha256(
+        decrypt("previous", "saturnin-review-attestation-previous-key").encode()
+    ).hexdigest(),
+    generation,
+    current,
+    previous,
+)
+')
 if [[ ! "$CURRENT_KEY_ID" =~ ^[0-9a-f]{64}$ ]] \
   || [[ ! "$PREVIOUS_KEY_ID" =~ ^[0-9a-f]{64}$ ]] \
-  || [[ ! "$CREDENTIAL_GENERATION" =~ ^[0-9a-f]{64}$ ]]; then
+  || [[ ! "$CREDENTIAL_GENERATION" =~ ^[0-9a-f]{64}$ ]] \
+  || [[ ! "$CURRENT_CREDENTIAL" =~ ^[A-Za-z0-9+/=]+$ ]] \
+  || [[ ! "$PREVIOUS_CREDENTIAL" =~ ^[A-Za-z0-9+/=]+$ ]]; then
   echo "Attestation credential generation identity is invalid." >&2
   exit 1
 fi
 readonly CURRENT_KEY_ID PREVIOUS_KEY_ID CREDENTIAL_GENERATION
-if [[ "$(credential_identity "$FILE_CURRENT")" != "$CURRENT_CREDENTIAL_ID" ]] \
-  || [[ "$(credential_identity "$FILE_PREVIOUS")" != "$PREVIOUS_CREDENTIAL_ID" ]]; then
-  echo "Attestation credential identity changed during readiness validation." >&2
-  exit 1
-fi
+readonly CURRENT_CREDENTIAL PREVIOUS_CREDENTIAL
 
 TEMPLATE_PATH="$TEMPLATE_SNAPSHOT" DESTINATION="$STAGE" \
   HOME_VALUE="$SATURNIN_HOME" RUNTIME_SHA256_VALUE="$RUNTIME_TREE_SHA256" \
   CURRENT_KEY_ID_VALUE="$CURRENT_KEY_ID" PREVIOUS_KEY_ID_VALUE="$PREVIOUS_KEY_ID" \
   CREDENTIAL_GENERATION_VALUE="$CREDENTIAL_GENERATION" \
+  CURRENT_CREDENTIAL_VALUE="$CURRENT_CREDENTIAL" \
+  PREVIOUS_CREDENTIAL_VALUE="$PREVIOUS_CREDENTIAL" \
   "$PYTHON" -I -c '
 import os
 from pathlib import Path
@@ -1078,6 +1180,11 @@ rendered = rendered.replace(
 ).replace("@SATURNIN_PREVIOUS_KEY_ID@", os.environ["PREVIOUS_KEY_ID_VALUE"])
 rendered = rendered.replace(
     "@SATURNIN_CREDENTIAL_GENERATION@", os.environ["CREDENTIAL_GENERATION_VALUE"]
+)
+rendered = rendered.replace(
+    "@SATURNIN_CURRENT_CREDENTIAL@", os.environ["CURRENT_CREDENTIAL_VALUE"]
+).replace(
+    "@SATURNIN_PREVIOUS_CREDENTIAL@", os.environ["PREVIOUS_CREDENTIAL_VALUE"]
 )
 Path(os.environ["DESTINATION"]).write_text(rendered, encoding="utf-8")
 '
@@ -1128,11 +1235,6 @@ fi
 if [[ "$(trusted_file_identity "$FILE_INSTALLED_RUNTIME" 0400)" != "$RUNTIME_TREE_ID" ]] \
   || [[ "$(trusted_fd_identity "$RUNTIME_TREE_FD" 0400)" != "$RUNTIME_TREE_ID" ]]; then
   echo "Installed attestation runtime identity drifted before signer start." >&2
-  exit 1
-fi
-if [[ "$(credential_identity "$FILE_CURRENT")" != "$CURRENT_CREDENTIAL_ID" ]] \
-  || [[ "$(credential_identity "$FILE_PREVIOUS")" != "$PREVIOUS_CREDENTIAL_ID" ]]; then
-  echo "Attestation credential identity drifted before signer start." >&2
   exit 1
 fi
 verify_unit_directory

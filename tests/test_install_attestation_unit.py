@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import fcntl
+import base64
 import hashlib
 import os
 import shutil
@@ -14,6 +15,7 @@ from types import SimpleNamespace
 import pytest
 import yaml
 
+from saturnin.credentials import HOST_SCOPED_CREDENTIAL_ID
 from saturnin.worker_callbacks import (
     WorkerCallbackError,
     _open_governed_executable,
@@ -147,6 +149,44 @@ def signer_install(tmp_path: Path) -> tuple[Path, dict[str, str], Path, Path]:
         "  [ -z \"${FAIL_PROCESS_IDENTITY:-}\" ]\n"
         "  exit\n"
         "fi\n"
+        "if [ -n \"${SNAPSHOT_CREDENTIALS:-}\" ]; then\n"
+        "  if [ -n \"${USE_REAL_CREDENTIAL_SNAPSHOT:-}\" ]; then\n"
+        "    exec /usr/bin/python3 \"$@\"\n"
+        "  fi\n"
+        "  credential_dir=\"$HOME/.config/systemd/user/saturnin-credentials\"\n"
+        "  [ -d \"$credential_dir\" ] && [ ! -L \"$credential_dir\" ] || exit 1\n"
+        "  for credential in "
+        "\"$HOME/.config/systemd/user/saturnin-credentials/"
+        "saturnin-review-attestation-key.cred\" "
+        "\"$HOME/.config/systemd/user/saturnin-credentials/"
+        "saturnin-review-attestation-previous-key.cred\"; do\n"
+        "    [ -f \"$credential\" ] && [ ! -L \"$credential\" ] "
+        "&& [ \"$(/usr/bin/stat -c %h \"$credential\")\" = 1 ] || exit 1\n"
+        "  done\n"
+        "  if ! /usr/bin/flock --exclusive --nonblock "
+        "\"$HOME/.config/systemd/user/saturnin-credentials\" /usr/bin/true; then\n"
+        "    printf '%s\\n' 'another credential lifecycle operation is in progress' >&2\n"
+        "    exit 1\n"
+        "  fi\n"
+        "  if [ -n \"${RACE_RUNTIME_ARCHIVE:-}\" ]; then\n"
+        "    archive=$(/usr/bin/find \"$HOME/.config/systemd/user\" "
+        "-name saturnin-attestation-runtime.pyz -type f -print -quit)\n"
+        "    printf malicious > \"$archive.replacement\"\n"
+        "    chmod 0400 \"$archive.replacement\"\n"
+        "    mv -f \"$archive.replacement\" \"$archive\"\n"
+        "  fi\n"
+        "  if [ -n \"${REPLACE_CREDENTIAL_DIRECTORY_AFTER_SNAPSHOT:-}\" ]; then\n"
+        "    mv \"$credential_dir\" \"$credential_dir.original\"\n"
+        "    mkdir -m 0700 \"$credential_dir\"\n"
+        "    printf '%s\\n' ATTACKER > "
+        "\"$credential_dir/saturnin-review-attestation-key.cred\"\n"
+        "    printf '%s\\n' ATTACKER > "
+        "\"$credential_dir/saturnin-review-attestation-previous-key.cred\"\n"
+        "    chmod 0600 \"$credential_dir\"/*.cred\n"
+        "  fi\n"
+        "    printf '%064d %064d %064d QUJD REVG\\n' 0 1 2\n"
+        "    exit 0\n"
+        "fi\n"
         "case \"${3:-}\" in\n"
         "  *_decrypt_encrypted_credential*)\n"
         "    printf '%064d %064d %064d\\n' 0 1 2\n"
@@ -157,6 +197,17 @@ def signer_install(tmp_path: Path) -> tuple[Path, dict[str, str], Path, Path]:
         encoding="utf-8",
     )
     fake_python.chmod(0o755)
+    fake_systemd_creds = fake_bin / "systemd-creds"
+    fake_systemd_creds.write_text(
+        "#!/bin/sh\n"
+        "case \"$*\" in\n"
+        "  *saturnin-review-attestation-previous-key*) "
+        "printf '%s\\n' previous-key ;;\n"
+        "  *) printf '%s\\n' current-key ;;\n"
+        "esac\n",
+        encoding="utf-8",
+    )
+    fake_systemd_creds.chmod(0o755)
     calls = tmp_path / "systemctl-calls"
     state = tmp_path / "state"
     state.mkdir()
@@ -280,6 +331,10 @@ def signer_install(tmp_path: Path) -> tuple[Path, dict[str, str], Path, Path]:
         .replace(
             "readonly SYSTEMD_ANALYZE=/usr/bin/systemd-analyze",
             f"readonly SYSTEMD_ANALYZE={analyzer}",
+        )
+        .replace(
+            "readonly SYSTEMD_CREDS=/usr/bin/systemd-creds",
+            f"readonly SYSTEMD_CREDS={fake_systemd_creds}",
         )
         .replace(
             '[[ "$("$STAT" -c %u "$tool")" -ne 0 ]]',
@@ -831,9 +886,9 @@ def test_status_rejects_tampered_unit_without_systemctl(
         ),
         ("PrivateNetwork=yes", "PrivateNetwork=no"),
         (
-            "LoadCredentialEncrypted=saturnin-review-attestation-key:",
-            "LoadCredentialEncrypted=unexpected:/unsafe\n"
-            "LoadCredentialEncrypted=saturnin-review-attestation-key:",
+            "SetCredentialEncrypted=saturnin-review-attestation-key:",
+            "SetCredentialEncrypted=unexpected:QUJD\n"
+            "SetCredentialEncrypted=saturnin-review-attestation-key:",
         ),
         (
             "[Service]\nType=notify",
@@ -1189,6 +1244,7 @@ def test_rejects_noncanonical_home_and_path_injection(
 @pytest.mark.parametrize(
     "unsafe",
     [
+        "credential-dir-link",
         "credential-link",
         "runtime-link",
         "unit-dir-mode",
@@ -1205,7 +1261,12 @@ def test_rejects_symlinks_and_unsafe_permissions_before_mutation(
     tmp_path: Path,
 ) -> None:
     checkout, _, unit_dir, calls = signer_install
-    if unsafe == "credential-link":
+    if unsafe == "credential-dir-link":
+        credential_dir = unit_dir / "saturnin-credentials"
+        moved = unit_dir / "real-credentials"
+        credential_dir.rename(moved)
+        credential_dir.symlink_to(moved.name)
+    elif unsafe == "credential-link":
         credential = (
             unit_dir
             / "saturnin-credentials"
@@ -1250,3 +1311,102 @@ def test_rejects_symlinks_and_unsafe_permissions_before_mutation(
         assert calls.read_text(encoding="utf-8").splitlines() == [
             "--user is-active --quiet saturnin-attestation.service"
         ]
+
+
+def test_inline_credentials_survive_canonical_parent_replacement_after_snapshot(
+    signer_install: tuple[Path, dict[str, str], Path, Path],
+) -> None:
+    _, _, unit_dir, _ = signer_install
+
+    result = _run(
+        signer_install,
+        "install",
+        REPLACE_CREDENTIAL_DIRECTORY_AFTER_SNAPSHOT="1",
+    )
+
+    assert result.returncode == 0, result.stderr
+    installed = (unit_dir / "saturnin-attestation.service").read_text(
+        encoding="utf-8"
+    )
+    assert (
+        "SetCredentialEncrypted=saturnin-review-attestation-key:QUJD" in installed
+    )
+    assert (
+        "SetCredentialEncrypted=saturnin-review-attestation-previous-key:REVG"
+        in installed
+    )
+    assert "LoadCredentialEncrypted=" not in installed
+    assert (
+        unit_dir
+        / "saturnin-credentials"
+        / "saturnin-review-attestation-key.cred"
+    ).read_text(encoding="utf-8") == "ATTACKER\n"
+
+
+def test_real_descriptor_snapshot_binds_inline_credentials(
+    signer_install: tuple[Path, dict[str, str], Path, Path],
+) -> None:
+    _, _, unit_dir, _ = signer_install
+    credential_dir = unit_dir / "saturnin-credentials"
+    current = base64.b64encode(
+        HOST_SCOPED_CREDENTIAL_ID + b"current-fixture"
+    ).decode()
+    previous = base64.b64encode(
+        HOST_SCOPED_CREDENTIAL_ID + b"previous-fixture"
+    ).decode()
+    (credential_dir / "saturnin-review-attestation-key.cred").write_text(
+        current + "\n", encoding="utf-8"
+    )
+    (
+        credential_dir / "saturnin-review-attestation-previous-key.cred"
+    ).write_text(previous + "\n", encoding="utf-8")
+    generation = "3" * 64
+    (credential_dir / ".generation").write_text(generation + "\n", encoding="utf-8")
+    (credential_dir / ".execution-signer-enabled").write_text(
+        generation + "\n", encoding="utf-8"
+    )
+    for path in credential_dir.iterdir():
+        path.chmod(0o600)
+
+    result = _run(
+        signer_install,
+        "install",
+        USE_REAL_CREDENTIAL_SNAPSHOT="1",
+    )
+
+    assert result.returncode == 0, result.stderr
+    installed = (unit_dir / "saturnin-attestation.service").read_text(
+        encoding="utf-8"
+    )
+    assert f"SetCredentialEncrypted=saturnin-review-attestation-key:{current}" in installed
+    assert (
+        "SetCredentialEncrypted=saturnin-review-attestation-previous-key:"
+        f"{previous}"
+    ) in installed
+    assert (
+        f'Environment=SATURNIN_CURRENT_KEY_ID="{hashlib.sha256(b"current-key").hexdigest()}"'
+        in installed
+    )
+    assert (
+        f'Environment=SATURNIN_PREVIOUS_KEY_ID="{hashlib.sha256(b"previous-key").hexdigest()}"'
+        in installed
+    )
+
+
+def test_debian_python_launcher_and_canonical_executable_identities() -> None:
+    result = subprocess.run(
+        [
+            "/usr/bin/python3",
+            "-I",
+            "-c",
+            "import os;print(os.readlink('/proc/self/exe'));"
+            "print(open('/proc/self/cmdline','rb').read().split(b'\\0')[0].decode())",
+        ],
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+
+    executable, argument_zero = result.stdout.splitlines()
+    assert Path(executable) == Path("/usr/bin/python3").resolve()
+    assert argument_zero == "/usr/bin/python3"

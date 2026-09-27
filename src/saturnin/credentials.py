@@ -38,41 +38,14 @@ class CredentialError(RuntimeError):
     pass
 
 
-def _credential_directory_fd() -> int | None:
-    value = os.environ.get("SATURNIN_CREDENTIAL_DIRECTORY_FD", "")
-    if not value:
-        return None
-    if (
-        os.environ.get("SATURNIN_SEALED_GOVERNANCE") != "runtime-archive"
-        or not value.isdecimal()
-    ):
-        raise CredentialError("credential directory descriptor is not authorized")
-    descriptor = int(value)
-    try:
-        metadata = os.fstat(descriptor)
-    except OSError as exc:
-        raise CredentialError("credential directory descriptor is unavailable") from exc
-    if (
-        not stat.S_ISDIR(metadata.st_mode)
-        or metadata.st_uid != os.getuid()
-        or stat.S_IMODE(metadata.st_mode) != 0o700
-    ):
-        raise CredentialError("credential directory descriptor is unsafe")
-    return descriptor
-
-
 @contextmanager
 def _lifecycle_lock(*, exclusive: bool) -> object:
-    pinned = _credential_directory_fd()
-    if pinned is not None:
-        descriptor = os.dup(pinned)
-    else:
-        directory = encrypted_credential_dir()
-        _secure_directory(directory)
-        descriptor = os.open(
-            directory,
-            os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW,
-        )
+    directory = encrypted_credential_dir()
+    _secure_directory(directory)
+    descriptor = os.open(
+        directory,
+        os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW,
+    )
     try:
         metadata = os.fstat(descriptor)
         if (
@@ -92,9 +65,6 @@ def _lifecycle_lock(*, exclusive: bool) -> object:
 
 
 def encrypted_credential_dir() -> Path:
-    pinned = _credential_directory_fd()
-    if pinned is not None:
-        return Path(f"/proc/self/fd/{pinned}")
     config_home = Path(
         os.environ.get("XDG_CONFIG_HOME", str(Path.home() / ".config"))
     ).expanduser()
@@ -568,7 +538,6 @@ def _decrypt_encrypted_credential(kind: str) -> str:
         raise CredentialError(f"encrypted credential has unsafe ownership or mode: {kind}")
     _validate_encryption_model(_read_private_file(path).encode("utf-8"))
     try:
-        pinned = _credential_directory_fd()
         result = subprocess.run(
             [
                 "systemd-creds",
@@ -580,7 +549,6 @@ def _decrypt_encrypted_credential(kind: str) -> str:
             ],
             check=False,
             capture_output=True,
-            pass_fds=(() if pinned is None else (pinned,)),
         )
     except OSError as exc:
         raise CredentialError(

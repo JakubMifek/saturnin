@@ -19,7 +19,6 @@ from saturnin.credentials import (
     complete_attestation_rotation,
     credential_prerequisites,
     credential_status,
-    encrypted_credential_dir,
     provision_attestation_key,
     revoke_credential,
     rollback_attestation_rotation,
@@ -45,34 +44,6 @@ def _write_attestation_credentials(credential_dir: Path) -> tuple[Path, Path]:
     previous.chmod(0o600)
     generation.chmod(0o600)
     return current, previous
-
-
-def test_sealed_runtime_uses_validated_credential_directory_descriptor(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    credential_dir = tmp_path / "credentials"
-    credential_dir.mkdir(mode=0o700)
-    descriptor = os.open(credential_dir, os.O_RDONLY | os.O_DIRECTORY)
-    try:
-        monkeypatch.setenv("SATURNIN_SEALED_GOVERNANCE", "runtime-archive")
-        monkeypatch.setenv("SATURNIN_CREDENTIAL_DIRECTORY_FD", str(descriptor))
-
-        assert encrypted_credential_dir() == Path(f"/proc/self/fd/{descriptor}")
-    finally:
-        os.close(descriptor)
-
-
-def test_unsealed_runtime_rejects_credential_directory_descriptor(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    descriptor = os.open(tmp_path, os.O_RDONLY | os.O_DIRECTORY)
-    try:
-        monkeypatch.setenv("SATURNIN_CREDENTIAL_DIRECTORY_FD", str(descriptor))
-
-        with pytest.raises(CredentialError, match="not authorized"):
-            encrypted_credential_dir()
-    finally:
-        os.close(descriptor)
 
 
 def test_provision_attestation_encrypts_without_secret_arguments(
