@@ -1119,8 +1119,8 @@ restore_file() {
 
 rollback() {
   set +e
-  if declare -F release_credential_lock >/dev/null \
-    && ! release_credential_lock; then
+  if declare -F downgrade_credential_lock >/dev/null \
+    && ! downgrade_credential_lock; then
     return 1
   fi
   if ! stop_signer_service >/dev/null 2>&1; then
@@ -1195,6 +1195,10 @@ on_exit() {
       status=125
     fi
   fi
+  if declare -F release_credential_lock >/dev/null \
+    && ! release_credential_lock; then
+    status=125
+  fi
   cleanup
   exit "$status"
 }
@@ -1262,10 +1266,16 @@ readonly CREDENTIAL_LOCK_READY="$TRANSACTION/credential-lock-ready"
 "$CHMOD" 0600 "$CREDENTIAL_LOCK_READY"
 exec {CREDENTIAL_LOCK_READY_FD}>"$CREDENTIAL_LOCK_READY"
 readonly CREDENTIAL_LOCK_READY_FD
+readonly CREDENTIAL_LOCK_SHARED="$TRANSACTION/credential-lock-shared"
+: >"$CREDENTIAL_LOCK_SHARED"
+"$CHMOD" 0600 "$CREDENTIAL_LOCK_SHARED"
+exec {CREDENTIAL_LOCK_SHARED_FD}>"$CREDENTIAL_LOCK_SHARED"
+readonly CREDENTIAL_LOCK_SHARED_FD
 UNIT_DIRECTORY_FD="$UNIT_DIR_FD" EXPECTED_UID="$CURRENT_UID" \
   EXPECTED_UNIT_DIRECTORY="$UNIT_DIR_DEVICE_INODE" \
   XDG_RUNTIME_DIR="${XDG_RUNTIME_DIR:-/run/user/$CURRENT_UID}" \
-  READY_FD="$CREDENTIAL_LOCK_READY_FD" PARENT_PID="$$" \
+  READY_FD="$CREDENTIAL_LOCK_READY_FD" SHARED_FD="$CREDENTIAL_LOCK_SHARED_FD" \
+  PARENT_PID="$$" \
   "$PYTHON" -I -c '
 import fcntl
 import os
@@ -1277,6 +1287,12 @@ import time
 for signum in (signal.SIGTERM, signal.SIGINT, signal.SIGHUP):
     signal.signal(signum, signal.SIG_IGN)
 signal.signal(signal.SIGUSR1, lambda *_: sys.exit(0))
+
+def downgrade_lock(*_: object) -> None:
+    fcntl.flock(lifecycle_fd, fcntl.LOCK_SH)
+    os.write(int(os.environ["SHARED_FD"]), b"shared\n")
+
+signal.signal(signal.SIGUSR2, downgrade_lock)
 unit_fd = int(os.environ["UNIT_DIRECTORY_FD"])
 expected_uid = int(os.environ["EXPECTED_UID"])
 runtime = os.environ["XDG_RUNTIME_DIR"]
@@ -1375,6 +1391,24 @@ while os.path.exists(parent):
 ' &
 readonly CREDENTIAL_LOCK_HOLDER=$!
 credential_lock_released=0
+credential_lock_shared=0
+downgrade_credential_lock() {
+  if [[ "$credential_lock_released" -eq 0 && "$credential_lock_shared" -eq 0 ]]; then
+    kill -USR2 "$CREDENTIAL_LOCK_HOLDER" 2>/dev/null || return 1
+    local state=
+    for _ in {1..100}; do
+      if IFS= read -r state <"$CREDENTIAL_LOCK_SHARED" && [[ "$state" == shared ]]; then
+        credential_lock_shared=1
+        return 0
+      fi
+      if ! kill -0 "$CREDENTIAL_LOCK_HOLDER" 2>/dev/null; then
+        return 1
+      fi
+      "$SLEEP" 0.05
+    done
+    return 1
+  fi
+}
 release_credential_lock() {
   if [[ "$credential_lock_released" -eq 0 ]]; then
     kill -USR1 "$CREDENTIAL_LOCK_HOLDER" 2>/dev/null || true
@@ -1660,7 +1694,7 @@ verify_unit_directory
 verify_wants_link
 systemctl_bounded --user cat --no-pager "$UNIT" >"$MANAGER_VIEW"
 verify_manager_loaded_unit "$MANAGER_VIEW"
-release_credential_lock
+downgrade_credential_lock
 if [[ "$was_active" -eq 1 ]]; then
   systemctl_bounded --user restart "$UNIT"
 else
@@ -1679,5 +1713,6 @@ systemctl_bounded --user show --no-pager \
   --property=StatusText \
   "$UNIT" >"$MANAGER_STATE"
 verify_running_service "$MANAGER_STATE" "$RUNTIME_TREE_SHA256"
+release_credential_lock
 mutating=0
 echo "installed and started $UNIT"

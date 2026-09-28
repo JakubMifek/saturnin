@@ -965,7 +965,7 @@ def test_lifecycle_lock_excludes_concurrent_uninstall_and_rollback(
     assert (unit_dir / "saturnin-attestation.service").is_file()
 
 
-def test_rotation_gate_is_retained_after_credential_lock_handoff(
+def test_rotation_is_blocked_until_startup_verification_finishes(
     signer_install: tuple[Path, dict[str, str], Path, Path],
 ) -> None:
     checkout, env, unit_dir, _ = signer_install
@@ -992,21 +992,27 @@ def test_rotation_gate_is_retained_after_credential_lock_handoff(
         while not entered.exists() and time.monotonic() < deadline:
             time.sleep(0.01)
         assert entered.exists()
-        credential_fd = os.open(
-            unit_dir / "saturnin-credentials",
-            os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW,
+        lifecycle_path = (
+            Path(env["XDG_RUNTIME_DIR"])
+            / "saturnin-attestation"
+            / ".saturnin-credential-lifecycle.lock"
         )
+        lifecycle_fd = os.open(lifecycle_path, os.O_RDWR | os.O_NOFOLLOW)
+        shared_fd = os.open(lifecycle_path, os.O_RDWR | os.O_NOFOLLOW)
         unit_fd = os.open(
             unit_dir,
             os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW,
         )
         try:
-            fcntl.flock(credential_fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            with pytest.raises(BlockingIOError):
+                fcntl.flock(lifecycle_fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            fcntl.flock(shared_fd, fcntl.LOCK_SH | fcntl.LOCK_NB)
             with pytest.raises(BlockingIOError):
                 fcntl.flock(unit_fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
         finally:
-            fcntl.flock(credential_fd, fcntl.LOCK_UN)
-            os.close(credential_fd)
+            fcntl.flock(shared_fd, fcntl.LOCK_UN)
+            os.close(shared_fd)
+            os.close(lifecycle_fd)
             os.close(unit_fd)
         hold.unlink()
         stdout, stderr = process.communicate(timeout=5)
