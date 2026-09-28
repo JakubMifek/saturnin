@@ -869,7 +869,7 @@ if [[ "$action" == status ]]; then
 fi
 
 readonly TRANSACTION="$PINNED_UNIT_DIR/.saturnin-attestation-transaction.$$"
-readonly STAGE="$TRANSACTION/stage"
+readonly STAGE="$TRANSACTION/$UNIT"
 readonly BACKUP="$TRANSACTION/backup"
 readonly MANAGER_VIEW="$TRANSACTION/manager-view"
 readonly MANAGER_STATE="$TRANSACTION/manager-state"

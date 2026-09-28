@@ -321,6 +321,7 @@ def signer_install(tmp_path: Path) -> tuple[Path, dict[str, str], Path, Path]:
     analyzer = fake_bin / "systemd-analyze"
     analyzer.write_text(
         "#!/bin/sh\n"
+        "case \"${3##*/}\" in *.service) ;; *) exit 1 ;; esac\n"
         "if [ -n \"${RACE_SOURCES:-}\" ]; then\n"
         "  printf '%s\\n' '#!/bin/sh' 'touch \"$HOME/runtime-reopened\"' "
         "> \"${RUNTIME_TO_REPLACE}\"\n"
