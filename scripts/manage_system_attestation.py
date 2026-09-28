@@ -58,7 +58,7 @@ FILES = {
 }
 EXPECTED_SHA256 = {
     "src/saturnin/system_attestation.py":
-        "5091a867c4df676a7322423910dbbf9c67d706c9436f91fa1cb404fb806a645c",
+        "871b52526ee5f0fa09026b3f60b9aabadf50b96f97590fb23c9b008c721056e7",
     "config/attestation.json":
         "203d56027f000b87c4a14e972e97655151986969c6d8c0e96fa8ac4c6416a2d1",
     "systemd/system/saturnin-attestation.service":
@@ -70,7 +70,7 @@ EXPECTED_SHA256 = {
     "systemd/system/saturnin-attestation.tmpfiles":
         "4073a18cb346fc86e0559a6bb46d61244f956d11f9ea3d49516a086c985a7cbc",
 }
-ADMIN_REVIEWED_SHA256 = "4422319a5d37dd457beea22a4e1ae601700a4221cfd88a3d3847f7575eb4eb84"
+ADMIN_REVIEWED_SHA256 = "d881acd72fd259d1df7fa5d8755507b138dc8870ef623a36c167057174941d2c"
 ADMIN_DIGEST_MARKER = b'ADMIN_REVIEWED_SHA256 = "'
 ARCHIVE_VERSION = 1
 ARCHIVE_MAX_KEYS = 16

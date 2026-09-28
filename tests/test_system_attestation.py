@@ -119,10 +119,26 @@ def test_stale_or_wrong_commit_review_fails(tmp_path: Path) -> None:
         signer(tmp_path, transport).authorize(request())
 
 
-def test_evidence_is_idempotent_but_altered_scope_is_replay(tmp_path: Path) -> None:
-    service = signer(tmp_path)
+def test_pr_evidence_is_idempotent_across_advancing_clock(
+    tmp_path: Path,
+) -> None:
+    current = [NOW]
+    cfg = service_config()
+    service = DedicatedSigner(
+        cfg, GitHub(cfg, transport=pr_transport()), b"c" * 48, b"p" * 48,
+        tmp_path / "state.sqlite3", now=lambda: current[0],
+    )
     first = service.authorize(request())
-    assert service.authorize(request()) == first
+    current[0] += timedelta(minutes=4)
+    second = service.authorize(request())
+
+    assert second == first
+    assert json.loads(second)["expires_at"] == "2026-09-27T16:00:00+00:00"
+
+
+def test_same_evidence_id_rejects_altered_scope(tmp_path: Path) -> None:
+    service = signer(tmp_path)
+    service.authorize(request())
     service.config = ServiceConfig(
         frozenset({"acme/widget", "acme/other"}), service.config.pr_reviewers,
         service.config.issue_reviewers, service.config.allowed_verdicts,
@@ -131,10 +147,48 @@ def test_evidence_is_idempotent_but_altered_scope_is_replay(tmp_path: Path) -> N
         service.authorize(request(destination_repo="acme/other"))
 
 
-def test_concurrent_request_has_one_exact_result(tmp_path: Path) -> None:
-    service = signer(tmp_path)
+def test_same_review_id_rejects_changed_current_head(tmp_path: Path) -> None:
+    current_head = [HEAD]
+
+    def transport(path: str):
+        if path == "/repos/acme/widget/pulls/7":
+            return {
+                "head": {"sha": current_head[0]},
+                "user": {"login": "author"},
+            }
+        if "/reviews?" in path:
+            return [] if "page=2" in path else [{
+                "id": 91, "commit_id": current_head[0], "state": "APPROVED",
+                "submitted_at": "2026-09-27T16:00:00Z",
+                "user": {"login": "review-bot", "type": "Bot"},
+            }]
+        raise AssertionError(path)
+
+    service = signer(tmp_path, transport)
+    service.authorize(request())
+    current_head[0] = "b" * 40
+
+    with pytest.raises(SystemAttestationError, match="already consumed"):
+        service.authorize(request())
+
+
+def test_concurrent_process_shaped_requests_have_one_exact_result(
+    tmp_path: Path,
+) -> None:
+    cfg = service_config()
+    state_path = tmp_path / "state.sqlite3"
+    services = [
+        DedicatedSigner(
+            cfg, GitHub(cfg, transport=pr_transport()), b"c" * 48, b"p" * 48,
+            state_path, now=lambda: NOW,
+        )
+        for _ in range(8)
+    ]
     with ThreadPoolExecutor(max_workers=8) as pool:
-        values = list(pool.map(lambda _: service.authorize(request()), range(16)))
+        values = list(pool.map(
+            lambda index: services[index % len(services)].authorize(request()),
+            range(16),
+        ))
     assert len(set(values)) == 1
 
 

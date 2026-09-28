@@ -22,9 +22,11 @@ latest exact-commit review, an allowed verdict, and zero-context reviewer role.
 Issue authority requires an allowlisted bot comment with the exact v1 marker,
 independently recomputed title/body digest, author, role, verdict, destination,
 expiry, and nonce. Evidence consumption is durable and idempotent only for the
-identical scope. The covered `expires_at` is the upstream authorization
-capability's deadline at signing time. It remains signed evidence, but it does
-not expire an already signed ReviewLedger record during later verification.
+identical scope. The covered `expires_at` is stable upstream evidence metadata:
+the marker expiry for issues and the review submission time for pull requests.
+Issue marker expiry is enforced before first issuance. The field remains signed
+evidence, but it does not expire an already signed ReviewLedger record during
+later verification.
 
 The daemon accepts only its socket-activated AF_UNIX listener. Its only network
 client constructs HTTPS requests to the exact `https://api.github.com` origin;

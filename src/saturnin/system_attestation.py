@@ -12,6 +12,7 @@ import argparse
 import base64
 import binascii
 from collections import defaultdict, deque
+from contextlib import closing
 import hashlib
 import hmac
 import json
@@ -273,7 +274,7 @@ class DedicatedSigner:
         self.now = now or (lambda: datetime.now(timezone.utc))
         self.lock = threading.Lock()
         state_path.parent.mkdir(parents=True, exist_ok=True)
-        with self._db() as db:
+        with closing(self._db()) as db, db:
             db.execute(
                 "CREATE TABLE IF NOT EXISTS consumed ("
                 "evidence_id TEXT PRIMARY KEY, scope_hash TEXT NOT NULL, "
@@ -306,7 +307,7 @@ class DedicatedSigner:
         authorization_current = bool(evidence.pop("_authorization_current", True))
         scope_hash = hashlib.sha256(_canonical(evidence)).hexdigest()
         evidence_id = evidence["authorization_evidence_id"]
-        with self.lock, self._db() as db:
+        with self.lock, closing(self._db()) as db, db:
             db.execute("BEGIN IMMEDIATE")
             row = db.execute(
                 "SELECT scope_hash, attestation FROM consumed WHERE evidence_id=?",
@@ -580,7 +581,7 @@ class DedicatedSigner:
         return self._evidence(
             "pr", repo, subject, author, "pr-reviewer", verdict, head.casefold(), "",
             destination, f"github:review:{review['id']}", nonce, reviewer,
-            now.timestamp() + 300,
+            _iso(review["submitted_at"]).timestamp(),
         )
 
     def _issue(
