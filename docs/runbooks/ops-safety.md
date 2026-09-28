@@ -155,7 +155,8 @@ previous key have been retired or archived.
 
 The ciphertext alone is not a recoverable backup. Recovery requires all of:
 
-- the complete `saturnin-credentials` directory from a `rotation=ready` state;
+- the canonical home-root `saturnin-review-attestation-*.cred` files and
+  `.saturnin-*` generation/enablement files from a `rotation=ready` state;
 - the root-only `/var/lib/systemd/credential.secret` host master;
 - the same machine ID, numeric UID, and account name.
 
@@ -168,7 +169,9 @@ saturnin credential status all
 read -r -p 'Encrypted backup mount: ' SATURNIN_ENCRYPTED_BACKUP
 test -n "$SATURNIN_ENCRYPTED_BACKUP" && test "${SATURNIN_ENCRYPTED_BACKUP#/}" != "$SATURNIN_ENCRYPTED_BACKUP"
 install -d -m 0700 "$SATURNIN_ENCRYPTED_BACKUP/saturnin/credentials"
-cp --archive ~/.config/systemd/user/saturnin-credentials/. "$SATURNIN_ENCRYPTED_BACKUP/saturnin/credentials/"
+cp --archive ~/saturnin-review-attestation-*.cred \
+  ~/.saturnin-attestation-generation ~/.saturnin-execution-signer-enabled \
+  "$SATURNIN_ENCRYPTED_BACKUP/saturnin/credentials/"
 chmod -R go-rwx "$SATURNIN_ENCRYPTED_BACKUP/saturnin/credentials"
 ```
 
@@ -205,10 +208,9 @@ The owner then restores and validates ciphertext:
 ```bash
 read -r -p 'Encrypted backup mount: ' SATURNIN_ENCRYPTED_BACKUP
 test -n "$SATURNIN_ENCRYPTED_BACKUP" && test "${SATURNIN_ENCRYPTED_BACKUP#/}" != "$SATURNIN_ENCRYPTED_BACKUP"
-install -d -m 0700 ~/.config/systemd/user/saturnin-credentials
-cp --archive "$SATURNIN_ENCRYPTED_BACKUP/saturnin/credentials/." ~/.config/systemd/user/saturnin-credentials/
-chmod 0700 ~/.config/systemd/user/saturnin-credentials
-chmod 0600 ~/.config/systemd/user/saturnin-credentials/*
+cp --archive "$SATURNIN_ENCRYPTED_BACKUP/saturnin/credentials/." ~/
+chmod 0600 ~/saturnin-review-attestation-*.cred \
+  ~/.saturnin-attestation-generation ~/.saturnin-execution-signer-enabled
 saturnin credential prerequisites
 saturnin credential status all
 ```

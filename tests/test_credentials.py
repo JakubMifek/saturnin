@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import os
+import pwd
 import stat
 import base64
 import fcntl
@@ -14,10 +15,13 @@ import pytest
 
 from saturnin.credentials import (
     ATTESTATION_CREDENTIAL,
+    CREDENTIAL_GENERATION,
     HOST_SCOPED_CREDENTIAL_ID,
     PREVIOUS_ATTESTATION_CREDENTIAL,
     CredentialError,
     _advance_generation,
+    _credential_namespace_parent_is_trusted,
+    _credential_namespace_path,
     _lifecycle_lock,
     _sealed_systemd_creds,
     _validate_systemd_creds_namespace,
@@ -40,6 +44,18 @@ def runtime_gate(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
     runtime = tmp_path / "canonical-runtime"
     runtime.mkdir(mode=0o700)
     monkeypatch.setattr("saturnin.credentials._runtime_gate_path", lambda: runtime)
+    namespace = tmp_path / "config/systemd/user/saturnin-credentials"
+    namespace.mkdir(parents=True, mode=0o700)
+    namespace.parent.chmod(0o700)
+    monkeypatch.setattr(
+        "saturnin.credentials._credential_namespace_path",
+        lambda: Path(os.environ["XDG_CONFIG_HOME"])
+        / "systemd/user/saturnin-credentials",
+    )
+    monkeypatch.setattr(
+        "saturnin.credentials._credential_namespace_parent_is_trusted",
+        lambda *_: True,
+    )
     return runtime
 
 
@@ -47,14 +63,36 @@ def _ciphertext(payload: bytes = b"fixture") -> bytes:
     return base64.b64encode(HOST_SCOPED_CREDENTIAL_ID + payload) + b"\n"
 
 
+def test_production_credential_namespace_ignores_caller_home(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(
+        "saturnin.credentials._credential_namespace_path",
+        _credential_namespace_path,
+    )
+    monkeypatch.setenv("HOME", str(tmp_path))
+
+    namespace = _credential_namespace_path()
+
+    assert namespace == Path(pwd.getpwuid(os.getuid()).pw_dir)
+    assert namespace != tmp_path
+    root_metadata = Path("/").stat()
+    assert _credential_namespace_parent_is_trusted(
+        namespace.parent.stat(), root_metadata
+    )
+    assert not _credential_namespace_parent_is_trusted(
+        tmp_path.stat(), root_metadata
+    )
+
+
 def _write_attestation_credentials(credential_dir: Path) -> tuple[Path, Path]:
-    credential_dir.mkdir(parents=True, mode=0o700)
+    credential_dir.mkdir(parents=True, mode=0o700, exist_ok=True)
     credential_dir.parent.chmod(0o700)
     current = credential_dir / f"{ATTESTATION_CREDENTIAL}.cred"
     previous = credential_dir / f"{PREVIOUS_ATTESTATION_CREDENTIAL}.cred"
     current.write_bytes(_ciphertext(b"current"))
     previous.write_bytes(_ciphertext(b"previous"))
-    generation = credential_dir / ".generation"
+    generation = credential_dir / CREDENTIAL_GENERATION
     generation.write_text("fixture-generation\n", encoding="utf-8")
     current.chmod(0o600)
     previous.chmod(0o600)
@@ -176,15 +214,19 @@ def test_lifecycle_transaction_stays_on_pinned_directory_and_rejects_commit(
         directory.rename(original)
         replacement = directory
         replacement.mkdir(mode=0o700)
-        (replacement / ".generation").write_text("attacker\n", encoding="utf-8")
-        (replacement / ".generation").chmod(0o600)
+        (replacement / CREDENTIAL_GENERATION).write_text(
+            "attacker\n", encoding="utf-8"
+        )
+        (replacement / CREDENTIAL_GENERATION).chmod(0o600)
 
         assert credential_generation() == "fixture-generation"
         with pytest.raises(CredentialError, match="identity changed"):
             _advance_generation()
 
-    assert (replacement / ".generation").read_text(encoding="utf-8") == "attacker\n"
-    assert (original / ".generation").read_text(encoding="utf-8") == (
+    assert (replacement / CREDENTIAL_GENERATION).read_text(
+        encoding="utf-8"
+    ) == "attacker\n"
+    assert (original / CREDENTIAL_GENERATION).read_text(encoding="utf-8") == (
         "fixture-generation\n"
     )
 
@@ -212,7 +254,7 @@ def test_lifecycle_lock_rejects_unsafe_credential_directory(
             target.mkdir(mode=0o700)
             directory.symlink_to(target, target_is_directory=True)
 
-    with pytest.raises(CredentialError, match="owner-controlled"):
+    with pytest.raises(CredentialError, match="canonical|owner-controlled"):
         with _lifecycle_lock(exclusive=False):
             pass
 
@@ -616,11 +658,12 @@ def test_provision_rejects_symlinked_credential_directory(
     controlled = tmp_path / "controlled"
     controlled.mkdir()
     credential_dir = config / "systemd" / "user" / "saturnin-credentials"
-    credential_dir.parent.mkdir(parents=True)
+    credential_dir.parent.mkdir(parents=True, exist_ok=True)
+    credential_dir.rmdir()
     credential_dir.symlink_to(controlled, target_is_directory=True)
     monkeypatch.setenv("XDG_CONFIG_HOME", str(config))
 
-    with pytest.raises(CredentialError, match="owner-controlled directory"):
+    with pytest.raises(CredentialError, match="canonical|owner-controlled directory"):
         provision_attestation_key()
 
 
@@ -770,7 +813,7 @@ def test_revoke_attestation_removes_current_and_previous(
 ) -> None:
     monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path / "config"))
     credential_dir = tmp_path / "config" / "systemd" / "user" / "saturnin-credentials"
-    credential_dir.mkdir(parents=True, mode=0o700)
+    credential_dir.mkdir(parents=True, mode=0o700, exist_ok=True)
     credential_dir.parent.chmod(0o700)
     paths = [
         credential_dir / f"{ATTESTATION_CREDENTIAL}.cred",

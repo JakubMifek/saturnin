@@ -8,7 +8,7 @@ unset BASH_ENV ENV CDPATH PYTHONHOME PYTHONPATH
 IFS=$' \t\n'
 
 readonly UNIT=saturnin-attestation.service
-readonly EXPECTED_RUNTIME_MANIFEST_SHA256=2b9c23ac1a85f880cb317dd471c9c2a20997fd0ee6d38b25929797020091f817
+readonly EXPECTED_RUNTIME_MANIFEST_SHA256=2f5f0f9809aed9150fddf7a8e489a20a4e0e4251f62075e0e8b019bfbb74c7d5
 readonly ID=/usr/bin/id
 readonly REALPATH=/usr/bin/realpath
 readonly STAT=/usr/bin/stat
@@ -198,6 +198,13 @@ if [[ ! -x "$RUNTIME" ]]; then
 fi
 
 readonly CONFIG_HOME="${XDG_CONFIG_HOME:-$HOME/.config}"
+ACCOUNT_HOME="$("$PYTHON" -I -c 'import os,pwd; print(pwd.getpwuid(os.getuid()).pw_dir)')"
+readonly ACCOUNT_HOME
+if [[ "$HOME" != "$ACCOUNT_HOME" ]] \
+  || [[ "$("$REALPATH" "$HOME")" != "$HOME" ]]; then
+  echo "HOME must identify the canonical passwd home directory." >&2
+  exit 1
+fi
 if [[ "$CONFIG_HOME" != "$HOME/.config" ]]; then
   echo "Signer installation requires the canonical user configuration directory." >&2
   exit 1
@@ -997,12 +1004,6 @@ if [[ "$("$STAT" -c %u "$UNIT_DIR")" -ne "$CURRENT_UID" ]] \
   exit 1
 fi
 
-exec {LIFECYCLE_LOCK_FD}<"$HOME"
-readonly LIFECYCLE_LOCK_FD
-if ! "$FLOCK" --exclusive --nonblock "$LIFECYCLE_LOCK_FD"; then
-  echo "Another attestation unit lifecycle operation is in progress." >&2
-  exit 1
-fi
 UNIT_DIR_DEVICE_INODE="$("$STAT" -Lc %d:%i "$UNIT_DIR")"
 readonly UNIT_DIR_DEVICE_INODE
 exec {UNIT_DIR_FD}<"$UNIT_DIR"
@@ -1269,6 +1270,7 @@ exec {CREDENTIAL_LOCK_HANDED_OFF_FD}>"$CREDENTIAL_LOCK_HANDED_OFF"
 readonly CREDENTIAL_LOCK_HANDED_OFF_FD
 UNIT_DIRECTORY_FD="$UNIT_DIR_FD" EXPECTED_UID="$CURRENT_UID" \
   EXPECTED_UNIT_DIRECTORY="$UNIT_DIR_DEVICE_INODE" \
+  HOME_DIRECTORY="$HOME" \
   XDG_RUNTIME_DIR="${XDG_RUNTIME_DIR:-/run/user/$CURRENT_UID}" \
   READY_FD="$CREDENTIAL_LOCK_READY_FD" \
   HANDOFF_FD="$CREDENTIAL_LOCK_HANDED_OFF_FD" \
@@ -1321,9 +1323,8 @@ if (
 ):
     raise SystemExit("pinned user-unit directory identity mismatch")
 credential_fd = os.open(
-    "saturnin-credentials",
+    os.environ["HOME_DIRECTORY"],
     os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC,
-    dir_fd=unit_fd,
 )
 metadata = os.fstat(credential_fd)
 if (
@@ -1332,10 +1333,106 @@ if (
     or stat.S_IMODE(metadata.st_mode) != 0o700
 ):
     raise SystemExit("credential directory descriptor metadata mismatch")
+parent = os.path.dirname(os.environ["HOME_DIRECTORY"])
+parent_fd = os.open(
+    parent, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC
+)
+parent_metadata = os.fstat(parent_fd)
+if (
+    not stat.S_ISDIR(parent_metadata.st_mode)
+    or parent_metadata.st_uid != 0
+    or parent_metadata.st_mode & 0o022
+):
+    raise SystemExit("credential namespace parent is unsafe")
+os.close(parent_fd)
 try:
     fcntl.flock(credential_fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
 except BlockingIOError:
     raise SystemExit("another credential lifecycle operation is in progress")
+
+legacy_fd = os.open(
+    "saturnin-credentials",
+    os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC,
+    dir_fd=unit_fd,
+)
+legacy_metadata = os.fstat(legacy_fd)
+if (
+    not stat.S_ISDIR(legacy_metadata.st_mode)
+    or legacy_metadata.st_uid != expected_uid
+    or stat.S_IMODE(legacy_metadata.st_mode) != 0o700
+):
+    raise SystemExit("legacy credential directory metadata mismatch")
+migration = {
+    "saturnin-review-attestation-key.cred": (
+        "saturnin-review-attestation-key.cred"
+    ),
+    "saturnin-review-attestation-previous-key.cred": (
+        "saturnin-review-attestation-previous-key.cred"
+    ),
+    ".generation": ".saturnin-attestation-generation",
+    ".execution-signer-enabled": ".saturnin-execution-signer-enabled",
+}
+present = []
+for destination in migration.values():
+    try:
+        value = os.stat(destination, dir_fd=credential_fd, follow_symlinks=False)
+    except FileNotFoundError:
+        present.append(False)
+        continue
+    if (
+        not stat.S_ISREG(value.st_mode)
+        or value.st_uid != expected_uid
+        or value.st_nlink != 1
+        or stat.S_IMODE(value.st_mode) != 0o600
+    ):
+        raise SystemExit("canonical credential artifact metadata mismatch")
+    present.append(True)
+if any(present) and not all(present):
+    raise SystemExit("canonical credential migration is incomplete")
+created = []
+try:
+    if not any(present):
+        for source, destination in migration.items():
+            source_fd = os.open(
+                source,
+                os.O_RDONLY | os.O_NOFOLLOW | os.O_CLOEXEC,
+                dir_fd=legacy_fd,
+            )
+            source_metadata = os.fstat(source_fd)
+            if (
+                not stat.S_ISREG(source_metadata.st_mode)
+                or source_metadata.st_uid != expected_uid
+                or source_metadata.st_nlink != 1
+                or stat.S_IMODE(source_metadata.st_mode) != 0o600
+            ):
+                raise SystemExit("legacy credential artifact metadata mismatch")
+            destination_fd = os.open(
+                destination,
+                os.O_WRONLY
+                | os.O_CREAT
+                | os.O_EXCL
+                | os.O_NOFOLLOW
+                | os.O_CLOEXEC,
+                0o600,
+                dir_fd=credential_fd,
+            )
+            created.append(destination)
+            while chunk := os.read(source_fd, 65536):
+                view = memoryview(chunk)
+                while view:
+                    view = view[os.write(destination_fd, view) :]
+            os.fsync(destination_fd)
+            os.close(destination_fd)
+            os.close(source_fd)
+        os.fsync(credential_fd)
+except BaseException:
+    for destination in created:
+        try:
+            os.unlink(destination, dir_fd=credential_fd)
+        except FileNotFoundError:
+            pass
+    raise
+os.close(legacy_fd)
 os.write(
     int(os.environ["READY_FD"]),
     f"{metadata.st_dev}:{metadata.st_ino}\n".encode(),
@@ -1396,7 +1493,8 @@ read -r CURRENT_KEY_ID PREVIOUS_KEY_ID CREDENTIAL_GENERATION \
   CURRENT_CREDENTIAL PREVIOUS_CREDENTIAL < <(
   UNIT_DIRECTORY_FD="$UNIT_DIR_FD" EXPECTED_UNIT_DIRECTORY="$UNIT_DIR_DEVICE_INODE" \
     EXPECTED_CREDENTIAL_DIRECTORY="$CREDENTIAL_DIRECTORY_ID" \
-    EXPECTED_UID="$CURRENT_UID" RUNTIME_ARCHIVE_FD="$RUNTIME_TREE_FD" \
+    EXPECTED_UID="$CURRENT_UID" HOME_DIRECTORY="$HOME" \
+    RUNTIME_ARCHIVE_FD="$RUNTIME_TREE_FD" \
     SYSTEMD_CREDS_PATH="$SYSTEMD_CREDS" SNAPSHOT_CREDENTIALS=1 \
     "$PYTHON" -I -c '
 import hashlib
@@ -1418,9 +1516,8 @@ if (
 ):
     raise SystemExit("pinned user-unit directory identity mismatch")
 credential_fd = os.open(
-    "saturnin-credentials",
+    os.environ["HOME_DIRECTORY"],
     os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC,
-    dir_fd=unit_fd,
 )
 credential_metadata = os.fstat(credential_fd)
 if (
@@ -1469,8 +1566,8 @@ def read_file(name):
 names = {
     "current": "saturnin-review-attestation-key.cred",
     "previous": "saturnin-review-attestation-previous-key.cred",
-    "generation": ".generation",
-    "enabled": ".execution-signer-enabled",
+    "generation": ".saturnin-attestation-generation",
+    "enabled": ".saturnin-execution-signer-enabled",
 }
 files = {key: read_file(name) for key, name in names.items()}
 for artifact in (

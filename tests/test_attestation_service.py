@@ -56,6 +56,15 @@ def stable_generation(monkeypatch: pytest.MonkeyPatch) -> None:
         "saturnin.attestation_service._rotation_state",
         lambda: "ready",
     )
+    monkeypatch.setattr(
+        "saturnin.credentials._credential_namespace_path",
+        lambda: Path(os.environ["XDG_CONFIG_HOME"])
+        / "systemd/user/saturnin-credentials",
+    )
+    monkeypatch.setattr(
+        "saturnin.credentials._credential_namespace_parent_is_trusted",
+        lambda *_: True,
+    )
 
 
 def _scope() -> dict[str, str]:

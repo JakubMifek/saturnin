@@ -57,7 +57,7 @@ services:
 operations:
   signer_user_unit:
     executable: scripts/install_attestation_unit.sh
-    sha256: fe4952e80719d7a6b2eb55c0037621417164784f61b6a8853e3ed30eb952b817
+    sha256: b5c78f6645b71bed4c7f1cd1d56bc71f1a4f5837af03286d6da2465fabc1ad50
     dependencies:
       - .venv/bin/saturnin
       - systemd/saturnin-attestation.service
@@ -116,7 +116,7 @@ operations:
     runtime_files:
       - source: policies/governance.yaml
         archive: saturnin/governance.runtime.yaml
-    runtime_manifest_sha256: 2b9c23ac1a85f880cb317dd471c9c2a20997fd0ee6d38b25929797020091f817
+    runtime_manifest_sha256: 2f5f0f9809aed9150fddf7a8e489a20a4e0e4251f62075e0e8b019bfbb74c7d5
     trusted_tools:
       - /usr/bin/bash
       - /usr/bin/chmod
@@ -155,6 +155,13 @@ filesystem:
     - "%h/.config/systemd/user/saturnin-attestation-runtime.pyz"
     - "%h/.config/systemd/user/default.target.wants/saturnin-attestation.service"
     - "%h/.config/systemd/user/saturnin-credentials"
+    - "%h/saturnin-review-attestation-key.cred"
+    - "%h/saturnin-review-attestation-previous-key.cred"
+    - "%h/.saturnin-attestation-generation"
+    - "%h/.saturnin-execution-signer-enabled"
+    - "%h/.attestation-rotation.json"
+    - "%h/.saturnin-review-attestation-key.rollback.cred"
+    - "%h/.saturnin-review-attestation-previous-key.rollback.cred"
   # Basename-specific command rules only apply to executables resolved from
   # administrator-controlled system locations.
   trusted_executable_roots:

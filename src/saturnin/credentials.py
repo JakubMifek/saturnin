@@ -6,6 +6,7 @@ import base64
 import hashlib
 import json
 import os
+import pwd
 import secrets
 import shutil
 import stat
@@ -31,8 +32,8 @@ HOST_CREDENTIAL_SECRET = Path("/var/lib/systemd/credential.secret")
 ROTATION_STATE = ".attestation-rotation.json"
 ROTATION_CURRENT_BACKUP = ".saturnin-review-attestation-key.rollback.cred"
 ROTATION_PREVIOUS_BACKUP = ".saturnin-review-attestation-previous-key.rollback.cred"
-CREDENTIAL_GENERATION = ".generation"
-EXECUTION_SIGNER_ENABLEMENT = ".execution-signer-enabled"
+CREDENTIAL_GENERATION = ".saturnin-attestation-generation"
+EXECUTION_SIGNER_ENABLEMENT = ".saturnin-execution-signer-enabled"
 HOST_SCOPED_CREDENTIAL_ID = bytes.fromhex("55b9ed1d38594d43a8319d2ebb332ac6")
 _ACTIVE_CREDENTIAL_DIRECTORY: ContextVar[int | None] = ContextVar(
     "active_credential_directory", default=None
@@ -128,10 +129,11 @@ def _runtime_gate_path() -> Path:
 
 
 def encrypted_credential_dir() -> Path:
-    config_home = Path(
-        os.environ.get("XDG_CONFIG_HOME", str(Path.home() / ".config"))
-    ).expanduser()
-    return config_home / "systemd" / "user" / "saturnin-credentials"
+    return _credential_namespace_path()
+
+
+def _credential_namespace_path() -> Path:
+    return Path(pwd.getpwuid(os.getuid()).pw_dir)
 
 
 def encrypted_credential_path(kind: str) -> Path:
@@ -145,7 +147,10 @@ def encrypted_credential_path(kind: str) -> Path:
 def _credential_directory_descriptor() -> int:
     directory = encrypted_credential_dir()
     parent = directory.parent
-    if parent.resolve(strict=True) != parent:
+    if (
+        directory.resolve(strict=True) != directory
+        or parent.resolve(strict=True) != parent
+    ):
         raise CredentialError("credential directory is not canonical")
     try:
         parent_descriptor = os.open(
@@ -157,10 +162,18 @@ def _credential_directory_descriptor() -> int:
         ) from exc
     try:
         parent_metadata = os.fstat(parent_descriptor)
+        root_descriptor = os.open(
+            "/", os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC
+        )
+        try:
+            root_metadata = os.fstat(root_descriptor)
+        finally:
+            os.close(root_descriptor)
         if (
             not stat.S_ISDIR(parent_metadata.st_mode)
-            or parent_metadata.st_uid != os.getuid()
-            or parent_metadata.st_mode & 0o022
+            or not _credential_namespace_parent_is_trusted(
+                parent_metadata, root_metadata
+            )
             or parent_metadata.st_nlink < 2
         ):
             raise CredentialError(
@@ -191,17 +204,19 @@ def _credential_directory_descriptor() -> int:
     return descriptor
 
 
+def _credential_namespace_parent_is_trusted(
+    metadata: os.stat_result, root_metadata: os.stat_result
+) -> bool:
+    return (
+        stat.S_ISDIR(root_metadata.st_mode)
+        and root_metadata.st_uid in {0, 65534}
+        and metadata.st_uid == root_metadata.st_uid
+        and not root_metadata.st_mode & 0o022
+        and not metadata.st_mode & 0o022
+    )
+
+
 def _ensure_credential_directory() -> None:
-    directory = encrypted_credential_dir()
-    try:
-        directory.parent.mkdir(parents=True, mode=0o700, exist_ok=True)
-        directory.mkdir(mode=0o700)
-    except FileExistsError:
-        pass
-    except OSError as exc:
-        raise CredentialError(
-            "credential directory could not be created safely"
-        ) from exc
     descriptor = _credential_directory_descriptor()
     os.close(descriptor)
 

@@ -97,6 +97,7 @@ def signer_install(tmp_path: Path) -> tuple[Path, dict[str, str], Path, Path]:
     unit_dir = home / ".config" / "systemd" / "user"
     credentials = unit_dir / "saturnin-credentials"
     credentials.mkdir(parents=True, mode=0o700)
+    home.chmod(0o700)
     unit_dir.chmod(0o700)
     for name in (
         "saturnin-review-attestation-key.cred",
@@ -105,6 +106,11 @@ def signer_install(tmp_path: Path) -> tuple[Path, dict[str, str], Path, Path]:
         credential = credentials / name
         credential.write_text("TOP-SECRET-CIPHERTEXT\n", encoding="utf-8")
         credential.chmod(0o600)
+    generation = "0" * 63 + "2"
+    for name in (".generation", ".execution-signer-enabled"):
+        artifact = credentials / name
+        artifact.write_text(generation + "\n", encoding="utf-8")
+        artifact.chmod(0o600)
 
     fake_bin = tmp_path / "bin"
     fake_bin.mkdir()
@@ -378,6 +384,11 @@ def signer_install(tmp_path: Path) -> tuple[Path, dict[str, str], Path, Path]:
             f"PYTHON={fake_python}",
         )
         .replace(
+            'ACCOUNT_HOME="$("$PYTHON" -I -c '
+            "'import os,pwd; print(pwd.getpwuid(os.getuid()).pw_dir)')\"",
+            'ACCOUNT_HOME="$HOME"',
+        )
+        .replace(
             "readonly SYSTEMCTL=/usr/bin/systemctl",
             f"readonly SYSTEMCTL={systemctl}",
         )
@@ -392,6 +403,10 @@ def signer_install(tmp_path: Path) -> tuple[Path, dict[str, str], Path, Path]:
         .replace(
             "readonly CGROUP_ROOT_OWNER=0",
             f"readonly CGROUP_ROOT_OWNER={os.getuid()}",
+        )
+        .replace(
+            "or parent_metadata.st_uid != 0",
+            "or parent_metadata.st_uid not in (0, expected_uid)",
         )
         .replace(
             "readonly CGROUP_ROOT=/sys/fs/cgroup",
@@ -541,11 +556,65 @@ def test_install_is_selective_idempotent_and_does_not_disclose_credentials(
     assert first.returncode == second.returncode == 0
     assert unrelated.read_text(encoding="utf-8") == "unchanged\n"
     assert (unit_dir / "saturnin-attestation.service").is_file()
+    home = unit_dir.parents[2]
+    assert {
+        path.name
+        for path in home.iterdir()
+        if path.is_file() and (
+            path.name.startswith("saturnin-review-attestation-")
+            or path.name.startswith(".saturnin-")
+        )
+    } == {
+        "saturnin-review-attestation-key.cred",
+        "saturnin-review-attestation-previous-key.cred",
+        ".saturnin-attestation-generation",
+        ".saturnin-execution-signer-enabled",
+    }
     assert "TOP-SECRET-CIPHERTEXT" not in first.stdout + first.stderr
     assert all(
         "saturnin-improve" not in call
         for call in calls.read_text(encoding="utf-8").splitlines()
     )
+
+
+def test_install_rejects_partial_canonical_credential_migration(
+    signer_install: tuple[Path, dict[str, str], Path, Path],
+) -> None:
+    _, _, unit_dir, calls = signer_install
+    home = unit_dir.parents[2]
+    artifact = home / "saturnin-review-attestation-key.cred"
+    artifact.write_text("existing\n", encoding="utf-8")
+    artifact.chmod(0o600)
+
+    result = _run(signer_install, "install")
+
+    assert result.returncode != 0
+    assert "migration is incomplete" in result.stderr
+    assert not (unit_dir / "saturnin-attestation.service").exists()
+    assert calls.read_text(encoding="utf-8").splitlines() == [
+        "--user is-active --quiet saturnin-attestation.service"
+    ]
+
+
+def test_failed_credential_migration_removes_partial_canonical_copies(
+    signer_install: tuple[Path, dict[str, str], Path, Path],
+) -> None:
+    _, _, unit_dir, _ = signer_install
+    legacy = unit_dir / "saturnin-credentials"
+    (legacy / ".generation").chmod(0o644)
+
+    result = _run(signer_install, "install")
+
+    assert result.returncode != 0
+    assert "legacy credential artifact metadata mismatch" in result.stderr
+    home = unit_dir.parents[2]
+    for name in (
+        "saturnin-review-attestation-key.cred",
+        "saturnin-review-attestation-previous-key.cred",
+        ".saturnin-attestation-generation",
+        ".saturnin-execution-signer-enabled",
+    ):
+        assert not (home / name).exists()
 
 
 def test_install_rejects_execution_without_governed_runtime_descriptor(
@@ -965,7 +1034,7 @@ def test_lifecycle_lock_excludes_concurrent_uninstall_and_rollback(
         os.close(runtime_fd)
 
     assert concurrent.returncode != 0
-    assert "lifecycle operation is in progress" in concurrent.stderr
+    assert "operation is in progress" in concurrent.stderr
     assert process.returncode == 0, stdout + stderr
     assert (unit_dir / "saturnin-attestation.service").is_file()
 
@@ -1920,7 +1989,28 @@ def test_reinstall_refreshes_newly_sealed_credential_generation(
     )
     assert first.returncode == 0, first.stderr
 
-    new_current, new_previous = seal("6" * 64, b"new")
+    credential_dir = unit_dir.parents[2]
+
+    def reseal_canonical(generation: str, suffix: bytes) -> tuple[str, str]:
+        current = base64.b64encode(
+            HOST_SCOPED_CREDENTIAL_ID + b"current-" + suffix
+        ).decode()
+        previous = base64.b64encode(
+            HOST_SCOPED_CREDENTIAL_ID + b"previous-" + suffix
+        ).decode()
+        values = {
+            "saturnin-review-attestation-key.cred": current,
+            "saturnin-review-attestation-previous-key.cred": previous,
+            ".saturnin-attestation-generation": generation,
+            ".saturnin-execution-signer-enabled": generation,
+        }
+        for name, value in values.items():
+            path = credential_dir / name
+            path.write_text(value + "\n", encoding="utf-8")
+            path.chmod(0o600)
+        return current, previous
+
+    new_current, new_previous = reseal_canonical("6" * 64, b"new")
     refreshed = _run(
         signer_install,
         "install",
