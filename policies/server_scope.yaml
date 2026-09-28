@@ -57,7 +57,7 @@ services:
 operations:
   signer_user_unit:
     executable: scripts/install_attestation_unit.sh
-    sha256: 46c7ffb4f40d550bfd51b1802411da433ec264cf7eb18f05f1ba26dd4ca20811
+    sha256: 66e964221a90e192f2cb3b6f3302844f5970590076f5930860726275dcf0c0e5
     dependencies:
       - .venv/bin/saturnin
       - systemd/saturnin-attestation.service
@@ -116,7 +116,7 @@ operations:
     runtime_files:
       - source: policies/governance.yaml
         archive: saturnin/governance.runtime.yaml
-    runtime_manifest_sha256: 0eedaacceb21e680a760ea06e3bfa00b9d945d71ccc869839373d559faf6d9ad
+    runtime_manifest_sha256: 2f1e951b3e58e163533ed1cdb1946115d82a0a8d8d75546953961a7636cf0412
     trusted_tools:
       - /usr/bin/bash
       - /usr/bin/chmod

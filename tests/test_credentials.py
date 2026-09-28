@@ -4,6 +4,7 @@ import os
 import stat
 import base64
 import fcntl
+import hashlib
 import threading
 import time
 from pathlib import Path
@@ -17,6 +18,8 @@ from saturnin.credentials import (
     PREVIOUS_ATTESTATION_CREDENTIAL,
     CredentialError,
     _lifecycle_lock,
+    _sealed_systemd_creds,
+    _validate_systemd_creds_namespace,
     attestation_rotation_values,
     complete_attestation_rotation,
     credential_prerequisites,
@@ -166,6 +169,7 @@ def test_systemd_credential_decrypts_inline_ciphertext_without_secret_argument(
         observed["args"] = args
         observed["input"] = kwargs["input"]
         observed["env"] = kwargs["env"]
+        observed["pass_fds"] = kwargs["pass_fds"]
         output = int(kwargs["stdout"])
         observed["mode"] = stat.S_IMODE(os.fstat(output).st_mode)
         with pytest.raises(PermissionError):
@@ -177,20 +181,178 @@ def test_systemd_credential_decrypts_inline_ciphertext_without_secret_argument(
     monkeypatch.setenv("LD_PRELOAD", "/same-uid/attacker.so")
     monkeypatch.setenv("SATURNIN_CURRENT_CREDENTIAL_CIPHERTEXT", ciphertext)
     monkeypatch.setattr("saturnin.credentials.subprocess.run", decrypt)
+    helper = os.memfd_create("test-systemd-creds", os.MFD_ALLOW_SEALING)
+    os.fchmod(helper, 0o500)
+    monkeypatch.setattr(
+        "saturnin.credentials._sealed_systemd_creds", lambda: os.dup(helper)
+    )
 
-    assert systemd_credential(ATTESTATION_CREDENTIAL) == "role-master"
-    assert observed["args"] == [
-        "/usr/bin/systemd-creds",
+    try:
+        assert systemd_credential(ATTESTATION_CREDENTIAL) == "role-master"
+    finally:
+        os.close(helper)
+    arguments = observed["args"]
+    assert isinstance(arguments, list)
+    assert str(arguments[0]).startswith("/proc/self/fd/")
+    assert arguments[1:] == [
         "decrypt",
         "--user",
         f"--name={ATTESTATION_CREDENTIAL}",
         "-",
         "-",
     ]
+    assert observed["pass_fds"] == (int(str(arguments[0]).rsplit("/", 1)[-1]),)
     assert observed["env"] == {"XDG_RUNTIME_DIR": f"/run/user/{os.getuid()}"}
     assert observed["input"] == ciphertext.encode()
     assert observed["mode"] == 0
     assert "role-master" not in " ".join(observed["args"])
+
+
+def _namespace_metadata(
+    uid: int, *, tool_uid: int | None = None, nlink: int = 1
+) -> tuple[list[SimpleNamespace], SimpleNamespace, str]:
+    device = os.makedev(254, 1)
+    parents = [
+        SimpleNamespace(st_mode=stat.S_IFDIR | 0o755, st_uid=uid)
+        for _ in range(3)
+    ]
+    tool = SimpleNamespace(
+        st_mode=stat.S_IFREG | 0o755,
+        st_uid=uid if tool_uid is None else tool_uid,
+        st_nlink=nlink,
+        st_dev=device,
+        st_ino=5509331,
+    )
+    mountinfo = "278 47 254:1 / / ro,nosuid,relatime - ext4 /dev/root rw\n"
+    return parents, tool, mountinfo
+
+
+@pytest.mark.parametrize("namespace_root_uid", [0, 65534])
+def test_systemd_creds_namespace_accepts_bound_canonical_host_identity(
+    namespace_root_uid: int,
+) -> None:
+    parents, tool, mountinfo = _namespace_metadata(namespace_root_uid)
+
+    _validate_systemd_creds_namespace(
+        parents, tool, mountinfo, tool.st_dev, tool.st_ino, 0o755
+    )
+
+
+@pytest.mark.parametrize(
+    ("change", "message"),
+    [
+        ({"tool_uid": 65534}, "namespace identity"),
+        ({"nlink": 2}, "namespace identity"),
+    ],
+)
+def test_systemd_creds_namespace_rejects_nobody_lookalikes_and_aliases(
+    change: dict[str, int], message: str
+) -> None:
+    parents, tool, mountinfo = _namespace_metadata(0, **change)
+
+    with pytest.raises(CredentialError, match=message):
+        _validate_systemd_creds_namespace(
+            parents, tool, mountinfo, tool.st_dev, tool.st_ino, 0o755
+        )
+
+
+def test_systemd_creds_namespace_rejects_wrong_or_writable_mount() -> None:
+    parents, tool, _ = _namespace_metadata(65534)
+    for mountinfo in (
+        "278 47 254:2 / / ro,nosuid - ext4 /dev/other rw\n",
+        "278 47 254:1 / / rw,nosuid - ext4 /dev/root rw\n",
+        "278 47 254:1 / / ro - ext4 /dev/root rw\n"
+        "279 278 254:1 /systemd-creds /usr/bin/systemd-creds "
+        "rw - ext4 /dev/root rw\n",
+        "278 47 254:1 / / ro - ext4 /dev/root rw\n"
+        "279 47 254:1 / / ro - ext4 /dev/root rw\n",
+    ):
+        with pytest.raises(CredentialError, match="mount provenance"):
+            _validate_systemd_creds_namespace(
+                parents, tool, mountinfo, tool.st_dev, tool.st_ino, 0o755
+            )
+
+
+@pytest.mark.parametrize(
+    ("device_delta", "inode_delta", "mode"),
+    [(1, 0, 0o755), (0, 1, 0o755), (0, 0, 0o775)],
+)
+def test_systemd_creds_namespace_rejects_changed_host_identity(
+    device_delta: int, inode_delta: int, mode: int
+) -> None:
+    parents, tool, mountinfo = _namespace_metadata(65534)
+
+    with pytest.raises(CredentialError, match="namespace identity"):
+        _validate_systemd_creds_namespace(
+            parents,
+            tool,
+            mountinfo,
+            tool.st_dev + device_delta,
+            tool.st_ino + inode_delta,
+            mode,
+        )
+
+
+def test_systemd_creds_is_copied_to_exact_sealed_executable(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    tool = Path("/usr/bin/systemd-creds")
+    metadata = tool.stat(follow_symlinks=False)
+    digest = hashlib.sha256(tool.read_bytes()).hexdigest()
+    monkeypatch.setenv("SATURNIN_SYSTEMD_CREDS_SHA256", digest)
+    monkeypatch.setenv("SATURNIN_SYSTEMD_CREDS_DEVICE", str(metadata.st_dev))
+    monkeypatch.setenv("SATURNIN_SYSTEMD_CREDS_INODE", str(metadata.st_ino))
+    monkeypatch.setenv(
+        "SATURNIN_SYSTEMD_CREDS_MODE", str(stat.S_IMODE(metadata.st_mode))
+    )
+    original_read_text = Path.read_text
+
+    def read_text(path: Path, *args: object, **kwargs: object) -> str:
+        if path == Path("/proc/self/mountinfo"):
+            device = f"{os.major(metadata.st_dev)}:{os.minor(metadata.st_dev)}"
+            return f"1 0 {device} / / ro - ext4 /dev/root rw\n"
+        return original_read_text(path, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "read_text", read_text)
+
+    descriptor = _sealed_systemd_creds()
+    try:
+        assert stat.S_IMODE(os.fstat(descriptor).st_mode) == 0o500
+        assert fcntl.fcntl(descriptor, fcntl.F_GET_SEALS) == (
+            fcntl.F_SEAL_WRITE
+            | fcntl.F_SEAL_GROW
+            | fcntl.F_SEAL_SHRINK
+            | fcntl.F_SEAL_SEAL
+        )
+        assert hashlib.sha256(
+            os.pread(descriptor, metadata.st_size, 0)
+        ).hexdigest() == digest
+    finally:
+        os.close(descriptor)
+
+
+def test_systemd_creds_sealing_rejects_byte_digest_change(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    tool = Path("/usr/bin/systemd-creds")
+    metadata = tool.stat(follow_symlinks=False)
+    monkeypatch.setenv("SATURNIN_SYSTEMD_CREDS_SHA256", "0" * 64)
+    monkeypatch.setenv("SATURNIN_SYSTEMD_CREDS_DEVICE", str(metadata.st_dev))
+    monkeypatch.setenv("SATURNIN_SYSTEMD_CREDS_INODE", str(metadata.st_ino))
+    monkeypatch.setenv(
+        "SATURNIN_SYSTEMD_CREDS_MODE", str(stat.S_IMODE(metadata.st_mode))
+    )
+    device = f"{os.major(metadata.st_dev)}:{os.minor(metadata.st_dev)}"
+    monkeypatch.setattr(
+        Path,
+        "read_text",
+        lambda *_args, **_kwargs: (
+            f"1 0 {device} / / ro - ext4 /dev/root rw\n"
+        ),
+    )
+
+    with pytest.raises(CredentialError, match="changed after host validation"):
+        _sealed_systemd_creds()
 
 
 def test_validate_encrypted_credential_reports_only_status(

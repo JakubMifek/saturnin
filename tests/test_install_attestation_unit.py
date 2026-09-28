@@ -6,6 +6,7 @@ import hashlib
 import os
 import signal
 import shutil
+import stat
 import subprocess
 import sys
 import time
@@ -1355,6 +1356,10 @@ def test_status_rejects_tampered_unit_without_systemctl(
         ),
         ("PrivateNetwork=yes", "PrivateNetwork=no"),
         (
+            "Environment=SATURNIN_SYSTEMD_CREDS_SHA256=",
+            "Environment=SATURNIN_SYSTEMD_CREDS_SHA256_OVERRIDE="
+        ),
+        (
             "Environment=SATURNIN_CURRENT_CREDENTIAL_CIPHERTEXT=",
             "Environment=UNEXPECTED_CREDENTIAL_CIPHERTEXT=\"QUJD\"\n"
             "Environment=SATURNIN_CURRENT_CREDENTIAL_CIPHERTEXT=",
@@ -1800,6 +1805,18 @@ def test_inline_credentials_survive_canonical_parent_replacement_after_snapshot(
     assert 'Environment=SATURNIN_CURRENT_CREDENTIAL_CIPHERTEXT="QUJD"' in installed
     assert 'Environment=SATURNIN_PREVIOUS_CREDENTIAL_CIPHERTEXT="REVG"' in installed
     assert "LoadCredentialEncrypted=" not in installed
+    systemd_creds = Path("/usr/bin/systemd-creds")
+    metadata = systemd_creds.stat(follow_symlinks=False)
+    assert (
+        f'Environment=SATURNIN_SYSTEMD_CREDS_SHA256="'
+        f'{hashlib.sha256(systemd_creds.read_bytes()).hexdigest()}"'
+    ) in installed
+    assert f'Environment=SATURNIN_SYSTEMD_CREDS_DEVICE="{metadata.st_dev}"' in installed
+    assert f'Environment=SATURNIN_SYSTEMD_CREDS_INODE="{metadata.st_ino}"' in installed
+    assert (
+        f'Environment=SATURNIN_SYSTEMD_CREDS_MODE="'
+        f'{stat.S_IMODE(metadata.st_mode)}"'
+    ) in installed
     assert (
         unit_dir
         / "saturnin-credentials"
