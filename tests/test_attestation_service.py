@@ -8,6 +8,7 @@ import subprocess
 import sys
 import threading
 import time
+from contextlib import nullcontext
 from pathlib import Path
 
 import pytest
@@ -45,6 +46,10 @@ def stable_generation(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(
         "saturnin.attestation_service.execution_signer_ready",
         lambda: True,
+    )
+    monkeypatch.setattr(
+        "saturnin.attestation_service._lifecycle_lock",
+        lambda **_: nullcontext(),
     )
 
 
