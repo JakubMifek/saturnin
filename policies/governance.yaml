@@ -90,7 +90,7 @@ review:
     state: /var/lib/saturnin-attestation
     role_scoped: true
     execution_scoped: false
-    legacy_migration: bootstrap-with-new-key-preserve-ledger-read-only
+    legacy_migration: reviewed-current-previous-keys-to-root-service
     key_env: SATURNIN_REVIEW_ATTESTATION_KEY
     previous_key_env: SATURNIN_REVIEW_ATTESTATION_PREVIOUS_KEY
     key_scope_env: SATURNIN_REVIEW_ATTESTATION_KEY_SCOPE

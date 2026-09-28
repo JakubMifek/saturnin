@@ -444,26 +444,50 @@ def _verify_review_attestation(
         if type(payload[field_name]) is not expected_type:
             raise ReviewError(f"review attestation field {field_name!r} has the wrong type")
     execution_scoped = _is_execution_attestation_id(payload["attestation_id"])
+    settings = config.governance.get("review", {}).get("attestation", {})
+    dedicated_authority = settings.get("authorization_source") == "github-api"
     if not execution_scoped:
         if historical_identity is None:
             raise ReviewError(
                 "new review records require an execution-scoped attestation id"
             )
-        _require_sealed_previous_attestation(config, historical_identity)
+        if not dedicated_authority:
+            _require_sealed_previous_attestation(config, historical_identity)
     if payload.get("schema") == "saturnin-attestation-v2":
         from .system_attestation import SystemAttestationError, verify_attestation
 
         try:
-            verified = verify_attestation(attestation)
+            verified = verify_attestation(
+                attestation, historical=historical_identity is not None
+            )
         except (SystemAttestationError, OSError) as exc:
             raise ReviewError(str(exc)) from exc
-        if historical_identity is None and verified.get("previous") is True:
+        if (
+            historical_identity is None
+            and verified.get("key_state") != "current"
+        ):
             raise ReviewError(
-                "previous-key attestation cannot authorize a new review record"
+                "noncurrent-key attestation cannot authorize a new review record"
+            )
+        return payload
+    if dedicated_authority:
+        from .system_attestation import SystemAttestationError, verify_attestation
+
+        try:
+            verified = verify_attestation(
+                attestation, historical=historical_identity is not None
+            )
+        except (SystemAttestationError, OSError) as exc:
+            raise ReviewError(str(exc)) from exc
+        if (
+            historical_identity is None
+            and verified.get("key_state") != "current"
+        ):
+            raise ReviewError(
+                "noncurrent-key attestation cannot authorize a new review record"
             )
         return payload
     include_previous = historical_identity is not None
-    settings = config.governance.get("review", {}).get("attestation", {})
     scope_env = str(
         settings.get(
             "key_scope_env", "SATURNIN_REVIEW_ATTESTATION_KEY_SCOPE"
@@ -497,14 +521,22 @@ def _verify_review_attestation(
             from .system_attestation import SystemAttestationError, verify_attestation
 
             try:
-                verified = verify_attestation(attestation)
+                verified = verify_attestation(
+                    attestation, historical=historical_identity is not None
+                )
             except (SystemAttestationError, OSError) as exc:
                 raise ReviewError(str(exc)) from exc
-            if historical_identity is None and verified.get("previous") is True:
+            if (
+                historical_identity is None
+                and verified.get("key_state") != "current"
+            ):
                 raise ReviewError(
-                    "previous-key attestation cannot authorize a new review record"
+                    "noncurrent-key attestation cannot authorize a new review record"
                 )
-            if historical_identity is not None and verified.get("previous") is True:
+            if (
+                historical_identity is not None
+                and verified.get("key_state") != "current"
+            ):
                 _require_sealed_previous_attestation(config, historical_identity)
             return payload
     key_id = payload.get("key_id")

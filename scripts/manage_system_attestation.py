@@ -4,8 +4,10 @@
 from __future__ import annotations
 
 import argparse
+import base64
 import fcntl
 import hashlib
+import json
 import os
 import secrets
 import shutil
@@ -51,11 +53,11 @@ FILES = {
 }
 EXPECTED_SHA256 = {
     "src/saturnin/system_attestation.py":
-        "99b67e0f67f5ae49a8e6beacce55095299ed5628875a0e72e4f00bde7ad22ee0",
+        "5091a867c4df676a7322423910dbbf9c67d706c9436f91fa1cb404fb806a645c",
     "config/attestation.json":
         "203d56027f000b87c4a14e972e97655151986969c6d8c0e96fa8ac4c6416a2d1",
     "systemd/system/saturnin-attestation.service":
-        "c2cb3f16079e8d15adf9950eacbad554cbec82578feed1e7b24c30c2fac3ef96",
+        "f44c189b0a5fea1a252d202314e4711a4aee480fe00055866a11965ae46698b0",
     "systemd/system/saturnin-attestation.socket":
         "607ca78353de34badb46a03e366b00859638dba057a7e08e25ded311d0f0855f",
     "systemd/system/saturnin-attestation.sysusers":
@@ -63,8 +65,10 @@ EXPECTED_SHA256 = {
     "systemd/system/saturnin-attestation.tmpfiles":
         "db85221548cb33ab108fbb2ded0e4b4508414507ddc4b190da23e62ae9c47222",
 }
-ADMIN_REVIEWED_SHA256 = "47fcb8a3fe5f58c5662e1ad3710f837a61a5df2a8fe4648bc46082131a456ed9"
+ADMIN_REVIEWED_SHA256 = "636825b5de0652255f716d454cb078fafae1f44c7c180c1034e35b0120a87803"
 ADMIN_DIGEST_MARKER = b'ADMIN_REVIEWED_SHA256 = "'
+ARCHIVE_VERSION = 1
+ARCHIVE_MAX_KEYS = 16
 ROOT_ONLY = {
     "etc/saturnin-attestation": 0o750,
     "var/lib/saturnin-attestation": 0o700,
@@ -203,6 +207,57 @@ def _safe_target(root: Path, relative: str) -> Path:
     return target
 
 
+def _fsync_directory(path: Path) -> None:
+    fd = os.open(path, os.O_RDONLY | os.O_DIRECTORY | os.O_CLOEXEC)
+    try:
+        os.fsync(fd)
+    finally:
+        os.close(fd)
+
+
+def _write_file_durable(path: Path, value: bytes, mode: int) -> None:
+    fd = os.open(
+        path,
+        os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW | os.O_CLOEXEC,
+        mode,
+    )
+    try:
+        view = memoryview(value)
+        while view:
+            written = os.write(fd, view)
+            if written <= 0:
+                raise OSError("short write while staging installed artifact")
+            view = view[written:]
+        os.fchmod(fd, mode)
+        os.fsync(fd)
+    finally:
+        os.close(fd)
+
+
+def _mkdir_tracked(path: Path, root: Path, created: list[Path]) -> None:
+    missing: list[Path] = []
+    current = path
+    while current != root and not current.exists():
+        missing.append(current)
+        current = current.parent
+    if current != root and (current.is_symlink() or not current.is_dir()):
+        raise InstallError(f"unsafe target parent: {current}")
+    for directory in reversed(missing):
+        directory.mkdir()
+        created.append(directory)
+
+
+def _cleanup_created_directories(created: list[Path], preserve: set[Path]) -> None:
+    for directory in reversed(created):
+        if directory in preserve:
+            continue
+        try:
+            directory.rmdir()
+            _fsync_directory(directory.parent)
+        except OSError:
+            pass
+
+
 def _digest_bytes(value: bytes) -> str:
     return hashlib.sha256(value).hexdigest()
 
@@ -223,6 +278,14 @@ def _credential_paths(root: Path) -> tuple[Path, Path]:
     return directory / "current.key.cred", directory / "previous.key.cred"
 
 
+def _archive_path(root: Path) -> Path:
+    return _credential_paths(root)[0].with_name("archive.keys.cred")
+
+
+def _rollback_path(root: Path) -> Path:
+    return _credential_paths(root)[0].with_name("rollback.state.cred")
+
+
 def _read_credential(root: Path, path: Path) -> bytes:
     source = _open_source(
         _safe_target(root, str(path.relative_to(root))),
@@ -240,12 +303,103 @@ def _validate_key(value: bytes, label: str) -> None:
         raise InstallError(f"{label} signing credential identity is invalid")
 
 
+def _encode_archive(keys: list[bytes]) -> bytes:
+    if len(keys) > ARCHIVE_MAX_KEYS:
+        raise InstallError(
+            f"retired key archive limit ({ARCHIVE_MAX_KEYS}) is reached"
+        )
+    for key in keys:
+        _validate_key(key, "archive.keys")
+    if len({_digest_bytes(key) for key in keys}) != len(keys):
+        raise InstallError("retired key archive contains duplicate credentials")
+    return json.dumps(
+        {
+            "version": ARCHIVE_VERSION,
+            "keys": [base64.b64encode(key).decode("ascii") for key in keys],
+        },
+        sort_keys=True,
+        separators=(",", ":"),
+    ).encode()
+
+
+def _decode_archive(value: bytes) -> list[bytes]:
+    try:
+        payload = json.loads(value)
+    except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+        raise InstallError("retired key archive is malformed") from exc
+    if (
+        not isinstance(payload, dict)
+        or set(payload) != {"version", "keys"}
+        or payload["version"] != ARCHIVE_VERSION
+        or not isinstance(payload["keys"], list)
+        or len(payload["keys"]) > ARCHIVE_MAX_KEYS
+    ):
+        raise InstallError("retired key archive schema is invalid")
+    keys: list[bytes] = []
+    for encoded in payload["keys"]:
+        if not isinstance(encoded, str):
+            raise InstallError("retired key archive schema is invalid")
+        try:
+            key = base64.b64decode(encoded, validate=True)
+        except ValueError as exc:
+            raise InstallError("retired key archive contains an invalid key") from exc
+        _validate_key(key, "archive.keys")
+        keys.append(key)
+    if len({_digest_bytes(key) for key in keys}) != len(keys):
+        raise InstallError("retired key archive contains duplicate credentials")
+    return keys
+
+
+def _encode_rollback(current: bytes, previous: bytes, archive: list[bytes]) -> bytes:
+    return json.dumps(
+        {
+            "version": 1,
+            "current": base64.b64encode(current).decode("ascii"),
+            "previous": base64.b64encode(previous).decode("ascii"),
+            "archive": json.loads(_encode_archive(archive)),
+        },
+        sort_keys=True,
+        separators=(",", ":"),
+    ).encode()
+
+
+def _decode_rollback(value: bytes) -> tuple[bytes, bytes, list[bytes]]:
+    try:
+        payload = json.loads(value)
+        if (
+            not isinstance(payload, dict)
+            or set(payload) != {"version", "current", "previous", "archive"}
+            or payload["version"] != 1
+            or not isinstance(payload["current"], str)
+            or not isinstance(payload["previous"], str)
+        ):
+            raise ValueError
+        current = base64.b64decode(payload["current"], validate=True)
+        previous = base64.b64decode(payload["previous"], validate=True)
+        archive = _decode_archive(
+            json.dumps(payload["archive"], separators=(",", ":")).encode()
+        )
+    except (UnicodeDecodeError, json.JSONDecodeError, ValueError) as exc:
+        raise InstallError("rollback state is malformed") from exc
+    _validate_key(current, "rollback current")
+    _validate_key(previous, "rollback previous")
+    if current == previous:
+        raise InstallError("rollback credentials must differ")
+    return current, previous, archive
+
+
 def _new_key() -> bytes:
     return secrets.token_hex(48).encode()
 
 
 def _encode_checked(runner: Runner, plaintext: bytes, name: str) -> bytes:
     _validate_key(plaintext, name)
+    return _encode_blob_checked(runner, plaintext, name)
+
+
+def _encode_blob_checked(runner: Runner, plaintext: bytes, name: str) -> bytes:
+    if not plaintext or len(plaintext) > 128 * 1024 or b"\0" in plaintext:
+        raise InstallError(f"{name} credential payload is invalid")
     ciphertext = runner.encrypt(plaintext, name)
     if not ciphertext or runner.decrypt(ciphertext, name) != plaintext:
         raise InstallError(f"{name} credential round-trip failed")
@@ -298,17 +452,27 @@ def _atomic_credentials(
         for target, backup in reversed(backups):
             if backup.exists():
                 os.replace(backup, target)
+        _fsync_directory(next(iter(values)).parent)
         if restart:
             try:
                 _restart_and_verify(runner)
-            except Exception:
-                pass
+            except Exception as recovery:
+                _record_install_failure(
+                    root, "credential-activation", "service-recovery-failed"
+                )
+                raise InstallError(
+                    "credentials were rolled back but service recovery failed"
+                ) from recovery
+            _record_install_failure(
+                root, "credential-activation", "service-restarted-after-rollback"
+            )
         raise
     finally:
         for temporary in staged:
             temporary.unlink(missing_ok=True)
         for _target, backup in backups:
             backup.unlink(missing_ok=True)
+        _fsync_directory(next(iter(values)).parent)
 
 
 def _restart_and_verify(runner: Runner) -> None:
@@ -316,6 +480,30 @@ def _restart_and_verify(runner: Runner) -> None:
     runner.command(
         ["/usr/bin/systemctl", "is-active", "--quiet", "saturnin-attestation.service"]
     )
+
+
+def _record_install_failure(root: Path, phase: str, recovery: str) -> Path:
+    directory = _safe_target(
+        root, "var/lib/saturnin-attestation/.failure"
+    ).parent
+    directory.mkdir(parents=True, exist_ok=True)
+    marker = directory / "install-failure.json"
+    temporary = marker.with_name(f".{marker.name}.{os.getpid()}.new")
+    payload = json.dumps(
+        {
+            "version": 1,
+            "phase": phase,
+            "artifacts_restored": True,
+            "credentials_restored": True,
+            "service_recovery": recovery,
+        },
+        sort_keys=True,
+        separators=(",", ":"),
+    ).encode()
+    _write_file_durable(temporary, payload, 0o600)
+    os.replace(temporary, marker)
+    _fsync_directory(directory)
+    return marker
 
 
 def _mount_identity(path: Path) -> tuple[str, str, str]:
@@ -388,13 +576,24 @@ def _open_legacy(root: Path) -> list[Source] | None:
     return opened
 
 
-def _migrate_or_provision(root: Path, runner: Runner) -> bool:
+def _migrate_or_provision(root: Path, runner: Runner) -> list[Path]:
     current, previous = _credential_paths(root)
+    archive = _archive_path(root)
     existing = (current.exists(), previous.exists())
     if any(existing):
         if not all(existing):
             raise InstallError("partial system credential state is forbidden")
-        return False
+        if archive.exists():
+            return []
+        values = {
+            archive: _encode_blob_checked(
+                runner, _encode_archive([]), "archive.keys"
+            ),
+        }
+        _atomic_credentials(root, values, runner, restart=False)
+        return [archive]
+    if archive.exists():
+        raise InstallError("partial system credential state is forbidden")
     opened = _open_legacy(root)
     if opened is None:
         current_plain = _new_key()
@@ -419,10 +618,11 @@ def _migrate_or_provision(root: Path, runner: Runner) -> bool:
     values = {
         current: _encode_checked(runner, current_plain, "current.key"),
         previous: _encode_checked(runner, previous_plain, "previous.key"),
+        archive: _encode_blob_checked(runner, _encode_archive([]), "archive.keys"),
     }
     _atomic_credentials(root, values, runner, restart=False)
     current_plain = previous_plain = b""
-    return True
+    return [current, previous, archive]
 
 
 def status(root: Path, runner: Runner | None = None) -> None:
@@ -448,13 +648,25 @@ def status(root: Path, runner: Runner | None = None) -> None:
     if not admin.is_file() or _admin_digest(admin.read_bytes()) != ADMIN_REVIEWED_SHA256:
         raise InstallError("installed administrator differs")
     current, previous = _credential_paths(root)
+    archive = _archive_path(root)
     codec = runner or (SystemRunner() if root == Path("/") else FakeRunner())
     current_plain = codec.decrypt(_read_credential(root, current), "current.key")
     previous_plain = codec.decrypt(_read_credential(root, previous), "previous.key")
+    archive_plain = _decode_archive(
+        codec.decrypt(_read_credential(root, archive), "archive.keys")
+    )
     _validate_key(current_plain, "current.key")
     _validate_key(previous_plain, "previous.key")
     if current_plain == previous_plain:
         raise InstallError("current and previous credentials must differ")
+    all_keys = [current_plain, previous_plain, *archive_plain]
+    if len({_digest_bytes(key) for key in all_keys}) != len(all_keys):
+        raise InstallError("active and retired credentials must be duplicate-free")
+    rollback = _rollback_path(root)
+    if rollback.exists():
+        _decode_rollback(
+            codec.decrypt(_read_credential(root, rollback), "rollback.state")
+        )
 
 
 def install(root: Path, test_mode: bool, runner: Runner | None = None) -> None:
@@ -479,54 +691,98 @@ def install(root: Path, test_mode: bool, runner: Runner | None = None) -> None:
         raise InstallError("transaction stage already exists")
     installed: list[Path] = []
     backups: list[tuple[Path, Path]] = []
-    credentials_created = False
+    credentials_created: list[Path] = []
+    created_directories: list[Path] = []
+    service_phase = ""
+    preserve_directories: set[Path] = set()
     try:
         stage.mkdir(mode=0o700)
         for source, target_name in [*sources, (admin_source, ADMIN_TARGET)]:
             staged = stage / target_name
             staged.parent.mkdir(parents=True, exist_ok=True)
-            staged.write_bytes(source.content)
-            staged.chmod(0o755 if target_name.endswith((".py", "admin")) else 0o644)
+            _write_file_durable(
+                staged,
+                source.content,
+                0o755 if target_name.endswith((".py", "admin")) else 0o644,
+            )
+        for directory in sorted(
+            {path.parent for path in stage.rglob("*")}, key=lambda path: len(path.parts),
+            reverse=True,
+        ):
+            _fsync_directory(directory)
         for relative, mode in ROOT_ONLY.items():
             target = _safe_target(root, relative + "/.sentinel").parent
-            target.mkdir(parents=True, exist_ok=True)
+            _mkdir_tracked(target, root, created_directories)
             target.chmod(mode)
+            _fsync_directory(target.parent)
         for source, _target_name in [*sources, (admin_source, ADMIN_TARGET)]:
             _revalidate(source)
         for _source, target_name in [*sources, (admin_source, ADMIN_TARGET)]:
             target = _safe_target(root, target_name)
-            target.parent.mkdir(parents=True, exist_ok=True)
+            _mkdir_tracked(target.parent, root, created_directories)
             staged = stage / target_name
             if target.exists():
                 backup = stage / "backups" / target_name
                 backup.parent.mkdir(parents=True, exist_ok=True)
                 os.replace(target, backup)
                 backups.append((target, backup))
+                _fsync_directory(target.parent)
+                _fsync_directory(backup.parent)
             os.replace(staged, target)
             installed.append(target)
+            _fsync_directory(target.parent)
         credentials_created = _migrate_or_provision(root, codec)
         if not test_mode:
-            for command in (
-                ["/usr/bin/systemd-sysusers",
-                 "/usr/lib/sysusers.d/saturnin-attestation.conf"],
-                ["/usr/bin/systemd-tmpfiles", "--create",
-                 "/usr/lib/tmpfiles.d/saturnin-attestation.conf"],
-                ["/usr/bin/systemctl", "daemon-reload"],
-                ["/usr/bin/systemctl", "enable", "--now",
-                 "saturnin-attestation.socket"],
+            for phase, command in (
+                (
+                    "sysusers",
+                    ["/usr/bin/systemd-sysusers",
+                     "/usr/lib/sysusers.d/saturnin-attestation.conf"],
+                ),
+                (
+                    "tmpfiles",
+                    ["/usr/bin/systemd-tmpfiles", "--create",
+                     "/usr/lib/tmpfiles.d/saturnin-attestation.conf"],
+                ),
+                ("daemon-reload", ["/usr/bin/systemctl", "daemon-reload"]),
+                (
+                    "socket-activation",
+                    ["/usr/bin/systemctl", "enable", "--now",
+                     "saturnin-attestation.socket"],
+                ),
             ):
+                service_phase = phase
                 codec.command(command)
+            service_phase = "service-health"
             _restart_and_verify(codec)
         status(root, codec)
+        (_safe_target(
+            root, "var/lib/saturnin-attestation/install-failure.json"
+        )).unlink(missing_ok=True)
     except Exception:
-        if credentials_created:
-            for credential in _credential_paths(root):
-                credential.unlink(missing_ok=True)
+        for credential in credentials_created:
+            credential.unlink(missing_ok=True)
+            _fsync_directory(credential.parent)
         for target in reversed(installed):
             target.unlink(missing_ok=True)
+            _fsync_directory(target.parent)
         for target, backup in reversed(backups):
             if backup.exists():
                 os.replace(backup, target)
+                _fsync_directory(target.parent)
+        if service_phase:
+            recovery = "not-attempted"
+            try:
+                codec.command(
+                    ["/usr/bin/systemctl", "disable", "--now",
+                     "saturnin-attestation.socket"]
+                )
+                codec.command(["/usr/bin/systemctl", "daemon-reload"])
+                recovery = "socket-disabled"
+            except Exception:
+                recovery = "socket-disable-failed"
+            marker = _record_install_failure(root, service_phase, recovery)
+            preserve_directories.update({marker.parent})
         raise
     finally:
         for source, _target in sources:
@@ -534,22 +790,38 @@ def install(root: Path, test_mode: bool, runner: Runner | None = None) -> None:
         if admin_source is not None:
             admin_source.close()
         shutil.rmtree(stage, ignore_errors=True)
+        _cleanup_created_directories(created_directories, preserve_directories)
 
 
 def rotate(root: Path, test_mode: bool, runner: Runner | None = None) -> None:
     codec = runner or (FakeRunner() if test_mode else SystemRunner())
     status(root, codec)
     current, previous = _credential_paths(root)
+    archive = _archive_path(root)
     old_current = codec.decrypt(_read_credential(root, current), "current.key")
     old_previous = codec.decrypt(_read_credential(root, previous), "previous.key")
+    old_archive = _decode_archive(
+        codec.decrypt(_read_credential(root, archive), "archive.keys")
+    )
     _validate_key(old_current, "current.key")
     _validate_key(old_previous, "previous.key")
-    rollback_key = current.with_name("rollback.key.cred")
+    if len(old_archive) >= ARCHIVE_MAX_KEYS:
+        raise InstallError(
+            "retired key archive is full; complete documented retirement before rotating"
+        )
+    rollback_state = _rollback_path(root)
     new_current = _new_key()
     values = {
         current: _encode_checked(codec, new_current, "current.key"),
         previous: _encode_checked(codec, old_current, "previous.key"),
-        rollback_key: _encode_checked(codec, old_previous, "rollback.key"),
+        archive: _encode_blob_checked(
+            codec, _encode_archive([*old_archive, old_previous]), "archive.keys"
+        ),
+        rollback_state: _encode_blob_checked(
+            codec,
+            _encode_rollback(old_current, old_previous, old_archive),
+            "rollback.state",
+        ),
     }
     _atomic_credentials(root, values, codec, restart=not test_mode)
 
@@ -558,18 +830,29 @@ def rollback(root: Path, test_mode: bool, runner: Runner | None = None) -> None:
     codec = runner or (FakeRunner() if test_mode else SystemRunner())
     status(root, codec)
     current, previous = _credential_paths(root)
-    rollback_key = current.with_name("rollback.key.cred")
-    if not rollback_key.exists():
+    archive = _archive_path(root)
+    rollback_state = _rollback_path(root)
+    if not rollback_state.exists():
         raise InstallError("rollback requires a completed rotation")
     current_plain = codec.decrypt(_read_credential(root, current), "current.key")
     previous_plain = codec.decrypt(_read_credential(root, previous), "previous.key")
-    rollback_plain = codec.decrypt(
-        _read_credential(root, rollback_key), "rollback.key"
+    archive_plain = _decode_archive(
+        codec.decrypt(_read_credential(root, archive), "archive.keys")
+    )
+    restore_current, restore_previous, restore_archive = _decode_rollback(
+        codec.decrypt(_read_credential(root, rollback_state), "rollback.state")
     )
     values = {
-        current: _encode_checked(codec, previous_plain, "current.key"),
-        previous: _encode_checked(codec, rollback_plain, "previous.key"),
-        rollback_key: _encode_checked(codec, current_plain, "rollback.key"),
+        current: _encode_checked(codec, restore_current, "current.key"),
+        previous: _encode_checked(codec, restore_previous, "previous.key"),
+        archive: _encode_blob_checked(
+            codec, _encode_archive(restore_archive), "archive.keys"
+        ),
+        rollback_state: _encode_blob_checked(
+            codec,
+            _encode_rollback(current_plain, previous_plain, archive_plain),
+            "rollback.state",
+        ),
     }
     _atomic_credentials(root, values, codec, restart=not test_mode)
 

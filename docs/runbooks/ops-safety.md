@@ -41,17 +41,18 @@ artifacts before atomic publication and removes the transaction on failure.
 encrypted credentials for administrator recovery.
 
 <!-- generated:attestation-boundary -->
-The system `saturnin-attestation.service` runs as the non-login `saturnin-signer` identity from root-controlled runtime and configuration. The system manager decrypts current and previous HMAC credentials into its private credential tmpfs; ordinary workers never receive key material.
+The system `saturnin-attestation.service` runs as the non-login `saturnin-signer` identity from root-controlled runtime and configuration. The system manager decrypts current, previous, and bounded retired HMAC credentials into its private credential tmpfs; ordinary workers never receive key material.
 
-For pull requests the service obtains the live head, author, and exact commit-bound latest review state directly from GitHub over TLS. For issues it recomputes title/body digest and accepts one exact, expiring, nonce-bound machine marker in an allowlisted bot comment. Repository and API origins are fixed allowlists; caller claims and socket credentials are not authority.
+For pull requests the service obtains the live head, author, and exact commit-bound latest review state directly from GitHub over TLS. For issues it recomputes title/body digest and accepts one exact, expiring, nonce-bound machine marker in an allowlisted bot comment. Evidence expiry limits new authorization, not later verification of an already signed durable record. Repository and API origins are fixed allowlists; caller claims and socket credentials are not authority.
 
 Consumed evidence and its exact idempotent attestation are serialized in dedicated state. Altered reuse fails. The ordinary client authenticates a root-owned service peer and records the returned scope in ReviewLedger; workers receive neither signing sessions nor credentials.
 <!-- /generated:attestation-boundary -->
 
 ### Provisioning and rotation
 
-The system manager decrypts `current.key.cred`, `previous.key.cred`, and the
-optional GitHub token into its credential tmpfs. The administrator interface
+The system manager decrypts `current.key.cred`, `previous.key.cred`,
+`archive.keys.cred`, and the optional `github.token` credential-store entry
+into its credential tmpfs. The administrator interface
 generates key bytes in process and streams them directly to `systemd-creds`;
 it never accepts or prints a key.
 
@@ -63,9 +64,12 @@ sudo /usr/sbin/saturnin-attestation-admin rollback
 ```
 
 Rotation serializes by fixed credential names, retains the old current key as
-previous, and restarts the service only after atomic publication. A failed
-restart restores the prior generation. Rollback is the only reversal and does
-not accept caller-selected files.
+previous, moves the outgoing previous key into the verification-only encrypted
+archive, and restarts the service only after atomic publication. The archive
+is schema-validated, duplicate-free, and bounded at 16 keys. A failed restart
+restores the exact prior current, previous, and archive generation and writes
+fail-closed recovery evidence. Rollback is the only reversal and does not
+accept caller-selected files.
 
 On first installation only, the administrator checks the fixed UID-1000 source
 `/home/jakubmifek/.config/systemd/user/saturnin-credentials`. It accepts only
@@ -77,6 +81,13 @@ whole transaction. Plaintext is passed only through root process pipes and is
 re-encrypted as `current.key` and `previous.key`. If the source is absent,
 bootstrap creates fresh keys; it never silently falls back after a rejected
 migration.
+
+The issue marker expiry and the PR's live exact-head state are checked when
+authorization is minted. The signed expiry remains covered evidence; it does
+not invalidate a durable signed ReviewLedger record when a gate is evaluated
+later. A consumed, identical evidence item remains idempotent after its
+authorization deadline, while changed or previously unconsumed stale evidence
+fails.
 
 The service accepts only the local AF_UNIX socket and needs outbound HTTPS to
 the fixed `api.github.com` origin. The system sandbox prevents network binds;
@@ -91,6 +102,15 @@ administrator-controlled encrypted backup together with the systemd host key.
 Never copy plaintext credential-directory contents or log request bodies.
 After restoration, run `status`, start the socket, authorize a mocked approved
 head, verify the returned attestation, and confirm an unreviewed head fails.
+
+At the 16-key archive bound, rotation stops fail-closed. There is intentionally
+no online “drop oldest” action: do not retire a key while any retained ledger
+record depends on it. Continue by preserving the exact encrypted credential,
+host key, state database, and dependent ledgers as one disaster-recovery set,
+then obtain explicit governance approval either to stop rotation or to retire
+the dependent records under the repository retention procedure. After an
+approved disaster restore, restore that whole set; never hand-edit
+`archive.keys.cred`.
 
 ## Cleanup safety model
 

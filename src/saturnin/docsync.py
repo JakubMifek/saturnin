@@ -299,14 +299,17 @@ def _attestation_boundary(config: Config) -> str:
         [
             "The system `saturnin-attestation.service` runs as the non-login "
             "`saturnin-signer` identity from root-controlled runtime and configuration. "
-            "The system manager decrypts current and previous HMAC credentials into its "
-            "private credential tmpfs; ordinary workers never receive key material.",
+            "The system manager decrypts current, previous, and bounded retired HMAC "
+            "credentials into its private credential tmpfs; ordinary workers never "
+            "receive key material.",
             "",
             "For pull requests the service obtains the live head, author, and exact "
             "commit-bound latest review state directly from GitHub over TLS. For issues "
             "it recomputes title/body digest and accepts one exact, expiring, nonce-bound "
-            "machine marker in an allowlisted bot comment. Repository and API origins are "
-            "fixed allowlists; caller claims and socket credentials are not authority.",
+            "machine marker in an allowlisted bot comment. Evidence expiry limits new "
+            "authorization, not later verification of an already signed durable record. "
+            "Repository and API origins are fixed allowlists; caller claims and socket "
+            "credentials are not authority.",
             "",
             "Consumed evidence and its exact idempotent attestation are serialized in "
             "dedicated state. Altered reuse fails. The ordinary client authenticates a "

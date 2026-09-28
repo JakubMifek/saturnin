@@ -14,6 +14,15 @@ REPO_ROOT = Path(__file__).resolve().parents[1]
 
 @pytest.fixture()
 def docs_home(config: Config) -> Config:
+    config.governance["review"]["attestation"]["authorization_source"] = "github-api"
+    governance = config.root / "policies" / "governance.yaml"
+    governance.write_text(
+        governance.read_text(encoding="utf-8").replace(
+            "authorization_source: test-local",
+            "authorization_source: github-api",
+        ),
+        encoding="utf-8",
+    )
     for name in ("docs", ".github"):
         shutil.copytree(REPO_ROOT / name, config.root / name)
     return config

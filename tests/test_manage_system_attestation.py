@@ -4,6 +4,7 @@ import os
 import subprocess
 import hashlib
 import importlib.util
+import json
 import sys
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
@@ -38,6 +39,8 @@ def test_fake_root_transaction_install_status_rotate_rollback_uninstall(
     current = root / "etc/saturnin-attestation/current.key.cred"
     original = current.read_bytes()
     original_previous = (current.parent / "previous.key.cred").read_bytes()
+    archive = current.parent / "archive.keys.cred"
+    original_archive = archive.read_bytes()
     codec = admin.FakeRunner()
     original_plain = codec.decrypt(original, "current.key")
     original_previous_plain = codec.decrypt(original_previous, "previous.key")
@@ -50,6 +53,7 @@ def test_fake_root_transaction_install_status_rotate_rollback_uninstall(
     assert codec.decrypt(
         (current.parent / "previous.key.cred").read_bytes(), "previous.key"
     ) == original_previous_plain
+    assert archive.read_bytes() == original_archive
     run(root, "uninstall")
     assert not (root / "usr/lib/saturnin-attestation/system_attestation.py").exists()
     assert not (root / "usr/sbin/saturnin-attestation-admin").exists()
@@ -93,6 +97,40 @@ def test_transaction_failure_restores_replaced_artifacts(tmp_path: Path) -> None
     assert runtime.read_text(encoding="utf-8") == "old runtime"
     assert config.read_text(encoding="utf-8") == "old config"
     assert not list(root.glob(".saturnin-attestation-stage-*"))
+    assert not (root / "run/saturnin-attestation").exists()
+
+
+def test_late_install_failure_restores_files_and_records_fail_closed_state(
+    tmp_path: Path,
+) -> None:
+    root = tmp_path / "root"
+    root.mkdir()
+
+    class FailingSysusers(admin.FakeRunner):
+        def __init__(self) -> None:
+            self.commands: list[list[str]] = []
+
+        def command(self, argv):
+            self.commands.append(argv)
+            if argv[0] == "/usr/bin/systemd-sysusers":
+                raise subprocess.CalledProcessError(1, argv)
+
+    runner = FailingSysusers()
+    with pytest.raises(subprocess.CalledProcessError):
+        admin.install(root, False, runner)
+
+    assert not (root / "usr/lib/saturnin-attestation").exists()
+    assert not (root / "etc/saturnin-attestation").exists()
+    assert not (root / "run/saturnin-attestation").exists()
+    marker = root / "var/lib/saturnin-attestation/install-failure.json"
+    assert json.loads(marker.read_text()) == {
+        "version": 1,
+        "phase": "sysusers",
+        "artifacts_restored": True,
+        "credentials_restored": True,
+        "service_recovery": "socket-disabled",
+    }
+    assert not any("userdel" in argument for command in runner.commands for argument in command)
 
 
 def test_admin_interface_has_fixed_action_grammar(tmp_path: Path) -> None:
@@ -115,9 +153,32 @@ def test_concurrent_rotations_are_serialized(tmp_path: Path) -> None:
     codec = admin.FakeRunner()
     current = root / "etc/saturnin-attestation/current.key.cred"
     previous = current.with_name("previous.key.cred")
+    archive = current.with_name("archive.keys.cred")
     assert codec.decrypt(current.read_bytes(), "current.key") != codec.decrypt(
         previous.read_bytes(), "previous.key"
     )
+    assert len(admin._decode_archive(codec.decrypt(
+        archive.read_bytes(), "archive.keys"
+    ))) == 2
+
+
+def test_archive_is_bounded_duplicate_free_and_verification_only(
+    tmp_path: Path,
+) -> None:
+    root = tmp_path / "root"
+    root.mkdir()
+    codec = admin.FakeRunner()
+    admin.install(root, True, codec)
+    for _ in range(admin.ARCHIVE_MAX_KEYS):
+        admin.rotate(root, True, codec)
+    with pytest.raises(admin.InstallError, match="archive is full"):
+        admin.rotate(root, True, codec)
+
+    duplicate = [b"k" * 48, b"k" * 48]
+    with pytest.raises(admin.InstallError, match="duplicate"):
+        admin._encode_archive(duplicate)
+    with pytest.raises(admin.InstallError, match="schema"):
+        admin._decode_archive(b'{"version":1,"keys":[],"unknown":true}')
 
 
 def test_rotation_health_failure_restores_both_generations(tmp_path: Path) -> None:
@@ -125,16 +186,20 @@ def test_rotation_health_failure_restores_both_generations(tmp_path: Path) -> No
     root.mkdir()
     admin.install(root, True)
     current, previous = admin._credential_paths(root)
-    before = current.read_bytes(), previous.read_bytes()
+    archive = admin._archive_path(root)
+    before = current.read_bytes(), previous.read_bytes(), archive.read_bytes()
 
     class FailingHealth(admin.FakeRunner):
         def command(self, argv):
             if "is-active" in argv:
                 raise subprocess.CalledProcessError(1, argv)
 
-    with pytest.raises(subprocess.CalledProcessError):
+    with pytest.raises(admin.InstallError, match="service recovery failed"):
         admin.rotate(root, False, FailingHealth())
-    assert (current.read_bytes(), previous.read_bytes()) == before
+    assert (current.read_bytes(), previous.read_bytes(), archive.read_bytes()) == before
+    assert json.loads(
+        (root / "var/lib/saturnin-attestation/install-failure.json").read_text()
+    )["phase"] == "credential-activation"
 
 
 def test_rollback_health_failure_restores_all_generations(tmp_path: Path) -> None:
@@ -144,17 +209,28 @@ def test_rollback_health_failure_restores_all_generations(tmp_path: Path) -> Non
     admin.install(root, True, codec)
     admin.rotate(root, True, codec)
     current, previous = admin._credential_paths(root)
-    rollback = current.with_name("rollback.key.cred")
-    before = current.read_bytes(), previous.read_bytes(), rollback.read_bytes()
+    archive = admin._archive_path(root)
+    rollback = admin._rollback_path(root)
+    before = (
+        current.read_bytes(),
+        previous.read_bytes(),
+        archive.read_bytes(),
+        rollback.read_bytes(),
+    )
 
     class FailingHealth(admin.FakeRunner):
         def command(self, argv):
             if "is-active" in argv:
                 raise subprocess.CalledProcessError(1, argv)
 
-    with pytest.raises(subprocess.CalledProcessError):
+    with pytest.raises(admin.InstallError, match="service recovery failed"):
         admin.rollback(root, False, FailingHealth())
-    assert (current.read_bytes(), previous.read_bytes(), rollback.read_bytes()) == before
+    assert (
+        current.read_bytes(),
+        previous.read_bytes(),
+        archive.read_bytes(),
+        rollback.read_bytes(),
+    ) == before
 
 
 def test_status_rejects_credential_target_alias(tmp_path: Path) -> None:
@@ -204,6 +280,9 @@ def test_authorized_legacy_migration_reencrypts_reviewed_plaintext(
     current, previous = admin._credential_paths(root)
     assert codec.decrypt(current.read_bytes(), "current.key") == current_plain
     assert codec.decrypt(previous.read_bytes(), "previous.key") == previous_plain
+    assert admin._decode_archive(
+        codec.decrypt(admin._archive_path(root).read_bytes(), "archive.keys")
+    ) == []
 
 
 def test_source_descriptor_rejects_links_and_mutation(tmp_path: Path) -> None:
@@ -236,6 +315,8 @@ def test_system_units_sysusers_and_tmpfiles_are_consistent() -> None:
     tmpfiles = (unit_root / "saturnin-attestation.tmpfiles").read_text()
     assert "User=saturnin-signer" in service
     assert "Group=saturnin-signer" in service
+    assert "LoadCredentialEncrypted=archive.keys:" in service
+    assert "LoadCredentialEncrypted=github.token" in service
     assert "RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6" in service
     assert "SocketBindDeny=any" in service
     assert "ListenStream=/run/saturnin-attestation/sign.sock" in socket_unit

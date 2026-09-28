@@ -1,6 +1,9 @@
 from __future__ import annotations
 
 import json
+import base64
+import hashlib
+import hmac
 import os
 import socket
 import threading
@@ -16,23 +19,31 @@ from saturnin.system_attestation import (
     DedicatedSigner,
     GitHub,
     AuthorizationLimiter,
+    ARCHIVE_MAX_KEYS,
     ServiceConfig,
     SystemAttestationError,
     _RejectRedirects,
+    _archive_credential,
     _audit,
+    _credential,
     _open_without_redirects,
     request_attestation,
     verify_attestation,
 )
 from saturnin.governance import Governance
-from saturnin.review import ReviewLedger
+from saturnin.review import ReviewLedger, ReviewRecord, slugify
+from saturnin.review import (
+    execution_scoped_review_attestation_key,
+    role_scoped_review_attestation_key,
+    sign_review_attestation,
+)
 
 
 NOW = datetime(2026, 9, 28, tzinfo=timezone.utc)
 HEAD = "a" * 40
 
 
-def config() -> ServiceConfig:
+def service_config() -> ServiceConfig:
     return ServiceConfig(
         frozenset({"acme/widget"}),
         frozenset({"review-bot"}),
@@ -48,7 +59,7 @@ def pr_transport(*, state: str = "APPROVED", head: str = HEAD):
         if "/reviews?" in path:
             return [] if "page=2" in path else [{
                 "id": 91, "commit_id": head, "state": state,
-                "submitted_at": "2026-09-28T16:00:00Z",
+                "submitted_at": "2026-09-27T16:00:00Z",
                 "user": {"login": "review-bot", "type": "Bot"},
             }]
         raise AssertionError(path)
@@ -56,7 +67,7 @@ def pr_transport(*, state: str = "APPROVED", head: str = HEAD):
 
 
 def signer(tmp_path: Path, transport=pr_transport()) -> DedicatedSigner:
-    cfg = config()
+    cfg = service_config()
     return DedicatedSigner(
         cfg, GitHub(cfg, transport=transport), b"c" * 48, b"p" * 48,
         tmp_path / "state.sqlite3", now=lambda: NOW,
@@ -101,7 +112,7 @@ def test_stale_or_wrong_commit_review_fails(tmp_path: Path) -> None:
             return {"head": {"sha": HEAD}, "user": {"login": "author"}}
         return [{
             "id": 1, "commit_id": "b" * 40, "state": "APPROVED",
-            "submitted_at": "2026-09-28T16:00:00Z",
+            "submitted_at": "2026-09-27T16:00:00Z",
             "user": {"login": "review-bot", "type": "Bot"},
         }]
     with pytest.raises(SystemAttestationError, match="exact head"):
@@ -131,7 +142,6 @@ def test_issue_marker_binds_every_field_and_consumes_comment(tmp_path: Path) -> 
     digest_payload = json.dumps(
         {"body": "Body", "title": "Title"}, sort_keys=True, separators=(",", ":")
     ).encode()
-    import hashlib
     digest = hashlib.sha256(digest_payload).hexdigest()
     marker = {
         "repository": "acme/widget", "issue": 9, "digest": digest,
@@ -151,17 +161,23 @@ def test_issue_marker_binds_every_field_and_consumes_comment(tmp_path: Path) -> 
             "user": {"login": "review-bot", "type": "Bot"},
         }]
 
-    cfg = config()
+    cfg = service_config()
+    current = [NOW]
     service = DedicatedSigner(
         cfg, GitHub(cfg, transport=transport), b"k" * 48, None,
-        tmp_path / "issue.sqlite3", now=lambda: NOW,
+        tmp_path / "issue.sqlite3", now=lambda: current[0],
     )
     value = service.authorize(request(kind="issue", number=9))
     assert json.loads(value)["issue_digest"] == digest
     assert service.authorize(request(kind="issue", number=9)) == value
+    current[0] += timedelta(minutes=6)
+    assert service.authorize(request(kind="issue", number=9)) == value
     marker["expiry"] = (NOW - timedelta(seconds=1)).isoformat()
     with pytest.raises(SystemAttestationError, match="expired"):
-        service.authorize(request(kind="issue", number=9))
+        DedicatedSigner(
+            cfg, GitHub(cfg, transport=transport), b"n" * 48, None,
+            tmp_path / "expired.sqlite3", now=lambda: current[0],
+        ).authorize(request(kind="issue", number=9))
     marker["expiry"] = (NOW + timedelta(minutes=5)).isoformat()
     marker["author"] = 7
     with pytest.raises(SystemAttestationError, match="types"):
@@ -169,7 +185,7 @@ def test_issue_marker_binds_every_field_and_consumes_comment(tmp_path: Path) -> 
 
 
 def test_current_and_previous_verification_no_downgrade(tmp_path: Path) -> None:
-    cfg = config()
+    cfg = service_config()
     with pytest.raises(SystemAttestationError, match="previous"):
         DedicatedSigner(
             cfg, GitHub(cfg, transport=pr_transport()), b"k" * 48, b"k" * 48,
@@ -179,24 +195,288 @@ def test_current_and_previous_verification_no_downgrade(tmp_path: Path) -> None:
     with pytest.raises(SystemAttestationError, match="malformed"):
         service.verify("{")
     value = service.authorize(request())
-    assert service.verify(value) == {"status": "verified", "previous": False}
+    assert service.verify(value) == {"status": "verified", "key_state": "current"}
     altered = json.loads(value)
     altered["destination_repo"] = "acme/other"
     with pytest.raises(SystemAttestationError, match="does not match"):
         service.verify(json.dumps(altered))
 
 
-def test_attestation_expiry_is_enforced(tmp_path: Path) -> None:
+def test_strict_legacy_verification_uses_execution_role_and_archive_keys(
+    tmp_path: Path,
+) -> None:
+    current = b"current-legacy-master-" + b"c" * 32
+    previous = b"previous-legacy-master-" + b"p" * 32
+    retired = b"retired-legacy-master-" + b"r" * 32
+    cfg = service_config()
+    service = DedicatedSigner(
+        cfg,
+        GitHub(cfg, transport=pr_transport()),
+        current,
+        previous,
+        tmp_path / "legacy.sqlite3",
+        now=lambda: NOW,
+        archive_keys=(retired,),
+    )
+    attestation_id = "T-20260924-review:" + "b" * 64
+    execution = sign_review_attestation(
+        key=execution_scoped_review_attestation_key(
+            current.decode(),
+            "pr-reviewer",
+            "T-20260924-review",
+            "b" * 64,
+            "acme/widget#7",
+            HEAD,
+            "",
+        ),
+        subject="acme/widget#7",
+        kind="pr",
+        author="github:author",
+        reviewer="pr-reviewer",
+        verdict="approved",
+        head_sha=HEAD,
+        destination_repo="",
+        attestation_id=attestation_id,
+    )
+    with pytest.raises(SystemAttestationError, match="cannot authorize"):
+        service.verify(execution)
+    assert service.verify(execution, historical=True) == {
+        "status": "verified",
+        "key_state": "current",
+    }
+
+    role = sign_review_attestation(
+        key=role_scoped_review_attestation_key(
+            retired.decode(), "pr-reviewer"
+        ),
+        subject="acme/widget#7",
+        kind="pr",
+        author="github:author",
+        reviewer="pr-reviewer",
+        verdict="approved",
+        head_sha=HEAD,
+        destination_repo="",
+        attestation_id="legacy-attestation-one",
+    )
+    assert service.verify(role, historical=True) == {
+        "status": "verified",
+        "key_state": "archive",
+    }
+    without_key_id = json.loads(role)
+    without_key_id.pop("key_id")
+    role_key = role_scoped_review_attestation_key(
+        retired.decode(), "pr-reviewer"
+    ).encode()
+    without_key_id["signature"] = hmac.new(
+        role_key,
+        json.dumps(
+            {
+                key: value
+                for key, value in without_key_id.items()
+                if key != "signature"
+            },
+            sort_keys=True,
+            separators=(",", ":"),
+        ).encode(),
+        hashlib.sha256,
+    ).hexdigest()
+    assert service.verify(
+        json.dumps(without_key_id), historical=True
+    )["key_state"] == "archive"
+    malformed = json.loads(role)
+    malformed["unknown"] = True
+    with pytest.raises(SystemAttestationError, match="schema"):
+        service.verify(json.dumps(malformed), historical=True)
+    malformed.pop("unknown")
+    malformed["attestation_id"] = "bad:id"
+    with pytest.raises(SystemAttestationError, match="id"):
+        service.verify(json.dumps(malformed), historical=True)
+    malformed["attestation_id"] = "legacy-attestation-one"
+    malformed["reviewer"] = "issue-reviewer"
+    with pytest.raises(SystemAttestationError, match="scope"):
+        service.verify(json.dumps(malformed), historical=True)
+
+
+def test_archive_v2_verification_cannot_authorize_a_new_record(
+    tmp_path: Path,
+) -> None:
+    cfg = service_config()
+    retired = b"r" * 48
+    old_signer = DedicatedSigner(
+        cfg,
+        GitHub(cfg, transport=pr_transport()),
+        retired,
+        None,
+        tmp_path / "old.sqlite3",
+        now=lambda: NOW,
+    )
+    verifier = DedicatedSigner(
+        cfg,
+        GitHub(cfg, transport=pr_transport()),
+        b"c" * 48,
+        b"p" * 48,
+        tmp_path / "new.sqlite3",
+        now=lambda: NOW,
+        archive_keys=(retired,),
+    )
+    assert verifier.verify(old_signer.authorize(request())) == {
+        "status": "verified",
+        "key_state": "archive",
+    }
+
+
+def test_historical_legacy_ledger_verifies_only_through_root_service(
+    tmp_path: Path, config, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    master = b"migrated-root-master-" + b"m" * 32
+    cfg = service_config()
+    service = DedicatedSigner(
+        cfg,
+        GitHub(cfg, transport=pr_transport()),
+        master,
+        None,
+        tmp_path / "legacy-ledger.sqlite3",
+        now=lambda: NOW,
+    )
+    subject = "acme/widget#7"
+    attestation = json.loads(sign_review_attestation(
+        key=role_scoped_review_attestation_key(
+            master.decode(), "pr-reviewer"
+        ),
+        subject=subject,
+        kind="pr",
+        author="github:author",
+        reviewer="pr-reviewer",
+        verdict="approved",
+        head_sha=HEAD,
+        attestation_id="legacy-attestation-ledger",
+    ))
+    record = ReviewRecord(
+        subject=subject,
+        kind="pr",
+        author="github:author",
+        reviewer="pr-reviewer",
+        verdict="approved",
+        head_sha=HEAD,
+        attestation_id=attestation["attestation_id"],
+        attestation_signature=f"{attestation['key_id']}:{attestation['signature']}",
+    )
+    ledger = ReviewLedger(config)
+    path = ledger.dir / f"pr-{slugify(subject)}.jsonl"
+    path.write_text(json.dumps(record.to_dict()) + "\n", encoding="utf-8")
+    config.governance["review"]["attestation"]["authorization_source"] = "github-api"
+    monkeypatch.delenv("SATURNIN_REVIEW_ATTESTATION_KEY", raising=False)
+    monkeypatch.setattr(
+        "saturnin.system_attestation.verify_attestation",
+        lambda value, **kwargs: service.verify(value, **kwargs),
+    )
+
+    assert ledger.for_subject(subject, "pr") == [record]
+
+
+@pytest.mark.parametrize(
+    ("payload", "message"),
+    [
+        (b"{", "malformed"),
+        (b'{"version":1,"keys":[],"extra":true}', "schema"),
+        (
+            json.dumps({
+                "version": 1,
+                "keys": ["a"] * (ARCHIVE_MAX_KEYS + 1),
+            }).encode(),
+            "schema",
+        ),
+        (b'{"version":1,"keys":[7]}', "schema"),
+        (b'{"version":1,"keys":["!"]}', "invalid"),
+        (
+            json.dumps({
+                "version": 1,
+                "keys": [base64.b64encode(b"short").decode()],
+            }).encode(),
+            "invalid",
+        ),
+        (
+            json.dumps({
+                "version": 1,
+                "keys": [base64.b64encode(b"k" * 48).decode()] * 2,
+            }).encode(),
+            "duplicates",
+        ),
+    ],
+)
+def test_archive_credential_schema_fails_closed(
+    payload: bytes, message: str,
+) -> None:
+    with pytest.raises(SystemAttestationError, match=message):
+        _archive_credential(payload)
+
+
+def test_archive_and_named_credential_loading(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    first, second = b"a" * 48, b"b" * 48
+    encoded = json.dumps({
+        "version": 1,
+        "keys": [
+            base64.b64encode(first).decode(),
+            base64.b64encode(second).decode(),
+        ],
+    }).encode()
+    assert _archive_credential(encoded) == (first, second)
+
+    monkeypatch.setenv("CREDENTIALS_DIRECTORY", str(tmp_path))
+    assert _credential("missing", optional=True) == b""
+    with pytest.raises(SystemAttestationError, match="unavailable"):
+        _credential("missing")
+    (tmp_path / "value").write_bytes(b"credential\n")
+    assert _credential("value") == b"credential"
+    (tmp_path / "value").write_bytes(b"bad\0credential")
+    with pytest.raises(SystemAttestationError, match="invalid"):
+        _credential("value")
+
+
+@pytest.mark.parametrize(
+    ("field", "value", "message"),
+    [
+        ("zero_context", "true", "types"),
+        ("subject", "other/widget#7", "scope"),
+        ("author", "github:", "scope"),
+        ("reviewer_identity", "", "scope"),
+        ("author_role", "caller", "scope"),
+        ("verdict", "invented", "scope"),
+        ("destination_repo", "../bad", "repository"),
+        ("nonce", "short", "scope"),
+        ("attestation_id", "legacy-id", "scope"),
+        ("key_id", "short", "scope"),
+        ("kind", "invented", "scope"),
+        ("reviewer", "issue-reviewer", "scope"),
+        ("head_sha", "", "scope"),
+        ("issue_digest", "f" * 64, "scope"),
+        ("authorization_evidence_id", "github:comment:1", "scope"),
+    ],
+)
+def test_v2_verifier_rejects_every_malformed_scope(
+    tmp_path: Path, field: str, value: object, message: str,
+) -> None:
+    service = signer(tmp_path)
+    payload = json.loads(service.authorize(request()))
+    payload[field] = value
+    with pytest.raises(SystemAttestationError, match=message):
+        service.verify(json.dumps(payload))
+
+
+def test_signed_attestation_remains_durable_after_authorization_expiry(
+    tmp_path: Path,
+) -> None:
     current = [NOW]
-    cfg = config()
+    cfg = service_config()
     service = DedicatedSigner(
         cfg, GitHub(cfg, transport=pr_transport()), b"c" * 48, b"p" * 48,
         tmp_path / "expiry.sqlite3", now=lambda: current[0],
     )
     value = service.authorize(request())
     current[0] += timedelta(seconds=301)
-    with pytest.raises(SystemAttestationError, match="expired"):
-        service.verify(value)
+    assert service.verify(value) == {"status": "verified", "key_state": "current"}
 
 
 def test_mocked_production_approval_record_gate_and_unreviewed_rejection(
@@ -206,7 +486,7 @@ def test_mocked_production_approval_record_gate_and_unreviewed_rejection(
     attestation = service.authorize(request())
     monkeypatch.setattr(
         "saturnin.system_attestation.verify_attestation",
-        lambda value: service.verify(value),
+        lambda value, **kwargs: service.verify(value, **kwargs),
     )
     record = ReviewLedger(config).record(
         subject="acme/widget#7",
@@ -219,6 +499,7 @@ def test_mocked_production_approval_record_gate_and_unreviewed_rejection(
         attestation=attestation,
         notes="mock GitHub production flow",
     )
+    service.now = lambda: NOW + timedelta(days=30)
     reloaded = ReviewLedger(config).for_subject("acme/widget#7", "pr")
     decision = Governance(config).merge_allowed(
         repo="JakubMifek/saturnin",
@@ -358,10 +639,10 @@ def test_socket_client_checks_peer_and_response_schema(
     thread.join(timeout=5)
 
     path.unlink()
-    thread = _one_shot_server(path, {"status": "verified", "previous": False})
+    thread = _one_shot_server(path, {"status": "verified", "key_state": "current"})
     assert verify_attestation(
         "signed", socket_path=path, expected_uid=os.getuid()
-    ) == {"status": "verified", "previous": False}
+    ) == {"status": "verified", "key_state": "current"}
     thread.join(timeout=5)
 
     path.unlink()
@@ -372,7 +653,7 @@ def test_socket_client_checks_peer_and_response_schema(
 
 
 def test_github_client_rejects_paths_and_bounds_pagination() -> None:
-    cfg = config()
+    cfg = service_config()
     client = GitHub(cfg, transport=lambda path: [])
     with pytest.raises(SystemAttestationError, match="path"):
         client.get("https://evil.invalid/repos/acme/widget")
@@ -409,7 +690,7 @@ def test_github_authorization_header_uses_token_without_disclosure(
 
     token = "root-token-for-test"
     assert GitHub(
-        config(), token=token, request_transport=open_request
+        service_config(), token=token, request_transport=open_request
     ).get("/repos/acme/widget/pulls/7") == {}
     assert seen == {"authorization": f"Bearer {token}", "timeout": 10}
 
@@ -418,9 +699,10 @@ def test_github_authorization_header_uses_token_without_disclosure(
 
     with pytest.raises(SystemAttestationError) as caught:
         GitHub(
-            config(), token=token, request_transport=fail_request
+            service_config(), token=token, request_transport=fail_request
         ).get("/repos/acme/widget/pulls/7")
     assert token not in str(caught.value)
+    assert caught.value.__cause__ is None
 
 
 def test_github_client_rejects_redirect_and_malformed_response(
@@ -443,7 +725,7 @@ def test_github_client_rejects_redirect_and_malformed_response(
 
     response = Response()
     client = GitHub(
-        config(), request_transport=lambda request, timeout: response
+        service_config(), request_transport=lambda request, timeout: response
     )
     with pytest.raises(SystemAttestationError, match="redirect"):
         client.get("/repos/acme/widget/pulls/7")
