@@ -51,6 +51,10 @@ def stable_generation(monkeypatch: pytest.MonkeyPatch) -> None:
         "saturnin.attestation_service._lifecycle_lock",
         lambda **_: nullcontext(),
     )
+    monkeypatch.setattr(
+        "saturnin.attestation_service._rotation_state",
+        lambda: "ready",
+    )
 
 
 def _scope() -> dict[str, str]:
