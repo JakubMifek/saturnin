@@ -3935,7 +3935,7 @@ def test_launcher_rejects_approved_config_destination_collisions(
         AgentLauncher(config, board)._isolated_home("duplicate-destination")
 
 
-def test_launcher_injects_only_scoped_signing_session_for_reviewers(
+def test_launcher_never_injects_signing_capability_for_reviewers(
     config: Config, board: Board, git_repo: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     monkeypatch.setenv("SATURNIN_REVIEW_ATTESTATION_PREVIOUS_KEY", "old-master-key")
@@ -3988,13 +3988,11 @@ def test_launcher_injects_only_scoped_signing_session_for_reviewers(
     assert "SATURNIN_REVIEW_ATTESTATION_KEY_SCOPE" not in environment
     assert environment["SATURNIN_AGENT_ROLE"] == "pr-reviewer"
     assert "SATURNIN_REVIEW_ATTESTATION_PREVIOUS_KEY" not in environment
-    assert environment["SATURNIN_REVIEW_SIGNING_NONCE"] == "public-session-nonce"
-    assert environment["SATURNIN_REVIEW_SIGNING_SOCKET"].endswith(
-        "signing-session.sock"
-    )
+    assert "SATURNIN_REVIEW_SIGNING_NONCE" not in environment
+    assert "SATURNIN_REVIEW_SIGNING_SOCKET" not in environment
 
 
-def test_launcher_refuses_reviewer_without_signing_session(
+def test_launcher_allows_reviewer_without_signing_session(
     config: Config, board: Board, git_repo: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     head_sha = "d" * 40
@@ -4033,14 +4031,15 @@ def test_launcher_refuses_reviewer_without_signing_session(
         verified_review_input,
     )
 
-    with pytest.raises(LauncherError, match="requires a signing session"):
-        launcher._worker_environment(
-            worker_config,
-            contract,
-            task=board.get(task.id),
-            workdir=worktree.path,
-            review_input=review_input,
-        )
+    environment = launcher._worker_environment(
+        worker_config,
+        contract,
+        task=board.get(task.id),
+        workdir=worktree.path,
+        review_input=review_input,
+    )
+    assert "SATURNIN_REVIEW_SIGNING_NONCE" not in environment
+    assert "SATURNIN_REVIEW_SIGNING_SOCKET" not in environment
 
 
 def test_launcher_stages_pr_diff_for_exact_review_head_before_signing(
@@ -4113,7 +4112,7 @@ def test_launcher_stages_pr_diff_for_exact_review_head_before_signing(
     assert "diff --git a/app.py b/app.py" not in prompt
     assert review_input.path.stat().st_mode & 0o777 == 0o600
     assert "SATURNIN_REVIEW_ATTESTATION_KEY" not in environment
-    assert "SATURNIN_REVIEW_SIGNING_SOCKET" in environment
+    assert "SATURNIN_REVIEW_SIGNING_SOCKET" not in environment
 
 
 def test_launcher_keeps_large_verified_pr_diff_out_of_command_arguments(
@@ -4193,7 +4192,7 @@ def test_launcher_keeps_large_verified_pr_diff_out_of_command_arguments(
     )
 
 
-def test_launcher_verifies_issue_draft_before_exposing_signing_key(
+def test_launcher_verifies_issue_draft_without_exposing_signing_capability(
     config: Config,
     board: Board,
     git_repo: Path,
@@ -4228,13 +4227,14 @@ def test_launcher_verifies_issue_draft_before_exposing_signing_key(
     assert '"issue_digest": "' + digest + '"' in staged_payload
     assert '"title": "' + title + '"' in staged_payload
     assert '"body": "' + body + '"' in staged_payload
-    with pytest.raises(LauncherError, match="requires verified review input"):
-        launcher._worker_environment(
-            config,
-            contract,
-            task=task,
-            workdir=git_repo,
-        )
+    environment = launcher._worker_environment(
+        config,
+        contract,
+        task=task,
+        workdir=git_repo,
+    )
+    assert "SATURNIN_REVIEW_SIGNING_SOCKET" not in environment
+    assert "SATURNIN_REVIEW_ATTESTATION_KEY" not in environment
 
     task.body = "A changed issue body."
     with pytest.raises(LauncherError, match="does not match task review_issue_digest"):

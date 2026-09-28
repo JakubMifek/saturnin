@@ -80,18 +80,17 @@ review:
     author_may_review: false
     allowed_reviewer_roles: [issue-reviewer]
   attestation:
-    # The master keys exist only in the private signing service. A routed
-    # reviewer receives a process-bound, expiring, single-use signing session.
+    # A root-installed service derives authorization independently from GitHub.
+    # Caller identity and caller-supplied review fields are never authority.
     required: true
+    authorization_source: github-api
+    service_identity: saturnin-signer
+    service_socket: /run/saturnin-attestation/sign.sock
+    runtime: /usr/lib/saturnin-attestation/system_attestation.py
+    state: /var/lib/saturnin-attestation
     role_scoped: true
-    execution_scoped: true
-    legacy_migration: rotation-manifest-v2-required
-    service_socket: "%t/saturnin-attestation/control.sock"
-    session_ttl_seconds: 900
-    supervisor_units:
-      - saturnin-improve.service
-      - saturnin-resume.service
-      - saturnin-discovery.service
+    execution_scoped: false
+    legacy_migration: bootstrap-with-new-key-preserve-ledger-read-only
     key_env: SATURNIN_REVIEW_ATTESTATION_KEY
     previous_key_env: SATURNIN_REVIEW_ATTESTATION_PREVIOUS_KEY
     key_scope_env: SATURNIN_REVIEW_ATTESTATION_KEY_SCOPE

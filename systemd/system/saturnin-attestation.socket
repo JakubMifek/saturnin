@@ -1,0 +1,13 @@
+[Unit]
+Description=Saturnin dedicated attestation socket
+
+[Socket]
+ListenStream=/run/saturnin-attestation/sign.sock
+SocketUser=saturnin-signer
+SocketGroup=saturnin
+SocketMode=0660
+DirectoryMode=0750
+RemoveOnStop=yes
+
+[Install]
+WantedBy=sockets.target

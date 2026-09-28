@@ -1,0 +1,3 @@
+d /var/lib/saturnin-attestation 0700 saturnin-signer saturnin-signer -
+d /run/saturnin-attestation 0750 saturnin-signer saturnin -
+d /etc/saturnin-attestation 0750 root saturnin-signer -

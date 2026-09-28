@@ -995,142 +995,15 @@ def test_common_sets_private_umask_for_runtime_files(
     assert marker.stat().st_mode & 0o777 == 0o600
 
 
-def test_review_gate_rejects_pr_subject_for_another_repo(config: Config) -> None:
-    result = subprocess.run(
-        [
-            "bash",
-            str(config.root / "automation/library/review_gate.sh"),
-            "pr",
-            "other/repo#42",
-            "owner/repo",
-            "code-worker",
-        ],
-        capture_output=True,
-        text=True,
-        env={**os.environ, "SATURNIN_HOME": str(config.root)},
-    )
-
-    assert result.returncode == 2
-    assert "expected owner/repo#number" in result.stderr
-
-
-def test_review_gate_passes_issue_digest_to_gate(config: Config) -> None:
-    args_log = config.root / "saturnin-args"
-    saturnin = config.root / ".venv" / "bin" / "saturnin"
-    saturnin.parent.mkdir(parents=True)
-    saturnin.write_text(
-        f"#!/bin/sh\nprintf '%s\\n' \"$@\" > {args_log}\n",
-        encoding="utf-8",
-    )
-    saturnin.chmod(0o755)
-
-    subprocess.run(
-        [
-            "bash",
-            str(config.root / "automation/library/review_gate.sh"),
-            "issue",
-            "draft-42",
-            "owner/repo",
-            "researcher",
-            "reviewed-digest",
-        ],
-        check=True,
-        capture_output=True,
-        text=True,
-        env={**os.environ, "SATURNIN_HOME": str(config.root)},
-    )
-
-    args = args_log.read_text(encoding="utf-8").splitlines()
-    assert args[:2] == ["review", "gate"]
-    assert args[-2:] == ["--issue-digest", "reviewed-digest"]
-
-
-def test_review_gate_imports_only_the_designated_reviewer(config: Config) -> None:
+def test_review_gate_delegates_all_github_authorization_to_service(
+    config: Config,
+) -> None:
     script = (config.root / "automation/library/review_gate.sh").read_text(
         encoding="utf-8"
     )
-
-    assert config.governance["review"]["pr"]["github_reviewer_logins"] == [
-        "copilot-pull-request-reviewer[bot]"
-    ]
-    assert 'review_user.get("type") != "Bot"' in script
-    assert "user.casefold() not in reviewer_logins" in script
-    assert '"changes_requested", "rejected", "dismissed"' in script
-    assert "state not in" in script
-    assert "Imported from GitHub reviewer ${github_reviewer}" in script
-    assert 'author="github:${pr_author}"' in script
-    assert "saturnin_python -c '" in script
-    assert "import json, sys, yaml" in script
-
-
-def test_review_gate_reads_pages_until_empty_before_aggregating(config: Config) -> None:
-    pages_log = config.root / "review-pages"
-    args_log = config.root / "saturnin-args"
-    (config.root / "sitecustomize.py").write_text(
-        "import io\n"
-        "import json\n"
-        "import urllib.parse\n"
-        "import urllib.request\n"
-        f"_pages_log = {str(pages_log)!r}\n"
-        "def _urlopen(request, timeout=None):\n"
-        "    page = int(urllib.parse.parse_qs("
-        "urllib.parse.urlparse(request.full_url).query)['page'][0])\n"
-        "    with open(_pages_log, 'a', encoding='utf-8') as stream:\n"
-        "        stream.write(f'{page}\\n')\n"
-        "    if page <= 11:\n"
-        "        state = 'CHANGES_REQUESTED' if page == 11 else 'APPROVED'\n"
-        "        reviews = [{'commit_id': 'head-sha', 'state': state, "
-        "'user': {'login': 'copilot-pull-request-reviewer[bot]', "
-        "'type': 'Bot'}}]\n"
-        "    else:\n"
-        "        reviews = []\n"
-        "    return io.BytesIO(json.dumps(reviews).encode())\n"
-        "urllib.request.urlopen = _urlopen\n",
-        encoding="utf-8",
-    )
-    fake_bin = config.root / "fake-bin"
-    fake_bin.mkdir()
-    curl = fake_bin / "curl"
-    curl.write_text(
-        "#!/bin/sh\n"
-        "printf '%s\\n' "
-        '\'{"head":{"sha":"head-sha"},"user":{"login":"author"}}\'\n',
-        encoding="utf-8",
-    )
-    curl.chmod(0o755)
-    saturnin = config.root / ".venv" / "bin" / "saturnin"
-    saturnin.parent.mkdir(parents=True)
-    saturnin.write_text(
-        "#!/bin/sh\n"
-        f"printf '%s\\n' \"$*\" >> {args_log}\n"
-        "case \"$*\" in\n"
-        "  *\"review attest \"*) printf attestation ;;\n"
-        "esac\n",
-        encoding="utf-8",
-    )
-    saturnin.chmod(0o755)
-
-    subprocess.run(
-        [
-            "bash",
-            str(config.root / "automation/library/review_gate.sh"),
-            "pr",
-            "owner/repo#42",
-            "owner/repo",
-        ],
-        check=True,
-        capture_output=True,
-        text=True,
-        env={
-            **os.environ,
-            "PATH": f"{fake_bin}:{os.environ['PATH']}",
-            "PYTHONPATH": str(config.root),
-            "SATURNIN_HOME": str(config.root),
-        },
-    )
-
-    assert pages_log.read_text(encoding="utf-8").splitlines() == [
-        str(page) for page in range(1, 13)
-    ]
-    assert "review record owner/repo#42" in args_log.read_text(encoding="utf-8")
-    assert "--verdict changes_requested" in args_log.read_text(encoding="utf-8")
+    assert "saturnin review attest" in script
+    assert "saturnin review record" in script
+    assert "saturnin review gate" in script
+    assert "curl" not in script
+    assert "urllib" not in script
+    assert "GITHUB_TOKEN" not in script

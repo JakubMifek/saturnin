@@ -1,0 +1,53 @@
+[Unit]
+Description=Saturnin dedicated GitHub review attestation service
+Documentation=file:/usr/share/doc/saturnin-attestation/runbook.md
+Requires=saturnin-attestation.socket
+After=network-online.target
+
+[Service]
+Type=simple
+User=saturnin-signer
+Group=saturnin-signer
+ExecStart=/usr/bin/python3 -I /usr/lib/saturnin-attestation/system_attestation.py serve
+LoadCredentialEncrypted=current.key:/etc/saturnin-attestation/current.key.cred
+LoadCredentialEncrypted=previous.key:/etc/saturnin-attestation/previous.key.cred
+StateDirectory=saturnin-attestation
+StateDirectoryMode=0700
+RuntimeDirectory=saturnin-attestation
+RuntimeDirectoryMode=0750
+UMask=0077
+NoNewPrivileges=yes
+CapabilityBoundingSet=
+AmbientCapabilities=
+ProtectSystem=strict
+ProtectHome=yes
+PrivateTmp=yes
+PrivateDevices=yes
+PrivateIPC=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectKernelLogs=yes
+ProtectControlGroups=yes
+ProtectClock=yes
+ProtectHostname=yes
+ProtectProc=invisible
+ProcSubset=pid
+RestrictSUIDSGID=yes
+RestrictRealtime=yes
+RestrictNamespaces=yes
+LockPersonality=yes
+MemoryDenyWriteExecute=yes
+RemoveIPC=yes
+SystemCallArchitectures=native
+SystemCallFilter=@system-service
+SystemCallErrorNumber=EPERM
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+IPAddressAllow=any
+DevicePolicy=closed
+ReadOnlyPaths=/usr/lib/saturnin-attestation /etc/saturnin-attestation
+ReadWritePaths=/var/lib/saturnin-attestation
+Environment=PYTHONHASHSEED=random
+TimeoutStartSec=30s
+TimeoutStopSec=15s
+Restart=on-failure
+RestartSec=5s

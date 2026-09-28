@@ -23,7 +23,7 @@ import yaml
 from . import escalation as escalation_mod
 from . import telemetry
 from .automation import AutomationLibrary
-from .attestation_service import AttestationServiceError, sign_from_session
+from .system_attestation import SystemAttestationError, request_attestation
 from .board import CONTAINER_KINDS, TRANSITIONS, Board, BoardError, Task
 from .checkpoints import Checkpoint, CheckpointStore
 from .config import Config, ConfigError, find_root, load_yaml
@@ -1830,20 +1830,18 @@ def _run_review(args: argparse.Namespace, config: Config, as_json: bool) -> int:
         return 0
     if args.review_command == "attest":
         try:
-            attestation = sign_from_session(
-                {
-                    "subject": args.subject,
-                    "kind": args.kind,
-                    "author": args.author,
-                    "reviewer": args.reviewer,
-                    "verdict": args.verdict,
-                    "zero_context": not args.with_context,
-                    "head_sha": args.head_sha,
-                    "issue_digest": args.issue_digest,
-                    "destination_repo": args.repo,
-                }
+            subject_repo, separator, number_text = args.subject.rpartition("#")
+            if not separator or not number_text.isdecimal():
+                raise SystemAttestationError(
+                    "subject must be an exact owner/repository#number"
+                )
+            attestation = request_attestation(
+                kind=args.kind,
+                repository=subject_repo,
+                number=int(number_text),
+                destination_repo=args.repo or subject_repo,
             )
-        except AttestationServiceError as exc:
+        except SystemAttestationError as exc:
             raise ReviewError(str(exc)) from exc
         _emit({"attestation": attestation}, as_json, attestation)
         return 0

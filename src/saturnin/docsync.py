@@ -249,10 +249,10 @@ def _credential_admin_recovery(config: Config) -> str:
 
 def _signer_unit_interface(config: Config) -> str:
     operation = config.policy("server_scope").get("operations", {}).get(
-        "signer_user_unit"
+        "signer_system_service"
     )
     if not isinstance(operation, dict):
-        raise GeneratedBlockError("server_scope signer_user_unit operation is required")
+        raise GeneratedBlockError("server_scope signer_system_service operation is required")
     executable = operation.get("executable")
     actions = operation.get("allowed_actions")
     unit = operation.get("unit")
@@ -266,20 +266,18 @@ def _signer_unit_interface(config: Config) -> str:
         or not isinstance(runtime_snapshot, str)
         or not isinstance(scope, str)
     ):
-        raise GeneratedBlockError("server_scope signer_user_unit operation is invalid")
+        raise GeneratedBlockError("server_scope signer_system_service operation is invalid")
     commands = "\n".join(
-        'saturnin check command "$SATURNIN_HOME/'
-        f'{executable} {action}" --execute --task <task-id>'
+        f'sudo /usr/sbin/saturnin-attestation-admin {action}'
         for action in actions
     )
     return (
-        f"This interface is restricted to the `{scope}`-scoped `{unit}` unit.\n\n"
+        f"This human-administrator interface manages only the `{scope}`-scoped `{unit}` unit.\n\n"
         f"```bash\n{commands}\n```\n\n"
         "Install is retry-safe and restores the prior signer definition and state "
-        "after a partial failure. Status performs no mutation. Uninstall removes "
-        f"only the signer definition, enablement link, and pinned runtime snapshot "
-        f"`{runtime_snapshot}`, leaves encrypted credentials in place, and is safe "
-        "to repeat."
+        "after a partial failure. Status performs no mutation. Rotate and rollback "
+        "only exchange encrypted credential generations. No action accepts a path, "
+        "unit, owner, package, or arbitrary command."
     )
 
 
@@ -287,46 +285,30 @@ def _attestation_boundary(config: Config) -> str:
     policy = config.governance.get("review", {}).get("attestation", {})
     if (
         policy.get("required") is not True
-        or policy.get("execution_scoped") is not True
-        or policy.get("legacy_migration") != "rotation-manifest-v2-required"
+        or policy.get("authorization_source") != "github-api"
+        or policy.get("service_identity") != "saturnin-signer"
         or not isinstance(policy.get("service_socket"), str)
     ):
         raise GeneratedBlockError(
-            "governance review.attestation must require execution-scoped service signing"
-        )
-    ttl = policy.get("session_ttl_seconds")
-    if not isinstance(ttl, int) or ttl <= 0:
-        raise GeneratedBlockError(
-            "governance review.attestation.session_ttl_seconds must be positive"
+            "governance review.attestation must require dedicated GitHub authorization"
         )
     return "\n".join(
         [
-            "During autonomous operation, the master and previous keys are loaded only by "
-            "`saturnin-attestation.service` in its private mount, network, "
-            "runtime, and credential namespace. Supervisor and worker units do "
-            "not load either credential. Explicit owner lifecycle commands may "
-            "decrypt them in bounded process memory only while the signer and "
-            "supervisors are stopped.",
+            "The system `saturnin-attestation.service` runs as the non-login "
+            "`saturnin-signer` identity from root-controlled runtime and configuration. "
+            "The system manager decrypts current and previous HMAC credentials into its "
+            "private credential tmpfs; ordinary workers never receive key material.",
             "",
-            "The signer remains disabled until the owner rotates the master and "
-            "seals a version-2 migration manifest. That manifest enumerates the "
-            "exact immutable historical attestations, records a signed ledger "
-            "digest and timestamp cutoff, and never permits a legacy role-scoped "
-            "signature to authorize a new record.",
+            "For pull requests the service obtains the live head, author, and exact "
+            "commit-bound latest review state directly from GitHub over TLS. For issues "
+            "it recomputes title/body digest and accepts one exact, expiring, nonce-bound "
+            "machine marker in an allowlisted bot comment. Repository and API origins are "
+            "fixed allowlists; caller claims and socket credentials are not authority.",
             "",
-            "For a routed reviewer task, the trusted launcher asks the service "
-            "for a session bound to task, role, author, subject, immutable head "
-            "or issue digest, a random nonce, and the launched process identity. "
-            f"The session expires after {ttl} seconds, accepts one signature, "
-            "and verifies that the connecting process descends from that exact "
-            "launch. Its Unix socket is bind-mounted only into that reviewer's "
-            "sandbox; `/run` and `/proc` remain isolated for all workers.",
-            "",
-            "No worker receives a master or derived key in argv, environment, "
-            "files, descriptors, logs, board data, or Git. Ordinary workers do "
-            "not receive the session socket. The signed ledger retains only "
-            "scope, key identifier, nonce, and signature, never plaintext key "
-            "material.",
+            "Consumed evidence and its exact idempotent attestation are serialized in "
+            "dedicated state. Altered reuse fails. The ordinary client authenticates a "
+            "root-owned service peer and records the returned scope in ReviewLedger; "
+            "workers receive neither signing sessions nor credentials.",
         ]
     )
 

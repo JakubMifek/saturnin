@@ -1,0 +1,9 @@
+{
+  "repositories": ["jakubmifek/saturnin"],
+  "pr_reviewers": ["copilot-pull-request-reviewer[bot]"],
+  "issue_reviewers": ["copilot-pull-request-reviewer[bot]"],
+  "allowed_verdicts": ["approved"],
+  "github_api": "https://api.github.com",
+  "request_timeout_seconds": 10,
+  "maximum_issue_marker_ttl_seconds": 3600
+}
