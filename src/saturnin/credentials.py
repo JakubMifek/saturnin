@@ -566,6 +566,7 @@ def systemd_credential(name: str) -> str:
                 input=ciphertext.encode("utf-8"),
                 stdout=plaintext_fd,
                 stderr=subprocess.DEVNULL,
+                env={"XDG_RUNTIME_DIR": f"/run/user/{os.getuid()}"},
             )
         except OSError as exc:
             os.close(plaintext_fd)

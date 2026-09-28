@@ -8,7 +8,7 @@ unset BASH_ENV ENV CDPATH PYTHONHOME PYTHONPATH
 IFS=$' \t\n'
 
 readonly UNIT=saturnin-attestation.service
-readonly EXPECTED_RUNTIME_MANIFEST_SHA256=aaf918e9e59899c0ff9ef4306fe37665ed2c41aed42835e04f02b45475d2ce7e
+readonly EXPECTED_RUNTIME_MANIFEST_SHA256=0eedaacceb21e680a760ea06e3bfa00b9d945d71ccc869839373d559faf6d9ad
 readonly ID=/usr/bin/id
 readonly REALPATH=/usr/bin/realpath
 readonly STAT=/usr/bin/stat
@@ -25,6 +25,8 @@ readonly MV=/usr/bin/mv
 readonly CHMOD=/usr/bin/chmod
 readonly SLEEP=/usr/bin/sleep
 readonly TIMEOUT=/usr/bin/timeout
+readonly CGROUP_ROOT=/sys/fs/cgroup
+readonly CGROUP_ROOT_OWNER=0
 readonly RAW_SCRIPT_PATH="${BASH_SOURCE[0]}"
 SCRIPT_PATH="$("$REALPATH" -- "$RAW_SCRIPT_PATH")"
 readonly SCRIPT_PATH
@@ -605,6 +607,7 @@ expected = [
         "Type=notify",
         "NotifyAccess=main",
         f"WorkingDirectory={home}",
+        "UnsetEnvironment=GCONV_PATH GETCONF_DIR GLIBC_TUNABLES HOSTALIASES LD_AUDIT LD_BIND_NOT LD_BIND_NOW LD_DEBUG LD_DEBUG_OUTPUT LD_DYNAMIC_WEAK LD_HWCAP_MASK LD_KEEPDIR LD_LIBRARY_PATH LD_ORIGIN_PATH LD_PRELOAD LD_PROFILE LD_SHOW_AUXV LD_TRACE_LOADED_OBJECTS LD_USE_LOAD_BIAS LD_VERBOSE LD_WARN LOCALDOMAIN LOCPATH MALLOC_TRACE NIS_PATH NLSPATH PYTHONHOME PYTHONPATH RESOLV_HOST_CONF RES_OPTIONS TMPDIR TZDIR",
         f"Environment=SATURNIN_HOME=\"{home}\"",
         f"Environment=SATURNIN_RUNTIME_SHA256=\"{runtime_sha256}\"",
         "Environment=SATURNIN_SEALED_GOVERNANCE=runtime-archive",
@@ -776,10 +779,13 @@ verify_stopped_service() {
     --property=ActiveState --property=SubState \
     --property=MainPID --property=ExecMainPID --property=ControlGroup \
     "$UNIT" >"$MANAGER_STATE" || return 1
-  MANAGER_STATE_PATH="$MANAGER_STATE" VERIFY_STOPPED_SERVICE=1 \
+  MANAGER_STATE_PATH="$MANAGER_STATE" CGROUP_ROOT_PATH="$CGROUP_ROOT" \
+    CGROUP_ROOT_OWNER_VALUE="$CGROUP_ROOT_OWNER" \
+    VERIFY_STOPPED_SERVICE=1 \
     "$PYTHON" -I -c '
 import os
-from pathlib import Path
+import stat
+from pathlib import Path, PurePosixPath
 
 properties = {}
 for line in Path(os.environ["MANAGER_STATE_PATH"]).read_text(
@@ -802,7 +808,48 @@ if (
 control_group = properties.get("ControlGroup", "")
 if control_group and not control_group.endswith("/saturnin-attestation.service"):
     raise SystemExit("stopped signer control-group identity is invalid")
+if control_group:
+    relative = PurePosixPath(control_group)
+    if (
+        not relative.is_absolute()
+        or any(part in {".", ".."} for part in relative.parts)
+        or relative.name != "saturnin-attestation.service"
+    ):
+        raise SystemExit("stopped signer control-group path is invalid")
+    root = Path(os.environ["CGROUP_ROOT_PATH"])
+    root_metadata = root.stat(follow_symlinks=False)
+    if (
+        not stat.S_ISDIR(root_metadata.st_mode)
+        or root_metadata.st_uid != int(os.environ["CGROUP_ROOT_OWNER_VALUE"])
+        or root_metadata.st_mode & 0o022
+    ):
+        raise SystemExit("cgroup filesystem root has an unsafe identity")
+    cgroup = root.joinpath(*relative.parts[1:])
+    try:
+        cgroup_metadata = cgroup.stat(follow_symlinks=False)
+    except FileNotFoundError:
+        cgroup_metadata = None
+    if cgroup_metadata is not None:
+        if not stat.S_ISDIR(cgroup_metadata.st_mode):
+            raise SystemExit("stopped signer control group has an unsafe identity")
+        events = {}
+        for line in (cgroup / "cgroup.events").read_text(
+            encoding="ascii"
+        ).splitlines():
+            key, separator, value = line.partition(" ")
+            if not separator or key in events:
+                raise SystemExit("stopped signer cgroup state is invalid")
+            events[key] = value
+        if events.get("populated") != "0":
+            raise SystemExit("stopped signer control group still has processes")
 '
+}
+
+stop_signer_service() {
+  systemctl_bounded --user stop "$UNIT" || return 1
+  systemctl_bounded --user kill --kill-whom=all --signal=KILL \
+    "$UNIT" >/dev/null 2>&1 || true
+  verify_stopped_service
 }
 
 if [[ ! -d "$UNIT_DIR" ]]; then
@@ -942,8 +989,7 @@ rollback() {
     && ! release_credential_lock; then
     return 1
   fi
-  if ! systemctl_bounded --user stop "$UNIT" >/dev/null 2>&1 \
-    || ! verify_stopped_service; then
+  if ! stop_signer_service >/dev/null 2>&1; then
     echo "ROLLBACK FAILURE: rejected signer termination was not proven; prior files were not restored." >&2
     return 1
   fi
@@ -1055,11 +1101,11 @@ if [[ "$action" == uninstall ]]; then
   mutating=1
   verify_unit_directory
   if [[ "$was_active" -eq 1 ]]; then
-    systemctl_bounded --user stop "$UNIT"
+    stop_signer_service
   else
-    systemctl_bounded --user stop "$UNIT" >/dev/null 2>&1 || true
+    stop_signer_service >/dev/null 2>&1 || true
+    verify_stopped_service
   fi
-  verify_stopped_service
   if [[ "$had_wants_dir" -eq 1 ]]; then
     wants_operation unlink "$wants_dir_identity"
   fi

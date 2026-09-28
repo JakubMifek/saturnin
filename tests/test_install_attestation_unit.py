@@ -107,6 +107,12 @@ def signer_install(tmp_path: Path) -> tuple[Path, dict[str, str], Path, Path]:
 
     fake_bin = tmp_path / "bin"
     fake_bin.mkdir()
+    cgroup_root = tmp_path / "cgroup"
+    signer_cgroup = cgroup_root / "user.slice" / "saturnin-attestation.service"
+    signer_cgroup.mkdir(parents=True)
+    (signer_cgroup / "cgroup.events").write_text(
+        "populated 0\nfrozen 0\n", encoding="ascii"
+    )
     fake_stat = fake_bin / "stat"
     fake_stat.write_text("#!/bin/sh\nexec /usr/bin/stat \"$@\"\n", encoding="utf-8")
     fake_stat.chmod(0o755)
@@ -291,7 +297,7 @@ def signer_install(tmp_path: Path) -> tuple[Path, dict[str, str], Path, Path]:
         "      printf '%s\\n' 'LoadState=loaded' 'ActiveState=inactive' "
         "'SubState=dead' \"FragmentPath=$unit_dir/saturnin-attestation.service\" "
         "'DropInPaths=' 'MainPID=0' 'ExecMainPID=0' "
-        "'ControlGroup=/user.slice/saturnin-attestation.service'\n"
+        "\"ControlGroup=${SERVICE_CGROUP:+/user.slice/saturnin-attestation.service}\"\n"
         "    fi\n"
         "    ;;\n"
         "  enable)\n"
@@ -373,6 +379,14 @@ def signer_install(tmp_path: Path) -> tuple[Path, dict[str, str], Path, Path]:
         .replace(
             "readonly SYSTEMD_CREDS=/usr/bin/systemd-creds",
             f"readonly SYSTEMD_CREDS={fake_systemd_creds}",
+        )
+        .replace(
+            "readonly CGROUP_ROOT=/sys/fs/cgroup",
+            f"readonly CGROUP_ROOT={cgroup_root}",
+        )
+        .replace(
+            "readonly CGROUP_ROOT_OWNER=0",
+            f"readonly CGROUP_ROOT_OWNER={os.getuid()}",
         )
         .replace(
             '[[ "$("$STAT" -c %u "$tool")" -ne 0 ]]',
@@ -1098,6 +1112,35 @@ def test_uninstall_recovers_failed_service_with_no_process(
     assert result.returncode == 0, result.stderr
     assert not (unit_dir / "saturnin-attestation.service").exists()
     assert not (unit_dir / "saturnin-attestation-runtime.pyz").exists()
+
+
+def test_uninstall_rejects_residual_signer_cgroup_processes(
+    signer_install: tuple[Path, dict[str, str], Path, Path],
+) -> None:
+    checkout, _, unit_dir, calls = signer_install
+    assert _run(signer_install, "install").returncode == 0
+    events = (
+        checkout.parent
+        / "cgroup"
+        / "user.slice"
+        / "saturnin-attestation.service"
+        / "cgroup.events"
+    )
+    events.write_text("populated 1\nfrozen 0\n", encoding="ascii")
+
+    result = _run(
+        signer_install,
+        "uninstall",
+        SERVICE_CGROUP="1",
+        USE_REAL_STOP_VERIFY="1",
+    )
+
+    assert result.returncode != 0
+    assert (unit_dir / "saturnin-attestation.service").exists()
+    assert (
+        "--user kill --kill-whom=all --signal=KILL "
+        "saturnin-attestation.service"
+    ) in calls.read_text(encoding="utf-8").splitlines()
 
 
 def test_uninstall_stops_active_signer_with_unvalidated_definition(
