@@ -278,7 +278,11 @@ def signer_install(tmp_path: Path) -> tuple[Path, dict[str, str], Path, Path]:
         "    fi\n"
         "    ;;\n"
         "  show)\n"
-        "    if [ -e \"$state/active\" ] || [ -n \"${STOP_REMAINS_ACTIVE:-}\" ]; then\n"
+        "    if [ -n \"${SERVICE_FAILED:-}\" ]; then\n"
+        "      printf '%s\\n' 'LoadState=loaded' 'ActiveState=failed' "
+        "'SubState=failed' \"FragmentPath=$unit_dir/saturnin-attestation.service\" "
+        "'DropInPaths=' 'MainPID=0' 'ExecMainPID=0' 'ControlGroup='\n"
+        "    elif [ -e \"$state/active\" ] || [ -n \"${STOP_REMAINS_ACTIVE:-}\" ]; then\n"
         "      printf '%s\\n' 'LoadState=loaded' 'ActiveState=active' "
         "'SubState=running' \"FragmentPath=$unit_dir/saturnin-attestation.service\" "
         "'DropInPaths=' 'MainPID=1234' 'ExecMainPID=1234' "
@@ -1083,6 +1087,19 @@ def test_uninstall_stops_active_signer_when_disk_artifacts_are_missing(
                           "saturnin-attestation.service") == 2
 
 
+def test_uninstall_recovers_failed_service_with_no_process(
+    signer_install: tuple[Path, dict[str, str], Path, Path],
+) -> None:
+    _, _, unit_dir, _ = signer_install
+    assert _run(signer_install, "install").returncode == 0
+
+    result = _run(signer_install, "uninstall", SERVICE_FAILED="1")
+
+    assert result.returncode == 0, result.stderr
+    assert not (unit_dir / "saturnin-attestation.service").exists()
+    assert not (unit_dir / "saturnin-attestation-runtime.pyz").exists()
+
+
 def test_uninstall_stops_active_signer_with_unvalidated_definition(
     signer_install: tuple[Path, dict[str, str], Path, Path],
 ) -> None:
@@ -1253,9 +1270,9 @@ def test_status_rejects_tampered_unit_without_systemctl(
         ),
         ("PrivateNetwork=yes", "PrivateNetwork=no"),
         (
-            "SetCredentialEncrypted=saturnin-review-attestation-key:",
-            "SetCredentialEncrypted=unexpected:QUJD\n"
-            "SetCredentialEncrypted=saturnin-review-attestation-key:",
+            "Environment=SATURNIN_CURRENT_CREDENTIAL_CIPHERTEXT=",
+            "Environment=UNEXPECTED_CREDENTIAL_CIPHERTEXT=\"QUJD\"\n"
+            "Environment=SATURNIN_CURRENT_CREDENTIAL_CIPHERTEXT=",
         ),
         (
             "[Service]\nType=notify",
@@ -1695,13 +1712,8 @@ def test_inline_credentials_survive_canonical_parent_replacement_after_snapshot(
     installed = (unit_dir / "saturnin-attestation.service").read_text(
         encoding="utf-8"
     )
-    assert (
-        "SetCredentialEncrypted=saturnin-review-attestation-key:QUJD" in installed
-    )
-    assert (
-        "SetCredentialEncrypted=saturnin-review-attestation-previous-key:REVG"
-        in installed
-    )
+    assert 'Environment=SATURNIN_CURRENT_CREDENTIAL_CIPHERTEXT="QUJD"' in installed
+    assert 'Environment=SATURNIN_PREVIOUS_CREDENTIAL_CIPHERTEXT="REVG"' in installed
     assert "LoadCredentialEncrypted=" not in installed
     assert (
         unit_dir
@@ -1745,11 +1757,14 @@ def test_real_descriptor_snapshot_binds_inline_credentials(
     installed = (unit_dir / "saturnin-attestation.service").read_text(
         encoding="utf-8"
     )
-    assert f"SetCredentialEncrypted=saturnin-review-attestation-key:{current}" in installed
     assert (
-        "SetCredentialEncrypted=saturnin-review-attestation-previous-key:"
-        f"{previous}"
-    ) in installed
+        f'Environment=SATURNIN_CURRENT_CREDENTIAL_CIPHERTEXT="{current}"'
+        in installed
+    )
+    assert (
+        f'Environment=SATURNIN_PREVIOUS_CREDENTIAL_CIPHERTEXT="{previous}"'
+        in installed
+    )
     assert (
         f'Environment=SATURNIN_CURRENT_KEY_ID="{hashlib.sha256(b"current-key").hexdigest()}"'
         in installed

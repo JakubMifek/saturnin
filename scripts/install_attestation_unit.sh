@@ -8,7 +8,7 @@ unset BASH_ENV ENV CDPATH PYTHONHOME PYTHONPATH
 IFS=$' \t\n'
 
 readonly UNIT=saturnin-attestation.service
-readonly EXPECTED_RUNTIME_MANIFEST_SHA256=65b8859a34569d29ba6bf94eb7e66c7c230da0c0d893ce7e7f1afa9badf65ce5
+readonly EXPECTED_RUNTIME_MANIFEST_SHA256=32be5fd5acc4aaaa8582a09f6eb7f3be366902cf5923612c74012a5646feb042
 readonly ID=/usr/bin/id
 readonly REALPATH=/usr/bin/realpath
 readonly STAT=/usr/bin/stat
@@ -568,13 +568,13 @@ if not current_key_id or not previous_key_id or not credential_generation:
         elif line.startswith("Environment=SATURNIN_CREDENTIAL_GENERATION="):
             credential_generation = line.rsplit("=", 1)[-1].strip("\"")
         elif line.startswith(
-            "SetCredentialEncrypted=saturnin-review-attestation-key:"
+            "Environment=SATURNIN_CURRENT_CREDENTIAL_CIPHERTEXT="
         ):
-            current_credential = line.split(":", 1)[1]
+            current_credential = line.split("=", 2)[2].strip("\"")
         elif line.startswith(
-            "SetCredentialEncrypted=saturnin-review-attestation-previous-key:"
+            "Environment=SATURNIN_PREVIOUS_CREDENTIAL_CIPHERTEXT="
         ):
-            previous_credential = line.split(":", 1)[1]
+            previous_credential = line.split("=", 2)[2].strip("\"")
 if (
     len(current_key_id) != 64
     or len(previous_key_id) != 64
@@ -612,8 +612,8 @@ expected = [
         f"Environment=SATURNIN_PREVIOUS_KEY_ID=\"{previous_key_id}\"",
         f"Environment=SATURNIN_CREDENTIAL_GENERATION=\"{credential_generation}\"",
         "ExecStart=/usr/bin/python3 -I -c '\''import fcntl,hashlib,os,runpy,stat,sys;p=os.path.expanduser(\"~/.config/systemd/user/saturnin-attestation-runtime.pyz\");f=os.open(p,os.O_RDONLY|os.O_CLOEXEC|os.O_NOFOLLOW);a=os.fstat(f);assert stat.S_ISREG(a.st_mode) and a.st_uid==os.getuid() and a.st_nlink==1 and stat.S_IMODE(a.st_mode)==0o400;s=os.memfd_create(\"saturnin-attestation-runtime\",os.MFD_CLOEXEC|os.MFD_ALLOW_SEALING);os.fchmod(s,0o400);h=hashlib.sha256();exec(\"while b:=os.read(f,65536):\\\\n h.update(b)\\\\n v=memoryview(b)\\\\n while v:\\\\n  v=v[os.write(s,v):]\");z=os.fstat(f);assert (a.st_dev,a.st_ino,a.st_size,a.st_mtime_ns,a.st_ctime_ns)==(z.st_dev,z.st_ino,z.st_size,z.st_mtime_ns,z.st_ctime_ns) and h.hexdigest()==os.environ[\"SATURNIN_RUNTIME_SHA256\"];fcntl.fcntl(s,fcntl.F_ADD_SEALS,fcntl.F_SEAL_WRITE|fcntl.F_SEAL_GROW|fcntl.F_SEAL_SHRINK|fcntl.F_SEAL_SEAL);os.lseek(s,0,os.SEEK_SET);os.close(f);sys.path.insert(0,f\"/proc/self/fd/{s}\");runpy.run_module(\"saturnin.attestation_service\",run_name=\"__main__\")'\'' serve",
-        f"SetCredentialEncrypted=saturnin-review-attestation-key:{current_credential}",
-        f"SetCredentialEncrypted=saturnin-review-attestation-previous-key:{previous_credential}",
+        f"Environment=SATURNIN_CURRENT_CREDENTIAL_CIPHERTEXT=\"{current_credential}\"",
+        f"Environment=SATURNIN_PREVIOUS_CREDENTIAL_CIPHERTEXT=\"{previous_credential}\"",
         "RuntimeDirectory=saturnin-attestation",
         "RuntimeDirectoryMode=0700",
         "PrivateMounts=yes",
@@ -790,8 +790,11 @@ for line in Path(os.environ["MANAGER_STATE_PATH"]).read_text(
         raise SystemExit("systemd reported invalid stopped signer state")
     properties[key] = value
 if (
-    properties.get("ActiveState") != "inactive"
-    or properties.get("SubState") != "dead"
+    (
+        properties.get("ActiveState"),
+        properties.get("SubState"),
+    )
+    not in {("inactive", "dead"), ("failed", "failed")}
     or properties.get("MainPID") != "0"
     or properties.get("ExecMainPID") != "0"
 ):

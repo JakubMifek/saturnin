@@ -525,7 +525,50 @@ def _revoke_credential(kind: str) -> list[Path]:
 def systemd_credential(name: str) -> str:
     directory = os.environ.get("CREDENTIALS_DIRECTORY", "")
     if not directory:
-        return ""
+        ciphertext_env = {
+            ATTESTATION_CREDENTIAL: "SATURNIN_CURRENT_CREDENTIAL_CIPHERTEXT",
+            PREVIOUS_ATTESTATION_CREDENTIAL: (
+                "SATURNIN_PREVIOUS_CREDENTIAL_CIPHERTEXT"
+            ),
+        }.get(name)
+        ciphertext = os.environ.get(ciphertext_env, "") if ciphertext_env else ""
+        if not ciphertext:
+            return ""
+        _validate_encryption_model(ciphertext.encode("utf-8"))
+        try:
+            result = subprocess.run(
+                [
+                    "/usr/bin/systemd-creds",
+                    "decrypt",
+                    "--user",
+                    f"--name={name}",
+                    "-",
+                    "-",
+                ],
+                check=False,
+                capture_output=True,
+                input=ciphertext.encode("utf-8"),
+            )
+        except OSError as exc:
+            raise CredentialError(
+                f"could not decrypt inline systemd credential {name}"
+            ) from exc
+        value = result.stdout
+        if (
+            result.returncode != 0
+            or not value
+            or len(value) > MAX_CREDENTIAL_BYTES
+            or b"\x00" in value
+        ):
+            raise CredentialError(
+                f"could not decrypt inline systemd credential {name}"
+            )
+        try:
+            return value.decode("utf-8").rstrip("\n")
+        except UnicodeDecodeError as exc:
+            raise CredentialError(
+                f"inline systemd credential {name} is not text"
+            ) from exc
     path = Path(directory) / name
     try:
         descriptor = os.open(path, os.O_RDONLY | os.O_NOFOLLOW)
