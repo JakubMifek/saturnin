@@ -107,6 +107,13 @@ def signer_install(tmp_path: Path) -> tuple[Path, dict[str, str], Path, Path]:
 
     fake_bin = tmp_path / "bin"
     fake_bin.mkdir()
+    cgroup_root = tmp_path / "cgroup"
+    signer_cgroup = cgroup_root / "user.slice" / "saturnin-attestation.service"
+    signer_cgroup.mkdir(parents=True)
+    cgroup_root.chmod(0o755)
+    (signer_cgroup / "cgroup.events").write_text(
+        "populated 0\nfrozen 0\n", encoding="ascii"
+    )
     fake_stat = fake_bin / "stat"
     fake_stat.write_text("#!/bin/sh\nexec /usr/bin/stat \"$@\"\n", encoding="utf-8")
     fake_stat.chmod(0o755)
@@ -278,7 +285,12 @@ def signer_install(tmp_path: Path) -> tuple[Path, dict[str, str], Path, Path]:
         "    fi\n"
         "    ;;\n"
         "  show)\n"
-        "    if [ -e \"$state/active\" ] || [ -n \"${STOP_REMAINS_ACTIVE:-}\" ]; then\n"
+        "    if [ -n \"${SERVICE_FAILED:-}\" ]; then\n"
+        "      printf '%s\\n' 'LoadState=loaded' 'ActiveState=failed' "
+        "'SubState=failed' \"FragmentPath=$unit_dir/saturnin-attestation.service\" "
+        "'DropInPaths=' 'MainPID=0' 'ExecMainPID=0' "
+        "\"ControlGroup=${SERVICE_CGROUP:+/user.slice/saturnin-attestation.service}\"\n"
+        "    elif [ -e \"$state/active\" ] || [ -n \"${STOP_REMAINS_ACTIVE:-}\" ]; then\n"
         "      printf '%s\\n' 'LoadState=loaded' 'ActiveState=active' "
         "'SubState=running' \"FragmentPath=$unit_dir/saturnin-attestation.service\" "
         "'DropInPaths=' 'MainPID=1234' 'ExecMainPID=1234' "
@@ -287,7 +299,7 @@ def signer_install(tmp_path: Path) -> tuple[Path, dict[str, str], Path, Path]:
         "      printf '%s\\n' 'LoadState=loaded' 'ActiveState=inactive' "
         "'SubState=dead' \"FragmentPath=$unit_dir/saturnin-attestation.service\" "
         "'DropInPaths=' 'MainPID=0' 'ExecMainPID=0' "
-        "'ControlGroup=/user.slice/saturnin-attestation.service'\n"
+        "\"ControlGroup=${SERVICE_CGROUP:+/user.slice/saturnin-attestation.service}\"\n"
         "    fi\n"
         "    ;;\n"
         "  enable)\n"
@@ -319,9 +331,15 @@ def signer_install(tmp_path: Path) -> tuple[Path, dict[str, str], Path, Path]:
         "    [ \"${FAIL_ON:-}\" != start ]\n"
         "    ;;\n"
         "  stop)\n"
-        "    if [ -n \"${FAIL_ROLLBACK_STOP:-}\" ]; then exit 1; fi\n"
+        "    if [ -n \"${FAIL_ROLLBACK_STOP:-}\" ] "
+        "|| [ -n \"${FAIL_STOP:-}\" ]; then exit 1; fi\n"
         "    rm -f \"$state/active\"\n"
         "    touch \"$state/rollback-stopped\"\n"
+        "    ;;\n"
+        "  kill)\n"
+        "    if [ -n \"${EMPTY_CGROUP_ON_KILL:-}\" ]; then\n"
+        f"      printf '%s\\n' 'populated 0' 'frozen 0' > {signer_cgroup / 'cgroup.events'}\n"
+        "    fi\n"
         "    ;;\n"
         "  status) printf '%s\\n' 'signer status only' ;;\n"
         "esac\n",
@@ -369,6 +387,14 @@ def signer_install(tmp_path: Path) -> tuple[Path, dict[str, str], Path, Path]:
         .replace(
             "readonly SYSTEMD_CREDS=/usr/bin/systemd-creds",
             f"readonly SYSTEMD_CREDS={fake_systemd_creds}",
+        )
+        .replace(
+            "readonly CGROUP_ROOT_OWNER=0",
+            f"readonly CGROUP_ROOT_OWNER={os.getuid()}",
+        )
+        .replace(
+            "readonly CGROUP_ROOT=/sys/fs/cgroup",
+            f"readonly CGROUP_ROOT={cgroup_root}",
         )
         .replace(
             '[[ "$("$STAT" -c %u "$tool")" -ne 0 ]]',
@@ -794,7 +820,7 @@ def test_failed_active_restart_stops_new_process_and_restores_old_service(
     ("failure", "message"),
     [
         (
-            {"FAIL_ROLLBACK_STOP": "1"},
+            {"FAIL_ROLLBACK_STOP": "1", "STOP_REMAINS_ACTIVE": "1"},
             "rejected signer termination was not proven",
         ),
         (
@@ -1083,6 +1109,82 @@ def test_uninstall_stops_active_signer_when_disk_artifacts_are_missing(
                           "saturnin-attestation.service") == 2
 
 
+def test_uninstall_recovers_failed_service_with_no_process(
+    signer_install: tuple[Path, dict[str, str], Path, Path],
+) -> None:
+    _, _, unit_dir, _ = signer_install
+    assert _run(signer_install, "install").returncode == 0
+
+    result = _run(signer_install, "uninstall", SERVICE_FAILED="1")
+
+    assert result.returncode == 0, result.stderr
+    assert not (unit_dir / "saturnin-attestation.service").exists()
+    assert not (unit_dir / "saturnin-attestation-runtime.pyz").exists()
+
+
+def test_uninstall_rejects_residual_signer_cgroup_processes(
+    signer_install: tuple[Path, dict[str, str], Path, Path],
+) -> None:
+    checkout, _, unit_dir, calls = signer_install
+    assert _run(signer_install, "install").returncode == 0
+    events = (
+        checkout.parent
+        / "cgroup"
+        / "user.slice"
+        / "saturnin-attestation.service"
+        / "cgroup.events"
+    )
+    events.write_text("populated 1\nfrozen 0\n", encoding="ascii")
+
+    result = _run(
+        signer_install,
+        "uninstall",
+        SERVICE_CGROUP="1",
+        USE_REAL_STOP_VERIFY="1",
+    )
+
+    assert result.returncode != 0
+    assert (unit_dir / "saturnin-attestation.service").exists()
+    assert (
+        "--user kill --kill-whom=all --signal=KILL "
+        "saturnin-attestation.service"
+    ) in calls.read_text(encoding="utf-8").splitlines()
+
+
+def test_uninstall_kills_residual_cgroup_after_stop_failure(
+    signer_install: tuple[Path, dict[str, str], Path, Path],
+) -> None:
+    checkout, _, unit_dir, calls = signer_install
+    assert _run(signer_install, "install").returncode == 0
+    events = (
+        checkout.parent
+        / "cgroup"
+        / "user.slice"
+        / "saturnin-attestation.service"
+        / "cgroup.events"
+    )
+    events.write_text("populated 1\nfrozen 0\n", encoding="ascii")
+
+    result = _run(
+        signer_install,
+        "uninstall",
+        SERVICE_FAILED="1",
+        SERVICE_CGROUP="1",
+        USE_REAL_STOP_VERIFY="1",
+        FAIL_STOP="1",
+        EMPTY_CGROUP_ON_KILL="1",
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert not (unit_dir / "saturnin-attestation.service").exists()
+    recorded = calls.read_text(encoding="utf-8").splitlines()
+    assert "--user stop saturnin-attestation.service" in recorded
+    assert (
+        "--user kill --kill-whom=all --signal=KILL "
+        "saturnin-attestation.service"
+    ) in recorded
+
+
 def test_uninstall_stops_active_signer_with_unvalidated_definition(
     signer_install: tuple[Path, dict[str, str], Path, Path],
 ) -> None:
@@ -1253,9 +1355,9 @@ def test_status_rejects_tampered_unit_without_systemctl(
         ),
         ("PrivateNetwork=yes", "PrivateNetwork=no"),
         (
-            "SetCredentialEncrypted=saturnin-review-attestation-key:",
-            "SetCredentialEncrypted=unexpected:QUJD\n"
-            "SetCredentialEncrypted=saturnin-review-attestation-key:",
+            "Environment=SATURNIN_CURRENT_CREDENTIAL_CIPHERTEXT=",
+            "Environment=UNEXPECTED_CREDENTIAL_CIPHERTEXT=\"QUJD\"\n"
+            "Environment=SATURNIN_CURRENT_CREDENTIAL_CIPHERTEXT=",
         ),
         (
             "[Service]\nType=notify",
@@ -1695,13 +1797,8 @@ def test_inline_credentials_survive_canonical_parent_replacement_after_snapshot(
     installed = (unit_dir / "saturnin-attestation.service").read_text(
         encoding="utf-8"
     )
-    assert (
-        "SetCredentialEncrypted=saturnin-review-attestation-key:QUJD" in installed
-    )
-    assert (
-        "SetCredentialEncrypted=saturnin-review-attestation-previous-key:REVG"
-        in installed
-    )
+    assert 'Environment=SATURNIN_CURRENT_CREDENTIAL_CIPHERTEXT="QUJD"' in installed
+    assert 'Environment=SATURNIN_PREVIOUS_CREDENTIAL_CIPHERTEXT="REVG"' in installed
     assert "LoadCredentialEncrypted=" not in installed
     assert (
         unit_dir
@@ -1745,11 +1842,14 @@ def test_real_descriptor_snapshot_binds_inline_credentials(
     installed = (unit_dir / "saturnin-attestation.service").read_text(
         encoding="utf-8"
     )
-    assert f"SetCredentialEncrypted=saturnin-review-attestation-key:{current}" in installed
     assert (
-        "SetCredentialEncrypted=saturnin-review-attestation-previous-key:"
-        f"{previous}"
-    ) in installed
+        f'Environment=SATURNIN_CURRENT_CREDENTIAL_CIPHERTEXT="{current}"'
+        in installed
+    )
+    assert (
+        f'Environment=SATURNIN_PREVIOUS_CREDENTIAL_CIPHERTEXT="{previous}"'
+        in installed
+    )
     assert (
         f'Environment=SATURNIN_CURRENT_KEY_ID="{hashlib.sha256(b"current-key").hexdigest()}"'
         in installed

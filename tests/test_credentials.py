@@ -154,6 +154,45 @@ def test_systemd_credential_requires_private_owner_file(
     assert systemd_credential(ATTESTATION_CREDENTIAL) == "role-master"
 
 
+def test_systemd_credential_decrypts_inline_ciphertext_without_secret_argument(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    ciphertext = base64.b64encode(
+        HOST_SCOPED_CREDENTIAL_ID + b"encrypted-envelope"
+    ).decode()
+    observed: dict[str, object] = {}
+
+    def decrypt(args: list[str], **kwargs: object) -> SimpleNamespace:
+        observed["args"] = args
+        observed["input"] = kwargs["input"]
+        observed["env"] = kwargs["env"]
+        output = int(kwargs["stdout"])
+        observed["mode"] = stat.S_IMODE(os.fstat(output).st_mode)
+        with pytest.raises(PermissionError):
+            os.open(f"/proc/self/fd/{output}", os.O_RDONLY)
+        os.write(output, b"role-master\n")
+        return SimpleNamespace(returncode=0)
+
+    monkeypatch.delenv("CREDENTIALS_DIRECTORY", raising=False)
+    monkeypatch.setenv("LD_PRELOAD", "/same-uid/attacker.so")
+    monkeypatch.setenv("SATURNIN_CURRENT_CREDENTIAL_CIPHERTEXT", ciphertext)
+    monkeypatch.setattr("saturnin.credentials.subprocess.run", decrypt)
+
+    assert systemd_credential(ATTESTATION_CREDENTIAL) == "role-master"
+    assert observed["args"] == [
+        "/usr/bin/systemd-creds",
+        "decrypt",
+        "--user",
+        f"--name={ATTESTATION_CREDENTIAL}",
+        "-",
+        "-",
+    ]
+    assert observed["env"] == {"XDG_RUNTIME_DIR": f"/run/user/{os.getuid()}"}
+    assert observed["input"] == ciphertext.encode()
+    assert observed["mode"] == 0
+    assert "role-master" not in " ".join(observed["args"])
+
+
 def test_validate_encrypted_credential_reports_only_status(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
