@@ -34,6 +34,7 @@ from saturnin.attestation_service import (
     verify_with_service,
 )
 from saturnin.config import Config
+from saturnin.credentials import _lifecycle_lock as credential_lifecycle_lock
 
 
 @pytest.fixture(autouse=True)
@@ -49,7 +50,7 @@ def stable_generation(monkeypatch: pytest.MonkeyPatch) -> None:
     )
     monkeypatch.setattr(
         "saturnin.attestation_service._lifecycle_lock",
-        lambda **_: nullcontext(),
+        lambda **_: nullcontext((1, 2)),
     )
     monkeypatch.setattr(
         "saturnin.attestation_service._rotation_state",
@@ -113,6 +114,7 @@ def _service(config: Config) -> SigningService:
     service.current = "current-test-master"
     service.previous = "previous-test-master"
     service.generation = "test-generation"
+    service.credential_directory_identity = (1, 2)
     service.sessions = {}
     service.lock = threading.Lock()
     return service
@@ -203,6 +205,43 @@ def test_generation_change_invalidates_inflight_session(
         with pytest.raises(AttestationServiceError, match="must restart"):
             service._sign(session, _request(), sender)
         with pytest.raises(AttestationServiceError, match="unavailable"):
+            service._sign(session, _request(), sender)
+    finally:
+        sender.close()
+        receiver.close()
+
+
+def test_credential_directory_replacement_invalidates_inflight_session(
+    config: Config,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    config_home = tmp_path / "config"
+    credential_directory = (
+        config_home / "systemd/user/saturnin-credentials"
+    )
+    credential_directory.mkdir(parents=True, mode=0o700)
+    credential_directory.parent.chmod(0o700)
+    runtime = tmp_path / "runtime"
+    runtime.mkdir(mode=0o700)
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(config_home))
+    monkeypatch.setattr("saturnin.credentials._runtime_gate_path", lambda: runtime)
+    service = _service(config)
+    with credential_lifecycle_lock(exclusive=False) as identity:
+        assert identity is not None
+        service.credential_directory_identity = identity
+    credential_directory.rename(
+        credential_directory.with_name("saturnin-credentials.original")
+    )
+    credential_directory.mkdir(mode=0o700)
+    monkeypatch.setattr(
+        "saturnin.attestation_service._lifecycle_lock",
+        credential_lifecycle_lock,
+    )
+    session = _session(tmp_path / "unused.sock")
+    sender, receiver = socket.socketpair()
+    try:
+        with pytest.raises(AttestationServiceError, match="must restart"):
             service._sign(session, _request(), sender)
     finally:
         sender.close()

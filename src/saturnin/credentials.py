@@ -61,7 +61,12 @@ def _lifecycle_lock(
             directory_descriptor = _credential_directory_descriptor()
             fcntl.flock(directory_descriptor, operation)
             directory_token = _ACTIVE_CREDENTIAL_DIRECTORY.set(directory_descriptor)
-        yield
+        metadata = (
+            os.fstat(directory_descriptor) if directory_descriptor is not None else None
+        )
+        yield (
+            (metadata.st_dev, metadata.st_ino) if metadata is not None else None
+        )
     finally:
         if directory_token is not None:
             _ACTIVE_CREDENTIAL_DIRECTORY.reset(directory_token)

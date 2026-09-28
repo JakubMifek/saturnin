@@ -376,7 +376,14 @@ class SigningService:
             raise AttestationServiceError(
                 "attestation service credential generation mismatch"
             )
-        with _lifecycle_lock(exclusive=False, rotation_gate=False):
+        with _lifecycle_lock(
+            exclusive=False, rotation_gate=False
+        ) as credential_directory_identity:
+            if credential_directory_identity is None:
+                raise AttestationServiceError(
+                    "attestation credential directory identity is unavailable"
+                )
+            self.credential_directory_identity = credential_directory_identity
             self.generation = credential_generation()
             if not hmac.compare_digest(
                 self.generation,
@@ -576,9 +583,10 @@ class SigningService:
             "dismissed",
         }:
             raise AttestationServiceError("reviewer signing request is invalid")
-        with _lifecycle_lock(exclusive=False):
+        with _lifecycle_lock(exclusive=False) as credential_directory_identity:
             if (
-                _rotation_state() != "ready"
+                credential_directory_identity != self.credential_directory_identity
+                or _rotation_state() != "ready"
                 or not execution_signer_ready()
                 or not secrets.compare_digest(
                     self.generation, credential_generation()
