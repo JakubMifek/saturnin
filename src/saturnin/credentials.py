@@ -29,7 +29,6 @@ HOST_CREDENTIAL_SECRET = Path("/var/lib/systemd/credential.secret")
 ROTATION_STATE = ".attestation-rotation.json"
 ROTATION_CURRENT_BACKUP = ".saturnin-review-attestation-key.rollback.cred"
 ROTATION_PREVIOUS_BACKUP = ".saturnin-review-attestation-previous-key.rollback.cred"
-LIFECYCLE_LOCK = ".lifecycle"
 CREDENTIAL_GENERATION = ".generation"
 EXECUTION_SIGNER_ENABLEMENT = ".execution-signer-enabled"
 HOST_SCOPED_CREDENTIAL_ID = bytes.fromhex("55b9ed1d38594d43a8319d2ebb332ac6")
@@ -40,23 +39,48 @@ class CredentialError(RuntimeError):
 
 
 @contextmanager
-def _lifecycle_lock(*, exclusive: bool) -> object:
+def _lifecycle_lock(
+    *, exclusive: bool, rotation_gate: bool = True
+) -> object:
     directory = encrypted_credential_dir()
+    _secure_directory(directory.parent)
     _secure_directory(directory)
-    path = directory / LIFECYCLE_LOCK
-    descriptor = os.open(
-        path,
-        os.O_RDWR | os.O_CREAT | os.O_NOFOLLOW,
-        PRIVATE_FILE_MODE,
-    )
+    gate_descriptor: int | None = None
+    if rotation_gate:
+        gate_descriptor = os.open(
+            directory.parent,
+            os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW,
+        )
+        gate_metadata = os.fstat(gate_descriptor)
+        if (
+            not stat.S_ISDIR(gate_metadata.st_mode)
+            or gate_metadata.st_uid != os.getuid()
+            or gate_metadata.st_mode & 0o022
+        ):
+            os.close(gate_descriptor)
+            raise CredentialError("credential rotation gate is unsafe")
+        fcntl.flock(
+            gate_descriptor,
+            fcntl.LOCK_EX if exclusive else fcntl.LOCK_SH,
+        )
+    try:
+        descriptor = os.open(
+            directory,
+            os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW,
+        )
+    except BaseException:
+        if gate_descriptor is not None:
+            fcntl.flock(gate_descriptor, fcntl.LOCK_UN)
+            os.close(gate_descriptor)
+        raise
     try:
         metadata = os.fstat(descriptor)
         if (
-            not stat.S_ISREG(metadata.st_mode)
+            not stat.S_ISDIR(metadata.st_mode)
             or metadata.st_uid != os.getuid()
+            or stat.S_IMODE(metadata.st_mode) != 0o700
         ):
             raise CredentialError("credential lifecycle lock is unsafe")
-        os.fchmod(descriptor, PRIVATE_FILE_MODE)
         fcntl.flock(
             descriptor,
             fcntl.LOCK_EX if exclusive else fcntl.LOCK_SH,
@@ -65,6 +89,9 @@ def _lifecycle_lock(*, exclusive: bool) -> object:
     finally:
         fcntl.flock(descriptor, fcntl.LOCK_UN)
         os.close(descriptor)
+        if gate_descriptor is not None:
+            fcntl.flock(gate_descriptor, fcntl.LOCK_UN)
+            os.close(gate_descriptor)
 
 
 def encrypted_credential_dir() -> Path:

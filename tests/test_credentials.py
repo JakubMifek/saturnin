@@ -3,6 +3,7 @@ from __future__ import annotations
 import os
 import stat
 import base64
+import fcntl
 import threading
 import time
 from pathlib import Path
@@ -15,6 +16,7 @@ from saturnin.credentials import (
     HOST_SCOPED_CREDENTIAL_ID,
     PREVIOUS_ATTESTATION_CREDENTIAL,
     CredentialError,
+    _lifecycle_lock,
     attestation_rotation_values,
     complete_attestation_rotation,
     credential_prerequisites,
@@ -44,6 +46,34 @@ def _write_attestation_credentials(credential_dir: Path) -> tuple[Path, Path]:
     previous.chmod(0o600)
     generation.chmod(0o600)
     return current, previous
+
+
+def test_installer_rotation_gate_allows_service_lock_handoff(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path / "config"))
+    with _lifecycle_lock(exclusive=True):
+        pass
+    unit_dir = tmp_path / "config/systemd/user"
+    gate = os.open(unit_dir, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+    fcntl.flock(gate, fcntl.LOCK_EX)
+    acquired = threading.Event()
+
+    def rotation_status() -> None:
+        with _lifecycle_lock(exclusive=False):
+            acquired.set()
+
+    thread = threading.Thread(target=rotation_status)
+    thread.start()
+    try:
+        assert not acquired.wait(0.05)
+        with _lifecycle_lock(exclusive=False, rotation_gate=False):
+            pass
+    finally:
+        fcntl.flock(gate, fcntl.LOCK_UN)
+        os.close(gate)
+    thread.join(timeout=2)
+    assert acquired.is_set()
 
 
 def test_provision_attestation_encrypts_without_secret_arguments(
@@ -104,7 +134,7 @@ def test_parallel_provision_is_serialized_without_partial_ready_state(
     assert "already provisioned" in str(failures[0])
     credential_dir = destinations[0].parent
     assert (credential_dir / f"{PREVIOUS_ATTESTATION_CREDENTIAL}.cred").is_file()
-    assert (credential_dir / ".lifecycle").stat().st_mode & 0o777 == 0o600
+    assert credential_dir.stat().st_mode & 0o777 == 0o700
 
 
 def test_systemd_credential_requires_private_owner_file(

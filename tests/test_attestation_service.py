@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import hashlib
 import os
 import socket
 import subprocess
@@ -36,6 +37,7 @@ from saturnin.config import Config
 
 @pytest.fixture(autouse=True)
 def stable_generation(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("SATURNIN_CREDENTIAL_GENERATION", "test-generation")
     monkeypatch.setattr(
         "saturnin.attestation_service.credential_generation",
         lambda: "test-generation",
@@ -58,6 +60,24 @@ def _scope() -> dict[str, str]:
         "destination_repo": "jakubmifek/saturnin",
         "nonce": "b" * 64,
     }
+
+
+def test_ready_notification_attests_verified_runtime(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    path = tmp_path / "notify"
+    listener = socket.socket(socket.AF_UNIX, socket.SOCK_DGRAM)
+    listener.bind(str(path))
+    digest = "a" * 64
+    monkeypatch.setenv("NOTIFY_SOCKET", str(path))
+    monkeypatch.setenv("SATURNIN_RUNTIME_SHA256", digest)
+    try:
+        attestation_service._notify_ready()
+        assert listener.recv(1024) == (
+            f"READY=1\nSTATUS=Saturnin runtime {digest} verified".encode()
+        )
+    finally:
+        listener.close()
 
 
 def _request(**changes: object) -> dict[str, object]:
@@ -192,7 +212,31 @@ def test_signer_startup_requires_completed_rotation(
         "saturnin.attestation_service.execution_signer_ready",
         lambda: False,
     )
+    monkeypatch.setenv(
+        "SATURNIN_CURRENT_KEY_ID",
+        hashlib.sha256(b"saturnin-review-attestation-key-test-value").hexdigest(),
+    )
+    monkeypatch.setenv(
+        "SATURNIN_PREVIOUS_KEY_ID",
+        hashlib.sha256(
+            b"saturnin-review-attestation-previous-key-test-value"
+        ).hexdigest(),
+    )
     with pytest.raises(AttestationServiceError, match="rotation and migration"):
+        SigningService(config)
+
+
+def test_signer_startup_rejects_loaded_credential_generation(
+    config: Config, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(
+        "saturnin.attestation_service.systemd_credential",
+        lambda name: f"{name}-test-value",
+    )
+    monkeypatch.setenv("SATURNIN_CURRENT_KEY_ID", "0" * 64)
+    monkeypatch.setenv("SATURNIN_PREVIOUS_KEY_ID", "1" * 64)
+
+    with pytest.raises(AttestationServiceError, match="generation mismatch"):
         SigningService(config)
 
 

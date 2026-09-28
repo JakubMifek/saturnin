@@ -78,13 +78,28 @@ installation.
 
 Once status is valid:
 
+<!-- generated:signer-unit-interface -->
+This interface is restricted to the `user`-scoped `saturnin-attestation.service` unit.
+
 ```bash
-scripts/install_user_units.sh
-systemctl --user daemon-reload
-systemctl --user restart saturnin-attestation.service
-systemctl --user restart saturnin-improve.timer saturnin-resume.timer saturnin-discovery.timer
-systemctl --user status saturnin-attestation.service
+saturnin check command "$SATURNIN_HOME/scripts/install_attestation_unit.sh install" --execute --task <task-id>
+saturnin check command "$SATURNIN_HOME/scripts/install_attestation_unit.sh status" --execute --task <task-id>
+saturnin check command "$SATURNIN_HOME/scripts/install_attestation_unit.sh uninstall" --execute --task <task-id>
 ```
+
+Install is retry-safe and restores the prior signer definition and state after a partial failure. Status performs no mutation. Uninstall removes only the signer definition, enablement link, and pinned runtime snapshot `%h/.config/systemd/user/saturnin-attestation-runtime.pyz`, leaves encrypted credentials in place, and is safe to repeat.
+<!-- /generated:signer-unit-interface -->
+
+The governed callback timeout first sends a cooperative termination signal and
+allows a 60-second rollback grace period. The installer retains its lifecycle
+and credential locks while its exit trap stops and verifies any candidate
+signer and restores the prior definition. If that grace period is exhausted,
+the broker force-terminates the process group and records that manual recovery
+is required rather than reporting an ordinary retry-safe failure.
+
+The uninstall action is the selective rollback for the signer installation.
+It does not revoke or delete credentials. Use the credential lifecycle commands
+below separately when revocation is intended.
 
 <!-- generated:attestation-boundary -->
 During autonomous operation, the master and previous keys are loaded only by `saturnin-attestation.service` in its private mount, network, runtime, and credential namespace. Supervisor and worker units do not load either credential. Explicit owner lifecycle commands may decrypt them in bounded process memory only while the signer and supervisors are stopped.
@@ -109,7 +124,7 @@ saturnin credential status review-attestation
 saturnin credential rotate-attestation
 saturnin credential seal-attestation-rotation
 saturnin credential status review-attestation
-systemctl --user start saturnin-attestation.service
+saturnin check command "$SATURNIN_HOME/scripts/install_attestation_unit.sh install" --execute --task <task-id>
 systemctl --user start saturnin-improve.timer saturnin-resume.timer saturnin-discovery.timer
 ```
 
@@ -119,6 +134,9 @@ the old current key to the previous slot in memory, generates a new current
 key internally, and enters `pending-seal`. Sealing passes both decrypted values
 directly to the review ledger API, without environment variables, then deletes
 rollback artifacts. A second rotation is refused while any rotation is pending.
+The governed installer retains the credential lifecycle lock while atomically
+rerendering and reloading the signer with the newly sealed generation; do not
+restart the stale loaded fragment directly.
 
 If rotation or sealing fails, keep the timers stopped. Retry sealing when
 status is `pending-seal`, or restore both encrypted slots:

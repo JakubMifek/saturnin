@@ -33,11 +33,128 @@ services:
   journalctl_allowed: true
   unit_prefix: saturnin-
   allowed_subcommands: [start, stop, restart, status, enable, disable, list-timers, daemon-reload]
+  allowed_units:
+    - saturnin-discovery.service
+    - saturnin-discovery.timer
+    - saturnin-improve.service
+    - saturnin-improve.timer
+    - saturnin-janitor.service
+    - saturnin-janitor.timer
+    - saturnin-mirror.service
+    - saturnin-mirror.timer
+    - saturnin-poller.service
+    - saturnin-poller.timer
+    - saturnin-resume.service
+    - saturnin-resume.timer
+    - saturnin-attestation.service
   # Timers live in the Saturnin user scope only.
   scheduling_scope: user
   allowed_schedulers: [systemd-user-timer]
+  governed_units: [saturnin-attestation.service]
+
+# Canonical compound operations are checked as exact executable/action pairs.
+# They may internally perform only the bounded user-unit lifecycle named here.
+operations:
+  signer_user_unit:
+    executable: scripts/install_attestation_unit.sh
+    sha256: 80e91818c3a71ca21db3b6918709ed5da603751bf969ccd58e4f568daa5ab78e
+    dependencies:
+      - .venv/bin/saturnin
+      - systemd/saturnin-attestation.service
+    runtime_sources:
+      - source: src/saturnin
+        archive: saturnin
+        files:
+          - __init__.py
+          - __main__.py
+          - attestation_service.py
+          - automation.py
+          - board.py
+          - checkpoints.py
+          - cli.py
+          - config.py
+          - contracts.py
+          - credentials.py
+          - disclosure.py
+          - discovery.py
+          - docsync.py
+          - escalation.py
+          - governance.py
+          - improve.py
+          - issues.py
+          - jsonlines.py
+          - launcher.py
+          - locking.py
+          - mcp.py
+          - review.py
+          - routing.py
+          - telemetry.py
+          - worker_callbacks.py
+          - worktrees.py
+      - source: .venv/lib/{python_version}/site-packages/yaml
+        archive: yaml
+        excluded_files:
+          - _yaml{extension_suffix}
+        files:
+          - __init__.py
+          - composer.py
+          - constructor.py
+          - cyaml.py
+          - dumper.py
+          - emitter.py
+          - error.py
+          - events.py
+          - loader.py
+          - nodes.py
+          - parser.py
+          - reader.py
+          - representer.py
+          - resolver.py
+          - scanner.py
+          - serializer.py
+          - tokens.py
+    runtime_files:
+      - source: policies/governance.yaml
+        archive: saturnin/governance.runtime.yaml
+    runtime_manifest_sha256: 65b8859a34569d29ba6bf94eb7e66c7c230da0c0d893ce7e7f1afa9badf65ce5
+    trusted_tools:
+      - /usr/bin/bash
+      - /usr/bin/chmod
+      - /usr/bin/cp
+      - /usr/bin/flock
+      - /usr/bin/id
+      - /usr/bin/mkdir
+      - /usr/bin/mv
+      - /usr/bin/python3
+      - /usr/bin/realpath
+      - /usr/bin/rm
+      - /usr/bin/rmdir
+      - /usr/bin/sleep
+      - /usr/bin/stat
+      - /usr/bin/systemctl
+      - /usr/bin/systemd-analyze
+      - /usr/bin/systemd-creds
+      - /usr/bin/timeout
+    allowed_actions: [install, status, uninstall]
+    unit: saturnin-attestation.service
+    runtime_snapshot: "%h/.config/systemd/user/saturnin-attestation-runtime.pyz"
+    scope: user
 
 filesystem:
+  governed_write_paths:
+    - policies/server_scope.yaml
+    - policies/governance.yaml
+    - scripts/install_attestation_unit.sh
+    - systemd/saturnin-attestation.service
+    - .venv/bin/saturnin
+    - src/saturnin
+    - ".venv/lib/{python_version}/site-packages/yaml"
+    - "%h/.config/systemd/user"
+    - "%h/.config/systemd/user/saturnin-attestation.service"
+    - "%h/.config/systemd/user/saturnin-attestation.service.d"
+    - "%h/.config/systemd/user/saturnin-attestation-runtime.pyz"
+    - "%h/.config/systemd/user/default.target.wants/saturnin-attestation.service"
+    - "%h/.config/systemd/user/saturnin-credentials"
   # Basename-specific command rules only apply to executables resolved from
   # administrator-controlled system locations.
   trusted_executable_roots:
@@ -82,8 +199,6 @@ filesystem:
     - false
     - test
     - wc
-    - sort
-    - uniq
     - tr
     - cut
     - basename

@@ -105,6 +105,9 @@ def test_install_user_units_installs_safe_checkout_path(tmp_path: Path) -> None:
         (fake_bin / command).chmod(0o755)
 
     config_home = tmp_path / "config"
+    (tmp_path / "pathlib.py").write_text(
+        "raise RuntimeError('untrusted cwd import')\n", encoding="utf-8"
+    )
     env = {
         **os.environ,
         "PATH": f"{fake_bin}:{os.environ['PATH']}",
@@ -117,6 +120,7 @@ def test_install_user_units_installs_safe_checkout_path(tmp_path: Path) -> None:
         capture_output=True,
         text=True,
         env=env,
+        cwd=tmp_path,
     )
 
     installed_dir = config_home / "systemd" / "user"
@@ -143,15 +147,10 @@ def test_install_user_units_installs_safe_checkout_path(tmp_path: Path) -> None:
         text = (installed_dir / unit).read_text(encoding="utf-8")
         assert "PrivateMounts=yes" in text
         assert "LoadCredentialEncrypted=" not in text
-    signer = (installed_dir / "saturnin-attestation.service").read_text(
-        encoding="utf-8"
-    )
-    assert signer.count("LoadCredentialEncrypted=") == 2
-    assert "PrivateNetwork=yes" in signer
-    assert "ProtectProc=invisible" in signer
+    assert not (installed_dir / "saturnin-attestation.service").exists()
 
 
-def test_install_user_units_rejects_incomplete_attestation_pair_before_replacement(
+def test_install_user_units_leaves_attestation_state_untouched(
     tmp_path: Path,
 ) -> None:
     saturnin_home = tmp_path / "checkout"
@@ -174,6 +173,8 @@ def test_install_user_units_rejects_incomplete_attestation_pair_before_replaceme
         "ciphertext\n", encoding="utf-8"
     )
 
+    signer = unit_dir / "saturnin-attestation.service"
+    signer.write_text("existing signer\n", encoding="utf-8")
     result = subprocess.run(
         ["bash", str(REPO_ROOT / "scripts/install_user_units.sh")],
         check=False,
@@ -187,9 +188,8 @@ def test_install_user_units_rejects_incomplete_attestation_pair_before_replaceme
         },
     )
 
-    assert result.returncode == 1
-    assert "pair is incomplete or unsafe" in result.stderr
-    assert previous.read_text(encoding="utf-8") == "existing installation\n"
+    assert result.returncode == 0
+    assert signer.read_text(encoding="utf-8") == "existing signer\n"
 
 
 def test_install_does_not_enable_unaccepted_mirror_timer(tmp_path: Path) -> None:
