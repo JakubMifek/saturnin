@@ -4,6 +4,8 @@ import json
 import os
 import socket
 import threading
+import urllib.error
+import urllib.request
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -13,8 +15,12 @@ import pytest
 from saturnin.system_attestation import (
     DedicatedSigner,
     GitHub,
+    AuthorizationLimiter,
     ServiceConfig,
     SystemAttestationError,
+    _RejectRedirects,
+    _audit,
+    _open_without_redirects,
     request_attestation,
     verify_attestation,
 )
@@ -140,6 +146,8 @@ def test_issue_marker_binds_every_field_and_consumes_comment(tmp_path: Path) -> 
             return {"title": "Title", "body": "Body", "user": {"login": "author"}}
         return [{
             "id": 55, "body": "saturnin-attestation:v1 " + json.dumps(marker),
+            "created_at": NOW.isoformat(),
+            "updated_at": NOW.isoformat(),
             "user": {"login": "review-bot", "type": "Bot"},
         }]
 
@@ -176,6 +184,19 @@ def test_current_and_previous_verification_no_downgrade(tmp_path: Path) -> None:
     altered["destination_repo"] = "acme/other"
     with pytest.raises(SystemAttestationError, match="does not match"):
         service.verify(json.dumps(altered))
+
+
+def test_attestation_expiry_is_enforced(tmp_path: Path) -> None:
+    current = [NOW]
+    cfg = config()
+    service = DedicatedSigner(
+        cfg, GitHub(cfg, transport=pr_transport()), b"c" * 48, b"p" * 48,
+        tmp_path / "expiry.sqlite3", now=lambda: current[0],
+    )
+    value = service.authorize(request())
+    current[0] += timedelta(seconds=301)
+    with pytest.raises(SystemAttestationError, match="expired"):
+        service.verify(value)
 
 
 def test_mocked_production_approval_record_gate_and_unreviewed_rejection(
@@ -258,6 +279,48 @@ def test_service_config_loads_only_fixed_github_origin(tmp_path: Path) -> None:
         ServiceConfig.load(path)
 
 
+@pytest.mark.parametrize(
+    ("name", "value"),
+    [
+        ("request_timeout_seconds", 0),
+        ("maximum_issue_marker_ttl_seconds", 3601),
+        ("authorization_limit", 0),
+        ("authorization_window_seconds", 3601),
+    ],
+)
+def test_service_config_rejects_unbounded_limits(
+    tmp_path: Path, name: str, value: int
+) -> None:
+    data = {
+        "repositories": ["acme/widget"], "pr_reviewers": ["bot"],
+        "issue_reviewers": ["bot"], "allowed_verdicts": ["approved"],
+        name: value,
+    }
+    path = tmp_path / "config.json"
+    path.write_text(json.dumps(data), encoding="utf-8")
+    with pytest.raises(SystemAttestationError, match="bounds"):
+        ServiceConfig.load(path)
+
+
+def test_service_config_rejects_missing_lists_and_non_numeric_bounds(
+    tmp_path: Path,
+) -> None:
+    path = tmp_path / "config.json"
+    path.write_text(json.dumps({
+        "repositories": ["acme/widget"], "pr_reviewers": ["bot"],
+        "issue_reviewers": ["bot"],
+    }), encoding="utf-8")
+    with pytest.raises(SystemAttestationError, match="lists"):
+        ServiceConfig.load(path)
+    path.write_text(json.dumps({
+        "repositories": ["acme/widget"], "pr_reviewers": ["bot"],
+        "issue_reviewers": ["bot"], "allowed_verdicts": ["approved"],
+        "authorization_limit": "not-a-number",
+    }), encoding="utf-8")
+    with pytest.raises(SystemAttestationError, match="bounds"):
+        ServiceConfig.load(path)
+
+
 def _one_shot_server(path: Path, response: dict) -> threading.Thread:
     ready = threading.Event()
 
@@ -320,3 +383,118 @@ def test_github_client_rejects_paths_and_bounds_pagination() -> None:
     oversized = GitHub(cfg, transport=lambda path: [{}] * 101)
     with pytest.raises(SystemAttestationError, match="oversized"):
         oversized.pages("/repos/acme/widget/pulls/7/reviews")
+
+
+def test_github_authorization_header_uses_token_without_disclosure(
+) -> None:
+    seen = {}
+
+    class Response:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *args):
+            return None
+
+        def geturl(self):
+            return "https://api.github.com/repos/acme/widget/pulls/7"
+
+        def read(self, _size):
+            return b"{}"
+
+    def open_request(request, timeout):
+        seen["authorization"] = request.get_header("Authorization")
+        seen["timeout"] = timeout
+        return Response()
+
+    token = "root-token-for-test"
+    assert GitHub(
+        config(), token=token, request_transport=open_request
+    ).get("/repos/acme/widget/pulls/7") == {}
+    assert seen == {"authorization": f"Bearer {token}", "timeout": 10}
+
+    def fail_request(_request, timeout):
+        raise urllib.error.URLError(f"transport failed with {token}")
+
+    with pytest.raises(SystemAttestationError) as caught:
+        GitHub(
+            config(), token=token, request_transport=fail_request
+        ).get("/repos/acme/widget/pulls/7")
+    assert token not in str(caught.value)
+
+
+def test_github_client_rejects_redirect_and_malformed_response(
+) -> None:
+    class Response:
+        url = "https://evil.invalid/repos/acme/widget/pulls/7"
+        body = b"{}"
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *args):
+            return None
+
+        def geturl(self):
+            return self.url
+
+        def read(self, _size):
+            return self.body
+
+    response = Response()
+    client = GitHub(
+        config(), request_transport=lambda request, timeout: response
+    )
+    with pytest.raises(SystemAttestationError, match="redirect"):
+        client.get("/repos/acme/widget/pulls/7")
+    response.url = "https://api.github.com/repos/acme/widget/pulls/7"
+    response.body = b"{"
+    with pytest.raises(SystemAttestationError, match="malformed"):
+        client.get("/repos/acme/widget/pulls/7")
+
+
+def test_default_github_transport_disables_redirects(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    assert _RejectRedirects().redirect_request(None, None, 302, "", {}, "") is None
+    seen = {}
+
+    class Opener:
+        def open(self, request, timeout):
+            seen["request"] = request
+            seen["timeout"] = timeout
+            return "response"
+
+    def build(handler):
+        seen["handler"] = handler
+        return Opener()
+
+    monkeypatch.setattr("urllib.request.build_opener", build)
+    request = urllib.request.Request("https://api.github.com/repos/acme/widget")
+    assert _open_without_redirects(request, 3) == "response"
+    assert seen["handler"] is _RejectRedirects
+    assert seen["request"] is request
+    assert seen["timeout"] == 3
+
+
+def test_authorization_limiter_is_bounded_and_recovers() -> None:
+    ticks = iter((0.0, 1.0, 2.0, 11.0, 12.0))
+    limiter = AuthorizationLimiter(2, 10, clock=lambda: next(ticks))
+    assert limiter.allow(1000)
+    assert limiter.allow(1000)
+    assert not limiter.allow(1000)
+    assert limiter.allow(1000)
+    assert limiter.allow(1001)
+
+
+def test_audit_record_contains_only_hashes_and_outcome(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    _audit("authorized", "e" * 64, "s" * 64)
+    record = json.loads(capsys.readouterr().err)
+    assert record == {
+        "event": "attestation_authorization",
+        "outcome": "authorized",
+        "evidence_hash": "e" * 64,
+        "scope_hash": "s" * 64,
+    }

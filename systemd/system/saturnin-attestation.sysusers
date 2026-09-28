@@ -1,1 +1,3 @@
+g saturnin - -
 u saturnin-signer - "Saturnin attestation signer" /var/lib/saturnin-attestation /usr/sbin/nologin
+m jakubmifek saturnin

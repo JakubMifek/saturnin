@@ -276,8 +276,11 @@ def _signer_unit_interface(config: Config) -> str:
         f"```bash\n{commands}\n```\n\n"
         "Install is retry-safe and restores the prior signer definition and state "
         "after a partial failure. Status performs no mutation. Rotate and rollback "
-        "only exchange encrypted credential generations. No action accepts a path, "
-        "unit, owner, package, or arbitrary command."
+        "decrypt each generation under root, validate its identity, and re-encrypt "
+        "it with its destination embedded name before atomic publication. Both "
+        "restart the service and require an active health result; any failure "
+        "restores the complete prior credential set and service. No action accepts "
+        "a path, unit, owner, package, or arbitrary command."
     )
 
 

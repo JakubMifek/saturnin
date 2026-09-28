@@ -31,7 +31,7 @@ sudo /usr/sbin/saturnin-attestation-admin rotate
 sudo /usr/sbin/saturnin-attestation-admin rollback
 ```
 
-Install is retry-safe and restores the prior signer definition and state after a partial failure. Status performs no mutation. Rotate and rollback only exchange encrypted credential generations. No action accepts a path, unit, owner, package, or arbitrary command.
+Install is retry-safe and restores the prior signer definition and state after a partial failure. Status performs no mutation. Rotate and rollback decrypt each generation under root, validate its identity, and re-encrypt it with its destination embedded name before atomic publication. Both restart the service and require an active health result; any failure restores the complete prior credential set and service. No action accepts a path, unit, owner, package, or arbitrary command.
 <!-- /generated:signer-unit-interface -->
 
 The installer creates only the declared sysuser, tmpfiles, system units,
@@ -67,10 +67,22 @@ previous, and restarts the service only after atomic publication. A failed
 restart restores the prior generation. Rollback is the only reversal and does
 not accept caller-selected files.
 
-Legacy user-owned signer ciphertext is not migrated: its same-UID origin
-cannot establish trustworthy key identity. Bootstrap creates a fresh system
-key; old ledgers remain read-only evidence and cannot authorize a new record.
-This is an explicit trust reset rather than a weakened migration.
+On first installation only, the administrator checks the fixed UID-1000 source
+`/home/jakubmifek/.config/systemd/user/saturnin-credentials`. It accepts only
+the reviewed current and previous filenames, embedded names, and plaintext
+SHA-256 identities recorded in ADR 0005. Every path component and retained
+O_NOFOLLOW descriptor is checked before and after decryption; aliases, links,
+mount or content mutation, partial target state, and hash mismatches fail the
+whole transaction. Plaintext is passed only through root process pipes and is
+re-encrypted as `current.key` and `previous.key`. If the source is absent,
+bootstrap creates fresh keys; it never silently falls back after a rejected
+migration.
+
+The service accepts only the local AF_UNIX socket and needs outbound HTTPS to
+the fixed `api.github.com` origin. The system sandbox prevents network binds;
+application validation refuses alternate origins and redirects. The
+`saturnin` socket-client group has fixed member `jakubmifek`; it does not grant
+access to credentials or signer state.
 
 ### Recovery
 

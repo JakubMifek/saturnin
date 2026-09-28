@@ -9,14 +9,17 @@ obtained again from GitHub.
 from __future__ import annotations
 
 import argparse
+from collections import defaultdict, deque
 import hashlib
 import hmac
 import json
 import os
 import pwd
 import re
+import signal
 import socket
 import sqlite3
+import stat
 import struct
 import sys
 import threading
@@ -39,6 +42,12 @@ _REPO = re.compile(r"[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+")
 _SHA = re.compile(r"[0-9a-f]{40}")
 _DIGEST = re.compile(r"[0-9a-f]{64}")
 _NONCE = re.compile(r"[0-9a-f]{32,64}")
+_ATTESTATION_FIELDS = {
+    "schema", "kind", "repository", "subject", "author", "author_role",
+    "reviewer", "reviewer_identity", "verdict", "zero_context", "head_sha",
+    "issue_digest", "destination_repo", "authorization_evidence_id", "nonce",
+    "expires_at", "attestation_id", "key_id", "signature",
+}
 
 
 class SystemAttestationError(RuntimeError):
@@ -82,6 +91,8 @@ class ServiceConfig:
     github_api: str = "https://api.github.com"
     request_timeout_seconds: float = 10
     maximum_issue_marker_ttl_seconds: int = 3600
+    authorization_limit: int = 30
+    authorization_window_seconds: int = 60
 
     @classmethod
     def load(cls, path: Path = CONFIG_PATH) -> "ServiceConfig":
@@ -92,6 +103,7 @@ class ServiceConfig:
         if not isinstance(raw, dict) or set(raw) - {
             "repositories", "pr_reviewers", "issue_reviewers", "allowed_verdicts",
             "github_api", "request_timeout_seconds", "maximum_issue_marker_ttl_seconds",
+            "authorization_limit", "authorization_window_seconds",
         }:
             raise SystemAttestationError("service configuration schema is invalid")
         api = raw.get("github_api", "https://api.github.com")
@@ -111,12 +123,26 @@ class ServiceConfig:
             raise SystemAttestationError("service allowlists must not be empty")
         if not verdicts or not verdicts <= {"approved", "changes_requested", "rejected"}:
             raise SystemAttestationError("allowed verdicts are invalid")
+        try:
+            timeout = float(raw.get("request_timeout_seconds", 10))
+            marker_ttl = int(raw.get("maximum_issue_marker_ttl_seconds", 3600))
+            authorization_limit = int(raw.get("authorization_limit", 30))
+            authorization_window = int(raw.get("authorization_window_seconds", 60))
+        except (TypeError, ValueError) as exc:
+            raise SystemAttestationError("service configuration bounds are invalid") from exc
+        if (
+            not 0 < timeout <= 30
+            or not 0 < marker_ttl <= 3600
+            or not 0 < authorization_limit <= 1000
+            or not 0 < authorization_window <= 3600
+        ):
+            raise SystemAttestationError("service configuration bounds are invalid")
         return cls(
             repositories, pr_reviewers, issue_reviewers, verdicts,
-            request_timeout_seconds=float(raw.get("request_timeout_seconds", 10)),
-            maximum_issue_marker_ttl_seconds=int(
-                raw.get("maximum_issue_marker_ttl_seconds", 3600)
-            ),
+            request_timeout_seconds=timeout,
+            maximum_issue_marker_ttl_seconds=marker_ttl,
+            authorization_limit=authorization_limit,
+            authorization_window_seconds=authorization_window,
         )
 
 
@@ -128,10 +154,12 @@ class GitHub:
         config: ServiceConfig,
         token: str = "",
         transport: Callable[[str], Any] | None = None,
+        request_transport: Callable[[urllib.request.Request, float], Any] | None = None,
     ) -> None:
         self.config = config
         self.token = token
         self.transport = transport
+        self.request_transport = request_transport or _open_without_redirects
 
     def get(self, path: str) -> Any:
         if not re.fullmatch(r"/repos/[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+/[A-Za-z0-9?&=._/-]+", path):
@@ -149,8 +177,8 @@ class GitHub:
             },
         )
         try:
-            with urllib.request.urlopen(
-                request, timeout=self.config.request_timeout_seconds
+            with self.request_transport(
+                request, self.config.request_timeout_seconds
             ) as response:
                 if response.geturl().split("?", 1)[0] != (
                     self.config.github_api + path.split("?", 1)[0]
@@ -178,6 +206,17 @@ class GitHub:
             if len(values) < 100:
                 return result
         raise SystemAttestationError("GitHub authorization pagination limit exceeded")
+
+
+class _RejectRedirects(urllib.request.HTTPRedirectHandler):
+    def redirect_request(self, request, fp, code, msg, headers, newurl):
+        return None
+
+
+def _open_without_redirects(
+    request: urllib.request.Request, timeout: float
+) -> Any:
+    return urllib.request.build_opener(_RejectRedirects).open(request, timeout=timeout)
 
 
 class DedicatedSigner:
@@ -267,8 +306,14 @@ class DedicatedSigner:
             payload = json.loads(attestation)
         except json.JSONDecodeError as exc:
             raise SystemAttestationError("attestation is malformed") from exc
-        if not isinstance(payload, dict) or payload.get("schema") != "saturnin-attestation-v2":
+        if (
+            not isinstance(payload, dict)
+            or set(payload) != _ATTESTATION_FIELDS
+            or payload.get("schema") != "saturnin-attestation-v2"
+        ):
             raise SystemAttestationError("attestation schema is invalid")
+        if _iso(payload.get("expires_at")) <= self.now():
+            raise SystemAttestationError("attestation is expired")
         signature = payload.get("signature")
         key_id = payload.get("key_id")
         if not isinstance(signature, str) or not _DIGEST.fullmatch(signature):
@@ -359,7 +404,7 @@ class DedicatedSigner:
         digest = hashlib.sha256(_canonical({
             "title": str(issue.get("title", "")), "body": str(issue.get("body") or "")
         })).hexdigest()
-        candidates: list[tuple[int, dict[str, Any], str]] = []
+        candidates: list[tuple[int, dict[str, Any], str, datetime]] = []
         for comment in self.github.pages(f"/repos/{repo}/issues/{number}/comments"):
             body = comment.get("body")
             user = comment.get("user") or {}
@@ -373,13 +418,19 @@ class DedicatedSigner:
                 continue
             try:
                 marker = json.loads(body[len(ISSUE_MARKER):])
+                created = _iso(comment.get("created_at"))
+                updated = _iso(comment.get("updated_at"))
             except json.JSONDecodeError:
                 continue
-            if isinstance(marker, dict):
-                candidates.append((comment_id, marker, login))
+            except SystemAttestationError:
+                continue
+            if isinstance(marker, dict) and created == updated:
+                candidates.append((comment_id, marker, login, created))
         if not candidates:
             raise SystemAttestationError("issue has no valid review marker")
-        comment_id, marker, reviewer_identity = max(candidates, key=lambda item: item[0])
+        comment_id, marker, reviewer_identity, comment_created = max(
+            candidates, key=lambda item: item[0]
+        )
         required = {
             "repository", "issue", "digest", "author", "reviewer_role", "verdict",
             "zero_context", "destination_repo", "expiry", "nonce",
@@ -396,7 +447,12 @@ class DedicatedSigner:
             raise SystemAttestationError("issue review marker types are invalid")
         expiry = _iso(marker["expiry"])
         now = self.now()
-        if expiry <= now or (expiry - now).total_seconds() > self.config.maximum_issue_marker_ttl_seconds:
+        if (
+            expiry <= now
+            or expiry <= comment_created
+            or (expiry - comment_created).total_seconds()
+            > self.config.maximum_issue_marker_ttl_seconds
+        ):
             raise SystemAttestationError("issue review marker is expired or overlong")
         if (
             _repo(marker["repository"]) != repo
@@ -549,6 +605,8 @@ def _trusted_service_process(pid: int) -> bool:
         metadata = executable.stat()
         cgroup = Path(f"/proc/{pid}/cgroup").read_text(encoding="utf-8")
         command = Path(f"/proc/{pid}/cmdline").read_bytes().split(b"\0")
+        runtime = Path("/usr/lib/saturnin-attestation/system_attestation.py")
+        runtime_metadata = runtime.lstat()
     except OSError:
         return False
     return (
@@ -560,6 +618,10 @@ def _trusted_service_process(pid: int) -> bool:
             part == b"/usr/lib/saturnin-attestation/system_attestation.py"
             for part in command
         )
+        and stat.S_ISREG(runtime_metadata.st_mode)
+        and runtime_metadata.st_uid == 0
+        and runtime_metadata.st_nlink == 1
+        and not runtime_metadata.st_mode & 0o022
         and "saturnin-attestation.service" in cgroup
     )
 
@@ -578,6 +640,41 @@ def _credential(name: str, *, optional: bool = False) -> bytes:
     return value.rstrip(b"\n")
 
 
+class AuthorizationLimiter:
+    def __init__(
+        self, limit: int, window: int, clock: Callable[[], float] = time.monotonic
+    ) -> None:
+        self.limit, self.window, self.clock = limit, window, clock
+        self._events: dict[int, deque[float]] = defaultdict(deque)
+
+    def allow(self, uid: int) -> bool:
+        now = self.clock()
+        events = self._events[uid]
+        while events and events[0] <= now - self.window:
+            events.popleft()
+        if len(events) >= self.limit:
+            return False
+        events.append(now)
+        return True
+
+
+def _audit(outcome: str, evidence_hash: str = "", scope_hash: str = "") -> None:
+    print(
+        json.dumps(
+            {
+                "event": "attestation_authorization",
+                "outcome": outcome,
+                "evidence_hash": evidence_hash,
+                "scope_hash": scope_hash,
+            },
+            sort_keys=True,
+            separators=(",", ":"),
+        ),
+        file=sys.stderr,
+        flush=True,
+    )
+
+
 def serve() -> None:
     config = ServiceConfig.load()
     current = _credential("current.key")
@@ -585,16 +682,35 @@ def serve() -> None:
     token = _credential("github.token", optional=True).decode()
     signer = DedicatedSigner(config, GitHub(config, token), current, previous)
     listener = socket.socket(fileno=3)
+    if listener.family != socket.AF_UNIX:
+        listener.close()
+        raise SystemAttestationError("socket activation listener must be AF_UNIX")
     listener.settimeout(1)
-    stop = False
-    while not stop:
+    stopping = threading.Event()
+    limiter = AuthorizationLimiter(
+        config.authorization_limit, config.authorization_window_seconds
+    )
+    old_handlers = {
+        signum: signal.signal(signum, lambda _signum, _frame: stopping.set())
+        for signum in (signal.SIGTERM, signal.SIGINT)
+    }
+    while not stopping.is_set():
         try:
             connection, _ = listener.accept()
         except TimeoutError:
             continue
         with connection:
             connection.settimeout(10)
+            outcome = "denied"
+            evidence_hash = ""
+            scope_hash = ""
             try:
+                _pid, peer_uid, _gid = struct.unpack(
+                    "3i",
+                    connection.getsockopt(
+                        socket.SOL_SOCKET, socket.SO_PEERCRED, struct.calcsize("3i")
+                    ),
+                )
                 data = bytearray()
                 while b"\n" not in data and len(data) <= MAX_REQUEST:
                     chunk = connection.recv(4096)
@@ -607,8 +723,29 @@ def serve() -> None:
                 if not isinstance(request, dict):
                     raise SystemAttestationError("request schema is invalid")
                 if request.get("action") == "authorize":
-                    response = {"attestation": signer.authorize(request)}
+                    if not limiter.allow(peer_uid):
+                        outcome = "rate_limited"
+                        raise SystemAttestationError("authorization rate limit exceeded")
+                    attestation = signer.authorize(request)
+                    payload = json.loads(attestation)
+                    evidence_hash = hashlib.sha256(
+                        str(payload["authorization_evidence_id"]).encode()
+                    ).hexdigest()
+                    scope_hash = hashlib.sha256(
+                        _canonical(
+                            {
+                                key: payload[key]
+                                for key in (
+                                    "kind", "repository", "subject",
+                                    "destination_repo", "head_sha", "issue_digest",
+                                )
+                            }
+                        )
+                    ).hexdigest()
+                    outcome = "authorized"
+                    response = {"attestation": attestation}
                 elif set(request) == {"action", "attestation"} and request["action"] == "verify":
+                    outcome = "verified"
                     response = signer.verify(request["attestation"])
                 else:
                     raise SystemAttestationError("request schema is invalid")
@@ -616,7 +753,12 @@ def serve() -> None:
                 response = {"error": str(exc)}
             except Exception:
                 response = {"error": "internal authorization failure"}
+            if outcome != "verified":
+                _audit(outcome, evidence_hash, scope_hash)
             connection.sendall(_canonical(response) + b"\n")
+    listener.close()
+    for signum, handler in old_handlers.items():
+        signal.signal(signum, handler)
 
 
 def main(argv: list[str] | None = None) -> int:
