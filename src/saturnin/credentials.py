@@ -313,16 +313,66 @@ def _atomic_replace_private(path: Path, value: str) -> None:
             while view:
                 view = view[os.write(file_descriptor, view) :]
             os.fsync(file_descriptor)
-            os.close(file_descriptor)
-            file_descriptor = -1
+            written_metadata = os.fstat(file_descriptor)
+            if (
+                not stat.S_ISREG(written_metadata.st_mode)
+                or written_metadata.st_uid != os.getuid()
+                or stat.S_IMODE(written_metadata.st_mode) != PRIVATE_FILE_MODE
+                or written_metadata.st_nlink != 1
+                or written_metadata.st_size != len(data)
+            ):
+                raise CredentialError(
+                    f"credential staging artifact changed before publication: {name}"
+                )
             _revalidate_credential_directory(directory_descriptor)
+            staged_metadata = os.stat(
+                temporary,
+                dir_fd=directory_descriptor,
+                follow_symlinks=False,
+            )
+            if (
+                staged_metadata.st_dev != written_metadata.st_dev
+                or staged_metadata.st_ino != written_metadata.st_ino
+                or staged_metadata.st_mode != written_metadata.st_mode
+                or staged_metadata.st_uid != written_metadata.st_uid
+                or staged_metadata.st_gid != written_metadata.st_gid
+                or staged_metadata.st_nlink != written_metadata.st_nlink
+                or staged_metadata.st_size != written_metadata.st_size
+            ):
+                raise CredentialError(
+                    f"credential staging artifact changed before publication: {name}"
+                )
             os.rename(
                 temporary,
                 name,
                 src_dir_fd=directory_descriptor,
                 dst_dir_fd=directory_descriptor,
             )
+            published_metadata = os.stat(
+                name,
+                dir_fd=directory_descriptor,
+                follow_symlinks=False,
+            )
+            retained_metadata = os.fstat(file_descriptor)
+            if (
+                published_metadata.st_dev != written_metadata.st_dev
+                or published_metadata.st_ino != written_metadata.st_ino
+                or published_metadata.st_mode != written_metadata.st_mode
+                or published_metadata.st_uid != written_metadata.st_uid
+                or published_metadata.st_gid != written_metadata.st_gid
+                or published_metadata.st_nlink != 1
+                or published_metadata.st_size != len(data)
+                or retained_metadata.st_dev != written_metadata.st_dev
+                or retained_metadata.st_ino != written_metadata.st_ino
+                or retained_metadata.st_nlink != 1
+                or retained_metadata.st_size != len(data)
+            ):
+                raise CredentialError(
+                    f"credential artifact changed during publication: {name}"
+                )
             os.fsync(directory_descriptor)
+        except CredentialError:
+            raise
         except OSError as exc:
             raise CredentialError(
                 f"credential artifact could not be replaced safely: {name}"

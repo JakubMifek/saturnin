@@ -20,6 +20,7 @@ from saturnin.credentials import (
     PREVIOUS_ATTESTATION_CREDENTIAL,
     CredentialError,
     _advance_generation,
+    _atomic_replace_private,
     _credential_namespace_parent_is_trusted,
     _credential_namespace_path,
     _lifecycle_lock,
@@ -61,6 +62,48 @@ def runtime_gate(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
 
 def _ciphertext(payload: bytes = b"fixture") -> bytes:
     return base64.b64encode(HOST_SCOPED_CREDENTIAL_ID + payload) + b"\n"
+
+
+def test_atomic_replace_rejects_staging_entry_substitution(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path / "config"))
+    credential_dir = (
+        tmp_path / "config" / "systemd" / "user" / "saturnin-credentials"
+    )
+    credential_dir.mkdir(parents=True, mode=0o700, exist_ok=True)
+    destination = credential_dir / "state"
+    original_rename = os.rename
+
+    def substitute_then_rename(
+        source: str,
+        target: str,
+        *,
+        src_dir_fd: int,
+        dst_dir_fd: int,
+    ) -> None:
+        os.unlink(source, dir_fd=src_dir_fd)
+        replacement = os.open(
+            source,
+            os.O_WRONLY | os.O_CREAT | os.O_EXCL,
+            0o600,
+            dir_fd=src_dir_fd,
+        )
+        os.write(replacement, b"attacker")
+        os.close(replacement)
+        original_rename(
+            source,
+            target,
+            src_dir_fd=src_dir_fd,
+            dst_dir_fd=dst_dir_fd,
+        )
+
+    monkeypatch.setattr("saturnin.credentials.os.rename", substitute_then_rename)
+
+    with pytest.raises(CredentialError, match="changed during publication"):
+        _atomic_replace_private(destination, "trusted")
+
+    assert destination.read_text() == "attacker"
 
 
 def test_production_credential_namespace_ignores_caller_home(
