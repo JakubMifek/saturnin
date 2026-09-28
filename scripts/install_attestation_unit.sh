@@ -802,7 +802,7 @@ if (
     )
     not in {("inactive", "dead"), ("failed", "failed")}
     or properties.get("MainPID") != "0"
-    or properties.get("ExecMainPID") != "0"
+    or not properties.get("ExecMainPID", "").isdigit()
 ):
     raise SystemExit("rejected signer process is not proven stopped")
 control_group = properties.get("ControlGroup", "")
