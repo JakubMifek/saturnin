@@ -922,7 +922,7 @@ def test_lifecycle_lock_excludes_concurrent_uninstall_and_rollback(
     assert (unit_dir / "saturnin-attestation.service").is_file()
 
 
-def test_credential_lock_is_retained_through_final_process_verification(
+def test_rotation_gate_is_retained_after_credential_lock_handoff(
     signer_install: tuple[Path, dict[str, str], Path, Path],
 ) -> None:
     checkout, env, unit_dir, _ = signer_install
@@ -953,14 +953,18 @@ def test_credential_lock_is_retained_through_final_process_verification(
             unit_dir / "saturnin-credentials",
             os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW,
         )
+        unit_fd = os.open(
+            unit_dir,
+            os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW,
+        )
         try:
+            fcntl.flock(credential_fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
             with pytest.raises(BlockingIOError):
-                fcntl.flock(
-                    credential_fd,
-                    fcntl.LOCK_EX | fcntl.LOCK_NB,
-                )
+                fcntl.flock(unit_fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
         finally:
+            fcntl.flock(credential_fd, fcntl.LOCK_UN)
             os.close(credential_fd)
+            os.close(unit_fd)
         hold.unlink()
         stdout, stderr = process.communicate(timeout=5)
     finally:
@@ -1046,6 +1050,28 @@ def test_uninstall_is_selective_and_repeatable(
     assert (unit_dir / "saturnin-credentials").is_dir()
 
 
+def test_uninstall_stops_active_signer_when_disk_artifacts_are_missing(
+    signer_install: tuple[Path, dict[str, str], Path, Path],
+) -> None:
+    _, _, unit_dir, calls = signer_install
+    assert _run(signer_install, "install").returncode == 0
+    (unit_dir / "saturnin-attestation.service").unlink()
+    (unit_dir / "saturnin-attestation-runtime.pyz").unlink()
+    (unit_dir / "default.target.wants/saturnin-attestation.service").unlink()
+    calls.unlink()
+
+    result = _run(signer_install, "uninstall")
+
+    assert result.returncode == 0
+    recorded = calls.read_text(encoding="utf-8").splitlines()
+    assert "--user stop saturnin-attestation.service" in recorded
+    assert recorded.count("--user show --no-pager "
+                          "--property=ActiveState --property=SubState "
+                          "--property=MainPID --property=ExecMainPID "
+                          "--property=ControlGroup "
+                          "saturnin-attestation.service") == 2
+
+
 def test_failed_uninstall_reload_restores_unit_and_active_state(
     signer_install: tuple[Path, dict[str, str], Path, Path],
 ) -> None:
@@ -1077,7 +1103,31 @@ def test_status_is_read_only(
     assert result.returncode == 0
     assert _topology(unit_dir) == before
     assert calls.read_text(encoding="utf-8").splitlines() == [
+        "--user cat --no-pager saturnin-attestation.service",
+        "--user show --no-pager --property=LoadState --property=ActiveState "
+        "--property=SubState --property=FragmentPath --property=DropInPaths "
+        "--property=MainPID --property=ExecMainPID --property=ControlGroup "
+        "--property=PrivateMounts --property=PrivateTmp "
+        "--property=PrivateNetwork --property=ProtectHome "
+        "--property=ProtectSystem --property=ProtectProc "
+        "--property=NoNewPrivileges --property=RestrictAddressFamilies "
+        "--property=StatusText saturnin-attestation.service",
         "--user status --no-pager saturnin-attestation.service"
+    ]
+
+
+def test_status_rejects_stale_manager_loaded_unit(
+    signer_install: tuple[Path, dict[str, str], Path, Path],
+) -> None:
+    _, _, _, calls = signer_install
+    assert _run(signer_install, "install").returncode == 0
+    calls.unlink()
+
+    result = _run(signer_install, "status", MANAGER_MISMATCH="1")
+
+    assert result.returncode != 0
+    assert calls.read_text(encoding="utf-8").splitlines() == [
+        "--user cat --no-pager saturnin-attestation.service"
     ]
 
 

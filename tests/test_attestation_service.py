@@ -62,6 +62,24 @@ def _scope() -> dict[str, str]:
     }
 
 
+def test_ready_notification_attests_verified_runtime(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    path = tmp_path / "notify"
+    listener = socket.socket(socket.AF_UNIX, socket.SOCK_DGRAM)
+    listener.bind(str(path))
+    digest = "a" * 64
+    monkeypatch.setenv("NOTIFY_SOCKET", str(path))
+    monkeypatch.setenv("SATURNIN_RUNTIME_SHA256", digest)
+    try:
+        attestation_service._notify_ready()
+        assert listener.recv(1024) == (
+            f"READY=1\nSTATUS=Saturnin runtime {digest} verified".encode()
+        )
+    finally:
+        listener.close()
+
+
 def _request(**changes: object) -> dict[str, object]:
     scope = _scope()
     request: dict[str, object] = {

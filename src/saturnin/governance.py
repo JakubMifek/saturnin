@@ -56,7 +56,7 @@ _ALL_OPERANDS_WRITABLE = {
     "truncate",
     "unlink",
 }
-_DESTINATION_WRITABLE = {"cp", "install", "ln", "mv", "rsync"}
+_DESTINATION_WRITABLE = {"cp", "install", "ln", "mv"}
 _SPECIAL_EXECUTABLES = (
     _WRAPPERS
     | _SHELL_RESERVED
@@ -2335,21 +2335,11 @@ def _positional_arguments(arguments: Sequence[str]) -> list[str]:
 
 
 def _destination_targets(binary: str, arguments: Sequence[str]) -> list[str]:
-    target_directory = _target_directory(arguments)
-    if target_directory is not None:
-        return [target_directory]
     value_options = {
         "cp": {"-S", "--suffix"},
         "install": {"-g", "--group", "-m", "--mode", "-o", "--owner", "-S", "--suffix"},
         "ln": {"-S", "--suffix"},
         "mv": {"-S", "--suffix"},
-        "rsync": {
-            "--backup-dir",
-            "--compare-dest",
-            "--copy-dest",
-            "--link-dest",
-            "--suffix",
-        },
     }.get(binary, set())
     short_value_prefixes = {
         option
@@ -2398,6 +2388,25 @@ def _destination_targets(binary: str, arguments: Sequence[str]) -> list[str]:
         seen_operand = True
         positionals.append(argument)
         index += 1
+    target_directory = _target_directory(arguments)
+    if target_directory is not None:
+        return (
+            [*positionals, target_directory]
+            if binary == "mv"
+            else [target_directory]
+        )
+    directory_install = binary == "install" and any(
+        argument == "--directory"
+        or (
+            argument.startswith("-")
+            and not argument.startswith("--")
+            and "d" in argument[1:]
+        )
+        for argument in arguments
+        if argument != "--"
+    )
+    if directory_install or binary == "mv":
+        return positionals
     return positionals[-1:]
 
 

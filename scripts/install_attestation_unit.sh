@@ -8,7 +8,7 @@ unset BASH_ENV ENV CDPATH PYTHONHOME PYTHONPATH
 IFS=$' \t\n'
 
 readonly UNIT=saturnin-attestation.service
-readonly EXPECTED_RUNTIME_MANIFEST_SHA256=016baf901fbbf3db5e8092e8296b7fbaa5a4f8aafe7172ca02bee28205aac9a5
+readonly EXPECTED_RUNTIME_MANIFEST_SHA256=6cea76e212b487e021d6321d01f9566a60eb8301bac9f86ac1db5b7a5a55fce9
 readonly ID=/usr/bin/id
 readonly REALPATH=/usr/bin/realpath
 readonly STAT=/usr/bin/stat
@@ -670,8 +670,6 @@ verify_running_service() {
     EXPECTED_UNIT_PATH="$expected_unit" \
     PYTHON_PATH="$PYTHON" RUNTIME_SHA256_VALUE="$runtime_sha256" \
     VERIFY_RUNNING_SERVICE=1 "$PYTHON" -I -c '
-import fcntl
-import hashlib
 import os
 import stat
 from pathlib import Path
@@ -698,6 +696,9 @@ expected = {
     "ProtectProc": "invisible",
     "NoNewPrivileges": "yes",
     "RestrictAddressFamilies": "AF_UNIX",
+    "StatusText": (
+        f"Saturnin runtime {os.environ['RUNTIME_SHA256_VALUE']} verified"
+    ),
 }
 if any(properties.get(key) != value for key, value in expected.items()):
     raise SystemExit("systemd signer loaded or active identity mismatch")
@@ -756,44 +757,6 @@ if os.stat(process / "ns/net").st_ino == os.stat("/proc/self/ns/net").st_ino:
     raise SystemExit("systemd signer private network namespace is missing")
 if os.stat(process / "ns/mnt").st_ino == os.stat("/proc/self/ns/mnt").st_ino:
     raise SystemExit("systemd signer private mount namespace is missing")
-runtime_digest = os.environ["RUNTIME_SHA256_VALUE"]
-matched = False
-for entry in (process / "fd").iterdir():
-    try:
-        target = os.readlink(entry)
-    except OSError:
-        continue
-    if "memfd:saturnin-attestation-runtime" not in target:
-        continue
-    descriptor = os.open(entry, os.O_RDONLY | os.O_CLOEXEC)
-    try:
-        before = os.fstat(descriptor)
-        seals = fcntl.fcntl(descriptor, fcntl.F_GET_SEALS)
-        digest = hashlib.sha256()
-        while chunk := os.read(descriptor, 65536):
-            digest.update(chunk)
-        after = os.fstat(descriptor)
-    finally:
-        os.close(descriptor)
-    if (
-        stat.S_ISREG(before.st_mode)
-        and before.st_uid == os.getuid()
-        and stat.S_IMODE(before.st_mode) == 0o400
-        and seals
-        == (
-            fcntl.F_SEAL_WRITE
-            | fcntl.F_SEAL_GROW
-            | fcntl.F_SEAL_SHRINK
-            | fcntl.F_SEAL_SEAL
-        )
-        and (before.st_dev, before.st_ino, before.st_size)
-        == (after.st_dev, after.st_ino, after.st_size)
-        and digest.hexdigest() == runtime_digest
-    ):
-        matched = True
-        break
-if not matched:
-    raise SystemExit("systemd signer runtime process identity mismatch")
 '
 }
 
@@ -852,6 +815,10 @@ UNIT_DIR_DEVICE_INODE="$("$STAT" -Lc %d:%i "$UNIT_DIR")"
 readonly UNIT_DIR_DEVICE_INODE
 exec {UNIT_DIR_FD}<"$UNIT_DIR"
 readonly UNIT_DIR_FD
+if ! "$FLOCK" --exclusive --nonblock "$UNIT_DIR_FD"; then
+  echo "Another credential or signer installation operation is in progress." >&2
+  exit 1
+fi
 readonly PINNED_UNIT_DIR="/proc/self/fd/$UNIT_DIR_FD"
 if [[ "$("$STAT" -Lc %d:%i "$PINNED_UNIT_DIR")" != "$UNIT_DIR_DEVICE_INODE" ]]; then
   echo "User-unit directory identity changed while it was pinned." >&2
@@ -870,6 +837,33 @@ if [[ "$action" == status ]]; then
   verify_unit_directory
   STATUS_RUNTIME_ID="$(trusted_file_identity "$FILE_INSTALLED_RUNTIME" 0400)"
   verify_unit_identity "$FILE_INSTALLED" 0644 "${STATUS_RUNTIME_ID##*:}" >/dev/null
+  read -r wants_dir_identity _ _ <<<"$(wants_operation inspect)"
+  verify_wants_link
+  readonly STATUS_TRANSACTION="$PINNED_UNIT_DIR/.saturnin-attestation-status.$$"
+  readonly STATUS_MANAGER_VIEW="$STATUS_TRANSACTION/manager-view"
+  readonly STATUS_MANAGER_STATE="$STATUS_TRANSACTION/manager-state"
+  status_cleanup() {
+    if verify_unit_directory >/dev/null 2>&1; then
+      "$RM" -rf "$STATUS_TRANSACTION"
+    fi
+  }
+  trap status_cleanup EXIT
+  "$MKDIR" -m 0700 "$STATUS_TRANSACTION"
+  systemctl_bounded --user cat --no-pager "$UNIT" >"$STATUS_MANAGER_VIEW"
+  verify_manager_loaded_unit "$STATUS_MANAGER_VIEW" "$FILE_INSTALLED"
+  systemctl_bounded --user show --no-pager \
+    --property=LoadState --property=ActiveState --property=SubState \
+    --property=FragmentPath --property=DropInPaths \
+    --property=MainPID --property=ExecMainPID --property=ControlGroup \
+    --property=PrivateMounts --property=PrivateTmp --property=PrivateNetwork \
+    --property=ProtectHome --property=ProtectSystem --property=ProtectProc \
+    --property=NoNewPrivileges --property=RestrictAddressFamilies \
+    --property=StatusText \
+    "$UNIT" >"$STATUS_MANAGER_STATE"
+  verify_running_service \
+    "$STATUS_MANAGER_STATE" "${STATUS_RUNTIME_ID##*:}" "$FILE_INSTALLED"
+  status_cleanup
+  trap - EXIT
   exec "$TIMEOUT" --signal=TERM --kill-after=10s 30s \
     "$SYSTEMCTL" --user status --no-pager "$UNIT"
 fi
@@ -943,6 +937,10 @@ restore_file() {
 
 rollback() {
   set +e
+  if declare -F release_credential_lock >/dev/null \
+    && ! release_credential_lock; then
+    return 1
+  fi
   if ! systemctl_bounded --user stop "$UNIT" >/dev/null 2>&1 \
     || ! verify_stopped_service; then
     echo "ROLLBACK FAILURE: rejected signer termination was not proven; prior files were not restored." >&2
@@ -995,6 +993,7 @@ rollback() {
     --property=PrivateMounts --property=PrivateTmp --property=PrivateNetwork \
     --property=ProtectHome --property=ProtectSystem --property=ProtectProc \
     --property=NoNewPrivileges --property=RestrictAddressFamilies \
+    --property=StatusText \
     "$UNIT" >"$MANAGER_STATE" \
     && verify_running_service "$MANAGER_STATE" \
       "${runtime_backup_identity##*:}" "$BACKUP/unit" || {
@@ -1044,9 +1043,9 @@ if [[ -e "$WANTS_DIR" || -L "$WANTS_DIR" ]]; then
 fi
 
 if [[ "$action" == uninstall ]]; then
+  already_uninstalled=0
   if [[ "$had_unit" -eq 0 && "$had_wants" -eq 0 && "$had_runtime" -eq 0 ]]; then
-    echo "$UNIT is already uninstalled; encrypted credentials were left untouched"
-    exit 0
+    already_uninstalled=1
   fi
   mutating=1
   verify_unit_directory
@@ -1055,14 +1054,20 @@ if [[ "$action" == uninstall ]]; then
   else
     systemctl_bounded --user stop "$UNIT" >/dev/null 2>&1 || true
   fi
+  verify_stopped_service
   if [[ "$had_wants_dir" -eq 1 ]]; then
     wants_operation unlink "$wants_dir_identity"
   fi
   "$RM" -f "$FILE_INSTALLED" "$FILE_INSTALLED_RUNTIME"
   verify_unit_directory
   systemctl_bounded --user daemon-reload
+  verify_stopped_service
   mutating=0
-  echo "uninstalled $UNIT; encrypted credentials were left untouched"
+  if [[ "$already_uninstalled" -eq 1 ]]; then
+    echo "$UNIT is already uninstalled; encrypted credentials were left untouched"
+  else
+    echo "uninstalled $UNIT; encrypted credentials were left untouched"
+  fi
   exit 0
 fi
 
@@ -1079,10 +1084,12 @@ import fcntl
 import os
 import signal
 import stat
+import sys
 import time
 
 for signum in (signal.SIGTERM, signal.SIGINT, signal.SIGHUP):
     signal.signal(signum, signal.SIG_IGN)
+signal.signal(signal.SIGUSR1, lambda *_: sys.exit(0))
 unit_fd = int(os.environ["UNIT_DIRECTORY_FD"])
 expected_uid = int(os.environ["EXPECTED_UID"])
 unit_metadata = os.fstat(unit_fd)
@@ -1126,6 +1133,14 @@ while os.path.exists(parent):
     time.sleep(0.05)
 ' &
 readonly CREDENTIAL_LOCK_HOLDER=$!
+credential_lock_released=0
+release_credential_lock() {
+  if [[ "$credential_lock_released" -eq 0 ]]; then
+    kill -USR1 "$CREDENTIAL_LOCK_HOLDER" 2>/dev/null || true
+    wait "$CREDENTIAL_LOCK_HOLDER" || return 1
+    credential_lock_released=1
+  fi
+}
 CREDENTIAL_DIRECTORY_ID=
 for _ in {1..100}; do
   if IFS= read -r CREDENTIAL_DIRECTORY_ID <"$CREDENTIAL_LOCK_READY"; then
@@ -1387,6 +1402,7 @@ verify_unit_directory
 verify_wants_link
 systemctl_bounded --user cat --no-pager "$UNIT" >"$MANAGER_VIEW"
 verify_manager_loaded_unit "$MANAGER_VIEW"
+release_credential_lock
 if [[ "$was_active" -eq 1 ]]; then
   systemctl_bounded --user restart "$UNIT"
 else
@@ -1401,6 +1417,7 @@ systemctl_bounded --user show --no-pager \
   --property=PrivateMounts --property=PrivateTmp --property=PrivateNetwork \
   --property=ProtectHome --property=ProtectSystem --property=ProtectProc \
   --property=NoNewPrivileges --property=RestrictAddressFamilies \
+  --property=StatusText \
   "$UNIT" >"$MANAGER_STATE"
 verify_running_service "$MANAGER_STATE" "$RUNTIME_TREE_SHA256"
 mutating=0

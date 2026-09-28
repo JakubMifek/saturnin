@@ -8,6 +8,7 @@ import hashlib
 import hmac
 import json
 import os
+import re
 import secrets
 import signal
 import socket
@@ -48,12 +49,17 @@ def _notify_ready() -> None:
     address = os.environ.get("NOTIFY_SOCKET")
     if not address:
         return
+    runtime_digest = os.environ.get("SATURNIN_RUNTIME_SHA256", "")
+    if not re.fullmatch(r"[0-9a-f]{64}", runtime_digest):
+        raise AttestationServiceError("attestation runtime identity is unavailable")
     if address.startswith("@"):
         address = "\0" + address[1:]
     notifier = socket.socket(socket.AF_UNIX, socket.SOCK_DGRAM)
     try:
         notifier.connect(address)
-        notifier.sendall(b"READY=1")
+        notifier.sendall(
+            f"READY=1\nSTATUS=Saturnin runtime {runtime_digest} verified".encode()
+        )
     finally:
         notifier.close()
 
@@ -370,7 +376,7 @@ class SigningService:
             raise AttestationServiceError(
                 "attestation service credential generation mismatch"
             )
-        with _lifecycle_lock(exclusive=False):
+        with _lifecycle_lock(exclusive=False, rotation_gate=False):
             self.generation = credential_generation()
             if not hmac.compare_digest(
                 self.generation,

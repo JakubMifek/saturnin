@@ -1460,6 +1460,66 @@ def _open_governed_runtime(config: Config, parts: Sequence[str]) -> int | None:
         ) from exc
 
 
+def _prepare_host_command(
+    config: Config,
+    parts: Sequence[str],
+    worktree: Path,
+) -> tuple[list[str], Path, dict[str, str], tuple[int, ...], int | None, int | None]:
+    governed_fd: int | None = None
+    governed_runtime_fd: int | None = None
+    try:
+        governed_fd = _open_governed_executable(config, parts)
+        if governed_fd is not None and parts[-1] == "install":
+            governed_runtime_fd = _open_governed_runtime(config, parts)
+        command_environment = os.environ.copy()
+        for name in (
+            "GIT_COMMON_DIR",
+            "GIT_DIR",
+            "GIT_INDEX_FILE",
+            "GIT_WORK_TREE",
+        ):
+            command_environment.pop(name, None)
+        execution_parts = list(parts)
+        pass_fds: tuple[int, ...] = ()
+        execution_cwd = worktree
+        if governed_fd is not None:
+            execution_parts[0] = f"/proc/self/fd/{governed_fd}"
+            pass_fds = (governed_fd,)
+            execution_cwd = config.data_root
+            account = pwd.getpwuid(os.geteuid())
+            runtime_dir = f"/run/user/{os.geteuid()}"
+            command_environment = {
+                "DBUS_SESSION_BUS_ADDRESS": f"unix:path={runtime_dir}/bus",
+                "HOME": account.pw_dir,
+                "LANG": "C.UTF-8",
+                "LOGNAME": account.pw_name,
+                "PATH": "/usr/bin:/bin",
+                "SATURNIN_GOVERNED_EXECUTION": "sealed-memfd",
+                "SATURNIN_HOME": str(config.data_root),
+                "USER": account.pw_name,
+                "XDG_RUNTIME_DIR": runtime_dir,
+            }
+            if governed_runtime_fd is not None:
+                pass_fds = (governed_fd, governed_runtime_fd)
+                command_environment["SATURNIN_GOVERNED_RUNTIME_FD"] = str(
+                    governed_runtime_fd
+                )
+        return (
+            execution_parts,
+            execution_cwd,
+            command_environment,
+            pass_fds,
+            governed_fd,
+            governed_runtime_fd,
+        )
+    except BaseException:
+        if governed_fd is not None:
+            os.close(governed_fd)
+        if governed_runtime_fd is not None:
+            os.close(governed_runtime_fd)
+        raise
+
+
 def run_server_command(
     config: Config,
     board: Board,
@@ -1566,42 +1626,14 @@ def run_server_command(
             command=cmdline,
             service=service,
         )
-        governed_fd = _open_governed_executable(config, parts)
-        if governed_fd is not None and parts[-1] == "install":
-            governed_runtime_fd = _open_governed_runtime(config, parts)
-    command_environment = os.environ.copy()
-    for name in (
-        "GIT_COMMON_DIR",
-        "GIT_DIR",
-        "GIT_INDEX_FILE",
-        "GIT_WORK_TREE",
-    ):
-        command_environment.pop(name, None)
-    execution_parts = list(parts)
-    pass_fds: tuple[int, ...] = ()
-    execution_cwd = worktree
-    if governed_fd is not None:
-        execution_parts[0] = f"/proc/self/fd/{governed_fd}"
-        pass_fds = (governed_fd,)
-        execution_cwd = config.data_root
-        account = pwd.getpwuid(os.geteuid())
-        runtime_dir = f"/run/user/{os.geteuid()}"
-        command_environment = {
-            "DBUS_SESSION_BUS_ADDRESS": f"unix:path={runtime_dir}/bus",
-            "HOME": account.pw_dir,
-            "LANG": "C.UTF-8",
-            "LOGNAME": account.pw_name,
-            "PATH": "/usr/bin:/bin",
-            "SATURNIN_GOVERNED_EXECUTION": "sealed-memfd",
-            "SATURNIN_HOME": str(config.data_root),
-            "USER": account.pw_name,
-            "XDG_RUNTIME_DIR": runtime_dir,
-        }
-        if governed_runtime_fd is not None:
-            pass_fds = (governed_fd, governed_runtime_fd)
-            command_environment["SATURNIN_GOVERNED_RUNTIME_FD"] = str(
-                governed_runtime_fd
-            )
+    (
+        execution_parts,
+        execution_cwd,
+        command_environment,
+        pass_fds,
+        governed_fd,
+        governed_runtime_fd,
+    ) = _prepare_host_command(config, parts, worktree)
     try:
         result = _run_bounded_command(
             execution_parts,

@@ -1818,6 +1818,37 @@ def test_governed_runtime_manifest_rejection_closes_memfd(
     assert len(list(Path("/proc/self/fd").iterdir())) == before
 
 
+def test_governed_runtime_acquisition_failure_closes_executable(
+    config: Config,
+    git_repo: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    descriptor = os.open("/dev/null", os.O_RDONLY)
+    monkeypatch.setattr(
+        worker_callbacks,
+        "_open_governed_executable",
+        lambda *_: descriptor,
+    )
+
+    def reject_runtime(*_: object) -> int:
+        raise WorkerCallbackError("runtime rejected")
+
+    monkeypatch.setattr(
+        worker_callbacks,
+        "_open_governed_runtime",
+        reject_runtime,
+    )
+
+    with pytest.raises(WorkerCallbackError, match="runtime rejected"):
+        worker_callbacks._prepare_host_command(
+            config,
+            ["scripts/install_attestation_unit.sh", "install"],
+            git_repo,
+        )
+    with pytest.raises(OSError):
+        os.fstat(descriptor)
+
+
 @pytest.mark.parametrize(
     "change",
     [

@@ -2477,7 +2477,6 @@ def test_git_network_subcommands_require_governed_wrappers(
         "mv source /etc/target --suffix .bak",
         "install source /etc/target --mode 600",
         "ln source /etc/target --suffix .bak",
-        "rsync source /etc/target --suffix .bak",
     ],
 )
 def test_destination_commands_reject_options_after_operands(
@@ -2691,7 +2690,7 @@ def test_git_fsck_rejects_undocumented_or_mutating_variants(
     assert "limited to the read-only" in decision.reasons[0]
 
 
-@pytest.mark.parametrize("binary", ["cp", "install", "ln", "mv", "rsync"])
+@pytest.mark.parametrize("binary", ["cp", "install", "ln", "mv"])
 def test_single_destination_operand_is_checked(
     governance: Governance, binary: str
 ) -> None:
@@ -2701,7 +2700,7 @@ def test_single_destination_operand_is_checked(
     assert "outside writable roots" in decision.reasons[0]
 
 
-@pytest.mark.parametrize("binary", ["cp", "install", "ln", "mv", "rsync"])
+@pytest.mark.parametrize("binary", ["cp", "install", "ln"])
 def test_only_final_operand_is_destination_for_multiple_operands(
     governance: Governance, binary: str
 ) -> None:
@@ -2710,6 +2709,66 @@ def test_only_final_operand_is_destination_for_multiple_operands(
     )
 
     assert decision.allowed
+
+
+def test_mv_requires_source_and_destination_in_writable_roots(
+    governance: Governance,
+) -> None:
+    assert governance.check_server_command(
+        "mv /home/saturnin/source /home/saturnin/destination"
+    ).allowed
+
+
+@pytest.mark.parametrize(
+    "command",
+    [
+        "rsync source /home/saturnin/destination",
+        "rsync -e /home/saturnin/evil remote:x /home/saturnin/destination",
+        "rsync --rsh=/home/saturnin/evil remote:x /home/saturnin/destination",
+        "rsync --remove-source-files source /home/saturnin/destination",
+        "rsync --daemon",
+    ],
+)
+def test_rsync_is_denied_as_unmodeled_dynamic_writer(
+    governance: Governance, command: str
+) -> None:
+    decision = governance.check_server_command(command)
+
+    assert not decision.allowed
+    assert "executable allowlist" in decision.reasons[0]
+
+
+@pytest.mark.parametrize(
+    "command",
+    [
+        "mv {governed} /home/saturnin/destination",
+        "mv -t /home/saturnin/destination {governed}",
+        "install -d /home/saturnin/allowed {governed}",
+        "install --directory /home/saturnin/allowed {governed}",
+    ],
+)
+def test_every_mutated_destination_operand_is_checked(
+    governance: Governance,
+    config: Config,
+    command: str,
+) -> None:
+    config.server_scope["filesystem"]["writable_root_sources"] = [
+        "user_home",
+        "data_root",
+    ]
+    governed = config.data_root / "policies/server_scope.yaml"
+    decision = governance.check_server_command(
+        command.format(governed=governed)
+    )
+
+    assert not decision.allowed
+    assert any(
+        text in decision.reasons[0]
+        for text in (
+            "reserved for a governed operation",
+            "aliases a governed operation object",
+        )
+    )
 
 
 def test_forbidden_roots_override_writable_roots(
