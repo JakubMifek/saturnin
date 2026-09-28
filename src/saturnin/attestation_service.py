@@ -377,7 +377,7 @@ class SigningService:
                 "attestation service credential generation mismatch"
             )
         with _lifecycle_lock(
-            exclusive=False, rotation_gate=False
+            exclusive=False, startup=True
         ) as credential_directory_identity:
             if credential_directory_identity is None:
                 raise AttestationServiceError(

@@ -48,19 +48,36 @@ def _lifecycle_lock(
     *,
     exclusive: bool,
     validate_credentials: bool = True,
-    rotation_gate: bool = True,
+    startup: bool = False,
 ) -> object:
-    gate_descriptor = _runtime_gate_descriptor() if rotation_gate else None
+    gate_descriptor = _runtime_gate_descriptor()
+    gate_locked = False
     directory_descriptor: int | None = None
     directory_token = None
     try:
         operation = fcntl.LOCK_EX if exclusive else fcntl.LOCK_SH
-        if gate_descriptor is not None:
-            fcntl.flock(gate_descriptor, operation)
-        if validate_credentials:
+        if startup:
+            if exclusive or not validate_credentials:
+                raise CredentialError("credential startup lock request is invalid")
             directory_descriptor = _credential_directory_descriptor()
-            fcntl.flock(directory_descriptor, operation)
+            fcntl.flock(directory_descriptor, fcntl.LOCK_SH)
+            _revalidate_credential_directory(directory_descriptor)
             directory_token = _ACTIVE_CREDENTIAL_DIRECTORY.set(directory_descriptor)
+            try:
+                fcntl.flock(gate_descriptor, fcntl.LOCK_SH | fcntl.LOCK_NB)
+                gate_locked = True
+            except BlockingIOError:
+                pass
+        else:
+            fcntl.flock(gate_descriptor, operation)
+            gate_locked = True
+            if validate_credentials:
+                directory_descriptor = _credential_directory_descriptor()
+                fcntl.flock(directory_descriptor, operation)
+                _revalidate_credential_directory(directory_descriptor)
+                directory_token = _ACTIVE_CREDENTIAL_DIRECTORY.set(
+                    directory_descriptor
+                )
         metadata = (
             os.fstat(directory_descriptor) if directory_descriptor is not None else None
         )
@@ -73,9 +90,9 @@ def _lifecycle_lock(
         if directory_descriptor is not None:
             fcntl.flock(directory_descriptor, fcntl.LOCK_UN)
             os.close(directory_descriptor)
-        if gate_descriptor is not None:
+        if gate_locked:
             fcntl.flock(gate_descriptor, fcntl.LOCK_UN)
-            os.close(gate_descriptor)
+        os.close(gate_descriptor)
 
 
 def _runtime_gate_descriptor() -> int:
@@ -217,6 +234,25 @@ def _revalidate_credential_directory(descriptor: int) -> None:
             raise CredentialError("credential directory identity changed")
     finally:
         os.close(current)
+
+
+@contextmanager
+def _credential_directory_lock(*, exclusive: bool) -> object:
+    descriptor = _credential_directory_descriptor()
+    token = None
+    try:
+        fcntl.flock(
+            descriptor, fcntl.LOCK_EX if exclusive else fcntl.LOCK_SH
+        )
+        _revalidate_credential_directory(descriptor)
+        token = _ACTIVE_CREDENTIAL_DIRECTORY.set(descriptor)
+        metadata = os.fstat(descriptor)
+        yield (metadata.st_dev, metadata.st_ino)
+    finally:
+        if token is not None:
+            _ACTIVE_CREDENTIAL_DIRECTORY.reset(token)
+        fcntl.flock(descriptor, fcntl.LOCK_UN)
+        os.close(descriptor)
 
 
 def _entry_exists(path: Path) -> bool:
@@ -496,7 +532,7 @@ def _rotation_state() -> str:
 def provision_attestation_key() -> Path:
     with _lifecycle_lock(exclusive=True, validate_credentials=False):
         _ensure_credential_directory()
-        with _lifecycle_lock(exclusive=True, rotation_gate=False):
+        with _credential_directory_lock(exclusive=True):
             return _provision_attestation_key()
 
 

@@ -94,6 +94,50 @@ def test_runtime_lock_serializes_service_and_rotation(
     assert acquired.is_set()
 
 
+def test_startup_couples_to_credential_lock_while_rotation_gate_is_held(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    runtime_gate: Path,
+) -> None:
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path / "config"))
+    credential_directory = (
+        tmp_path / "config/systemd/user/saturnin-credentials"
+    )
+    _write_attestation_credentials(credential_directory)
+    gate = os.open(
+        runtime_gate,
+        os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW,
+    )
+    fcntl.flock(gate, fcntl.LOCK_EX)
+    startup_acquired = threading.Event()
+    release_startup = threading.Event()
+
+    def start_service() -> None:
+        with _lifecycle_lock(exclusive=False, startup=True):
+            startup_acquired.set()
+            release_startup.wait(2)
+
+    thread = threading.Thread(target=start_service)
+    thread.start()
+    credential_descriptor = os.open(
+        credential_directory,
+        os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW,
+    )
+    try:
+        assert startup_acquired.wait(1)
+        with pytest.raises(BlockingIOError):
+            fcntl.flock(
+                credential_descriptor, fcntl.LOCK_EX | fcntl.LOCK_NB
+            )
+    finally:
+        release_startup.set()
+        thread.join(timeout=2)
+        os.close(credential_descriptor)
+        fcntl.flock(gate, fcntl.LOCK_UN)
+        os.close(gate)
+    assert not thread.is_alive()
+
+
 def test_lifecycle_lock_validates_existing_directory_without_mutation(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
