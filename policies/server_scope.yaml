@@ -57,7 +57,7 @@ services:
 operations:
   signer_user_unit:
     executable: scripts/install_attestation_unit.sh
-    sha256: d3aff6419c69eec2f8eaa445a7c92ad1a6a505e1adb3bced128b66add5072357
+    sha256: 80e91818c3a71ca21db3b6918709ed5da603751bf969ccd58e4f568daa5ab78e
     dependencies:
       - .venv/bin/saturnin
       - systemd/saturnin-attestation.service

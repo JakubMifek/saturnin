@@ -258,6 +258,11 @@ def signer_install(tmp_path: Path) -> tuple[Path, dict[str, str], Path, Path]:
         "    fi\n"
         "    if [ -n \"${FAIL_ROLLBACK_DAEMON_RELOAD:-}\" ] "
         "&& [ -e \"$state/rollback-stopped\" ]; then exit 1; fi\n"
+        "    if [ -n \"${FAIL_ONCE_DAEMON_RELOAD:-}\" ] "
+        "&& [ ! -e \"$state/daemon-reload-failed-once\" ]; then\n"
+        "      touch \"$state/daemon-reload-failed-once\"\n"
+        "      exit 1\n"
+        "    fi\n"
         "    [ \"${FAIL_ON:-}\" != daemon-reload ]\n"
         "    ;;\n"
         "  cat)\n"
@@ -1097,7 +1102,7 @@ def test_uninstall_stops_active_signer_with_unvalidated_definition(
     assert not installed.exists()
 
 
-def test_failed_uninstall_never_restores_unvalidated_definition(
+def test_failed_uninstall_restores_unvalidated_topology_but_not_process(
     signer_install: tuple[Path, dict[str, str], Path, Path],
 ) -> None:
     _, _, unit_dir, _ = signer_install
@@ -1105,12 +1110,17 @@ def test_failed_uninstall_never_restores_unvalidated_definition(
     installed = unit_dir / "saturnin-attestation.service"
     installed.write_text("[Unit]\nDescription=tampered\n", encoding="utf-8")
     installed.chmod(0o644)
+    before = _topology(unit_dir)
 
-    result = _run(signer_install, "uninstall", FAIL_ON="daemon-reload")
+    result = _run(
+        signer_install,
+        "uninstall",
+        FAIL_ONCE_DAEMON_RELOAD="1",
+    )
 
     assert result.returncode == 125
-    assert "unvalidated prior signer was left stopped" in result.stderr
-    assert not installed.exists()
+    assert "prior disk topology was restored" in result.stderr
+    assert _topology(unit_dir) == before
 
 
 def test_failed_uninstall_reload_restores_unit_and_active_state(

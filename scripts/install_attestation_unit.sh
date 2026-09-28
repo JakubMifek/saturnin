@@ -944,10 +944,6 @@ rollback() {
     echo "ROLLBACK FAILURE: rejected signer termination was not proven; prior files were not restored." >&2
     return 1
   fi
-  if [[ "$action" == uninstall && "$unit_was_valid" -ne 1 ]]; then
-    echo "ROLLBACK FAILURE: unvalidated prior signer was left stopped for manual recovery." >&2
-    return 1
-  fi
   if ! verify_unit_directory; then
     echo "Rollback stopped because the user-unit directory was replaced." >&2
     return 1
@@ -975,8 +971,12 @@ rollback() {
     }
     return 0
   fi
-  if [[ "$unit_was_valid" -ne 1 ]] \
-    || ! verify_unit_directory \
+  if [[ "$unit_was_valid" -ne 1 ]]; then
+    verify_stopped_service || return 1
+    echo "ROLLBACK FAILURE: prior disk topology was restored, but the unvalidated signer remains stopped for manual recovery." >&2
+    return 1
+  fi
+  if ! verify_unit_directory \
     || ! verify_unit_identity "$FILE_INSTALLED" 0644 \
       "${runtime_backup_identity##*:}" >/dev/null \
     || ! trusted_file_identity "$FILE_INSTALLED_RUNTIME" 0400 >/dev/null \
