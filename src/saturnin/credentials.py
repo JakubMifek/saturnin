@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import base64
+import hashlib
 import json
 import os
 import secrets
@@ -522,6 +523,171 @@ def _revoke_credential(kind: str) -> list[Path]:
     return removed
 
 
+def _decode_mountinfo_path(value: str) -> str:
+    for encoded, decoded in (
+        ("\\040", " "),
+        ("\\011", "\t"),
+        ("\\012", "\n"),
+        ("\\134", "\\"),
+    ):
+        value = value.replace(encoded, decoded)
+    return value
+
+
+def _systemd_creds_mount_identity(
+    mountinfo: str, metadata: os.stat_result
+) -> None:
+    target = "/usr/bin/systemd-creds"
+    candidates: list[tuple[int, str, set[str]]] = []
+    for line in mountinfo.splitlines():
+        before, separator, _ = line.partition(" - ")
+        fields = before.split()
+        if not separator or len(fields) < 6:
+            raise CredentialError("systemd-creds mount provenance is invalid")
+        mountpoint = _decode_mountinfo_path(fields[4])
+        if target == mountpoint or target.startswith(mountpoint.rstrip("/") + "/"):
+            candidates.append((len(mountpoint), fields[2], set(fields[5].split(","))))
+    if not candidates:
+        raise CredentialError("systemd-creds mount provenance is missing")
+    longest = max(length for length, _, _ in candidates)
+    effective = [
+        (device, options)
+        for length, device, options in candidates
+        if length == longest
+    ]
+    expected_device = f"{os.major(metadata.st_dev)}:{os.minor(metadata.st_dev)}"
+    if len(effective) != 1:
+        raise CredentialError("systemd-creds mount provenance is ambiguous")
+    device, options = effective[0]
+    if device != expected_device or "ro" not in options or "rw" in options:
+        raise CredentialError("systemd-creds mount provenance is unsafe")
+
+
+def _validate_systemd_creds_namespace(
+    parent_metadata: list[os.stat_result],
+    metadata: os.stat_result,
+    mountinfo: str,
+    expected_device: int,
+    expected_inode: int,
+    expected_mode: int,
+) -> None:
+    namespace_root_uid = parent_metadata[0].st_uid
+    if (
+        namespace_root_uid not in {0, 65534}
+        or any(
+            not stat.S_ISDIR(value.st_mode)
+            or value.st_uid != namespace_root_uid
+            or value.st_mode & 0o022
+            for value in parent_metadata
+        )
+        or not stat.S_ISREG(metadata.st_mode)
+        or metadata.st_uid != namespace_root_uid
+        or metadata.st_nlink != 1
+        or metadata.st_mode & 0o022
+        or metadata.st_dev != expected_device
+        or metadata.st_ino != expected_inode
+        or stat.S_IMODE(metadata.st_mode) != expected_mode
+    ):
+        raise CredentialError("systemd-creds namespace identity is unsafe")
+    _systemd_creds_mount_identity(mountinfo, metadata)
+
+
+def _sealed_systemd_creds() -> int:
+    expected_digest = os.environ.get("SATURNIN_SYSTEMD_CREDS_SHA256", "")
+    expected_device = os.environ.get("SATURNIN_SYSTEMD_CREDS_DEVICE", "")
+    expected_inode = os.environ.get("SATURNIN_SYSTEMD_CREDS_INODE", "")
+    expected_mode = os.environ.get("SATURNIN_SYSTEMD_CREDS_MODE", "")
+    if (
+        len(expected_digest) != 64
+        or any(character not in "0123456789abcdef" for character in expected_digest)
+        or not expected_device.isdigit()
+        or not expected_inode.isdigit()
+        or not expected_mode.isdigit()
+    ):
+        raise CredentialError("systemd-creds host identity is invalid")
+
+    descriptors: list[int] = []
+    helper_fd = -1
+    try:
+        parent_fd = os.open("/", os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+        descriptors.append(parent_fd)
+        parent_metadata = [os.fstat(parent_fd)]
+        for component in ("usr", "bin"):
+            parent_fd = os.open(
+                component,
+                os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW,
+                dir_fd=parent_fd,
+            )
+            descriptors.append(parent_fd)
+            parent_metadata.append(os.fstat(parent_fd))
+        source_fd = os.open(
+            "systemd-creds",
+            os.O_RDONLY | os.O_CLOEXEC | os.O_NOFOLLOW,
+            dir_fd=parent_fd,
+        )
+        descriptors.append(source_fd)
+        before = os.fstat(source_fd)
+        _validate_systemd_creds_namespace(
+            parent_metadata,
+            before,
+            Path("/proc/self/mountinfo").read_text(encoding="utf-8"),
+            int(expected_device),
+            int(expected_inode),
+            int(expected_mode),
+        )
+
+        helper_fd = os.memfd_create(
+            "saturnin-systemd-creds",
+            os.MFD_CLOEXEC | os.MFD_ALLOW_SEALING,
+        )
+        os.fchmod(helper_fd, 0o500)
+        digest = hashlib.sha256()
+        while chunk := os.read(source_fd, 65536):
+            digest.update(chunk)
+            view = memoryview(chunk)
+            while view:
+                view = view[os.write(helper_fd, view) :]
+        after = os.fstat(source_fd)
+        if (
+            before.st_dev,
+            before.st_ino,
+            before.st_mode,
+            before.st_uid,
+            before.st_nlink,
+            before.st_size,
+            before.st_mtime_ns,
+            before.st_ctime_ns,
+        ) != (
+            after.st_dev,
+            after.st_ino,
+            after.st_mode,
+            after.st_uid,
+            after.st_nlink,
+            after.st_size,
+            after.st_mtime_ns,
+            after.st_ctime_ns,
+        ) or digest.hexdigest() != expected_digest:
+            raise CredentialError("systemd-creds changed after host validation")
+        fcntl.fcntl(
+            helper_fd,
+            fcntl.F_ADD_SEALS,
+            fcntl.F_SEAL_WRITE
+            | fcntl.F_SEAL_GROW
+            | fcntl.F_SEAL_SHRINK
+            | fcntl.F_SEAL_SEAL,
+        )
+        return helper_fd
+    except (OSError, ValueError) as exc:
+        raise CredentialError("could not seal host-validated systemd-creds") from exc
+    finally:
+        for descriptor in reversed(descriptors):
+            os.close(descriptor)
+        if helper_fd >= 0 and not fcntl.fcntl(
+            helper_fd, fcntl.F_GET_SEALS
+        ) & fcntl.F_SEAL_SEAL:
+            os.close(helper_fd)
+
+
 def systemd_credential(name: str) -> str:
     directory = os.environ.get("CREDENTIALS_DIRECTORY", "")
     if not directory:
@@ -535,27 +701,22 @@ def systemd_credential(name: str) -> str:
         if not ciphertext:
             return ""
         _validate_encryption_model(ciphertext.encode("utf-8"))
-        tool = Path("/usr/bin/systemd-creds")
+        tool_fd = _sealed_systemd_creds()
         try:
-            tool_metadata = tool.stat(follow_symlinks=False)
+            plaintext_fd = os.memfd_create(
+                "saturnin-decrypted-credential",
+                os.MFD_CLOEXEC | os.MFD_ALLOW_SEALING,
+            )
+            os.fchmod(plaintext_fd, 0)
         except OSError as exc:
-            raise CredentialError("systemd-creds is unavailable") from exc
-        if (
-            not stat.S_ISREG(tool_metadata.st_mode)
-            or tool_metadata.st_uid != 0
-            or tool_metadata.st_nlink != 1
-            or tool_metadata.st_mode & 0o022
-        ):
-            raise CredentialError("systemd-creds has an unsafe identity")
-        plaintext_fd = os.memfd_create(
-            "saturnin-decrypted-credential",
-            os.MFD_CLOEXEC | os.MFD_ALLOW_SEALING,
-        )
-        os.fchmod(plaintext_fd, 0)
+            os.close(tool_fd)
+            raise CredentialError(
+                f"could not prepare inline systemd credential {name}"
+            ) from exc
         try:
             result = subprocess.run(
                 [
-                    str(tool),
+                    f"/proc/self/fd/{tool_fd}",
                     "decrypt",
                     "--user",
                     f"--name={name}",
@@ -567,9 +728,11 @@ def systemd_credential(name: str) -> str:
                 stdout=plaintext_fd,
                 stderr=subprocess.DEVNULL,
                 env={"XDG_RUNTIME_DIR": f"/run/user/{os.getuid()}"},
+                pass_fds=(tool_fd,),
             )
         except OSError as exc:
             os.close(plaintext_fd)
+            os.close(tool_fd)
             raise CredentialError(
                 f"could not decrypt inline systemd credential {name}"
             ) from exc
@@ -600,6 +763,7 @@ def systemd_credential(name: str) -> str:
                 ) from exc
         finally:
             os.close(plaintext_fd)
+            os.close(tool_fd)
     path = Path(directory) / name
     try:
         descriptor = os.open(path, os.O_RDONLY | os.O_NOFOLLOW)

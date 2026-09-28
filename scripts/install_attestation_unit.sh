@@ -8,7 +8,7 @@ unset BASH_ENV ENV CDPATH PYTHONHOME PYTHONPATH
 IFS=$' \t\n'
 
 readonly UNIT=saturnin-attestation.service
-readonly EXPECTED_RUNTIME_MANIFEST_SHA256=0eedaacceb21e680a760ea06e3bfa00b9d945d71ccc869839373d559faf6d9ad
+readonly EXPECTED_RUNTIME_MANIFEST_SHA256=2f1e951b3e58e163533ed1cdb1946115d82a0a8d8d75546953961a7636cf0412
 readonly ID=/usr/bin/id
 readonly REALPATH=/usr/bin/realpath
 readonly STAT=/usr/bin/stat
@@ -90,6 +90,91 @@ for tool in "$ID" "$REALPATH" "$STAT" "$PYTHON" "$SYSTEMCTL" \
     exit 1
   fi
 done
+
+SYSTEMD_CREDS_SHA256=
+SYSTEMD_CREDS_DEVICE=
+SYSTEMD_CREDS_INODE=
+SYSTEMD_CREDS_MODE=
+if [[ "$action" == install ]]; then
+  read -r SYSTEMD_CREDS_SHA256 SYSTEMD_CREDS_DEVICE \
+    SYSTEMD_CREDS_INODE SYSTEMD_CREDS_MODE < <(
+  "$PYTHON" -I -c '
+import hashlib
+import os
+import stat
+
+descriptors = []
+try:
+    parent = os.open("/", os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+    descriptors.append(parent)
+    parents = [os.fstat(parent)]
+    for component in ("usr", "bin"):
+        parent = os.open(
+            component,
+            os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW,
+            dir_fd=parent,
+        )
+        descriptors.append(parent)
+        parents.append(os.fstat(parent))
+    descriptor = os.open(
+        "systemd-creds",
+        os.O_RDONLY | os.O_CLOEXEC | os.O_NOFOLLOW,
+        dir_fd=parent,
+    )
+    descriptors.append(descriptor)
+    before = os.fstat(descriptor)
+    if (
+        any(
+            not stat.S_ISDIR(value.st_mode)
+            or value.st_uid != 0
+            or value.st_mode & 0o022
+            for value in parents
+        )
+        or not stat.S_ISREG(before.st_mode)
+        or before.st_uid != 0
+        or before.st_nlink != 1
+        or before.st_mode & 0o022
+        or not before.st_mode & 0o111
+    ):
+        raise SystemExit("systemd-creds host identity is unsafe")
+    digest = hashlib.sha256()
+    while chunk := os.read(descriptor, 65536):
+        digest.update(chunk)
+    after = os.fstat(descriptor)
+    if (
+        before.st_dev,
+        before.st_ino,
+        before.st_mode,
+        before.st_uid,
+        before.st_nlink,
+        before.st_size,
+        before.st_mtime_ns,
+        before.st_ctime_ns,
+    ) != (
+        after.st_dev,
+        after.st_ino,
+        after.st_mode,
+        after.st_uid,
+        after.st_nlink,
+        after.st_size,
+        after.st_mtime_ns,
+        after.st_ctime_ns,
+    ):
+        raise SystemExit("systemd-creds changed during host validation")
+    print(
+        digest.hexdigest(),
+        before.st_dev,
+        before.st_ino,
+        stat.S_IMODE(before.st_mode),
+    )
+finally:
+    for descriptor in reversed(descriptors):
+        os.close(descriptor)
+'
+  )
+fi
+readonly SYSTEMD_CREDS_SHA256 SYSTEMD_CREDS_DEVICE
+readonly SYSTEMD_CREDS_INODE SYSTEMD_CREDS_MODE
 
 systemctl_bounded() {
   "$TIMEOUT" --signal=TERM --kill-after=10s 30s "$SYSTEMCTL" "$@"
@@ -517,6 +602,10 @@ verify_unit_identity() {
     HOME_VALUE="$SATURNIN_HOME" CURRENT_KEY_ID_VALUE="${CURRENT_KEY_ID:-}" \
     PREVIOUS_KEY_ID_VALUE="${PREVIOUS_KEY_ID:-}" \
     CREDENTIAL_GENERATION_VALUE="${CREDENTIAL_GENERATION:-}" \
+    SYSTEMD_CREDS_SHA256_VALUE="${SYSTEMD_CREDS_SHA256:-}" \
+    SYSTEMD_CREDS_DEVICE_VALUE="${SYSTEMD_CREDS_DEVICE:-}" \
+    SYSTEMD_CREDS_INODE_VALUE="${SYSTEMD_CREDS_INODE:-}" \
+    SYSTEMD_CREDS_MODE_VALUE="${SYSTEMD_CREDS_MODE:-}" \
     CURRENT_CREDENTIAL_VALUE="${CURRENT_CREDENTIAL:-}" \
     PREVIOUS_CREDENTIAL_VALUE="${PREVIOUS_CREDENTIAL:-}" "$PYTHON" -I -c '
 import os
@@ -561,6 +650,10 @@ previous_key_id = os.environ["PREVIOUS_KEY_ID_VALUE"]
 credential_generation = os.environ["CREDENTIAL_GENERATION_VALUE"]
 current_credential = os.environ["CURRENT_CREDENTIAL_VALUE"]
 previous_credential = os.environ["PREVIOUS_CREDENTIAL_VALUE"]
+systemd_creds_sha256 = ""
+systemd_creds_device = ""
+systemd_creds_inode = ""
+systemd_creds_mode = ""
 if not current_key_id or not previous_key_id or not credential_generation:
     for line in lines:
         if line.startswith("Environment=SATURNIN_CURRENT_KEY_ID="):
@@ -577,6 +670,15 @@ if not current_key_id or not previous_key_id or not credential_generation:
             "Environment=SATURNIN_PREVIOUS_CREDENTIAL_CIPHERTEXT="
         ):
             previous_credential = line.split("=", 2)[2].strip("\"")
+for line in lines:
+    if line.startswith("Environment=SATURNIN_SYSTEMD_CREDS_SHA256="):
+        systemd_creds_sha256 = line.rsplit("=", 1)[-1].strip("\"")
+    elif line.startswith("Environment=SATURNIN_SYSTEMD_CREDS_DEVICE="):
+        systemd_creds_device = line.rsplit("=", 1)[-1].strip("\"")
+    elif line.startswith("Environment=SATURNIN_SYSTEMD_CREDS_INODE="):
+        systemd_creds_inode = line.rsplit("=", 1)[-1].strip("\"")
+    elif line.startswith("Environment=SATURNIN_SYSTEMD_CREDS_MODE="):
+        systemd_creds_mode = line.rsplit("=", 1)[-1].strip("\"")
 if (
     len(current_key_id) != 64
     or len(previous_key_id) != 64
@@ -598,6 +700,31 @@ if (
     )
 ):
     raise SystemExit("rendered encrypted credential literals are invalid")
+if (
+    len(systemd_creds_sha256) != 64
+    or any(
+        character not in "0123456789abcdef"
+        for character in systemd_creds_sha256
+    )
+    or not systemd_creds_device.isdigit()
+    or not systemd_creds_inode.isdigit()
+    or not systemd_creds_mode.isdigit()
+    or int(systemd_creds_device) <= 0
+    or int(systemd_creds_inode) <= 0
+    or int(systemd_creds_mode) > 0o777
+    or int(systemd_creds_mode) & 0o022
+    or not int(systemd_creds_mode) & 0o111
+):
+    raise SystemExit("rendered systemd-creds host identity is invalid")
+for name, actual in (
+    ("SYSTEMD_CREDS_SHA256", systemd_creds_sha256),
+    ("SYSTEMD_CREDS_DEVICE", systemd_creds_device),
+    ("SYSTEMD_CREDS_INODE", systemd_creds_inode),
+    ("SYSTEMD_CREDS_MODE", systemd_creds_mode),
+):
+    expected = os.environ[f"{name}_VALUE"]
+    if expected and actual != expected:
+        raise SystemExit("rendered systemd-creds host identity mismatch")
 expected = [
     ("Unit", [
         "Description=Saturnin private review attestation signer",
@@ -610,6 +737,10 @@ expected = [
         "UnsetEnvironment=GCONV_PATH GETCONF_DIR GLIBC_TUNABLES HOSTALIASES LD_AUDIT LD_BIND_NOT LD_BIND_NOW LD_DEBUG LD_DEBUG_OUTPUT LD_DYNAMIC_WEAK LD_HWCAP_MASK LD_KEEPDIR LD_LIBRARY_PATH LD_ORIGIN_PATH LD_PRELOAD LD_PROFILE LD_SHOW_AUXV LD_TRACE_LOADED_OBJECTS LD_USE_LOAD_BIAS LD_VERBOSE LD_WARN LOCALDOMAIN LOCPATH MALLOC_TRACE NIS_PATH NLSPATH PYTHONHOME PYTHONPATH RESOLV_HOST_CONF RES_OPTIONS TMPDIR TZDIR",
         f"Environment=SATURNIN_HOME=\"{home}\"",
         f"Environment=SATURNIN_RUNTIME_SHA256=\"{runtime_sha256}\"",
+        f"Environment=SATURNIN_SYSTEMD_CREDS_SHA256=\"{systemd_creds_sha256}\"",
+        f"Environment=SATURNIN_SYSTEMD_CREDS_DEVICE=\"{systemd_creds_device}\"",
+        f"Environment=SATURNIN_SYSTEMD_CREDS_INODE=\"{systemd_creds_inode}\"",
+        f"Environment=SATURNIN_SYSTEMD_CREDS_MODE=\"{systemd_creds_mode}\"",
         "Environment=SATURNIN_SEALED_GOVERNANCE=runtime-archive",
         f"Environment=SATURNIN_CURRENT_KEY_ID=\"{current_key_id}\"",
         f"Environment=SATURNIN_PREVIOUS_KEY_ID=\"{previous_key_id}\"",
@@ -1373,6 +1504,10 @@ readonly CURRENT_CREDENTIAL PREVIOUS_CREDENTIAL
 
 TEMPLATE_PATH="$TEMPLATE_SNAPSHOT" DESTINATION="$STAGE" \
   HOME_VALUE="$SATURNIN_HOME" RUNTIME_SHA256_VALUE="$RUNTIME_TREE_SHA256" \
+  SYSTEMD_CREDS_SHA256_VALUE="$SYSTEMD_CREDS_SHA256" \
+  SYSTEMD_CREDS_DEVICE_VALUE="$SYSTEMD_CREDS_DEVICE" \
+  SYSTEMD_CREDS_INODE_VALUE="$SYSTEMD_CREDS_INODE" \
+  SYSTEMD_CREDS_MODE_VALUE="$SYSTEMD_CREDS_MODE" \
   CURRENT_KEY_ID_VALUE="$CURRENT_KEY_ID" PREVIOUS_KEY_ID_VALUE="$PREVIOUS_KEY_ID" \
   CREDENTIAL_GENERATION_VALUE="$CREDENTIAL_GENERATION" \
   CURRENT_CREDENTIAL_VALUE="$CURRENT_CREDENTIAL" \
@@ -1386,6 +1521,19 @@ home = os.environ["HOME_VALUE"]
 rendered = template.replace("@SATURNIN_HOME@", home).replace(
     "@SATURNIN_HOME_ENV@", home
 ).replace("@SATURNIN_RUNTIME_SHA256@", os.environ["RUNTIME_SHA256_VALUE"])
+rendered = rendered.replace(
+    "@SATURNIN_SYSTEMD_CREDS_SHA256@",
+    os.environ["SYSTEMD_CREDS_SHA256_VALUE"],
+).replace(
+    "@SATURNIN_SYSTEMD_CREDS_DEVICE@",
+    os.environ["SYSTEMD_CREDS_DEVICE_VALUE"],
+).replace(
+    "@SATURNIN_SYSTEMD_CREDS_INODE@",
+    os.environ["SYSTEMD_CREDS_INODE_VALUE"],
+).replace(
+    "@SATURNIN_SYSTEMD_CREDS_MODE@",
+    os.environ["SYSTEMD_CREDS_MODE_VALUE"],
+)
 rendered = rendered.replace(
     "@SATURNIN_CURRENT_KEY_ID@", os.environ["CURRENT_KEY_ID_VALUE"]
 ).replace("@SATURNIN_PREVIOUS_KEY_ID@", os.environ["PREVIOUS_KEY_ID_VALUE"])
