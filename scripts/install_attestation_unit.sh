@@ -8,7 +8,7 @@ unset BASH_ENV ENV CDPATH PYTHONHOME PYTHONPATH
 IFS=$' \t\n'
 
 readonly UNIT=saturnin-attestation.service
-readonly EXPECTED_RUNTIME_MANIFEST_SHA256=0a00057391c04203d451dc728dac4de340f7f0224ad3a9787f94a25bb8578956
+readonly EXPECTED_RUNTIME_MANIFEST_SHA256=66a3149be299213bf011b193cb0775dc67a5430b87eee6f0633c15b2c5692814
 readonly ID=/usr/bin/id
 readonly REALPATH=/usr/bin/realpath
 readonly STAT=/usr/bin/stat
@@ -750,7 +750,6 @@ expected = [
         f"Environment=SATURNIN_PREVIOUS_CREDENTIAL_CIPHERTEXT=\"{previous_credential}\"",
         "RuntimeDirectory=saturnin-attestation",
         "RuntimeDirectoryMode=0700",
-        "RuntimeDirectoryPreserve=yes",
         "PrivateMounts=yes",
         "PrivateTmp=yes",
         "PrivateNetwork=yes",
@@ -842,7 +841,6 @@ expected = {
     "ProtectProc": "invisible",
     "NoNewPrivileges": "yes",
     "RestrictAddressFamilies": "AF_UNIX",
-    "RuntimeDirectoryPreserve": "yes",
     "StatusText": (
         f"Saturnin runtime {os.environ['RUNTIME_SHA256_VALUE']} verified"
     ),
@@ -1042,7 +1040,6 @@ if [[ "$action" == status ]]; then
     --property=PrivateMounts --property=PrivateTmp --property=PrivateNetwork \
     --property=ProtectHome --property=ProtectSystem --property=ProtectProc \
     --property=NoNewPrivileges --property=RestrictAddressFamilies \
-    --property=RuntimeDirectoryPreserve \
     --property=StatusText \
     "$UNIT" \
     | verify_running_service - "${STATUS_RUNTIME_ID##*:}" "$FILE_INSTALLED"
@@ -1119,8 +1116,8 @@ restore_file() {
 
 rollback() {
   set +e
-  if declare -F downgrade_credential_lock >/dev/null \
-    && ! downgrade_credential_lock; then
+  if declare -F handoff_credential_lock >/dev/null \
+    && ! handoff_credential_lock; then
     return 1
   fi
   if ! stop_signer_service >/dev/null 2>&1; then
@@ -1178,7 +1175,6 @@ rollback() {
     --property=PrivateMounts --property=PrivateTmp --property=PrivateNetwork \
     --property=ProtectHome --property=ProtectSystem --property=ProtectProc \
     --property=NoNewPrivileges --property=RestrictAddressFamilies \
-    --property=RuntimeDirectoryPreserve \
     --property=StatusText \
     "$UNIT" >"$MANAGER_STATE" \
     && verify_running_service "$MANAGER_STATE" \
@@ -1266,15 +1262,16 @@ readonly CREDENTIAL_LOCK_READY="$TRANSACTION/credential-lock-ready"
 "$CHMOD" 0600 "$CREDENTIAL_LOCK_READY"
 exec {CREDENTIAL_LOCK_READY_FD}>"$CREDENTIAL_LOCK_READY"
 readonly CREDENTIAL_LOCK_READY_FD
-readonly CREDENTIAL_LOCK_SHARED="$TRANSACTION/credential-lock-shared"
-: >"$CREDENTIAL_LOCK_SHARED"
-"$CHMOD" 0600 "$CREDENTIAL_LOCK_SHARED"
-exec {CREDENTIAL_LOCK_SHARED_FD}>"$CREDENTIAL_LOCK_SHARED"
-readonly CREDENTIAL_LOCK_SHARED_FD
+readonly CREDENTIAL_LOCK_HANDED_OFF="$TRANSACTION/credential-lock-handed-off"
+: >"$CREDENTIAL_LOCK_HANDED_OFF"
+"$CHMOD" 0600 "$CREDENTIAL_LOCK_HANDED_OFF"
+exec {CREDENTIAL_LOCK_HANDED_OFF_FD}>"$CREDENTIAL_LOCK_HANDED_OFF"
+readonly CREDENTIAL_LOCK_HANDED_OFF_FD
 UNIT_DIRECTORY_FD="$UNIT_DIR_FD" EXPECTED_UID="$CURRENT_UID" \
   EXPECTED_UNIT_DIRECTORY="$UNIT_DIR_DEVICE_INODE" \
   XDG_RUNTIME_DIR="${XDG_RUNTIME_DIR:-/run/user/$CURRENT_UID}" \
-  READY_FD="$CREDENTIAL_LOCK_READY_FD" SHARED_FD="$CREDENTIAL_LOCK_SHARED_FD" \
+  READY_FD="$CREDENTIAL_LOCK_READY_FD" \
+  HANDOFF_FD="$CREDENTIAL_LOCK_HANDED_OFF_FD" \
   PARENT_PID="$$" \
   "$PYTHON" -I -c '
 import fcntl
@@ -1288,15 +1285,15 @@ for signum in (signal.SIGTERM, signal.SIGINT, signal.SIGHUP):
     signal.signal(signum, signal.SIG_IGN)
 signal.signal(signal.SIGUSR1, lambda *_: sys.exit(0))
 
-def downgrade_lock(*_: object) -> None:
-    fcntl.flock(lifecycle_fd, fcntl.LOCK_SH)
-    os.write(int(os.environ["SHARED_FD"]), b"shared\n")
+def handoff_lock(*_: object) -> None:
+    fcntl.flock(credential_fd, fcntl.LOCK_UN)
+    os.write(int(os.environ["HANDOFF_FD"]), b"handed-off\n")
 
-signal.signal(signal.SIGUSR2, downgrade_lock)
+signal.signal(signal.SIGUSR2, handoff_lock)
 unit_fd = int(os.environ["UNIT_DIRECTORY_FD"])
 expected_uid = int(os.environ["EXPECTED_UID"])
 runtime = os.environ["XDG_RUNTIME_DIR"]
-if not os.path.isabs(runtime) or os.path.realpath(runtime) != runtime:
+if runtime != f"/run/user/{expected_uid}" or os.path.realpath(runtime) != runtime:
     raise SystemExit("credential lifecycle runtime directory is not canonical")
 runtime_fd = os.open(
     runtime,
@@ -1311,46 +1308,7 @@ if (
 ):
     raise SystemExit("credential lifecycle runtime directory is unsafe")
 try:
-    os.mkdir("saturnin-attestation", mode=0o700, dir_fd=runtime_fd)
-except FileExistsError:
-    pass
-service_runtime_fd = os.open(
-    "saturnin-attestation",
-    os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC,
-    dir_fd=runtime_fd,
-)
-service_runtime_metadata = os.fstat(service_runtime_fd)
-if (
-    not stat.S_ISDIR(service_runtime_metadata.st_mode)
-    or service_runtime_metadata.st_uid != expected_uid
-    or stat.S_IMODE(service_runtime_metadata.st_mode) != 0o700
-    or service_runtime_metadata.st_nlink < 2
-):
-    raise SystemExit("credential lifecycle service runtime directory is unsafe")
-lock_flags = os.O_RDWR | os.O_NOFOLLOW | os.O_CLOEXEC
-try:
-    lifecycle_fd = os.open(
-        ".saturnin-credential-lifecycle.lock",
-        lock_flags | os.O_CREAT | os.O_EXCL,
-        0o600,
-        dir_fd=service_runtime_fd,
-    )
-except FileExistsError:
-    lifecycle_fd = os.open(
-        ".saturnin-credential-lifecycle.lock",
-        lock_flags,
-        dir_fd=service_runtime_fd,
-    )
-lock_metadata = os.fstat(lifecycle_fd)
-if (
-    not stat.S_ISREG(lock_metadata.st_mode)
-    or lock_metadata.st_uid != expected_uid
-    or stat.S_IMODE(lock_metadata.st_mode) != 0o600
-    or lock_metadata.st_nlink != 1
-):
-    raise SystemExit("credential lifecycle lock is unsafe")
-try:
-    fcntl.flock(lifecycle_fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    fcntl.flock(runtime_fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
 except BlockingIOError:
     raise SystemExit("another credential lifecycle operation is in progress")
 unit_metadata = os.fstat(unit_fd)
@@ -1374,6 +1332,10 @@ if (
     or stat.S_IMODE(metadata.st_mode) != 0o700
 ):
     raise SystemExit("credential directory descriptor metadata mismatch")
+try:
+    fcntl.flock(credential_fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+except BlockingIOError:
+    raise SystemExit("another credential lifecycle operation is in progress")
 os.write(
     int(os.environ["READY_FD"]),
     f"{metadata.st_dev}:{metadata.st_ino}\n".encode(),
@@ -1391,14 +1353,15 @@ while os.path.exists(parent):
 ' &
 readonly CREDENTIAL_LOCK_HOLDER=$!
 credential_lock_released=0
-credential_lock_shared=0
-downgrade_credential_lock() {
-  if [[ "$credential_lock_released" -eq 0 && "$credential_lock_shared" -eq 0 ]]; then
+credential_lock_handed_off=0
+handoff_credential_lock() {
+  if [[ "$credential_lock_released" -eq 0 && "$credential_lock_handed_off" -eq 0 ]]; then
     kill -USR2 "$CREDENTIAL_LOCK_HOLDER" 2>/dev/null || return 1
     local state=
     for _ in {1..100}; do
-      if IFS= read -r state <"$CREDENTIAL_LOCK_SHARED" && [[ "$state" == shared ]]; then
-        credential_lock_shared=1
+      if IFS= read -r state <"$CREDENTIAL_LOCK_HANDED_OFF" \
+        && [[ "$state" == handed-off ]]; then
+        credential_lock_handed_off=1
         return 0
       fi
       if ! kill -0 "$CREDENTIAL_LOCK_HOLDER" 2>/dev/null; then
@@ -1694,7 +1657,7 @@ verify_unit_directory
 verify_wants_link
 systemctl_bounded --user cat --no-pager "$UNIT" >"$MANAGER_VIEW"
 verify_manager_loaded_unit "$MANAGER_VIEW"
-downgrade_credential_lock
+handoff_credential_lock
 if [[ "$was_active" -eq 1 ]]; then
   systemctl_bounded --user restart "$UNIT"
 else
@@ -1709,7 +1672,6 @@ systemctl_bounded --user show --no-pager \
   --property=PrivateMounts --property=PrivateTmp --property=PrivateNetwork \
   --property=ProtectHome --property=ProtectSystem --property=ProtectProc \
   --property=NoNewPrivileges --property=RestrictAddressFamilies \
-  --property=RuntimeDirectoryPreserve \
   --property=StatusText \
   "$UNIT" >"$MANAGER_STATE"
 verify_running_service "$MANAGER_STATE" "$RUNTIME_TREE_SHA256"

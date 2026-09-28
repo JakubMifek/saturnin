@@ -10,13 +10,14 @@ import secrets
 import shutil
 import stat
 import subprocess
+from contextvars import ContextVar
 from pathlib import Path
 from contextlib import contextmanager
 from typing import Callable
 
 import fcntl
 
-from .jsonlines import PRIVATE_FILE_MODE, atomic_replace_text
+from .jsonlines import PRIVATE_FILE_MODE
 
 ATTESTATION_CREDENTIAL = "saturnin-review-attestation-key"
 PREVIOUS_ATTESTATION_CREDENTIAL = "saturnin-review-attestation-previous-key"
@@ -32,9 +33,10 @@ ROTATION_CURRENT_BACKUP = ".saturnin-review-attestation-key.rollback.cred"
 ROTATION_PREVIOUS_BACKUP = ".saturnin-review-attestation-previous-key.rollback.cred"
 CREDENTIAL_GENERATION = ".generation"
 EXECUTION_SIGNER_ENABLEMENT = ".execution-signer-enabled"
-CREDENTIAL_LIFECYCLE_LOCK = ".saturnin-credential-lifecycle.lock"
-CREDENTIAL_RUNTIME_DIRECTORY = "saturnin-attestation"
 HOST_SCOPED_CREDENTIAL_ID = bytes.fromhex("55b9ed1d38594d43a8319d2ebb332ac6")
+_ACTIVE_CREDENTIAL_DIRECTORY: ContextVar[int | None] = ContextVar(
+    "active_credential_directory", default=None
+)
 
 
 class CredentialError(RuntimeError):
@@ -42,26 +44,37 @@ class CredentialError(RuntimeError):
 
 
 @contextmanager
-def _lifecycle_lock(*, exclusive: bool, validate_credentials: bool = True) -> object:
-    lock_descriptor = _runtime_lock_descriptor()
+def _lifecycle_lock(
+    *,
+    exclusive: bool,
+    validate_credentials: bool = True,
+    rotation_gate: bool = True,
+) -> object:
+    gate_descriptor = _runtime_gate_descriptor() if rotation_gate else None
     directory_descriptor: int | None = None
+    directory_token = None
     try:
-        fcntl.flock(
-            lock_descriptor,
-            fcntl.LOCK_EX if exclusive else fcntl.LOCK_SH,
-        )
+        operation = fcntl.LOCK_EX if exclusive else fcntl.LOCK_SH
+        if gate_descriptor is not None:
+            fcntl.flock(gate_descriptor, operation)
         if validate_credentials:
             directory_descriptor = _credential_directory_descriptor()
+            fcntl.flock(directory_descriptor, operation)
+            directory_token = _ACTIVE_CREDENTIAL_DIRECTORY.set(directory_descriptor)
         yield
     finally:
+        if directory_token is not None:
+            _ACTIVE_CREDENTIAL_DIRECTORY.reset(directory_token)
         if directory_descriptor is not None:
+            fcntl.flock(directory_descriptor, fcntl.LOCK_UN)
             os.close(directory_descriptor)
-        fcntl.flock(lock_descriptor, fcntl.LOCK_UN)
-        os.close(lock_descriptor)
+        if gate_descriptor is not None:
+            fcntl.flock(gate_descriptor, fcntl.LOCK_UN)
+            os.close(gate_descriptor)
 
 
-def _runtime_lock_descriptor() -> int:
-    runtime = Path(os.environ.get("XDG_RUNTIME_DIR", ""))
+def _runtime_gate_descriptor() -> int:
+    runtime = _runtime_gate_path()
     try:
         canonical_runtime = runtime.resolve(strict=True)
     except OSError as exc:
@@ -76,65 +89,20 @@ def _runtime_lock_descriptor() -> int:
         )
     except OSError as exc:
         raise CredentialError("credential lifecycle runtime directory is unsafe") from exc
-    service_runtime_descriptor: int | None = None
-    try:
-        metadata = os.fstat(runtime_descriptor)
-        if (
-            not stat.S_ISDIR(metadata.st_mode)
-            or metadata.st_uid != os.getuid()
-            or stat.S_IMODE(metadata.st_mode) != 0o700
-            or metadata.st_nlink < 2
-        ):
-            raise CredentialError("credential lifecycle runtime directory is unsafe")
-        try:
-            os.mkdir(
-                CREDENTIAL_RUNTIME_DIRECTORY, mode=0o700, dir_fd=runtime_descriptor
-            )
-        except FileExistsError:
-            pass
-        service_runtime_descriptor = os.open(
-            CREDENTIAL_RUNTIME_DIRECTORY,
-            os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC,
-            dir_fd=runtime_descriptor,
-        )
-        service_runtime_metadata = os.fstat(service_runtime_descriptor)
-        if (
-            not stat.S_ISDIR(service_runtime_metadata.st_mode)
-            or service_runtime_metadata.st_uid != os.getuid()
-            or stat.S_IMODE(service_runtime_metadata.st_mode) != 0o700
-            or service_runtime_metadata.st_nlink < 2
-        ):
-            raise CredentialError("credential lifecycle runtime directory is unsafe")
-        flags = os.O_RDWR | os.O_CLOEXEC | os.O_NOFOLLOW
-        try:
-            descriptor = os.open(
-                CREDENTIAL_LIFECYCLE_LOCK,
-                flags | os.O_CREAT | os.O_EXCL,
-                0o600,
-                dir_fd=service_runtime_descriptor,
-            )
-        except FileExistsError:
-            descriptor = os.open(
-                CREDENTIAL_LIFECYCLE_LOCK,
-                flags,
-                dir_fd=service_runtime_descriptor,
-            )
-    except OSError as exc:
-        raise CredentialError("credential lifecycle lock is unsafe") from exc
-    finally:
-        if service_runtime_descriptor is not None:
-            os.close(service_runtime_descriptor)
-        os.close(runtime_descriptor)
-    metadata = os.fstat(descriptor)
+    metadata = os.fstat(runtime_descriptor)
     if (
-        not stat.S_ISREG(metadata.st_mode)
+        not stat.S_ISDIR(metadata.st_mode)
         or metadata.st_uid != os.getuid()
-        or stat.S_IMODE(metadata.st_mode) != 0o600
-        or metadata.st_nlink != 1
+        or stat.S_IMODE(metadata.st_mode) != 0o700
+        or metadata.st_nlink < 2
     ):
-        os.close(descriptor)
-        raise CredentialError("credential lifecycle lock is unsafe")
-    return descriptor
+        os.close(runtime_descriptor)
+        raise CredentialError("credential lifecycle runtime directory is unsafe")
+    return runtime_descriptor
+
+
+def _runtime_gate_path() -> Path:
+    return Path(f"/run/user/{os.getuid()}")
 
 
 def encrypted_credential_dir() -> Path:
@@ -216,6 +184,102 @@ def _ensure_credential_directory() -> None:
     os.close(descriptor)
 
 
+@contextmanager
+def _credential_operation_descriptor() -> object:
+    active = _ACTIVE_CREDENTIAL_DIRECTORY.get()
+    if active is not None:
+        yield active
+        return
+    descriptor = _credential_directory_descriptor()
+    try:
+        yield descriptor
+    finally:
+        os.close(descriptor)
+
+
+def _credential_entry_name(path: Path) -> str:
+    if path.parent != encrypted_credential_dir() or path.name in {"", ".", ".."}:
+        raise CredentialError("credential path is outside the protected directory")
+    return path.name
+
+
+def _revalidate_credential_directory(descriptor: int) -> None:
+    current = _credential_directory_descriptor()
+    try:
+        expected = os.fstat(descriptor)
+        observed = os.fstat(current)
+        if (expected.st_dev, expected.st_ino) != (observed.st_dev, observed.st_ino):
+            raise CredentialError("credential directory identity changed")
+    finally:
+        os.close(current)
+
+
+def _entry_exists(path: Path) -> bool:
+    name = _credential_entry_name(path)
+    with _credential_operation_descriptor() as descriptor:
+        try:
+            os.stat(name, dir_fd=descriptor, follow_symlinks=False)
+        except FileNotFoundError:
+            return False
+        return True
+
+
+def _unlink_credential_entry(path: Path, *, missing_ok: bool = False) -> None:
+    name = _credential_entry_name(path)
+    with _credential_operation_descriptor() as descriptor:
+        _revalidate_credential_directory(descriptor)
+        try:
+            os.unlink(name, dir_fd=descriptor)
+        except FileNotFoundError:
+            if not missing_ok:
+                raise
+
+
+def _atomic_replace_private(path: Path, value: str) -> None:
+    name = _credential_entry_name(path)
+    data = value.encode("utf-8")
+    temporary = f".{name}.{secrets.token_urlsafe(24)}.tmp"
+    with _credential_operation_descriptor() as directory_descriptor:
+        file_descriptor = -1
+        try:
+            file_descriptor = os.open(
+                temporary,
+                os.O_WRONLY
+                | os.O_CREAT
+                | os.O_EXCL
+                | os.O_NOFOLLOW
+                | os.O_CLOEXEC,
+                PRIVATE_FILE_MODE,
+                dir_fd=directory_descriptor,
+            )
+            os.fchmod(file_descriptor, PRIVATE_FILE_MODE)
+            view = memoryview(data)
+            while view:
+                view = view[os.write(file_descriptor, view) :]
+            os.fsync(file_descriptor)
+            os.close(file_descriptor)
+            file_descriptor = -1
+            _revalidate_credential_directory(directory_descriptor)
+            os.rename(
+                temporary,
+                name,
+                src_dir_fd=directory_descriptor,
+                dst_dir_fd=directory_descriptor,
+            )
+            os.fsync(directory_descriptor)
+        except OSError as exc:
+            raise CredentialError(
+                f"credential artifact could not be replaced safely: {name}"
+            ) from exc
+        finally:
+            if file_descriptor >= 0:
+                os.close(file_descriptor)
+            try:
+                os.unlink(temporary, dir_fd=directory_descriptor)
+            except FileNotFoundError:
+                pass
+
+
 def _encrypt(name: str, value: str, destination: Path) -> None:
     if not value or "\x00" in value:
         raise CredentialError("credential value must be non-empty text")
@@ -248,7 +312,7 @@ def _encrypt(name: str, value: str, destination: Path) -> None:
     except UnicodeDecodeError as exc:
         raise CredentialError("systemd-creds returned an invalid encrypted credential") from exc
     _validate_encryption_model(encrypted.encode("utf-8"))
-    atomic_replace_text(destination, encrypted, mode=PRIVATE_FILE_MODE)
+    _atomic_replace_private(destination, encrypted)
 
 
 def _validate_encryption_model(ciphertext: bytes) -> None:
@@ -343,10 +407,9 @@ def credential_generation() -> str:
 
 
 def _advance_generation() -> None:
-    atomic_replace_text(
+    _atomic_replace_private(
         encrypted_credential_dir() / CREDENTIAL_GENERATION,
         secrets.token_bytes(32).hex() + "\n",
-        mode=PRIVATE_FILE_MODE,
     )
 
 
@@ -364,31 +427,39 @@ def execution_signer_ready() -> bool:
 
 
 def _enable_execution_signer() -> None:
-    atomic_replace_text(
+    _atomic_replace_private(
         encrypted_credential_dir() / EXECUTION_SIGNER_ENABLEMENT,
         credential_generation() + "\n",
-        mode=PRIVATE_FILE_MODE,
     )
 
 
 def _read_private_file(path: Path) -> str:
-    try:
-        descriptor = os.open(path, os.O_RDONLY | os.O_NOFOLLOW)
-    except OSError as exc:
-        raise CredentialError(f"credential recovery artifact is unavailable: {path.name}") from exc
-    try:
-        metadata = os.fstat(descriptor)
-        if (
-            not stat.S_ISREG(metadata.st_mode)
-            or metadata.st_uid != os.getuid()
-            or metadata.st_mode & 0o077
-        ):
-            raise CredentialError(
-                f"credential recovery artifact has unsafe ownership or mode: {path.name}"
+    name = _credential_entry_name(path)
+    with _credential_operation_descriptor() as directory_descriptor:
+        try:
+            descriptor = os.open(
+                name,
+                os.O_RDONLY | os.O_NOFOLLOW | os.O_CLOEXEC,
+                dir_fd=directory_descriptor,
             )
-        data = os.read(descriptor, MAX_CREDENTIAL_BYTES + 1)
-    finally:
-        os.close(descriptor)
+        except OSError as exc:
+            raise CredentialError(
+                f"credential recovery artifact is unavailable: {path.name}"
+            ) from exc
+        try:
+            metadata = os.fstat(descriptor)
+            if (
+                not stat.S_ISREG(metadata.st_mode)
+                or metadata.st_uid != os.getuid()
+                or metadata.st_mode & 0o077
+                or metadata.st_nlink != 1
+            ):
+                raise CredentialError(
+                    f"credential recovery artifact has unsafe ownership or mode: {path.name}"
+                )
+            data = os.read(descriptor, MAX_CREDENTIAL_BYTES + 1)
+        finally:
+            os.close(descriptor)
     if not data or len(data) > MAX_CREDENTIAL_BYTES:
         raise CredentialError(f"credential recovery artifact is invalid: {path.name}")
     try:
@@ -401,7 +472,9 @@ def _read_private_file(path: Path) -> str:
 
 def _rotation_state() -> str:
     state_path, current_backup, previous_backup = _rotation_paths()
-    artifacts = [path.exists() for path in (state_path, current_backup, previous_backup)]
+    artifacts = [
+        _entry_exists(path) for path in (state_path, current_backup, previous_backup)
+    ]
     if not any(artifacts):
         return "ready"
     try:
@@ -418,15 +491,16 @@ def _rotation_state() -> str:
 def provision_attestation_key() -> Path:
     with _lifecycle_lock(exclusive=True, validate_credentials=False):
         _ensure_credential_directory()
-        return _provision_attestation_key()
+        with _lifecycle_lock(exclusive=True, rotation_gate=False):
+            return _provision_attestation_key()
 
 
 def _provision_attestation_key() -> Path:
     destination = encrypted_credential_path("review-attestation")
-    (encrypted_credential_dir() / EXECUTION_SIGNER_ENABLEMENT).unlink(
-        missing_ok=True
+    _unlink_credential_entry(
+        encrypted_credential_dir() / EXECUTION_SIGNER_ENABLEMENT, missing_ok=True
     )
-    if destination.exists():
+    if _entry_exists(destination):
         raise CredentialError(
             "review-attestation is already provisioned; use rotate-attestation"
         )
@@ -458,8 +532,8 @@ def _rotate_attestation_key(
         raise CredentialError(
             "attestation rotation is already pending; seal or roll it back"
         )
-    (encrypted_credential_dir() / EXECUTION_SIGNER_ENABLEMENT).unlink(
-        missing_ok=True
+    _unlink_credential_entry(
+        encrypted_credential_dir() / EXECUTION_SIGNER_ENABLEMENT, missing_ok=True
     )
     current = _decrypt_encrypted_credential("review-attestation")
     previous = _decrypt_encrypted_credential("review-attestation-previous")
@@ -470,20 +544,17 @@ def _rotate_attestation_key(
             "previous attestation key still protects review records; archive or retire them before rotating"
         )
     state_path, current_backup, previous_backup = _rotation_paths()
-    atomic_replace_text(
+    _atomic_replace_private(
         current_backup,
         _read_private_file(encrypted_credential_path("review-attestation")),
-        mode=PRIVATE_FILE_MODE,
     )
-    atomic_replace_text(
+    _atomic_replace_private(
         previous_backup,
         _read_private_file(encrypted_credential_path("review-attestation-previous")),
-        mode=PRIVATE_FILE_MODE,
     )
-    atomic_replace_text(
+    _atomic_replace_private(
         state_path,
         json.dumps({"version": 1, "state": "pending-seal"}) + "\n",
-        mode=PRIVATE_FILE_MODE,
     )
     _encrypt(
         PREVIOUS_ATTESTATION_CREDENTIAL,
@@ -533,15 +604,14 @@ def _complete_attestation_rotation() -> None:
         raise CredentialError("no attestation rotation is pending sealing")
     state_path, current_backup, previous_backup = _rotation_paths()
     if state == "pending-seal":
-        atomic_replace_text(
+        _atomic_replace_private(
             state_path,
             json.dumps({"version": 1, "state": "sealed-cleanup"}) + "\n",
-            mode=PRIVATE_FILE_MODE,
         )
     _enable_execution_signer()
     for path in (current_backup, previous_backup, state_path):
         try:
-            path.unlink(missing_ok=True)
+            _unlink_credential_entry(path, missing_ok=True)
         except OSError as exc:
             raise CredentialError("could not remove attestation rotation recovery data") from exc
 
@@ -558,20 +628,20 @@ def _rollback_attestation_rotation() -> Path:
         raise CredentialError("no attestation rotation recovery data exists")
     if state == "sealed-cleanup":
         raise CredentialError("sealed attestation rotation may not be rolled back")
-    if not current_backup.exists() or not previous_backup.exists():
+    if not _entry_exists(current_backup) or not _entry_exists(previous_backup):
         raise CredentialError("attestation rotation recovery data is incomplete")
     current = encrypted_credential_path("review-attestation")
     previous = encrypted_credential_path("review-attestation-previous")
-    atomic_replace_text(current, _read_private_file(current_backup), mode=PRIVATE_FILE_MODE)
-    atomic_replace_text(previous, _read_private_file(previous_backup), mode=PRIVATE_FILE_MODE)
+    _atomic_replace_private(current, _read_private_file(current_backup))
+    _atomic_replace_private(previous, _read_private_file(previous_backup))
     _decrypt_encrypted_credential("review-attestation")
     _decrypt_encrypted_credential("review-attestation-previous")
     _advance_generation()
-    (encrypted_credential_dir() / EXECUTION_SIGNER_ENABLEMENT).unlink(
-        missing_ok=True
+    _unlink_credential_entry(
+        encrypted_credential_dir() / EXECUTION_SIGNER_ENABLEMENT, missing_ok=True
     )
     for path in (state_path, current_backup, previous_backup):
-        path.unlink(missing_ok=True)
+        _unlink_credential_entry(path, missing_ok=True)
     return current
 
 
@@ -590,7 +660,7 @@ def _revoke_credential(kind: str) -> list[Path]:
     for credential_kind in kinds:
         path = encrypted_credential_path(credential_kind)
         try:
-            path.unlink()
+            _unlink_credential_entry(path)
         except FileNotFoundError:
             continue
         except OSError as exc:
@@ -598,10 +668,11 @@ def _revoke_credential(kind: str) -> list[Path]:
         removed.append(path)
     if kind == "review-attestation":
         for path in _rotation_paths():
-            path.unlink(missing_ok=True)
-        (encrypted_credential_dir() / CREDENTIAL_GENERATION).unlink(missing_ok=True)
-        (encrypted_credential_dir() / EXECUTION_SIGNER_ENABLEMENT).unlink(
-            missing_ok=True
+            _unlink_credential_entry(path, missing_ok=True)
+        generation_path = encrypted_credential_dir() / CREDENTIAL_GENERATION
+        _unlink_credential_entry(generation_path, missing_ok=True)
+        _unlink_credential_entry(
+            encrypted_credential_dir() / EXECUTION_SIGNER_ENABLEMENT, missing_ok=True
         )
     if not removed:
         raise CredentialError(f"encrypted credential is not provisioned: {kind}")
@@ -879,34 +950,59 @@ def credential_value(env_name: str, credential_name: str) -> str:
 
 def _decrypt_encrypted_credential(kind: str) -> str:
     path = encrypted_credential_path(kind)
-    try:
-        metadata = path.stat(follow_symlinks=False)
-    except FileNotFoundError as exc:
-        raise CredentialError(f"encrypted credential is not provisioned: {kind}") from exc
-    if (
-        not stat.S_ISREG(metadata.st_mode)
-        or metadata.st_uid != os.getuid()
-        or metadata.st_mode & 0o077
-    ):
-        raise CredentialError(f"encrypted credential has unsafe ownership or mode: {kind}")
-    _validate_encryption_model(_read_private_file(path).encode("utf-8"))
-    try:
-        result = subprocess.run(
-            [
-                "systemd-creds",
-                "decrypt",
-                "--user",
-                f"--name={KNOWN_CREDENTIALS[kind]}",
-                str(path),
-                "-",
-            ],
-            check=False,
-            capture_output=True,
-        )
-    except OSError as exc:
-        raise CredentialError(
-            f"encrypted credential cannot be decrypted: {kind}"
-        ) from exc
+    name = _credential_entry_name(path)
+    with _credential_operation_descriptor() as directory_descriptor:
+        try:
+            descriptor = os.open(
+                name,
+                os.O_RDONLY | os.O_NOFOLLOW | os.O_CLOEXEC,
+                dir_fd=directory_descriptor,
+            )
+        except FileNotFoundError as exc:
+            raise CredentialError(
+                f"encrypted credential is not provisioned: {kind}"
+            ) from exc
+        except OSError as exc:
+            raise CredentialError(
+                f"encrypted credential cannot be opened: {kind}"
+            ) from exc
+        try:
+            metadata = os.fstat(descriptor)
+            if (
+                not stat.S_ISREG(metadata.st_mode)
+                or metadata.st_uid != os.getuid()
+                or metadata.st_mode & 0o077
+                or metadata.st_nlink != 1
+            ):
+                raise CredentialError(
+                    f"encrypted credential has unsafe ownership or mode: {kind}"
+                )
+            ciphertext = os.pread(descriptor, MAX_CREDENTIAL_BYTES + 1, 0)
+            if not ciphertext or len(ciphertext) > MAX_CREDENTIAL_BYTES:
+                raise CredentialError(
+                    f"encrypted credential cannot be decrypted: {kind}"
+                )
+            _validate_encryption_model(ciphertext)
+            try:
+                result = subprocess.run(
+                    [
+                        "systemd-creds",
+                        "decrypt",
+                        "--user",
+                        f"--name={KNOWN_CREDENTIALS[kind]}",
+                        f"/proc/self/fd/{descriptor}",
+                        "-",
+                    ],
+                    check=False,
+                    capture_output=True,
+                    pass_fds=(descriptor,),
+                )
+            except OSError as exc:
+                raise CredentialError(
+                    f"encrypted credential cannot be decrypted: {kind}"
+                ) from exc
+        finally:
+            os.close(descriptor)
     if result.returncode != 0 or not result.stdout:
         raise CredentialError(f"encrypted credential cannot be decrypted: {kind}")
     if len(result.stdout) > MAX_CREDENTIAL_BYTES or b"\x00" in result.stdout:

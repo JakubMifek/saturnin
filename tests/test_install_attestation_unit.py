@@ -401,6 +401,11 @@ def signer_install(tmp_path: Path) -> tuple[Path, dict[str, str], Path, Path]:
             '[[ "$("$STAT" -c %u "$tool")" -ne 0 ]]',
             '[[ "$("$STAT" -c %u "$tool")" -ne 0 '
             '&& "$("$STAT" -c %u "$tool")" -ne "$CURRENT_UID" ]]',
+        )
+        .replace(
+            'if runtime != f"/run/user/{expected_uid}" '
+            "or os.path.realpath(runtime) != runtime:",
+            "if not os.path.isabs(runtime) or os.path.realpath(runtime) != runtime:",
         ),
         encoding="utf-8",
     )
@@ -642,10 +647,10 @@ def test_install_serializes_with_credential_lifecycle(
     signer_install: tuple[Path, dict[str, str], Path, Path],
 ) -> None:
     _, _, unit_dir, calls = signer_install
-    runtime_dir = Path(signer_install[1]["XDG_RUNTIME_DIR"]) / "saturnin-attestation"
-    runtime_dir.mkdir(mode=0o700)
-    lock = runtime_dir / ".saturnin-credential-lifecycle.lock"
-    descriptor = os.open(lock, os.O_RDWR | os.O_CREAT | os.O_NOFOLLOW, 0o600)
+    runtime_dir = Path(signer_install[1]["XDG_RUNTIME_DIR"])
+    descriptor = os.open(
+        runtime_dir, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW
+    )
     fcntl.flock(descriptor, fcntl.LOCK_EX)
     try:
         result = _run(signer_install, "install")
@@ -992,28 +997,22 @@ def test_rotation_is_blocked_until_startup_verification_finishes(
         while not entered.exists() and time.monotonic() < deadline:
             time.sleep(0.01)
         assert entered.exists()
-        lifecycle_path = (
-            Path(env["XDG_RUNTIME_DIR"])
-            / "saturnin-attestation"
-            / ".saturnin-credential-lifecycle.lock"
+        lifecycle_fd = os.open(
+            env["XDG_RUNTIME_DIR"],
+            os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW,
         )
-        lifecycle_fd = os.open(lifecycle_path, os.O_RDWR | os.O_NOFOLLOW)
-        shared_fd = os.open(lifecycle_path, os.O_RDWR | os.O_NOFOLLOW)
-        unit_fd = os.open(
-            unit_dir,
+        credential_fd = os.open(
+            unit_dir / "saturnin-credentials",
             os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW,
         )
         try:
             with pytest.raises(BlockingIOError):
                 fcntl.flock(lifecycle_fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
-            fcntl.flock(shared_fd, fcntl.LOCK_SH | fcntl.LOCK_NB)
-            with pytest.raises(BlockingIOError):
-                fcntl.flock(unit_fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            fcntl.flock(credential_fd, fcntl.LOCK_SH | fcntl.LOCK_NB)
         finally:
-            fcntl.flock(shared_fd, fcntl.LOCK_UN)
-            os.close(shared_fd)
+            fcntl.flock(credential_fd, fcntl.LOCK_UN)
+            os.close(credential_fd)
             os.close(lifecycle_fd)
-            os.close(unit_fd)
         hold.unlink()
         stdout, stderr = process.communicate(timeout=5)
     finally:
@@ -1276,7 +1275,6 @@ def test_status_is_read_only(
         "--property=PrivateNetwork --property=ProtectHome "
         "--property=ProtectSystem --property=ProtectProc "
         "--property=NoNewPrivileges --property=RestrictAddressFamilies "
-        "--property=RuntimeDirectoryPreserve "
         "--property=StatusText saturnin-attestation.service",
         "--user status --no-pager saturnin-attestation.service"
     ]

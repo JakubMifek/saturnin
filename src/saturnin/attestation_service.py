@@ -376,7 +376,7 @@ class SigningService:
             raise AttestationServiceError(
                 "attestation service credential generation mismatch"
             )
-        with _lifecycle_lock(exclusive=False):
+        with _lifecycle_lock(exclusive=False, rotation_gate=False):
             self.generation = credential_generation()
             if not hmac.compare_digest(
                 self.generation,

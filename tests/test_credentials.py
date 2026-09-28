@@ -14,15 +14,16 @@ import pytest
 
 from saturnin.credentials import (
     ATTESTATION_CREDENTIAL,
-    CREDENTIAL_LIFECYCLE_LOCK,
     HOST_SCOPED_CREDENTIAL_ID,
     PREVIOUS_ATTESTATION_CREDENTIAL,
     CredentialError,
+    _advance_generation,
     _lifecycle_lock,
     _sealed_systemd_creds,
     _validate_systemd_creds_namespace,
     attestation_rotation_values,
     complete_attestation_rotation,
+    credential_generation,
     credential_prerequisites,
     credential_status,
     provision_attestation_key,
@@ -32,6 +33,14 @@ from saturnin.credentials import (
     systemd_credential,
     validate_encrypted_credential,
 )
+
+
+@pytest.fixture(autouse=True)
+def runtime_gate(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
+    runtime = tmp_path / "canonical-runtime"
+    runtime.mkdir(mode=0o700)
+    monkeypatch.setattr("saturnin.credentials._runtime_gate_path", lambda: runtime)
+    return runtime
 
 
 def _ciphertext(payload: bytes = b"fixture") -> bytes:
@@ -54,7 +63,7 @@ def _write_attestation_credentials(credential_dir: Path) -> tuple[Path, Path]:
 
 
 def test_runtime_lock_serializes_service_and_rotation(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, runtime_gate: Path
 ) -> None:
     monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path / "config"))
     runtime = tmp_path / "runtime"
@@ -63,12 +72,9 @@ def test_runtime_lock_serializes_service_and_rotation(
     _write_attestation_credentials(
         tmp_path / "config/systemd/user/saturnin-credentials"
     )
-    service_runtime = runtime / "saturnin-attestation"
-    service_runtime.mkdir(mode=0o700)
     gate = os.open(
-        service_runtime / CREDENTIAL_LIFECYCLE_LOCK,
-        os.O_RDWR | os.O_CREAT | os.O_NOFOLLOW,
-        0o600,
+        runtime_gate,
+        os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW,
     )
     fcntl.flock(gate, fcntl.LOCK_EX)
     acquired = threading.Event()
@@ -114,6 +120,31 @@ def test_lifecycle_lock_validates_existing_directory_without_mutation(
     )
 
 
+def test_lifecycle_transaction_stays_on_pinned_directory_and_rejects_commit(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path / "config"))
+    directory = tmp_path / "config/systemd/user/saturnin-credentials"
+    _write_attestation_credentials(directory)
+    original = directory.with_name("saturnin-credentials.original")
+
+    with _lifecycle_lock(exclusive=True):
+        directory.rename(original)
+        replacement = directory
+        replacement.mkdir(mode=0o700)
+        (replacement / ".generation").write_text("attacker\n", encoding="utf-8")
+        (replacement / ".generation").chmod(0o600)
+
+        assert credential_generation() == "fixture-generation"
+        with pytest.raises(CredentialError, match="identity changed"):
+            _advance_generation()
+
+    assert (replacement / ".generation").read_text(encoding="utf-8") == "attacker\n"
+    assert (original / ".generation").read_text(encoding="utf-8") == (
+        "fixture-generation\n"
+    )
+
+
 @pytest.mark.parametrize("unsafe_kind", ["mode", "file", "symlink"])
 def test_lifecycle_lock_rejects_unsafe_credential_directory(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, unsafe_kind: str
@@ -142,8 +173,8 @@ def test_lifecycle_lock_rejects_unsafe_credential_directory(
             pass
 
 
-def test_lifecycle_lock_rejects_unsafe_runtime_lock(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+def test_lifecycle_lock_ignores_alternate_runtime_environment(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, runtime_gate: Path
 ) -> None:
     monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path / "config"))
     runtime = tmp_path / "runtime"
@@ -152,15 +183,14 @@ def test_lifecycle_lock_rejects_unsafe_runtime_lock(
     _write_attestation_credentials(
         tmp_path / "config/systemd/user/saturnin-credentials"
     )
-    service_runtime = runtime / "saturnin-attestation"
-    service_runtime.mkdir(mode=0o700)
-    lock = service_runtime / CREDENTIAL_LIFECYCLE_LOCK
-    lock.write_text("", encoding="utf-8")
-    lock.chmod(0o644)
-
-    with pytest.raises(CredentialError, match="lifecycle lock is unsafe"):
+    alternate = os.open(runtime, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+    fcntl.flock(alternate, fcntl.LOCK_EX)
+    try:
         with _lifecycle_lock(exclusive=False):
             pass
+    finally:
+        fcntl.flock(alternate, fcntl.LOCK_UN)
+        os.close(alternate)
 
 
 def test_lifecycle_lock_rejects_wrong_owner(
@@ -575,9 +605,7 @@ def test_rotation_reencrypts_old_key_without_exposing_values(
     def fake_run(command: list[str], **kwargs: object) -> SimpleNamespace:
         value = kwargs.get("input")
         calls.append((command, value if isinstance(value, bytes) else None))
-        if command[1] == "decrypt" and command[-2].endswith(
-            f"{ATTESTATION_CREDENTIAL}.cred"
-        ):
+        if command[1] == "decrypt" and f"--name={ATTESTATION_CREDENTIAL}" in command:
             return SimpleNamespace(returncode=0, stdout=b"old-master")
         if command[1] == "decrypt":
             return SimpleNamespace(returncode=0, stdout=b"older-master")
@@ -619,7 +647,7 @@ def test_failed_rotation_can_restore_both_encrypted_slots(
                 returncode=0,
                 stdout=(
                     b"current-master"
-                    if command[-2].endswith(f"{ATTESTATION_CREDENTIAL}.cred")
+                    if f"--name={ATTESTATION_CREDENTIAL}" in command
                     else b"previous-master"
                 ),
             )
@@ -655,7 +683,7 @@ def test_rotation_refuses_to_replace_pending_previous_key(
             stdout=(
                 (
                     b"current-master"
-                    if command[-2].endswith(f"{ATTESTATION_CREDENTIAL}.cred")
+                    if f"--name={ATTESTATION_CREDENTIAL}" in command
                     else b"previous-master"
                 )
                 if command[1] == "decrypt"
@@ -681,7 +709,7 @@ def test_rotation_refuses_to_discard_key_used_by_review_records(
             returncode=0,
             stdout=(
                 b"current-master"
-                if command[-2].endswith(f"{ATTESTATION_CREDENTIAL}.cred")
+                if f"--name={ATTESTATION_CREDENTIAL}" in command
                 else b"previous-master"
             ),
         ),
