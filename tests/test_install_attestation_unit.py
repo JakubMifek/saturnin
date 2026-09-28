@@ -288,7 +288,7 @@ def signer_install(tmp_path: Path) -> tuple[Path, dict[str, str], Path, Path]:
         "    if [ -n \"${SERVICE_FAILED:-}\" ]; then\n"
         "      printf '%s\\n' 'LoadState=loaded' 'ActiveState=failed' "
         "'SubState=failed' \"FragmentPath=$unit_dir/saturnin-attestation.service\" "
-        "'DropInPaths=' 'MainPID=0' 'ExecMainPID=0' "
+        "'DropInPaths=' 'MainPID=0' 'ExecMainPID=2032763' "
         "\"ControlGroup=${SERVICE_CGROUP:+/user.slice/saturnin-attestation.service}\"\n"
         "    elif [ -e \"$state/active\" ] || [ -n \"${STOP_REMAINS_ACTIVE:-}\" ]; then\n"
         "      printf '%s\\n' 'LoadState=loaded' 'ActiveState=active' "
