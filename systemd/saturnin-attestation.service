@@ -22,6 +22,7 @@ Environment=SATURNIN_CURRENT_CREDENTIAL_CIPHERTEXT="@SATURNIN_CURRENT_CREDENTIAL
 Environment=SATURNIN_PREVIOUS_CREDENTIAL_CIPHERTEXT="@SATURNIN_PREVIOUS_CREDENTIAL@"
 RuntimeDirectory=saturnin-attestation
 RuntimeDirectoryMode=0700
+RuntimeDirectoryPreserve=yes
 PrivateMounts=yes
 PrivateTmp=yes
 PrivateNetwork=yes

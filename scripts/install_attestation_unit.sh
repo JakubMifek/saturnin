@@ -8,7 +8,7 @@ unset BASH_ENV ENV CDPATH PYTHONHOME PYTHONPATH
 IFS=$' \t\n'
 
 readonly UNIT=saturnin-attestation.service
-readonly EXPECTED_RUNTIME_MANIFEST_SHA256=2f1e951b3e58e163533ed1cdb1946115d82a0a8d8d75546953961a7636cf0412
+readonly EXPECTED_RUNTIME_MANIFEST_SHA256=0a00057391c04203d451dc728dac4de340f7f0224ad3a9787f94a25bb8578956
 readonly ID=/usr/bin/id
 readonly REALPATH=/usr/bin/realpath
 readonly STAT=/usr/bin/stat
@@ -750,6 +750,7 @@ expected = [
         f"Environment=SATURNIN_PREVIOUS_CREDENTIAL_CIPHERTEXT=\"{previous_credential}\"",
         "RuntimeDirectory=saturnin-attestation",
         "RuntimeDirectoryMode=0700",
+        "RuntimeDirectoryPreserve=yes",
         "PrivateMounts=yes",
         "PrivateTmp=yes",
         "PrivateNetwork=yes",
@@ -841,6 +842,7 @@ expected = {
     "ProtectProc": "invisible",
     "NoNewPrivileges": "yes",
     "RestrictAddressFamilies": "AF_UNIX",
+    "RuntimeDirectoryPreserve": "yes",
     "StatusText": (
         f"Saturnin runtime {os.environ['RUNTIME_SHA256_VALUE']} verified"
     ),
@@ -1040,6 +1042,7 @@ if [[ "$action" == status ]]; then
     --property=PrivateMounts --property=PrivateTmp --property=PrivateNetwork \
     --property=ProtectHome --property=ProtectSystem --property=ProtectProc \
     --property=NoNewPrivileges --property=RestrictAddressFamilies \
+    --property=RuntimeDirectoryPreserve \
     --property=StatusText \
     "$UNIT" \
     | verify_running_service - "${STATUS_RUNTIME_ID##*:}" "$FILE_INSTALLED"
@@ -1175,6 +1178,7 @@ rollback() {
     --property=PrivateMounts --property=PrivateTmp --property=PrivateNetwork \
     --property=ProtectHome --property=ProtectSystem --property=ProtectProc \
     --property=NoNewPrivileges --property=RestrictAddressFamilies \
+    --property=RuntimeDirectoryPreserve \
     --property=StatusText \
     "$UNIT" >"$MANAGER_STATE" \
     && verify_running_service "$MANAGER_STATE" \
@@ -1260,6 +1264,7 @@ exec {CREDENTIAL_LOCK_READY_FD}>"$CREDENTIAL_LOCK_READY"
 readonly CREDENTIAL_LOCK_READY_FD
 UNIT_DIRECTORY_FD="$UNIT_DIR_FD" EXPECTED_UID="$CURRENT_UID" \
   EXPECTED_UNIT_DIRECTORY="$UNIT_DIR_DEVICE_INODE" \
+  XDG_RUNTIME_DIR="${XDG_RUNTIME_DIR:-/run/user/$CURRENT_UID}" \
   READY_FD="$CREDENTIAL_LOCK_READY_FD" PARENT_PID="$$" \
   "$PYTHON" -I -c '
 import fcntl
@@ -1274,6 +1279,64 @@ for signum in (signal.SIGTERM, signal.SIGINT, signal.SIGHUP):
 signal.signal(signal.SIGUSR1, lambda *_: sys.exit(0))
 unit_fd = int(os.environ["UNIT_DIRECTORY_FD"])
 expected_uid = int(os.environ["EXPECTED_UID"])
+runtime = os.environ["XDG_RUNTIME_DIR"]
+if not os.path.isabs(runtime) or os.path.realpath(runtime) != runtime:
+    raise SystemExit("credential lifecycle runtime directory is not canonical")
+runtime_fd = os.open(
+    runtime,
+    os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC,
+)
+runtime_metadata = os.fstat(runtime_fd)
+if (
+    not stat.S_ISDIR(runtime_metadata.st_mode)
+    or runtime_metadata.st_uid != expected_uid
+    or stat.S_IMODE(runtime_metadata.st_mode) != 0o700
+    or runtime_metadata.st_nlink < 2
+):
+    raise SystemExit("credential lifecycle runtime directory is unsafe")
+try:
+    os.mkdir("saturnin-attestation", mode=0o700, dir_fd=runtime_fd)
+except FileExistsError:
+    pass
+service_runtime_fd = os.open(
+    "saturnin-attestation",
+    os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC,
+    dir_fd=runtime_fd,
+)
+service_runtime_metadata = os.fstat(service_runtime_fd)
+if (
+    not stat.S_ISDIR(service_runtime_metadata.st_mode)
+    or service_runtime_metadata.st_uid != expected_uid
+    or stat.S_IMODE(service_runtime_metadata.st_mode) != 0o700
+    or service_runtime_metadata.st_nlink < 2
+):
+    raise SystemExit("credential lifecycle service runtime directory is unsafe")
+lock_flags = os.O_RDWR | os.O_NOFOLLOW | os.O_CLOEXEC
+try:
+    lifecycle_fd = os.open(
+        ".saturnin-credential-lifecycle.lock",
+        lock_flags | os.O_CREAT | os.O_EXCL,
+        0o600,
+        dir_fd=service_runtime_fd,
+    )
+except FileExistsError:
+    lifecycle_fd = os.open(
+        ".saturnin-credential-lifecycle.lock",
+        lock_flags,
+        dir_fd=service_runtime_fd,
+    )
+lock_metadata = os.fstat(lifecycle_fd)
+if (
+    not stat.S_ISREG(lock_metadata.st_mode)
+    or lock_metadata.st_uid != expected_uid
+    or stat.S_IMODE(lock_metadata.st_mode) != 0o600
+    or lock_metadata.st_nlink != 1
+):
+    raise SystemExit("credential lifecycle lock is unsafe")
+try:
+    fcntl.flock(lifecycle_fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+except BlockingIOError:
+    raise SystemExit("another credential lifecycle operation is in progress")
 unit_metadata = os.fstat(unit_fd)
 if (
     f"{unit_metadata.st_dev}:{unit_metadata.st_ino}"
@@ -1295,10 +1358,6 @@ if (
     or stat.S_IMODE(metadata.st_mode) != 0o700
 ):
     raise SystemExit("credential directory descriptor metadata mismatch")
-try:
-    fcntl.flock(credential_fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
-except BlockingIOError:
-    raise SystemExit("another credential lifecycle operation is in progress")
 os.write(
     int(os.environ["READY_FD"]),
     f"{metadata.st_dev}:{metadata.st_ino}\n".encode(),
@@ -1616,6 +1675,7 @@ systemctl_bounded --user show --no-pager \
   --property=PrivateMounts --property=PrivateTmp --property=PrivateNetwork \
   --property=ProtectHome --property=ProtectSystem --property=ProtectProc \
   --property=NoNewPrivileges --property=RestrictAddressFamilies \
+  --property=RuntimeDirectoryPreserve \
   --property=StatusText \
   "$UNIT" >"$MANAGER_STATE"
 verify_running_service "$MANAGER_STATE" "$RUNTIME_TREE_SHA256"

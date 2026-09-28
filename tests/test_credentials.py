@@ -14,6 +14,7 @@ import pytest
 
 from saturnin.credentials import (
     ATTESTATION_CREDENTIAL,
+    CREDENTIAL_LIFECYCLE_LOCK,
     HOST_SCOPED_CREDENTIAL_ID,
     PREVIOUS_ATTESTATION_CREDENTIAL,
     CredentialError,
@@ -39,6 +40,7 @@ def _ciphertext(payload: bytes = b"fixture") -> bytes:
 
 def _write_attestation_credentials(credential_dir: Path) -> tuple[Path, Path]:
     credential_dir.mkdir(parents=True, mode=0o700)
+    credential_dir.parent.chmod(0o700)
     current = credential_dir / f"{ATTESTATION_CREDENTIAL}.cred"
     previous = credential_dir / f"{PREVIOUS_ATTESTATION_CREDENTIAL}.cred"
     current.write_bytes(_ciphertext(b"current"))
@@ -51,14 +53,23 @@ def _write_attestation_credentials(credential_dir: Path) -> tuple[Path, Path]:
     return current, previous
 
 
-def test_installer_rotation_gate_allows_service_lock_handoff(
+def test_runtime_lock_serializes_service_and_rotation(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path / "config"))
-    with _lifecycle_lock(exclusive=True):
-        pass
-    unit_dir = tmp_path / "config/systemd/user"
-    gate = os.open(unit_dir, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+    runtime = tmp_path / "runtime"
+    runtime.mkdir(mode=0o700)
+    monkeypatch.setenv("XDG_RUNTIME_DIR", str(runtime))
+    _write_attestation_credentials(
+        tmp_path / "config/systemd/user/saturnin-credentials"
+    )
+    service_runtime = runtime / "saturnin-attestation"
+    service_runtime.mkdir(mode=0o700)
+    gate = os.open(
+        service_runtime / CREDENTIAL_LIFECYCLE_LOCK,
+        os.O_RDWR | os.O_CREAT | os.O_NOFOLLOW,
+        0o600,
+    )
     fcntl.flock(gate, fcntl.LOCK_EX)
     acquired = threading.Event()
 
@@ -70,13 +81,112 @@ def test_installer_rotation_gate_allows_service_lock_handoff(
     thread.start()
     try:
         assert not acquired.wait(0.05)
-        with _lifecycle_lock(exclusive=False, rotation_gate=False):
-            pass
     finally:
         fcntl.flock(gate, fcntl.LOCK_UN)
         os.close(gate)
     thread.join(timeout=2)
     assert acquired.is_set()
+
+
+def test_lifecycle_lock_validates_existing_directory_without_mutation(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path / "config"))
+    runtime = tmp_path / "runtime"
+    runtime.mkdir(mode=0o700)
+    monkeypatch.setenv("XDG_RUNTIME_DIR", str(runtime))
+    credential_dir = tmp_path / "config/systemd/user/saturnin-credentials"
+    _write_attestation_credentials(credential_dir)
+    before = credential_dir.stat()
+    monkeypatch.setattr(
+        "saturnin.credentials.os.fchmod",
+        lambda *_: pytest.fail("runtime validation must not mutate directories"),
+    )
+
+    with _lifecycle_lock(exclusive=False):
+        pass
+
+    after = credential_dir.stat()
+    assert (after.st_dev, after.st_ino, after.st_mode) == (
+        before.st_dev,
+        before.st_ino,
+        before.st_mode,
+    )
+
+
+@pytest.mark.parametrize("unsafe_kind", ["mode", "file", "symlink"])
+def test_lifecycle_lock_rejects_unsafe_credential_directory(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, unsafe_kind: str
+) -> None:
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path / "config"))
+    runtime = tmp_path / "runtime"
+    runtime.mkdir(mode=0o700)
+    monkeypatch.setenv("XDG_RUNTIME_DIR", str(runtime))
+    directory = tmp_path / "config/systemd/user/saturnin-credentials"
+    _write_attestation_credentials(directory)
+    if unsafe_kind == "mode":
+        directory.chmod(0o755)
+    else:
+        for path in directory.iterdir():
+            path.unlink()
+        directory.rmdir()
+        if unsafe_kind == "file":
+            directory.write_text("not a directory", encoding="utf-8")
+        else:
+            target = tmp_path / "target"
+            target.mkdir(mode=0o700)
+            directory.symlink_to(target, target_is_directory=True)
+
+    with pytest.raises(CredentialError, match="owner-controlled"):
+        with _lifecycle_lock(exclusive=False):
+            pass
+
+
+def test_lifecycle_lock_rejects_unsafe_runtime_lock(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path / "config"))
+    runtime = tmp_path / "runtime"
+    runtime.mkdir(mode=0o700)
+    monkeypatch.setenv("XDG_RUNTIME_DIR", str(runtime))
+    _write_attestation_credentials(
+        tmp_path / "config/systemd/user/saturnin-credentials"
+    )
+    service_runtime = runtime / "saturnin-attestation"
+    service_runtime.mkdir(mode=0o700)
+    lock = service_runtime / CREDENTIAL_LIFECYCLE_LOCK
+    lock.write_text("", encoding="utf-8")
+    lock.chmod(0o644)
+
+    with pytest.raises(CredentialError, match="lifecycle lock is unsafe"):
+        with _lifecycle_lock(exclusive=False):
+            pass
+
+
+def test_lifecycle_lock_rejects_wrong_owner(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path / "config"))
+    runtime = tmp_path / "runtime"
+    runtime.mkdir(mode=0o700)
+    monkeypatch.setenv("XDG_RUNTIME_DIR", str(runtime))
+    directory = tmp_path / "config/systemd/user/saturnin-credentials"
+    _write_attestation_credentials(directory)
+    real_fstat = os.fstat
+
+    def wrong_owner(descriptor: int) -> os.stat_result:
+        metadata = real_fstat(descriptor)
+        if os.readlink(f"/proc/self/fd/{descriptor}") == str(directory):
+            fields = list(metadata)
+            fields[4] = os.getuid() + 1
+            return os.stat_result(fields)
+        return metadata
+
+    monkeypatch.setattr("saturnin.credentials.os.fstat", wrong_owner)
+
+    with pytest.raises(CredentialError, match="owner-controlled"):
+        with _lifecycle_lock(exclusive=False):
+            pass
 
 
 def test_provision_attestation_encrypts_without_secret_arguments(
@@ -589,6 +699,7 @@ def test_revoke_attestation_removes_current_and_previous(
     monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path / "config"))
     credential_dir = tmp_path / "config" / "systemd" / "user" / "saturnin-credentials"
     credential_dir.mkdir(parents=True, mode=0o700)
+    credential_dir.parent.chmod(0o700)
     paths = [
         credential_dir / f"{ATTESTATION_CREDENTIAL}.cred",
         credential_dir / f"{PREVIOUS_ATTESTATION_CREDENTIAL}.cred",

@@ -405,11 +405,14 @@ def signer_install(tmp_path: Path) -> tuple[Path, dict[str, str], Path, Path]:
         encoding="utf-8",
     )
     installer.chmod(0o755)
+    runtime_dir = tmp_path / "runtime"
+    runtime_dir.mkdir(mode=0o700)
     env = {
         **os.environ,
         "HOME": str(home),
         "XDG_CONFIG_HOME": str(home / ".config"),
         "SATURNIN_HOME": str(checkout),
+        "XDG_RUNTIME_DIR": str(runtime_dir),
         "PATH": f"{fake_bin}:{os.environ['PATH']}",
     }
     return checkout, env, unit_dir, calls
@@ -639,8 +642,10 @@ def test_install_serializes_with_credential_lifecycle(
     signer_install: tuple[Path, dict[str, str], Path, Path],
 ) -> None:
     _, _, unit_dir, calls = signer_install
-    credential_dir = unit_dir / "saturnin-credentials"
-    descriptor = os.open(credential_dir, os.O_RDONLY | os.O_DIRECTORY)
+    runtime_dir = Path(signer_install[1]["XDG_RUNTIME_DIR"]) / "saturnin-attestation"
+    runtime_dir.mkdir(mode=0o700)
+    lock = runtime_dir / ".saturnin-credential-lifecycle.lock"
+    descriptor = os.open(lock, os.O_RDWR | os.O_CREAT | os.O_NOFOLLOW, 0o600)
     fcntl.flock(descriptor, fcntl.LOCK_EX)
     try:
         result = _run(signer_install, "install")
@@ -1265,6 +1270,7 @@ def test_status_is_read_only(
         "--property=PrivateNetwork --property=ProtectHome "
         "--property=ProtectSystem --property=ProtectProc "
         "--property=NoNewPrivileges --property=RestrictAddressFamilies "
+        "--property=RuntimeDirectoryPreserve "
         "--property=StatusText saturnin-attestation.service",
         "--user status --no-pager saturnin-attestation.service"
     ]

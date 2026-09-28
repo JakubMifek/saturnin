@@ -32,6 +32,8 @@ ROTATION_CURRENT_BACKUP = ".saturnin-review-attestation-key.rollback.cred"
 ROTATION_PREVIOUS_BACKUP = ".saturnin-review-attestation-previous-key.rollback.cred"
 CREDENTIAL_GENERATION = ".generation"
 EXECUTION_SIGNER_ENABLEMENT = ".execution-signer-enabled"
+CREDENTIAL_LIFECYCLE_LOCK = ".saturnin-credential-lifecycle.lock"
+CREDENTIAL_RUNTIME_DIRECTORY = "saturnin-attestation"
 HOST_SCOPED_CREDENTIAL_ID = bytes.fromhex("55b9ed1d38594d43a8319d2ebb332ac6")
 
 
@@ -40,59 +42,99 @@ class CredentialError(RuntimeError):
 
 
 @contextmanager
-def _lifecycle_lock(
-    *, exclusive: bool, rotation_gate: bool = True
-) -> object:
-    directory = encrypted_credential_dir()
-    _secure_directory(directory.parent)
-    _secure_directory(directory)
-    gate_descriptor: int | None = None
-    if rotation_gate:
-        gate_descriptor = os.open(
-            directory.parent,
-            os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW,
-        )
-        gate_metadata = os.fstat(gate_descriptor)
-        if (
-            not stat.S_ISDIR(gate_metadata.st_mode)
-            or gate_metadata.st_uid != os.getuid()
-            or gate_metadata.st_mode & 0o022
-        ):
-            os.close(gate_descriptor)
-            raise CredentialError("credential rotation gate is unsafe")
+def _lifecycle_lock(*, exclusive: bool, validate_credentials: bool = True) -> object:
+    lock_descriptor = _runtime_lock_descriptor()
+    directory_descriptor: int | None = None
+    try:
         fcntl.flock(
-            gate_descriptor,
+            lock_descriptor,
             fcntl.LOCK_EX if exclusive else fcntl.LOCK_SH,
         )
+        if validate_credentials:
+            directory_descriptor = _credential_directory_descriptor()
+        yield
+    finally:
+        if directory_descriptor is not None:
+            os.close(directory_descriptor)
+        fcntl.flock(lock_descriptor, fcntl.LOCK_UN)
+        os.close(lock_descriptor)
+
+
+def _runtime_lock_descriptor() -> int:
+    runtime = Path(os.environ.get("XDG_RUNTIME_DIR", ""))
     try:
-        descriptor = os.open(
-            directory,
-            os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW,
+        canonical_runtime = runtime.resolve(strict=True)
+    except OSError as exc:
+        raise CredentialError(
+            "credential lifecycle runtime directory is unsafe"
+        ) from exc
+    if not runtime.is_absolute() or canonical_runtime != runtime:
+        raise CredentialError("credential lifecycle runtime directory is unsafe")
+    try:
+        runtime_descriptor = os.open(
+            runtime, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC
         )
-    except BaseException:
-        if gate_descriptor is not None:
-            fcntl.flock(gate_descriptor, fcntl.LOCK_UN)
-            os.close(gate_descriptor)
-        raise
+    except OSError as exc:
+        raise CredentialError("credential lifecycle runtime directory is unsafe") from exc
+    service_runtime_descriptor: int | None = None
     try:
-        metadata = os.fstat(descriptor)
+        metadata = os.fstat(runtime_descriptor)
         if (
             not stat.S_ISDIR(metadata.st_mode)
             or metadata.st_uid != os.getuid()
             or stat.S_IMODE(metadata.st_mode) != 0o700
+            or metadata.st_nlink < 2
         ):
-            raise CredentialError("credential lifecycle lock is unsafe")
-        fcntl.flock(
-            descriptor,
-            fcntl.LOCK_EX if exclusive else fcntl.LOCK_SH,
+            raise CredentialError("credential lifecycle runtime directory is unsafe")
+        try:
+            os.mkdir(
+                CREDENTIAL_RUNTIME_DIRECTORY, mode=0o700, dir_fd=runtime_descriptor
+            )
+        except FileExistsError:
+            pass
+        service_runtime_descriptor = os.open(
+            CREDENTIAL_RUNTIME_DIRECTORY,
+            os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC,
+            dir_fd=runtime_descriptor,
         )
-        yield
+        service_runtime_metadata = os.fstat(service_runtime_descriptor)
+        if (
+            not stat.S_ISDIR(service_runtime_metadata.st_mode)
+            or service_runtime_metadata.st_uid != os.getuid()
+            or stat.S_IMODE(service_runtime_metadata.st_mode) != 0o700
+            or service_runtime_metadata.st_nlink < 2
+        ):
+            raise CredentialError("credential lifecycle runtime directory is unsafe")
+        flags = os.O_RDWR | os.O_CLOEXEC | os.O_NOFOLLOW
+        try:
+            descriptor = os.open(
+                CREDENTIAL_LIFECYCLE_LOCK,
+                flags | os.O_CREAT | os.O_EXCL,
+                0o600,
+                dir_fd=service_runtime_descriptor,
+            )
+        except FileExistsError:
+            descriptor = os.open(
+                CREDENTIAL_LIFECYCLE_LOCK,
+                flags,
+                dir_fd=service_runtime_descriptor,
+            )
+    except OSError as exc:
+        raise CredentialError("credential lifecycle lock is unsafe") from exc
     finally:
-        fcntl.flock(descriptor, fcntl.LOCK_UN)
+        if service_runtime_descriptor is not None:
+            os.close(service_runtime_descriptor)
+        os.close(runtime_descriptor)
+    metadata = os.fstat(descriptor)
+    if (
+        not stat.S_ISREG(metadata.st_mode)
+        or metadata.st_uid != os.getuid()
+        or stat.S_IMODE(metadata.st_mode) != 0o600
+        or metadata.st_nlink != 1
+    ):
         os.close(descriptor)
-        if gate_descriptor is not None:
-            fcntl.flock(gate_descriptor, fcntl.LOCK_UN)
-            os.close(gate_descriptor)
+        raise CredentialError("credential lifecycle lock is unsafe")
+    return descriptor
 
 
 def encrypted_credential_dir() -> Path:
@@ -110,27 +152,68 @@ def encrypted_credential_path(kind: str) -> Path:
     return encrypted_credential_dir() / f"{name}.cred"
 
 
-def _secure_directory(path: Path) -> None:
-    path.mkdir(parents=True, exist_ok=True, mode=0o700)
+def _credential_directory_descriptor() -> int:
+    directory = encrypted_credential_dir()
+    parent = directory.parent
+    if parent.resolve(strict=True) != parent:
+        raise CredentialError("credential directory is not canonical")
     try:
-        descriptor = os.open(path, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+        parent_descriptor = os.open(
+            parent, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC
+        )
     except OSError as exc:
         raise CredentialError(
             "credential directory is not an owner-controlled directory"
         ) from exc
     try:
-        metadata = os.fstat(descriptor)
-        if metadata.st_uid != os.getuid():
+        parent_metadata = os.fstat(parent_descriptor)
+        if (
+            not stat.S_ISDIR(parent_metadata.st_mode)
+            or parent_metadata.st_uid != os.getuid()
+            or parent_metadata.st_mode & 0o022
+            or parent_metadata.st_nlink < 2
+        ):
             raise CredentialError(
                 "credential directory is not an owner-controlled directory"
             )
-        os.fchmod(descriptor, 0o700)
-        if os.fstat(descriptor).st_mode & 0o077:
-            raise CredentialError(
-                "credential directory is accessible by group or other users"
-            )
+        descriptor = os.open(
+            directory.name,
+            os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC,
+            dir_fd=parent_descriptor,
+        )
+    except OSError as exc:
+        raise CredentialError(
+            "credential directory is not an owner-controlled directory"
+        ) from exc
     finally:
+        os.close(parent_descriptor)
+    metadata = os.fstat(descriptor)
+    if (
+        not stat.S_ISDIR(metadata.st_mode)
+        or metadata.st_uid != os.getuid()
+        or stat.S_IMODE(metadata.st_mode) != 0o700
+        or metadata.st_nlink < 2
+    ):
         os.close(descriptor)
+        raise CredentialError(
+            "credential directory is not an owner-controlled directory"
+        )
+    return descriptor
+
+
+def _ensure_credential_directory() -> None:
+    directory = encrypted_credential_dir()
+    try:
+        directory.parent.mkdir(parents=True, mode=0o700, exist_ok=True)
+        directory.mkdir(mode=0o700)
+    except FileExistsError:
+        pass
+    except OSError as exc:
+        raise CredentialError(
+            "credential directory could not be created safely"
+        ) from exc
+    descriptor = _credential_directory_descriptor()
+    os.close(descriptor)
 
 
 def _encrypt(name: str, value: str, destination: Path) -> None:
@@ -139,7 +222,8 @@ def _encrypt(name: str, value: str, destination: Path) -> None:
     encoded = value.encode("utf-8")
     if len(encoded) > MAX_CREDENTIAL_BYTES:
         raise CredentialError("credential value is too large")
-    _secure_directory(destination.parent)
+    descriptor = _credential_directory_descriptor()
+    os.close(descriptor)
     try:
         result = subprocess.run(
             [
@@ -332,7 +416,8 @@ def _rotation_state() -> str:
 
 
 def provision_attestation_key() -> Path:
-    with _lifecycle_lock(exclusive=True):
+    with _lifecycle_lock(exclusive=True, validate_credentials=False):
+        _ensure_credential_directory()
         return _provision_attestation_key()
 
 
