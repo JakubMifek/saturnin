@@ -6,9 +6,11 @@ from __future__ import annotations
 import argparse
 import base64
 import fcntl
+import grp
 import hashlib
 import json
 import os
+import pwd
 import secrets
 import shutil
 import stat
@@ -23,6 +25,9 @@ ADMIN_SOURCE = Path(__file__).resolve()
 ADMIN_TARGET = "usr/sbin/saturnin-attestation-admin"
 SYSTEMD_CREDS = "/usr/bin/systemd-creds"
 LEGACY_UID = 1000
+OPERATOR_NAME = "jakubmifek"
+OPERATOR_UID = 1000
+OPERATOR_GID = 1000
 LEGACY_ROOT = Path("/home/jakubmifek/.config/systemd/user/saturnin-credentials")
 LEGACY = (
     (
@@ -57,15 +62,15 @@ EXPECTED_SHA256 = {
     "config/attestation.json":
         "203d56027f000b87c4a14e972e97655151986969c6d8c0e96fa8ac4c6416a2d1",
     "systemd/system/saturnin-attestation.service":
-        "f44c189b0a5fea1a252d202314e4711a4aee480fe00055866a11965ae46698b0",
+        "4f04a369c2e8443b1c1b0cc7b84ce2cf3cb4617a10d8be8ff472997f146bd27e",
     "systemd/system/saturnin-attestation.socket":
-        "607ca78353de34badb46a03e366b00859638dba057a7e08e25ded311d0f0855f",
+        "e0252f4ee7b0ac615cd8440bacf55bf26e00d3504b65913716b7d02dd56d24ae",
     "systemd/system/saturnin-attestation.sysusers":
-        "40a7f9eb62eb5544932db64bd459077547a52f38f18a2a62ee5f3da5e5960e08",
+        "0059e8a1ead80a9b47399f04a1430a1cecf7b70479b224dc8efe084e27fa2187",
     "systemd/system/saturnin-attestation.tmpfiles":
-        "db85221548cb33ab108fbb2ded0e4b4508414507ddc4b190da23e62ae9c47222",
+        "4073a18cb346fc86e0559a6bb46d61244f956d11f9ea3d49516a086c985a7cbc",
 }
-ADMIN_REVIEWED_SHA256 = "636825b5de0652255f716d454cb078fafae1f44c7c180c1034e35b0120a87803"
+ADMIN_REVIEWED_SHA256 = "4422319a5d37dd457beea22a4e1ae601700a4221cfd88a3d3847f7575eb4eb84"
 ADMIN_DIGEST_MARKER = b'ADMIN_REVIEWED_SHA256 = "'
 ARCHIVE_VERSION = 1
 ARCHIVE_MAX_KEYS = 16
@@ -141,6 +146,26 @@ def _identity(metadata: os.stat_result) -> tuple[int, int, int, int, int, int]:
         metadata.st_dev, metadata.st_ino, metadata.st_mode, metadata.st_uid,
         metadata.st_gid, metadata.st_nlink,
     )
+
+
+def _validate_operator_identity() -> None:
+    try:
+        account = pwd.getpwnam(OPERATOR_NAME)
+        primary_group = grp.getgrnam(OPERATOR_NAME)
+        uid_account = pwd.getpwuid(OPERATOR_UID)
+        gid_group = grp.getgrgid(OPERATOR_GID)
+    except KeyError as exc:
+        raise InstallError("fixed socket operator identity is missing") from exc
+    if (
+        account.pw_name != OPERATOR_NAME
+        or account.pw_uid != OPERATOR_UID
+        or account.pw_gid != OPERATOR_GID
+        or uid_account.pw_name != OPERATOR_NAME
+        or primary_group.gr_name != OPERATOR_NAME
+        or primary_group.gr_gid != OPERATOR_GID
+        or gid_group.gr_name != OPERATOR_NAME
+    ):
+        raise InstallError("fixed socket operator identity does not match reviewed UID/GID")
 
 
 def _open_source(path: Path, uid: int, *, mode: int | None = None) -> Source:
@@ -881,6 +906,8 @@ def main(argv: list[str] | None = None) -> int:
     test_mode = root != Path("/")
     if not test_mode and os.geteuid() != 0:
         raise InstallError("system installation requires the human administrator")
+    if not test_mode:
+        _validate_operator_identity()
     state = _safe_target(root, "var/lib/saturnin-attestation/.admin.lock")
     state.parent.mkdir(parents=True, exist_ok=True)
     with state.open("a+b") as lock:

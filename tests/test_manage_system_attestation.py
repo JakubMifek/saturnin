@@ -6,6 +6,7 @@ import hashlib
 import importlib.util
 import json
 import sys
+from types import SimpleNamespace
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
@@ -321,8 +322,82 @@ def test_system_units_sysusers_and_tmpfiles_are_consistent() -> None:
     assert "SocketBindDeny=any" in service
     assert "ListenStream=/run/saturnin-attestation/sign.sock" in socket_unit
     assert "SocketUser=saturnin-signer" in socket_unit
-    assert "SocketGroup=saturnin" in socket_unit
-    assert "g saturnin - -" in sysusers
-    assert "m jakubmifek saturnin" in sysusers
+    assert admin.OPERATOR_NAME == "jakubmifek"
+    assert admin.OPERATOR_UID == 1000
+    assert admin.OPERATOR_GID == 1000
+    assert f"SocketGroup={admin.OPERATOR_NAME}" in socket_unit
+    assert "SocketMode=0660" in socket_unit
+    assert "DirectoryMode=0750" in socket_unit
+    assert "RuntimeDirectory=" not in service
+    assert "g saturnin " not in sysusers
+    assert "m jakubmifek " not in sysusers
+    assert admin.OPERATOR_NAME not in sysusers
     assert "/usr/sbin/nologin" in sysusers
-    assert "d /run/saturnin-attestation 0750 saturnin-signer saturnin -" in tmpfiles
+    assert (
+        "d /run/saturnin-attestation 0750 saturnin-signer "
+        f"{admin.OPERATOR_NAME} -"
+        in tmpfiles
+    )
+    assert "d /etc/saturnin-attestation 0750 root saturnin-signer -" in tmpfiles
+    assert (
+        "d /var/lib/saturnin-attestation 0700 "
+        "saturnin-signer saturnin-signer -" in tmpfiles
+    )
+
+
+def test_fixed_socket_operator_identity_is_fail_closed(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    account = SimpleNamespace(
+        pw_name=admin.OPERATOR_NAME,
+        pw_uid=admin.OPERATOR_UID,
+        pw_gid=admin.OPERATOR_GID,
+    )
+    group = SimpleNamespace(
+        gr_name=admin.OPERATOR_NAME,
+        gr_gid=admin.OPERATOR_GID,
+    )
+    monkeypatch.setattr(admin.pwd, "getpwnam", lambda _name: account)
+    monkeypatch.setattr(admin.pwd, "getpwuid", lambda _uid: account)
+    monkeypatch.setattr(admin.grp, "getgrnam", lambda _name: group)
+    monkeypatch.setattr(admin.grp, "getgrgid", lambda _gid: group)
+    admin._validate_operator_identity()
+
+    mismatched = SimpleNamespace(
+        pw_name=admin.OPERATOR_NAME,
+        pw_uid=admin.OPERATOR_UID + 1,
+        pw_gid=admin.OPERATOR_GID,
+    )
+    monkeypatch.setattr(admin.pwd, "getpwnam", lambda _name: mismatched)
+    with pytest.raises(admin.InstallError, match="does not match"):
+        admin._validate_operator_identity()
+
+    monkeypatch.setattr(
+        admin.pwd,
+        "getpwnam",
+        lambda _name: (_ for _ in ()).throw(KeyError(_name)),
+    )
+    with pytest.raises(admin.InstallError, match="missing"):
+        admin._validate_operator_identity()
+
+
+def test_live_identity_check_precedes_admin_lock_mutation(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    target_checked = False
+
+    def reject_identity() -> None:
+        raise admin.InstallError("identity rejected")
+
+    def track_target(_root: Path, _relative: str) -> Path:
+        nonlocal target_checked
+        target_checked = True
+        raise AssertionError("admin lock target must not be reached")
+
+    monkeypatch.setattr(admin.os, "geteuid", lambda: 0)
+    monkeypatch.setattr(admin, "_validate_operator_identity", reject_identity)
+    monkeypatch.setattr(admin, "_safe_target", track_target)
+
+    with pytest.raises(admin.InstallError, match="identity rejected"):
+        admin.main(["install"])
+    assert not target_checked

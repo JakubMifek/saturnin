@@ -308,8 +308,9 @@ def _attestation_boundary(config: Config) -> str:
             "it recomputes title/body digest and accepts one exact, expiring, nonce-bound "
             "machine marker in an allowlisted bot comment. Evidence expiry limits new "
             "authorization, not later verification of an already signed durable record. "
-            "Repository and API origins are fixed allowlists; caller claims and socket "
-            "credentials are not authority.",
+            "Socket filesystem access permits transport only: independent GitHub "
+            "authorization remains required. Repository and API origins are fixed "
+            "allowlists; caller claims and socket credentials are not authority.",
             "",
             "Consumed evidence and its exact idempotent attestation are serialized in "
             "dedicated state. Altered reuse fails. The ordinary client authenticates a "

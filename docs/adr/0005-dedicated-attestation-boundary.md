@@ -9,10 +9,12 @@ Accepted.
 Signing moves from the ordinary Saturnin UID to the non-login
 `saturnin-signer` system identity. Runtime, configuration, credentials, and
 state are rooted in administrator-controlled `/usr`, `/etc`, and `/var/lib`
-trees. A dedicated `saturnin` client group contains the fixed ordinary
-operator `jakubmifek`; the signer remains a non-login identity and is not a
-member of that client group. The group can reach only the AF_UNIX socket and
-grants no signing authority.
+trees. The signer remains a non-login identity. The socket and runtime parent
+use the fixed ordinary operator's reviewed existing primary group,
+`jakubmifek` (GID 1000), so provisioning does not depend on supplemental-group
+refresh or create a client group. Modes `0660` and `0750` exclude other users.
+Group access reaches only the AF_UNIX socket and grants no signing authority;
+GitHub authorization remains independent.
 
 The service constructs fixed GitHub API requests itself. Pull-request authority
 requires an allowlisted repository, live head, author, an allowlisted bot's
