@@ -165,7 +165,12 @@ def test_systemd_credential_decrypts_inline_ciphertext_without_secret_argument(
     def decrypt(args: list[str], **kwargs: object) -> SimpleNamespace:
         observed["args"] = args
         observed["input"] = kwargs["input"]
-        return SimpleNamespace(returncode=0, stdout=b"role-master\n")
+        output = int(kwargs["stdout"])
+        observed["mode"] = stat.S_IMODE(os.fstat(output).st_mode)
+        with pytest.raises(PermissionError):
+            os.open(f"/proc/self/fd/{output}", os.O_RDONLY)
+        os.write(output, b"role-master\n")
+        return SimpleNamespace(returncode=0)
 
     monkeypatch.delenv("CREDENTIALS_DIRECTORY", raising=False)
     monkeypatch.setenv("SATURNIN_CURRENT_CREDENTIAL_CIPHERTEXT", ciphertext)
@@ -181,6 +186,7 @@ def test_systemd_credential_decrypts_inline_ciphertext_without_secret_argument(
         "-",
     ]
     assert observed["input"] == ciphertext.encode()
+    assert observed["mode"] == 0
     assert "role-master" not in " ".join(observed["args"])
 
 

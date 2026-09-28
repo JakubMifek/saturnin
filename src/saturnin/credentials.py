@@ -535,10 +535,27 @@ def systemd_credential(name: str) -> str:
         if not ciphertext:
             return ""
         _validate_encryption_model(ciphertext.encode("utf-8"))
+        tool = Path("/usr/bin/systemd-creds")
+        try:
+            tool_metadata = tool.stat(follow_symlinks=False)
+        except OSError as exc:
+            raise CredentialError("systemd-creds is unavailable") from exc
+        if (
+            not stat.S_ISREG(tool_metadata.st_mode)
+            or tool_metadata.st_uid != 0
+            or tool_metadata.st_nlink != 1
+            or tool_metadata.st_mode & 0o022
+        ):
+            raise CredentialError("systemd-creds has an unsafe identity")
+        plaintext_fd = os.memfd_create(
+            "saturnin-decrypted-credential",
+            os.MFD_CLOEXEC | os.MFD_ALLOW_SEALING,
+        )
+        os.fchmod(plaintext_fd, 0)
         try:
             result = subprocess.run(
                 [
-                    "/usr/bin/systemd-creds",
+                    str(tool),
                     "decrypt",
                     "--user",
                     f"--name={name}",
@@ -546,29 +563,42 @@ def systemd_credential(name: str) -> str:
                     "-",
                 ],
                 check=False,
-                capture_output=True,
                 input=ciphertext.encode("utf-8"),
+                stdout=plaintext_fd,
+                stderr=subprocess.DEVNULL,
             )
         except OSError as exc:
+            os.close(plaintext_fd)
             raise CredentialError(
                 f"could not decrypt inline systemd credential {name}"
             ) from exc
-        value = result.stdout
-        if (
-            result.returncode != 0
-            or not value
-            or len(value) > MAX_CREDENTIAL_BYTES
-            or b"\x00" in value
-        ):
-            raise CredentialError(
-                f"could not decrypt inline systemd credential {name}"
-            )
         try:
-            return value.decode("utf-8").rstrip("\n")
-        except UnicodeDecodeError as exc:
-            raise CredentialError(
-                f"inline systemd credential {name} is not text"
-            ) from exc
+            fcntl.fcntl(
+                plaintext_fd,
+                fcntl.F_ADD_SEALS,
+                fcntl.F_SEAL_WRITE
+                | fcntl.F_SEAL_GROW
+                | fcntl.F_SEAL_SHRINK
+                | fcntl.F_SEAL_SEAL,
+            )
+            value = os.pread(plaintext_fd, MAX_CREDENTIAL_BYTES + 1, 0)
+            if (
+                result.returncode != 0
+                or not value
+                or len(value) > MAX_CREDENTIAL_BYTES
+                or b"\x00" in value
+            ):
+                raise CredentialError(
+                    f"could not decrypt inline systemd credential {name}"
+                )
+            try:
+                return value.decode("utf-8").rstrip("\n")
+            except UnicodeDecodeError as exc:
+                raise CredentialError(
+                    f"inline systemd credential {name} is not text"
+                ) from exc
+        finally:
+            os.close(plaintext_fd)
     path = Path(directory) / name
     try:
         descriptor = os.open(path, os.O_RDONLY | os.O_NOFOLLOW)
