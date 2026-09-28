@@ -652,9 +652,15 @@ verify_manager_loaded_unit() {
   MANAGER_VIEW_PATH="$manager_view" UNIT_PATH="$expected_unit" \
     INSTALLED_PATH="$INSTALLED" "$PYTHON" -I -c '
 import os
+import sys
 from pathlib import Path
 
-manager = Path(os.environ["MANAGER_VIEW_PATH"]).read_text(encoding="utf-8").splitlines()
+manager_path = os.environ["MANAGER_VIEW_PATH"]
+manager = (
+    sys.stdin.read()
+    if manager_path == "-"
+    else Path(manager_path).read_text(encoding="utf-8")
+).splitlines()
 expected = Path(os.environ["UNIT_PATH"]).read_text(encoding="utf-8").splitlines()
 if not manager or manager[0] != f"# {os.environ['"'"'INSTALLED_PATH'"'"']}":
     raise SystemExit("systemd manager reported an unexpected unit fragment")
@@ -672,12 +678,17 @@ verify_running_service() {
     VERIFY_RUNNING_SERVICE=1 "$PYTHON" -I -c '
 import os
 import stat
+import sys
 from pathlib import Path
 
 properties = {}
-for line in Path(os.environ["MANAGER_STATE_PATH"]).read_text(
-    encoding="utf-8"
-).splitlines():
+manager_state_path = os.environ["MANAGER_STATE_PATH"]
+manager_state = (
+    sys.stdin.read()
+    if manager_state_path == "-"
+    else Path(manager_state_path).read_text(encoding="utf-8")
+)
+for line in manager_state.splitlines():
     key, separator, value = line.partition("=")
     if not separator or key in properties:
         raise SystemExit("systemd reported invalid signer process state")
@@ -839,18 +850,8 @@ if [[ "$action" == status ]]; then
   verify_unit_identity "$FILE_INSTALLED" 0644 "${STATUS_RUNTIME_ID##*:}" >/dev/null
   read -r wants_dir_identity _ _ <<<"$(wants_operation inspect)"
   verify_wants_link
-  readonly STATUS_TRANSACTION="$PINNED_UNIT_DIR/.saturnin-attestation-status.$$"
-  readonly STATUS_MANAGER_VIEW="$STATUS_TRANSACTION/manager-view"
-  readonly STATUS_MANAGER_STATE="$STATUS_TRANSACTION/manager-state"
-  status_cleanup() {
-    if verify_unit_directory >/dev/null 2>&1; then
-      "$RM" -rf "$STATUS_TRANSACTION"
-    fi
-  }
-  trap status_cleanup EXIT
-  "$MKDIR" -m 0700 "$STATUS_TRANSACTION"
-  systemctl_bounded --user cat --no-pager "$UNIT" >"$STATUS_MANAGER_VIEW"
-  verify_manager_loaded_unit "$STATUS_MANAGER_VIEW" "$FILE_INSTALLED"
+  systemctl_bounded --user cat --no-pager "$UNIT" \
+    | verify_manager_loaded_unit - "$FILE_INSTALLED"
   systemctl_bounded --user show --no-pager \
     --property=LoadState --property=ActiveState --property=SubState \
     --property=FragmentPath --property=DropInPaths \
@@ -859,11 +860,8 @@ if [[ "$action" == status ]]; then
     --property=ProtectHome --property=ProtectSystem --property=ProtectProc \
     --property=NoNewPrivileges --property=RestrictAddressFamilies \
     --property=StatusText \
-    "$UNIT" >"$STATUS_MANAGER_STATE"
-  verify_running_service \
-    "$STATUS_MANAGER_STATE" "${STATUS_RUNTIME_ID##*:}" "$FILE_INSTALLED"
-  status_cleanup
-  trap - EXIT
+    "$UNIT" \
+    | verify_running_service - "${STATUS_RUNTIME_ID##*:}" "$FILE_INSTALLED"
   exec "$TIMEOUT" --signal=TERM --kill-after=10s 30s \
     "$SYSTEMCTL" --user status --no-pager "$UNIT"
 fi
@@ -944,6 +942,10 @@ rollback() {
   if ! systemctl_bounded --user stop "$UNIT" >/dev/null 2>&1 \
     || ! verify_stopped_service; then
     echo "ROLLBACK FAILURE: rejected signer termination was not proven; prior files were not restored." >&2
+    return 1
+  fi
+  if [[ "$action" == uninstall && "$unit_was_valid" -ne 1 ]]; then
+    echo "ROLLBACK FAILURE: unvalidated prior signer was left stopped for manual recovery." >&2
     return 1
   fi
   if ! verify_unit_directory; then
@@ -1029,7 +1031,7 @@ if [[ -e "$FILE_INSTALLED" || -L "$FILE_INSTALLED" ]]; then
     && verify_unit_identity "$FILE_INSTALLED" 0644 \
       "${runtime_backup_identity##*:}" >/dev/null 2>&1; then
     unit_was_valid=1
-  elif [[ "$was_active" -eq 1 ]]; then
+  elif [[ "$was_active" -eq 1 && "$action" != uninstall ]]; then
     echo "Refusing to replace an active unvalidated attestation unit." >&2
     exit 1
   fi

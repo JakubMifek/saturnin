@@ -147,6 +147,7 @@ def signer_install(tmp_path: Path) -> tuple[Path, dict[str, str], Path, Path]:
         "  exit 0\n"
         "fi\n"
         "if [ -n \"${VERIFY_RUNNING_SERVICE:-}\" ]; then\n"
+        "  /usr/bin/cat >/dev/null\n"
         "  if [ -n \"${HOLD_VERIFY:-}\" ]; then\n"
         "    touch \"${VERIFY_ENTERED}\"\n"
         "    while [ -e \"${HOLD_VERIFY}\" ]; do /usr/bin/sleep 0.01; done\n"
@@ -260,6 +261,10 @@ def signer_install(tmp_path: Path) -> tuple[Path, dict[str, str], Path, Path]:
         "    [ \"${FAIL_ON:-}\" != daemon-reload ]\n"
         "    ;;\n"
         "  cat)\n"
+        "    if [ -n \"${HOLD_STATUS_CAT:-}\" ]; then\n"
+        "      touch \"${STATUS_CAT_ENTERED}\"\n"
+        "      while [ -e \"${HOLD_STATUS_CAT}\" ]; do /usr/bin/sleep 0.01; done\n"
+        "    fi\n"
         "    if [ -n \"${MANAGER_MISMATCH:-}\" ]; then\n"
         "      printf '%s\\n' '# unexpected' '[Unit]' 'Description=mismatch'\n"
         "    else\n"
@@ -1073,6 +1078,41 @@ def test_uninstall_stops_active_signer_when_disk_artifacts_are_missing(
                           "saturnin-attestation.service") == 2
 
 
+def test_uninstall_stops_active_signer_with_unvalidated_definition(
+    signer_install: tuple[Path, dict[str, str], Path, Path],
+) -> None:
+    _, _, unit_dir, calls = signer_install
+    assert _run(signer_install, "install").returncode == 0
+    installed = unit_dir / "saturnin-attestation.service"
+    installed.write_text("[Unit]\nDescription=tampered\n", encoding="utf-8")
+    installed.chmod(0o644)
+    calls.unlink()
+
+    result = _run(signer_install, "uninstall")
+
+    assert result.returncode == 0
+    assert "--user stop saturnin-attestation.service" in (
+        calls.read_text(encoding="utf-8").splitlines()
+    )
+    assert not installed.exists()
+
+
+def test_failed_uninstall_never_restores_unvalidated_definition(
+    signer_install: tuple[Path, dict[str, str], Path, Path],
+) -> None:
+    _, _, unit_dir, _ = signer_install
+    assert _run(signer_install, "install").returncode == 0
+    installed = unit_dir / "saturnin-attestation.service"
+    installed.write_text("[Unit]\nDescription=tampered\n", encoding="utf-8")
+    installed.chmod(0o644)
+
+    result = _run(signer_install, "uninstall", FAIL_ON="daemon-reload")
+
+    assert result.returncode == 125
+    assert "unvalidated prior signer was left stopped" in result.stderr
+    assert not installed.exists()
+
+
 def test_failed_uninstall_reload_restores_unit_and_active_state(
     signer_install: tuple[Path, dict[str, str], Path, Path],
 ) -> None:
@@ -1115,6 +1155,46 @@ def test_status_is_read_only(
         "--property=StatusText saturnin-attestation.service",
         "--user status --no-pager saturnin-attestation.service"
     ]
+
+
+def test_status_writes_nothing_during_manager_verification(
+    signer_install: tuple[Path, dict[str, str], Path, Path],
+    tmp_path: Path,
+) -> None:
+    checkout, env, unit_dir, _ = signer_install
+    assert _run(signer_install, "install").returncode == 0
+    hold = tmp_path / "hold-status"
+    entered = tmp_path / "status-entered"
+    hold.touch()
+    before = _topology(unit_dir)
+    executable_fd, _ = _authorized_fds(checkout, "status")
+    process = subprocess.Popen(
+        [f"/proc/self/fd/{executable_fd}", "status"],
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+        env={
+            **env,
+            "SATURNIN_GOVERNED_EXECUTION": "sealed-memfd",
+            "HOLD_STATUS_CAT": str(hold),
+            "STATUS_CAT_ENTERED": str(entered),
+        },
+        pass_fds=(executable_fd,),
+    )
+    try:
+        deadline = time.monotonic() + 5
+        while not entered.exists() and time.monotonic() < deadline:
+            time.sleep(0.01)
+        assert entered.exists()
+        assert _topology(unit_dir) == before
+        hold.unlink()
+        stdout, stderr = process.communicate(timeout=5)
+        assert process.returncode == 0, stdout + stderr
+    finally:
+        os.close(executable_fd)
+        if process.poll() is None:
+            process.kill()
+            process.wait()
 
 
 def test_status_rejects_stale_manager_loaded_unit(
