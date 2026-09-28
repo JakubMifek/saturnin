@@ -57,6 +57,7 @@ dedicated_attestation_service:
   scope: system
   ordinary_runtime_allowed: false
   socket: /run/saturnin-attestation/sign.sock
+  listener_creator: service-process
   runtime: /usr/lib/saturnin-attestation/system_attestation.py
   configuration: /etc/saturnin-attestation/config.json
   state: /var/lib/saturnin-attestation
@@ -139,7 +140,6 @@ operations:
     dependencies:
       - src/saturnin/system_attestation.py
       - systemd/system/saturnin-attestation.service
-      - systemd/system/saturnin-attestation.socket
       - systemd/system/saturnin-attestation.sysusers
       - systemd/system/saturnin-attestation.tmpfiles
       - config/attestation.json

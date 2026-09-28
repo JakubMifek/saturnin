@@ -20,8 +20,12 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Protocol
 
-PROJECT = Path(__file__).resolve().parents[1]
 ADMIN_SOURCE = Path(__file__).resolve()
+ADMIN_STAGE = Path(
+    "/run/saturnin-attestation-bootstrap/saturnin-attestation-admin.py"
+)
+ADMIN_INSTALLED = Path("/usr/sbin/saturnin-attestation-admin")
+PROJECT = Path("/usr") if ADMIN_SOURCE == ADMIN_INSTALLED else Path.cwd().resolve()
 ADMIN_TARGET = "usr/sbin/saturnin-attestation-admin"
 SYSTEMD_CREDS = "/usr/bin/systemd-creds"
 LEGACY_UID = 1000
@@ -49,29 +53,24 @@ FILES = {
     "config/attestation.json": "etc/saturnin-attestation/config.json",
     "systemd/system/saturnin-attestation.service":
         "usr/lib/systemd/system/saturnin-attestation.service",
-    "systemd/system/saturnin-attestation.socket":
-        "usr/lib/systemd/system/saturnin-attestation.socket",
     "systemd/system/saturnin-attestation.sysusers":
         "usr/lib/sysusers.d/saturnin-attestation.conf",
     "systemd/system/saturnin-attestation.tmpfiles":
         "usr/lib/tmpfiles.d/saturnin-attestation.conf",
 }
+OBSOLETE_FILES = ("usr/lib/systemd/system/saturnin-attestation.socket",)
 EXPECTED_SHA256 = {
     "src/saturnin/system_attestation.py":
-        "871b52526ee5f0fa09026b3f60b9aabadf50b96f97590fb23c9b008c721056e7",
+        "89840e3464c339a09275a32d9c43d0c63e50cbe9e79ac9249fb2102af103f46f",
     "config/attestation.json":
         "203d56027f000b87c4a14e972e97655151986969c6d8c0e96fa8ac4c6416a2d1",
     "systemd/system/saturnin-attestation.service":
-        "4f04a369c2e8443b1c1b0cc7b84ce2cf3cb4617a10d8be8ff472997f146bd27e",
-    "systemd/system/saturnin-attestation.socket":
-        "e0252f4ee7b0ac615cd8440bacf55bf26e00d3504b65913716b7d02dd56d24ae",
+        "273be113a975986c4f3fdead4c03da7f38d9e3e6559047482f467c8854234a4c",
     "systemd/system/saturnin-attestation.sysusers":
         "0059e8a1ead80a9b47399f04a1430a1cecf7b70479b224dc8efe084e27fa2187",
     "systemd/system/saturnin-attestation.tmpfiles":
-        "4073a18cb346fc86e0559a6bb46d61244f956d11f9ea3d49516a086c985a7cbc",
+        "3e4885148836f41ab17f2b790d326c10af050160ea602a9660712bb677f65110",
 }
-ADMIN_REVIEWED_SHA256 = "d881acd72fd259d1df7fa5d8755507b138dc8870ef623a36c167057174941d2c"
-ADMIN_DIGEST_MARKER = b'ADMIN_REVIEWED_SHA256 = "'
 ARCHIVE_VERSION = 1
 ARCHIVE_MAX_KEYS = 16
 ROOT_ONLY = {
@@ -285,17 +284,6 @@ def _cleanup_created_directories(created: list[Path], preserve: set[Path]) -> No
 
 def _digest_bytes(value: bytes) -> str:
     return hashlib.sha256(value).hexdigest()
-
-
-def _admin_digest(value: bytes) -> str:
-    start = value.find(ADMIN_DIGEST_MARKER)
-    if start < 0:
-        raise InstallError("administrator digest marker is missing")
-    start += len(ADMIN_DIGEST_MARKER)
-    end = value.find(b'"', start)
-    if end < 0:
-        raise InstallError("administrator digest marker is malformed")
-    return _digest_bytes(value[:start] + b"0" * 64 + value[end:])
 
 
 def _credential_paths(root: Path) -> tuple[Path, Path]:
@@ -669,9 +657,18 @@ def status(root: Path, runner: Runner | None = None) -> None:
         metadata = target.stat()
         if root == Path("/") and (metadata.st_uid != 0 or metadata.st_mode & 0o022):
             raise InstallError(f"installed artifact is not root-controlled: /{target_name}")
+    for target_name in OBSOLETE_FILES:
+        if _safe_target(root, target_name).exists():
+            raise InstallError(f"obsolete socket activation artifact remains: /{target_name}")
     admin = _safe_target(root, ADMIN_TARGET)
-    if not admin.is_file() or _admin_digest(admin.read_bytes()) != ADMIN_REVIEWED_SHA256:
-        raise InstallError("installed administrator differs")
+    admin_metadata = admin.lstat()
+    if (
+        not stat.S_ISREG(admin_metadata.st_mode)
+        or admin_metadata.st_nlink != 1
+        or stat.S_IMODE(admin_metadata.st_mode) != 0o755
+        or (root == Path("/") and admin_metadata.st_uid != 0)
+    ):
+        raise InstallError("installed administrator identity is unsafe")
     current, previous = _credential_paths(root)
     archive = _archive_path(root)
     codec = runner or (SystemRunner() if root == Path("/") else FakeRunner())
@@ -692,6 +689,15 @@ def status(root: Path, runner: Runner | None = None) -> None:
         _decode_rollback(
             codec.decrypt(_read_credential(root, rollback), "rollback.state")
         )
+    if root == Path("/"):
+        codec.command(
+            ["/usr/bin/systemctl", "is-enabled", "--quiet",
+             "saturnin-attestation.service"]
+        )
+        codec.command(
+            ["/usr/bin/systemctl", "is-active", "--quiet",
+             "saturnin-attestation.service"]
+        )
 
 
 def install(root: Path, test_mode: bool, runner: Runner | None = None) -> None:
@@ -709,8 +715,6 @@ def install(root: Path, test_mode: bool, runner: Runner | None = None) -> None:
             raise InstallError(f"reviewed source digest mismatch: {source.path}")
         sources.append((source, target_name))
     admin_source = _open_source(ADMIN_SOURCE, uid)
-    if _admin_digest(admin_source.content) != ADMIN_REVIEWED_SHA256:
-        raise InstallError("reviewed administrator digest mismatch")
     stage = root / f".saturnin-attestation-stage-{os.getpid()}"
     if stage.exists() or stage.is_symlink():
         raise InstallError("transaction stage already exists")
@@ -719,6 +723,7 @@ def install(root: Path, test_mode: bool, runner: Runner | None = None) -> None:
     credentials_created: list[Path] = []
     created_directories: list[Path] = []
     service_phase = ""
+    retired_socket = False
     preserve_directories: set[Path] = set()
     try:
         stage.mkdir(mode=0o700)
@@ -742,6 +747,16 @@ def install(root: Path, test_mode: bool, runner: Runner | None = None) -> None:
             _fsync_directory(target.parent)
         for source, _target_name in [*sources, (admin_source, ADMIN_TARGET)]:
             _revalidate(source)
+        for target_name in OBSOLETE_FILES:
+            target = _safe_target(root, target_name)
+            if target.exists():
+                retired_socket = True
+                backup = stage / "backups" / target_name
+                backup.parent.mkdir(parents=True, exist_ok=True)
+                os.replace(target, backup)
+                backups.append((target, backup))
+                _fsync_directory(target.parent)
+                _fsync_directory(backup.parent)
         for _source, target_name in [*sources, (admin_source, ADMIN_TARGET)]:
             target = _safe_target(root, target_name)
             _mkdir_tracked(target.parent, root, created_directories)
@@ -758,7 +773,7 @@ def install(root: Path, test_mode: bool, runner: Runner | None = None) -> None:
             _fsync_directory(target.parent)
         credentials_created = _migrate_or_provision(root, codec)
         if not test_mode:
-            for phase, command in (
+            commands = [
                 (
                     "sysusers",
                     ["/usr/bin/systemd-sysusers",
@@ -769,13 +784,22 @@ def install(root: Path, test_mode: bool, runner: Runner | None = None) -> None:
                     ["/usr/bin/systemd-tmpfiles", "--create",
                      "/usr/lib/tmpfiles.d/saturnin-attestation.conf"],
                 ),
+            ]
+            if retired_socket:
+                commands.append((
+                    "socket-deactivation",
+                    ["/usr/bin/systemctl", "disable", "--now",
+                     "saturnin-attestation.socket"],
+                ))
+            commands.extend((
                 ("daemon-reload", ["/usr/bin/systemctl", "daemon-reload"]),
                 (
-                    "socket-activation",
+                    "service-enable",
                     ["/usr/bin/systemctl", "enable", "--now",
-                     "saturnin-attestation.socket"],
+                     "saturnin-attestation.service"],
                 ),
-            ):
+            ))
+            for phase, command in commands:
                 service_phase = phase
                 codec.command(command)
             service_phase = "service-health"
@@ -800,12 +824,12 @@ def install(root: Path, test_mode: bool, runner: Runner | None = None) -> None:
             try:
                 codec.command(
                     ["/usr/bin/systemctl", "disable", "--now",
-                     "saturnin-attestation.socket"]
+                     "saturnin-attestation.service"]
                 )
                 codec.command(["/usr/bin/systemctl", "daemon-reload"])
-                recovery = "socket-disabled"
+                recovery = "service-disabled"
             except Exception:
-                recovery = "socket-disable-failed"
+                recovery = "service-disable-failed"
             marker = _record_install_failure(root, service_phase, recovery)
             preserve_directories.update({marker.parent})
         raise
@@ -886,32 +910,48 @@ def uninstall(root: Path, test_mode: bool, runner: Runner | None = None) -> None
     codec = runner or (FakeRunner() if test_mode else SystemRunner())
     if not test_mode:
         codec.command(
-            ["/usr/bin/systemctl", "disable", "--now", "saturnin-attestation.socket"]
+            ["/usr/bin/systemctl", "disable", "--now", "saturnin-attestation.service"]
         )
     for target_name in FILES.values():
+        _safe_target(root, target_name).unlink(missing_ok=True)
+    for target_name in OBSOLETE_FILES:
         _safe_target(root, target_name).unlink(missing_ok=True)
     _safe_target(root, ADMIN_TARGET).unlink(missing_ok=True)
     if not test_mode:
         codec.command(["/usr/bin/systemctl", "daemon-reload"])
 
 
-def main(argv: list[str] | None = None) -> int:
-    parser = argparse.ArgumentParser()
-    parser.add_argument(
-        "action", choices=["install", "status", "uninstall", "rotate", "rollback"]
-    )
-    parser.add_argument("--root", type=Path, default=Path("/"))
-    args = parser.parse_args(argv)
-    root = args.root.resolve(strict=True)
+def _validate_admin_execution() -> None:
+    if ADMIN_SOURCE not in {ADMIN_STAGE, ADMIN_INSTALLED}:
+        raise InstallError("administrator must run from the fixed root-owned path")
+    source = ADMIN_SOURCE.lstat()
+    parent = ADMIN_SOURCE.parent.lstat()
+    if (
+        not stat.S_ISREG(source.st_mode)
+        or source.st_uid != 0
+        or source.st_gid != 0
+        or source.st_nlink != 1
+        or source.st_mode & 0o022
+        or not stat.S_ISDIR(parent.st_mode)
+        or parent.st_uid != 0
+        or parent.st_gid != 0
+        or parent.st_mode & 0o022
+    ):
+        raise InstallError("administrator executable is not root-controlled")
+
+
+def _execute(action: str, root: Path) -> None:
+    root = root.resolve(strict=True)
     test_mode = root != Path("/")
     if not test_mode and os.geteuid() != 0:
         raise InstallError("system installation requires the human administrator")
     if not test_mode:
+        _validate_admin_execution()
         _validate_operator_identity()
     state = _safe_target(root, "var/lib/saturnin-attestation/.admin.lock")
     state.parent.mkdir(parents=True, exist_ok=True)
     with state.open("a+b") as lock:
-        fcntl.flock(lock, fcntl.LOCK_SH if args.action == "status" else fcntl.LOCK_EX)
+        fcntl.flock(lock, fcntl.LOCK_SH if action == "status" else fcntl.LOCK_EX)
         actions = {
             "install": install,
             "status": lambda r, t: status(r),
@@ -919,7 +959,16 @@ def main(argv: list[str] | None = None) -> int:
             "rotate": rotate,
             "rollback": rollback,
         }
-        actions[args.action](root, test_mode)
+        actions[action](root, test_mode)
+
+
+def main(argv: list[str] | None = None) -> int:
+    parser = argparse.ArgumentParser()
+    parser.add_argument(
+        "action", choices=["install", "status", "uninstall", "rotate", "rollback"]
+    )
+    args = parser.parse_args(argv)
+    _execute(args.action, Path("/"))
     return 0
 
 

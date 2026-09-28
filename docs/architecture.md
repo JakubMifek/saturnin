@@ -76,7 +76,7 @@ inspected with `cat` when everything else is on fire.
 
 The primary runtime is the local Debian server, running as the unprivileged
 `saturnin` user with systemd **user** timers (`systemd/`). The attestation
-signer is the sole exception: a socket-activated, non-login
+signer is the sole exception: a boot-activated, non-login
 `saturnin-signer` system service with root-controlled runtime, configuration,
 state, and encrypted credentials. GitHub Actions is an
 integration helper only: it runs the test suite and the review gate on PRs; it

@@ -13,12 +13,35 @@ systemctl --user list-timers 'saturnin-*'
 
 ## Dedicated attestation service
 
-The signer is a system service and a human-administrator boundary. Review the
-source tree and embedded artifact digests, then perform the first transaction
-with `sudo ./scripts/manage_system_attestation.py install`. It atomically
-publishes the fixed `/usr/sbin/saturnin-attestation-admin` interface; its
-grammar accepts only five actions and no paths, commands, units, users, or
-packages.
+The signer is a system service and a human-administrator boundary. Never run
+checkout Python with `sudo`. Through a trusted administrator channel, provision
+the independently approved exact-head evidence as the fixed root-owned file
+`/root/saturnin-attestation-admin.sha256`. It must contain the administrator
+SHA-256 and fixed staged pathname in `sha256sum --check` format; do not create
+it from this checkout or from an ordinary-UID process. From the exact reviewed
+checkout, use this fixed bootstrap sequence:
+
+```bash
+cd /path/to/exact-reviewed-checkout
+sudo /usr/bin/install -d -o root -g root -m 0700 /run/saturnin-attestation-bootstrap
+sudo /usr/bin/install -o root -g root -m 0500 scripts/manage_system_attestation.py /run/saturnin-attestation-bootstrap/saturnin-attestation-admin.py
+sudo /usr/bin/test -f /root/saturnin-attestation-admin.sha256
+sudo /usr/bin/sha256sum --strict --check /root/saturnin-attestation-admin.sha256
+sudo /usr/bin/python3 -I /run/saturnin-attestation-bootstrap/saturnin-attestation-admin.py install
+sudo /usr/bin/rm -- /run/saturnin-attestation-bootstrap/saturnin-attestation-admin.py
+sudo /usr/bin/rmdir -- /run/saturnin-attestation-bootstrap
+```
+
+The copy operation does not interpret checkout bytes. The verified copy and
+its parent are root-owned and non-writable to the ordinary UID, closing the
+verification/execution race. `-I` excludes the checkout and user Python paths,
+so a checkout-local `secrets.py` or other import shadow cannot run. The staged
+administrator pins and digest-checks all checkout artifact descriptors before
+publication. A changed source, wrong external digest, alias, or race aborts.
+It atomically publishes the fixed `/usr/sbin/saturnin-attestation-admin`
+interface; its grammar accepts only five actions and no paths, commands, units,
+users, ownership changes, or packages. Repeat this bootstrap for reviewed
+administrator updates; do not execute a replacement directly from a checkout.
 
 <!-- generated:signer-unit-interface -->
 This human-administrator interface manages only the `system`-scoped `saturnin-attestation.service` unit.
@@ -44,7 +67,7 @@ group to resolve bidirectionally to UID 1000 and GID 1000; a missing or reused
 identity fails closed before the administration lock or any other mutation.
 
 <!-- generated:attestation-boundary -->
-The system `saturnin-attestation.service` runs as the non-login `saturnin-signer` identity from root-controlled runtime and configuration. The system manager decrypts current, previous, and bounded retired HMAC credentials into its private credential tmpfs; ordinary workers never receive key material.
+The system `saturnin-attestation.service` runs as the non-login `saturnin-signer` identity from root-controlled runtime and configuration. The system manager decrypts current, previous, and bounded retired HMAC credentials into its private credential tmpfs; ordinary workers never receive key material. The service, not PID 1, creates the canonical listener, so client `SO_PEERCRED` verification authenticates the signer UID and process.
 
 For pull requests the service obtains the live head, author, and exact commit-bound latest review state directly from GitHub over TLS. For issues it recomputes title/body digest and accepts one exact, expiring, nonce-bound machine marker in an allowlisted bot comment. Evidence expiry limits new authorization, not later verification of an already signed durable record. Socket filesystem access permits transport only: independent GitHub authorization remains required. Repository and API origins are fixed allowlists; caller claims and socket credentials are not authority.
 
@@ -95,9 +118,9 @@ fails.
 The service accepts only the local AF_UNIX socket and needs outbound HTTPS to
 the fixed `api.github.com` origin. The system sandbox prevents network binds;
 application validation refuses alternate origins and redirects. The
-socket and its runtime parent use the existing primary group `jakubmifek`, so
+socket and its setgid runtime parent use the existing primary group `jakubmifek`, so
 the already-running user manager has immediate access after provisioning.
-Their modes are respectively `0660` and `0750`, excluding other users. This
+Their modes are respectively `0660` and `2750`, excluding other users. This
 filesystem access grants only transport, not trust: the signer independently
 requires GitHub authorization and grants no access to credentials or state.
 
@@ -106,7 +129,7 @@ requires GitHub authorization and grants no access to credentials or state.
 Keep encrypted credentials and `/var/lib/saturnin-attestation` in an
 administrator-controlled encrypted backup together with the systemd host key.
 Never copy plaintext credential-directory contents or log request bodies.
-After restoration, run `status`, start the socket, authorize a mocked approved
+After restoration, run `status`, start the service, authorize a mocked approved
 head, verify the returned attestation, and confirm an unreviewed head fails.
 
 At the 16-key archive bound, rotation stops fail-closed. There is intentionally

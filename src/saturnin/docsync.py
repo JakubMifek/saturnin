@@ -290,6 +290,7 @@ def _attestation_boundary(config: Config) -> str:
         policy.get("required") is not True
         or policy.get("authorization_source") != "github-api"
         or policy.get("service_identity") != "saturnin-signer"
+        or policy.get("listener_creator") != "service-process"
         or not isinstance(policy.get("service_socket"), str)
     ):
         raise GeneratedBlockError(
@@ -301,7 +302,9 @@ def _attestation_boundary(config: Config) -> str:
             "`saturnin-signer` identity from root-controlled runtime and configuration. "
             "The system manager decrypts current, previous, and bounded retired HMAC "
             "credentials into its private credential tmpfs; ordinary workers never "
-            "receive key material.",
+            "receive key material. The service, not PID 1, creates the canonical "
+            "listener, so client `SO_PEERCRED` verification authenticates the signer "
+            "UID and process.",
             "",
             "For pull requests the service obtains the live head, author, and exact "
             "commit-bound latest review state directly from GitHub over TLS. For issues "

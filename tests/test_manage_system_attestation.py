@@ -23,10 +23,14 @@ SPEC.loader.exec_module(admin)
 
 
 def run(root: Path, action: str, *, check: bool = True) -> subprocess.CompletedProcess[str]:
-    return subprocess.run(
-        [str(ADMIN), action, "--root", str(root)],
-        text=True, capture_output=True, check=check,
-    )
+    args = [str(ADMIN), action]
+    try:
+        admin._execute(action, root)
+    except (admin.InstallError, OSError, subprocess.SubprocessError) as exc:
+        if check:
+            raise
+        return subprocess.CompletedProcess(args, 1, "", str(exc))
+    return subprocess.CompletedProcess(args, 0, "", "")
 
 
 def test_fake_root_transaction_install_status_rotate_rollback_uninstall(
@@ -34,7 +38,11 @@ def test_fake_root_transaction_install_status_rotate_rollback_uninstall(
 ) -> None:
     root = tmp_path / "root"
     root.mkdir()
+    obsolete = root / admin.OBSOLETE_FILES[0]
+    obsolete.parent.mkdir(parents=True)
+    obsolete.write_text("old socket unit", encoding="utf-8")
     run(root, "install")
+    assert not obsolete.exists()
     run(root, "status")
     assert (root / "usr/sbin/saturnin-attestation-admin").stat().st_mode & 0o777 == 0o755
     current = root / "etc/saturnin-attestation/current.key.cred"
@@ -129,16 +137,49 @@ def test_late_install_failure_restores_files_and_records_fail_closed_state(
         "phase": "sysusers",
         "artifacts_restored": True,
         "credentials_restored": True,
-        "service_recovery": "socket-disabled",
+        "service_recovery": "service-disabled",
     }
     assert not any("userdel" in argument for command in runner.commands for argument in command)
 
 
-def test_admin_interface_has_fixed_action_grammar(tmp_path: Path) -> None:
+def test_upgrade_deactivates_socket_before_enabling_service(tmp_path: Path) -> None:
     root = tmp_path / "root"
-    root.mkdir()
+    obsolete = root / admin.OBSOLETE_FILES[0]
+    obsolete.parent.mkdir(parents=True)
+    obsolete.write_text("old socket unit", encoding="utf-8")
+
+    class RecordingRunner(admin.FakeRunner):
+        def __init__(self) -> None:
+            self.commands: list[list[str]] = []
+
+        def command(self, argv):
+            self.commands.append(argv)
+
+    runner = RecordingRunner()
+    admin.install(root, False, runner)
+
+    assert not obsolete.exists()
+    disable = [
+        "/usr/bin/systemctl", "disable", "--now",
+        "saturnin-attestation.socket",
+    ]
+    enable = [
+        "/usr/bin/systemctl", "enable", "--now",
+        "saturnin-attestation.service",
+    ]
+    assert disable in runner.commands
+    assert enable in runner.commands
+    assert runner.commands.index(disable) < runner.commands.index(enable)
+
+
+@pytest.mark.parametrize(
+    "extra", [["--unit", "evil.service"], ["--root", "/tmp/fake-root"]]
+)
+def test_admin_interface_has_fixed_action_grammar(
+    extra: list[str],
+) -> None:
     result = subprocess.run(
-        [str(ADMIN), "install", "--root", str(root), "--unit", "evil.service"],
+        [str(ADMIN), "install", *extra],
         text=True, capture_output=True,
     )
     assert result.returncode == 2
@@ -308,10 +349,79 @@ def test_source_descriptor_rejects_links_and_mutation(tmp_path: Path) -> None:
         opened.close()
 
 
+def test_bootstrap_copy_is_digest_pinned_and_source_mutation_safe(
+    tmp_path: Path,
+) -> None:
+    source = tmp_path / "checkout" / "manage_system_attestation.py"
+    stage = tmp_path / "root-stage" / "saturnin-attestation-admin.py"
+    source.parent.mkdir()
+    stage.parent.mkdir(mode=0o700)
+    reviewed = ADMIN.read_bytes()
+    source.write_bytes(reviewed)
+    subprocess.run(
+        ["/usr/bin/install", "-m", "0500", str(source), str(stage)],
+        check=True,
+    )
+    source.write_bytes(b"mutated after root-owned copy")
+    digest = hashlib.sha256(reviewed).hexdigest()
+    evidence = tmp_path / "root-owned-evidence.sha256"
+    evidence.write_text(f"{digest}  {stage}\n", encoding="ascii")
+    evidence.chmod(0o400)
+    verified = subprocess.run(
+        ["/usr/bin/sha256sum", "--strict", "--check", str(evidence)],
+        text=True,
+        capture_output=True,
+    )
+    assert verified.returncode == 0
+    assert stage.read_bytes() == reviewed
+    assert stage.stat().st_mode & 0o777 == 0o500
+    assert stage.stat().st_uid == os.getuid()
+
+
+def test_bootstrap_rejects_wrong_external_digest(tmp_path: Path) -> None:
+    stage = tmp_path / "saturnin-attestation-admin.py"
+    stage.write_bytes(ADMIN.read_bytes())
+    evidence = tmp_path / "root-owned-evidence.sha256"
+    evidence.write_text(f"{'0' * 64}  {stage}\n", encoding="ascii")
+    evidence.chmod(0o400)
+    result = subprocess.run(
+        ["/usr/bin/sha256sum", "--strict", "--check", str(evidence)],
+        text=True,
+        capture_output=True,
+    )
+    assert result.returncode != 0
+    assert "FAILED" in result.stdout
+
+
+def test_isolated_staged_invocation_ignores_checkout_module_shadow(
+    tmp_path: Path,
+) -> None:
+    checkout = tmp_path / "checkout"
+    checkout.mkdir()
+    sentinel = tmp_path / "shadow-imported"
+    (checkout / "secrets.py").write_text(
+        f"from pathlib import Path\nPath({str(sentinel)!r}).write_text('owned')\n",
+        encoding="utf-8",
+    )
+    stage = tmp_path / "saturnin-attestation-admin.py"
+    stage.write_bytes(ADMIN.read_bytes())
+    stage.chmod(0o500)
+
+    result = subprocess.run(
+        ["/usr/bin/python3", "-I", str(stage), "--help"],
+        cwd=checkout,
+        text=True,
+        capture_output=True,
+    )
+
+    assert result.returncode == 0
+    assert not sentinel.exists()
+    assert result.args[:2] == ["/usr/bin/python3", "-I"]
+
+
 def test_system_units_sysusers_and_tmpfiles_are_consistent() -> None:
     unit_root = ROOT / "systemd/system"
     service = (unit_root / "saturnin-attestation.service").read_text()
-    socket_unit = (unit_root / "saturnin-attestation.socket").read_text()
     sysusers = (unit_root / "saturnin-attestation.sysusers").read_text()
     tmpfiles = (unit_root / "saturnin-attestation.tmpfiles").read_text()
     assert "User=saturnin-signer" in service
@@ -320,21 +430,19 @@ def test_system_units_sysusers_and_tmpfiles_are_consistent() -> None:
     assert "LoadCredentialEncrypted=github.token" in service
     assert "RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6" in service
     assert "SocketBindDeny=any" in service
-    assert "ListenStream=/run/saturnin-attestation/sign.sock" in socket_unit
-    assert "SocketUser=saturnin-signer" in socket_unit
+    assert "WantedBy=multi-user.target" in service
+    assert "saturnin-attestation.socket" not in service
+    assert not (unit_root / "saturnin-attestation.socket").exists()
     assert admin.OPERATOR_NAME == "jakubmifek"
     assert admin.OPERATOR_UID == 1000
     assert admin.OPERATOR_GID == 1000
-    assert f"SocketGroup={admin.OPERATOR_NAME}" in socket_unit
-    assert "SocketMode=0660" in socket_unit
-    assert "DirectoryMode=0750" in socket_unit
     assert "RuntimeDirectory=" not in service
     assert "g saturnin " not in sysusers
     assert "m jakubmifek " not in sysusers
     assert admin.OPERATOR_NAME not in sysusers
     assert "/usr/sbin/nologin" in sysusers
     assert (
-        "d /run/saturnin-attestation 0750 saturnin-signer "
+        "d /run/saturnin-attestation 2750 saturnin-signer "
         f"{admin.OPERATOR_NAME} -"
         in tmpfiles
     )
@@ -395,9 +503,48 @@ def test_live_identity_check_precedes_admin_lock_mutation(
         raise AssertionError("admin lock target must not be reached")
 
     monkeypatch.setattr(admin.os, "geteuid", lambda: 0)
+    monkeypatch.setattr(admin, "_validate_admin_execution", lambda: None)
     monkeypatch.setattr(admin, "_validate_operator_identity", reject_identity)
     monkeypatch.setattr(admin, "_safe_target", track_target)
 
     with pytest.raises(admin.InstallError, match="identity rejected"):
         admin.main(["install"])
     assert not target_checked
+
+
+def test_system_admin_rejects_checkout_execution_before_mutation(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(admin.os, "geteuid", lambda: 0)
+    monkeypatch.setattr(admin, "ADMIN_SOURCE", ADMIN)
+    with pytest.raises(admin.InstallError, match="fixed root-owned path"):
+        admin.main(["install"])
+
+
+def test_system_admin_accepts_only_root_controlled_staged_identity(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    source = SimpleNamespace(
+        st_mode=admin.stat.S_IFREG | 0o500,
+        st_uid=0,
+        st_gid=0,
+        st_nlink=1,
+    )
+    parent = SimpleNamespace(
+        st_mode=admin.stat.S_IFDIR | 0o700,
+        st_uid=0,
+        st_gid=0,
+        st_nlink=1,
+    )
+
+    monkeypatch.setattr(admin, "ADMIN_SOURCE", admin.ADMIN_STAGE)
+    monkeypatch.setattr(
+        Path,
+        "lstat",
+        lambda path: source if path == admin.ADMIN_STAGE else parent,
+    )
+    admin._validate_admin_execution()
+
+    source.st_mode |= 0o020
+    with pytest.raises(admin.InstallError, match="not root-controlled"):
+        admin._validate_admin_execution()

@@ -38,6 +38,7 @@ from typing import Any, Callable
 MAX_REQUEST = 16 * 1024
 MAX_RESPONSE = 128 * 1024
 SOCKET_PATH = Path("/run/saturnin-attestation/sign.sock")
+SOCKET_GROUP_GID = 1000
 CONFIG_PATH = Path("/etc/saturnin-attestation/config.json")
 STATE_PATH = Path("/var/lib/saturnin-attestation/authorizations.sqlite3")
 ISSUE_MARKER = "saturnin-attestation:v1 "
@@ -920,6 +921,55 @@ def _audit(outcome: str, evidence_hash: str = "", scope_hash: str = "") -> None:
     )
 
 
+def _create_listener(
+    path: Path = SOCKET_PATH, expected_gid: int = SOCKET_GROUP_GID
+) -> socket.socket:
+    parent = path.parent.lstat()
+    if (
+        not stat.S_ISDIR(parent.st_mode)
+        or parent.st_uid != os.getuid()
+        or parent.st_gid != expected_gid
+        or stat.S_IMODE(parent.st_mode) != 0o2750
+    ):
+        raise SystemAttestationError("dedicated signer runtime directory is unsafe")
+    try:
+        existing = path.lstat()
+    except FileNotFoundError:
+        pass
+    else:
+        if (
+            not stat.S_ISSOCK(existing.st_mode)
+            or existing.st_uid != os.getuid()
+            or existing.st_nlink != 1
+        ):
+            raise SystemAttestationError("dedicated signer socket path is unsafe")
+        path.unlink()
+    listener = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+    try:
+        listener.bind(str(path))
+        os.chmod(path, 0o660, follow_symlinks=False)
+        metadata = path.lstat()
+        if (
+            not stat.S_ISSOCK(metadata.st_mode)
+            or metadata.st_uid != os.getuid()
+            or metadata.st_gid != expected_gid
+            or stat.S_IMODE(metadata.st_mode) != 0o660
+            or metadata.st_nlink != 1
+        ):
+            raise SystemAttestationError("dedicated signer socket identity is unsafe")
+        listener.listen(socket.SOMAXCONN)
+        listener.settimeout(1)
+        return listener
+    except Exception:
+        listener.close()
+        try:
+            if path.lstat().st_uid == os.getuid():
+                path.unlink()
+        except FileNotFoundError:
+            pass
+        raise
+
+
 def serve() -> None:
     config = ServiceConfig.load()
     current = _credential("current.key")
@@ -929,11 +979,7 @@ def serve() -> None:
     signer = DedicatedSigner(
         config, GitHub(config, token), current, previous, archive_keys=archive
     )
-    listener = socket.socket(fileno=3)
-    if listener.family != socket.AF_UNIX:
-        listener.close()
-        raise SystemAttestationError("socket activation listener must be AF_UNIX")
-    listener.settimeout(1)
+    listener = _create_listener()
     stopping = threading.Event()
     limiter = AuthorizationLimiter(
         config.authorization_limit, config.authorization_window_seconds
@@ -1011,6 +1057,12 @@ def serve() -> None:
                 _audit(outcome, evidence_hash, scope_hash)
             connection.sendall(_canonical(response) + b"\n")
     listener.close()
+    try:
+        metadata = SOCKET_PATH.lstat()
+        if stat.S_ISSOCK(metadata.st_mode) and metadata.st_uid == os.getuid():
+            SOCKET_PATH.unlink()
+    except FileNotFoundError:
+        pass
     for signum, handler in old_handlers.items():
         signal.signal(signum, handler)
 

@@ -28,8 +28,13 @@ Issue marker expiry is enforced before first issuance. The field remains signed
 evidence, but it does not expire an already signed ReviewLedger record during
 later verification.
 
-The daemon accepts only its socket-activated AF_UNIX listener. Its only network
-client constructs HTTPS requests to the exact `https://api.github.com` origin;
+The daemon itself creates, verifies, listens on, and removes the canonical
+AF_UNIX socket. Socket activation is forbidden: `SO_PEERCRED` therefore names
+the dedicated signer process that created the listener, rather than PID 1.
+The setgid runtime directory assigns the fixed operator group and the daemon
+sets exact mode `0660`; ordinary group members cannot replace entries in the
+`2750` directory. Its only network client constructs HTTPS requests to the
+exact `https://api.github.com` origin;
 redirects and caller-selected origins are refused. Authorization attempts are
 bounded per peer UID. Audit records contain only an outcome and hashes of the
 evidence identifier and authorization scope. SIGTERM stops acceptance and
@@ -46,6 +51,14 @@ historical role- and execution-scoped schemas with those keys; legacy payloads
 can never authorize a new record. Plaintext is never written. Any partial
 system state, substitution, mutation, or mismatch aborts and restores all
 system artifacts.
+
+No checkout Python is executed with privilege. Initial installation and every
+administrator update copy the administrator bytes without execution to the
+fixed root-owned bootstrap directory, compare that copy to a SHA-256 obtained
+from independently approved exact-head evidence, and only then invoke the same
+root-owned copy with `/usr/bin/python3 -I`. The checkout digest is not an
+authority. Isolated mode excludes checkout-local modules before the
+administrator pins and digest-checks every artifact descriptor.
 
 Rotation moves the outgoing previous key into a root-encrypted,
 duplicate-free `archive.keys` credential. The archive is verification-only,

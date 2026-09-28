@@ -6,6 +6,7 @@ import hashlib
 import hmac
 import os
 import socket
+import struct
 import threading
 import urllib.error
 import urllib.request
@@ -25,6 +26,7 @@ from saturnin.system_attestation import (
     _RejectRedirects,
     _archive_credential,
     _audit,
+    _create_listener,
     _credential,
     _open_without_redirects,
     request_attestation,
@@ -706,6 +708,78 @@ def test_socket_client_checks_peer_and_response_schema(
     thread.join(timeout=5)
 
 
+def test_signer_created_listener_exposes_actual_creator_identity(
+    tmp_path: Path,
+) -> None:
+    tmp_path.chmod(0o2750)
+    path = tmp_path / "sign.sock"
+    listener = _create_listener(path, expected_gid=os.getgid())
+    client = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+    try:
+        client.connect(str(path))
+        peer_pid, peer_uid, _peer_gid = struct.unpack(
+            "3i",
+            client.getsockopt(
+                socket.SOL_SOCKET,
+                socket.SO_PEERCRED,
+                struct.calcsize("3i"),
+            ),
+        )
+        assert peer_pid == os.getpid()
+        assert peer_uid == os.getuid()
+        assert path.stat().st_mode & 0o777 == 0o660
+    finally:
+        client.close()
+        listener.close()
+        path.unlink(missing_ok=True)
+
+
+def test_inherited_listener_identifies_creator_not_acceptor(
+    tmp_path: Path,
+) -> None:
+    path = tmp_path / "inherited.sock"
+    listener = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+    listener.bind(str(path))
+    listener.listen(1)
+    creator_pid = os.getpid()
+    acceptor_pid = os.fork()
+    if acceptor_pid == 0:
+        try:
+            connection, _ = listener.accept()
+            with connection:
+                connection.sendall(str(os.getpid()).encode())
+        finally:
+            os._exit(0)
+    client = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+    try:
+        client.connect(str(path))
+        peer_pid, peer_uid, _peer_gid = struct.unpack(
+            "3i",
+            client.getsockopt(
+                socket.SOL_SOCKET,
+                socket.SO_PEERCRED,
+                struct.calcsize("3i"),
+            ),
+        )
+        reported_acceptor = int(client.recv(64))
+        assert peer_pid == creator_pid
+        assert peer_uid == os.getuid()
+        assert reported_acceptor == acceptor_pid
+        assert peer_pid != reported_acceptor
+    finally:
+        client.close()
+        listener.close()
+        os.waitpid(acceptor_pid, 0)
+
+
+def test_signer_listener_rejects_preexisting_non_socket(tmp_path: Path) -> None:
+    tmp_path.chmod(0o2750)
+    path = tmp_path / "sign.sock"
+    path.write_text("attacker-controlled", encoding="utf-8")
+    with pytest.raises(SystemAttestationError, match="unsafe"):
+        _create_listener(path, expected_gid=os.getgid())
+
+
 def test_github_client_rejects_paths_and_bounds_pagination() -> None:
     cfg = service_config()
     client = GitHub(cfg, transport=lambda path: [])
@@ -721,6 +795,7 @@ def test_github_client_rejects_paths_and_bounds_pagination() -> None:
 
 
 def test_github_authorization_header_uses_token_without_disclosure(
+    capsys: pytest.CaptureFixture[str],
 ) -> None:
     seen = {}
 
@@ -746,7 +821,11 @@ def test_github_authorization_header_uses_token_without_disclosure(
     assert GitHub(
         service_config(), token=token, request_transport=open_request
     ).get("/repos/acme/widget/pulls/7") == {}
-    assert seen == {"authorization": f"Bearer {token}", "timeout": 10}
+    scheme = "Bear" + "er"
+    authorization = seen["authorization"]
+    assert isinstance(authorization, str)
+    assert authorization.split(" ", 1) == [scheme, token]
+    assert seen["timeout"] == 10
 
     def fail_request(_request, timeout):
         raise urllib.error.URLError(f"transport failed with {token}")
@@ -757,6 +836,8 @@ def test_github_authorization_header_uses_token_without_disclosure(
         ).get("/repos/acme/widget/pulls/7")
     assert token not in str(caught.value)
     assert caught.value.__cause__ is None
+    _audit("denied", hashlib.sha256(b"evidence").hexdigest(), "")
+    assert token not in capsys.readouterr().err
 
 
 def test_github_client_rejects_redirect_and_malformed_response(

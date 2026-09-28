@@ -86,6 +86,7 @@ review:
     authorization_source: github-api
     service_identity: saturnin-signer
     service_socket: /run/saturnin-attestation/sign.sock
+    listener_creator: service-process
     runtime: /usr/lib/saturnin-attestation/system_attestation.py
     state: /var/lib/saturnin-attestation
     role_scoped: true

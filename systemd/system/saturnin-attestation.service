@@ -1,8 +1,8 @@
 [Unit]
 Description=Saturnin dedicated GitHub review attestation service
 Documentation=file:/usr/share/doc/saturnin-attestation/runbook.md
-Requires=saturnin-attestation.socket
 After=network-online.target
+Wants=network-online.target
 
 [Service]
 Type=simple
@@ -54,3 +54,6 @@ KillSignal=SIGTERM
 SendSIGKILL=yes
 Restart=on-failure
 RestartSec=5s
+
+[Install]
+WantedBy=multi-user.target
