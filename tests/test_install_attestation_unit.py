@@ -110,6 +110,7 @@ def signer_install(tmp_path: Path) -> tuple[Path, dict[str, str], Path, Path]:
     cgroup_root = tmp_path / "cgroup"
     signer_cgroup = cgroup_root / "user.slice" / "saturnin-attestation.service"
     signer_cgroup.mkdir(parents=True)
+    cgroup_root.chmod(0o755)
     (signer_cgroup / "cgroup.events").write_text(
         "populated 0\nfrozen 0\n", encoding="ascii"
     )
@@ -287,7 +288,8 @@ def signer_install(tmp_path: Path) -> tuple[Path, dict[str, str], Path, Path]:
         "    if [ -n \"${SERVICE_FAILED:-}\" ]; then\n"
         "      printf '%s\\n' 'LoadState=loaded' 'ActiveState=failed' "
         "'SubState=failed' \"FragmentPath=$unit_dir/saturnin-attestation.service\" "
-        "'DropInPaths=' 'MainPID=0' 'ExecMainPID=0' 'ControlGroup='\n"
+        "'DropInPaths=' 'MainPID=0' 'ExecMainPID=0' "
+        "\"ControlGroup=${SERVICE_CGROUP:+/user.slice/saturnin-attestation.service}\"\n"
         "    elif [ -e \"$state/active\" ] || [ -n \"${STOP_REMAINS_ACTIVE:-}\" ]; then\n"
         "      printf '%s\\n' 'LoadState=loaded' 'ActiveState=active' "
         "'SubState=running' \"FragmentPath=$unit_dir/saturnin-attestation.service\" "
@@ -329,9 +331,15 @@ def signer_install(tmp_path: Path) -> tuple[Path, dict[str, str], Path, Path]:
         "    [ \"${FAIL_ON:-}\" != start ]\n"
         "    ;;\n"
         "  stop)\n"
-        "    if [ -n \"${FAIL_ROLLBACK_STOP:-}\" ]; then exit 1; fi\n"
+        "    if [ -n \"${FAIL_ROLLBACK_STOP:-}\" ] "
+        "|| [ -n \"${FAIL_STOP:-}\" ]; then exit 1; fi\n"
         "    rm -f \"$state/active\"\n"
         "    touch \"$state/rollback-stopped\"\n"
+        "    ;;\n"
+        "  kill)\n"
+        "    if [ -n \"${EMPTY_CGROUP_ON_KILL:-}\" ]; then\n"
+        f"      printf '%s\\n' 'populated 0' 'frozen 0' > {signer_cgroup / 'cgroup.events'}\n"
+        "    fi\n"
         "    ;;\n"
         "  status) printf '%s\\n' 'signer status only' ;;\n"
         "esac\n",
@@ -381,12 +389,12 @@ def signer_install(tmp_path: Path) -> tuple[Path, dict[str, str], Path, Path]:
             f"readonly SYSTEMD_CREDS={fake_systemd_creds}",
         )
         .replace(
-            "readonly CGROUP_ROOT=/sys/fs/cgroup",
-            f"readonly CGROUP_ROOT={cgroup_root}",
-        )
-        .replace(
             "readonly CGROUP_ROOT_OWNER=0",
             f"readonly CGROUP_ROOT_OWNER={os.getuid()}",
+        )
+        .replace(
+            "readonly CGROUP_ROOT=/sys/fs/cgroup",
+            f"readonly CGROUP_ROOT={cgroup_root}",
         )
         .replace(
             '[[ "$("$STAT" -c %u "$tool")" -ne 0 ]]',
@@ -812,7 +820,7 @@ def test_failed_active_restart_stops_new_process_and_restores_old_service(
     ("failure", "message"),
     [
         (
-            {"FAIL_ROLLBACK_STOP": "1"},
+            {"FAIL_ROLLBACK_STOP": "1", "STOP_REMAINS_ACTIVE": "1"},
             "rejected signer termination was not proven",
         ),
         (
@@ -1141,6 +1149,40 @@ def test_uninstall_rejects_residual_signer_cgroup_processes(
         "--user kill --kill-whom=all --signal=KILL "
         "saturnin-attestation.service"
     ) in calls.read_text(encoding="utf-8").splitlines()
+
+
+def test_uninstall_kills_residual_cgroup_after_stop_failure(
+    signer_install: tuple[Path, dict[str, str], Path, Path],
+) -> None:
+    checkout, _, unit_dir, calls = signer_install
+    assert _run(signer_install, "install").returncode == 0
+    events = (
+        checkout.parent
+        / "cgroup"
+        / "user.slice"
+        / "saturnin-attestation.service"
+        / "cgroup.events"
+    )
+    events.write_text("populated 1\nfrozen 0\n", encoding="ascii")
+
+    result = _run(
+        signer_install,
+        "uninstall",
+        SERVICE_FAILED="1",
+        SERVICE_CGROUP="1",
+        USE_REAL_STOP_VERIFY="1",
+        FAIL_STOP="1",
+        EMPTY_CGROUP_ON_KILL="1",
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert not (unit_dir / "saturnin-attestation.service").exists()
+    recorded = calls.read_text(encoding="utf-8").splitlines()
+    assert "--user stop saturnin-attestation.service" in recorded
+    assert (
+        "--user kill --kill-whom=all --signal=KILL "
+        "saturnin-attestation.service"
+    ) in recorded
 
 
 def test_uninstall_stops_active_signer_with_unvalidated_definition(

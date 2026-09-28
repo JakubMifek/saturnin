@@ -846,7 +846,7 @@ if control_group:
 }
 
 stop_signer_service() {
-  systemctl_bounded --user stop "$UNIT" || return 1
+  systemctl_bounded --user stop "$UNIT" >/dev/null 2>&1 || true
   systemctl_bounded --user kill --kill-whom=all --signal=KILL \
     "$UNIT" >/dev/null 2>&1 || true
   verify_stopped_service
