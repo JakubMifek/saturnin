@@ -211,6 +211,7 @@ def issue_action_fixture(*, expiry: datetime | None = None):
         if path == "/repos/acme/widget/issues/9":
             return {
                 "title": title, "body": body,
+                "state": "open",
                 "user": {"login": "author"},
             }
         if "/repos/acme/widget/issues/9/comments?" in path:
@@ -778,7 +779,10 @@ def test_issue_marker_binds_every_field_and_consumes_comment(tmp_path: Path) -> 
 
     def transport(path: str):
         if path.endswith("/issues/9"):
-            return {"title": "Title", "body": "Body", "user": {"login": "author"}}
+            return {
+                "title": "Title", "body": "Body", "state": "open",
+                "user": {"login": "author"},
+            }
         return [{
             "id": 55, "body": "saturnin-attestation:v1 " + json.dumps(marker),
             "created_at": NOW.isoformat(),
@@ -832,6 +836,7 @@ def test_protected_issue_reviewer_publishes_exact_identity_bound_marker() -> Non
             return {
                 "title": "Reviewed title",
                 "body": "Reviewed body",
+                "state": "open",
                 "user": {"login": "author"},
             }
         if "/comments?" in path:
@@ -913,6 +918,7 @@ def test_protected_issue_reviewer_rejects_replay_self_review_and_bad_response(
             return {
                 "title": "Title",
                 "body": "Body",
+                "state": "open",
                 "user": {"login": author},
             }
         if "/comments?" in path:
@@ -971,6 +977,7 @@ def test_protected_issue_reviewer_rejects_content_changed_after_approval() -> No
             return {
                 "title": "Changed title",
                 "body": "Body",
+                "state": "open",
                 "user": {"login": "author"},
             }
         if "/comments?" in path:
@@ -989,6 +996,67 @@ def test_protected_issue_reviewer_rejects_content_changed_after_approval() -> No
             now=NOW,
             nonce="e" * 64,
         )
+
+
+def test_issue_closure_revokes_publication_and_signer_authority(
+    tmp_path: Path,
+) -> None:
+    title, body, digest, _marker, base_transport = issue_action_fixture()
+    state = ["closed"]
+
+    def transport(path: str):
+        value = base_transport(path)
+        if path == "/repos/acme/widget/issues/9":
+            return {**value, "state": state[0]}
+        return value
+
+    cfg = ServiceConfig(
+        frozenset({"acme/widget"}),
+        frozenset({"review-bot"}),
+        frozenset({"review-bot"}),
+        frozenset({"approved"}),
+        issue_destinations=frozenset({"acme/issues"}),
+    )
+    with pytest.raises(SystemAttestationError, match="not open"):
+        publish_issue_review(
+            cfg,
+            GitHub(cfg, token="installation-token", transport=transport),
+            "acme/widget",
+            9,
+            "acme/issues",
+            ["incident"],
+            digest,
+            now=NOW,
+            nonce="d" * 64,
+        )
+
+    service = DedicatedSigner(
+        cfg,
+        GitHub(cfg, token="protected", transport=transport),
+        b"k" * 48,
+        None,
+        tmp_path / "closed-issue.sqlite3",
+        now=lambda: NOW,
+    )
+    request_value = {
+        "action": "decide_issue",
+        "operation": "issue_gate",
+        "repository": "acme/widget",
+        "number": 9,
+        "destination_repo": "acme/issues",
+        "issue_digest": digest,
+        "title": "",
+        "body": "",
+        "labels": [],
+        "nonce": "e" * 64,
+    }
+    with pytest.raises(SystemAttestationError, match="not open"):
+        service.issue_action(request_value)
+    state[0] = "open"
+    assert service.issue_action(request_value)["allowed"] is True
+    state[0] = "closed"
+    with pytest.raises(SystemAttestationError, match="not open"):
+        service.issue_action({**request_value, "nonce": "f" * 64})
 
 
 def test_fresh_issue_gate_and_protected_submission_are_digest_bound(

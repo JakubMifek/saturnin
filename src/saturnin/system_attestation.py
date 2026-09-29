@@ -261,6 +261,8 @@ def publish_issue_review(
     issue = github.get(f"/repos/{repo}/issues/{number}")
     if not isinstance(issue, dict) or "pull_request" in issue:
         raise SystemAttestationError("issue response is malformed")
+    if str(issue.get("state", "")).casefold() != "open":
+        raise SystemAttestationError("source issue is not open")
     title = issue.get("title")
     body = issue.get("body") or ""
     author = str((issue.get("user") or {}).get("login", ""))
@@ -1548,6 +1550,8 @@ class DedicatedSigner:
         issue = self.github.get(f"/repos/{repo}/issues/{number}")
         if not isinstance(issue, dict) or "pull_request" in issue:
             raise SystemAttestationError("issue response is malformed")
+        if str(issue.get("state", "")).casefold() != "open":
+            raise SystemAttestationError("source issue is not open")
         author = str((issue.get("user") or {}).get("login", ""))
         if not author:
             raise SystemAttestationError("issue author is invalid")
