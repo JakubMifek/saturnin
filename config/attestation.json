@@ -2,7 +2,7 @@
   "repositories": ["jakubmifek/saturnin"],
   "issue_destinations": ["jakubmifek/saturnin-ops"],
   "pr_reviewers": ["copilot-pull-request-reviewer[bot]"],
-  "issue_reviewers": ["copilot-pull-request-reviewer[bot]"],
+  "issue_reviewers": ["saturnin-issue-reviewer[bot]"],
   "allowed_verdicts": ["approved"],
   "github_api": "https://api.github.com",
   "request_timeout_seconds": 10,

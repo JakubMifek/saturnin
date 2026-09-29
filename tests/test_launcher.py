@@ -1057,6 +1057,70 @@ def test_trusted_cli_callback_records_review_as_assigned_reviewer(
     assert records[0].reviewer == "pr-reviewer"
 
 
+def test_trusted_cli_callback_runs_gate_only_for_exact_review_scope(
+    config: Config,
+    board: Board,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    subject = "JakubMifek/saturnin#11"
+    head_sha = "c" * 40
+    task = board.create(
+        "Gate the reviewed pull request",
+        kind="pr-review",
+        review_subject=subject,
+        review_author="code-worker",
+        review_head_sha=head_sha,
+    )
+    with board.edit(task.id) as stored:
+        stored.role = "pr-reviewer"
+        stored.state = "in_progress"
+    callback_dir = AgentLauncher(config, board)._isolated_home(
+        task.id
+    ) / ".saturnin-callbacks"
+    callback_dir.mkdir(parents=True)
+    callback = {
+        "type": "trusted_cli",
+        "task_id": task.id,
+        "operation": "review_gate",
+        "argv": [
+            "review",
+            "gate",
+            subject,
+            "--kind",
+            "pr",
+            "--repo",
+            "JakubMifek/saturnin",
+            "--author",
+            "code-worker",
+            "--head-sha",
+            head_sha,
+        ],
+    }
+    (callback_dir / CALLBACKS_FILE).write_text(
+        json.dumps(callback) + "\n",
+        encoding="utf-8",
+    )
+    decisions: list[dict] = []
+
+    def decide(**kwargs):
+        decisions.append(kwargs)
+        return {
+            "allowed": True,
+            "head_sha": head_sha,
+            "review_id": 91,
+            "reviewer_identity": "review-bot",
+            "nonce": "d" * 64,
+        }
+
+    monkeypatch.setattr("saturnin.cli.request_action", decide)
+
+    apply_queued(config, board, task_id=task.id, callback_dir=str(callback_dir))
+
+    assert len(decisions) == 1
+    assert decisions[0]["repository"] == "JakubMifek/saturnin"
+    assert decisions[0]["expected_head"] == head_sha
+
+
 def test_trusted_cli_review_record_requires_exact_task_scope(
     config: Config,
     board: Board,

@@ -98,10 +98,43 @@ identity fails closed before the administration lock or any other mutation.
 <!-- generated:attestation-boundary -->
 The system `saturnin-attestation.service` runs as the non-login `saturnin-signer` identity from root-controlled runtime and configuration. The system manager decrypts current, previous, and bounded retired HMAC credentials into its private credential tmpfs; ordinary workers never receive key material. The service, not PID 1, creates the canonical listener. Clients authenticate its kernel-reported UID plus the stable signer-owned socket directory and endpoint identity; this deliberately avoids cross-UID ptrace-gated `/proc` inspection. Systemd readiness is reported only after protected credential validation and listener creation.
 
-For pull requests the service obtains the live head, author, and exact commit-bound latest review state directly from GitHub over TLS. For issues it recomputes title/body digest and accepts one exact, expiring, nonce-bound machine marker in an allowlisted bot comment. The marker also binds approved labels. Every issue gate is fresh; submission repeats authorization and the signer creates exact reviewed content in an independently allowlisted destination with a deterministic hidden idempotency marker. Ambiguous submission outcomes reconcile only against one exact marker-bearing issue authored by the protected identity. Evidence expiry limits new authorization, not later audit verification of a durable record. Socket filesystem access permits transport only: independent GitHub authorization remains required. Repository and API origins are fixed allowlists; caller claims and socket credentials are not authority.
+For pull requests the service obtains the live head, author, and exact commit-bound latest review state directly from GitHub over TLS. For issues it recomputes title/body digest and accepts one exact, expiring, nonce-bound machine marker in an allowlisted dedicated GitHub App bot comment. A default-branch-only protected environment holds that App key and requires an independent human approver; ordinary workers cannot publish as the bot. The marker also binds approved labels. Every issue gate is fresh; submission repeats authorization and the signer creates exact reviewed content in an independently allowlisted destination with a deterministic hidden idempotency marker. Ambiguous submission outcomes reconcile only against one exact marker-bearing issue authored by the protected identity. Evidence expiry limits new authorization, not later audit verification of a durable record. Socket filesystem access permits transport only: independent GitHub authorization remains required. Repository and API origins are fixed allowlists; caller claims and socket credentials are not authority.
 
 Consumed evidence and its exact idempotent attestation are serialized in dedicated state for audit only. Altered reuse fails. Every PR gate obtains a fresh, expiring, one-time protected decision over the live head, base, review ID/state/identity and required checks. Merge repeats that lookup immediately before the signer uses GitHub's expected-head atomic merge API. The signer also requires strict branch protection with stale-review dismissal, required reviews/checks, administrator enforcement and no bypass identities. Its fixed non-admin merge identity and root-provisioned credential never enter the ordinary UID; workers receive neither signing sessions nor credentials.
+
+GitHub-hosted governance cannot access the host signer. Its `pull_request_target` job executes only default-branch code with a read-only token and repeats a live exact-head review lookup; it signs nothing and cannot merge. Sandboxed reviewers queue scope-bound gate callbacks for host execution instead of receiving signer socket access.
 <!-- /generated:attestation-boundary -->
+
+### Protected issue-review App
+
+This is a GitHub administration ceremony, not a Saturnin worker action. Create
+a dedicated App whose bot login exactly matches
+`config/attestation.json` (`saturnin-issue-reviewer[bot]`). Grant only
+**Metadata: read** and **Issues: read/write**, disable webhook delivery, and
+install it for **selected repositories only** on the configured source
+repository. Do not install it on issue destinations unless they are also
+review sources.
+
+Create the `issue-review-approval` Environment with all of these protections:
+
+1. Allow deployment only from the repository's default branch; tags and other
+   branches are forbidden.
+2. Require at least one reviewer who is independent of Saturnin workers and
+   issue authors. Prevent self-review where the GitHub plan supports it.
+3. Store the App private key only as the environment secret
+   `SATURNIN_ISSUE_REVIEWER_PRIVATE_KEY`; store its numeric App ID as the
+   environment variable `SATURNIN_ISSUE_REVIEWER_APP_ID`.
+4. Give ordinary worker, server, merge-bot, and repository secrets no copy of
+   either value. Their tokens must not impersonate the App bot.
+
+The approver must independently recompute and compare the source issue's
+title/body digest, destination, exact label JSON, and TTL in the pending
+deployment before approving
+`.github/workflows/issue-review-marker.yml`. Dispatch only on the exact default
+branch. The workflow obtains the installation for the exact source repository,
+requests a repository- and permission-scoped token, and publishes one
+short-lived digest-bound marker. A duplicate or ambiguous publication blocks;
+never create a replacement marker manually.
 
 ### Provisioning and rotation
 

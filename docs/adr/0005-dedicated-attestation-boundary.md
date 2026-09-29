@@ -51,6 +51,28 @@ allowances. Its fixed merge account must have write but not administration
 permission, and protection must apply to administrators, so GitHub rechecks
 review and status policy atomically at merge.
 
+GitHub-hosted governance has no route to the host signer socket. Its
+base-controlled `pull_request_target` job therefore performs only a read-only
+decision: trusted default-branch code uses a read-only workflow token to fetch
+the exact PR head and all review pages twice. It fails on any state change,
+blocking or stale review, unexpected reviewer identity, pagination/API error,
+or event-head mismatch. It creates no attestation and has no merge permission;
+the protected signer remains the sole merge authority. Sandboxed reviewers
+likewise queue exact-scope gate callbacks for host execution and never receive
+socket or key access.
+
+Issue markers are published by a separate GitHub App identity. The App is
+installed only on the selected source repository with Issues write and
+Metadata read; each installation token is further narrowed to that repository
+and those permissions. Its private key exists only in a protected
+`issue-review-approval` GitHub Environment. That environment permits
+deployments only from the default branch and requires an independent human
+reviewer who verifies the issue, destination, labels, and TTL before approval.
+The workflow checks out and executes only the default branch. The App response
+must prove the configured bot identity, exact immutable marker body, and
+current creation timestamp. Workers and the system merge credential do not
+receive the App key or token.
+
 The daemon itself creates, verifies, listens on, and removes the canonical
 AF_UNIX socket. Socket activation is forbidden. Clients authenticate the
 kernel-reported dedicated signer UID and stable inode beneath the exact

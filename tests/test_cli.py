@@ -40,6 +40,21 @@ def run(capsys: pytest.CaptureFixture[str], *argv: str) -> tuple[int, str]:
     return code, capsys.readouterr().out
 
 
+def write_service_config(home: Path) -> None:
+    path = home / "config" / "attestation.json"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(
+        json.dumps({
+            "repositories": ["JakubMifek/saturnin"],
+            "issue_destinations": ["JakubMifek/saturnin-ops"],
+            "pr_reviewers": ["copilot-pull-request-reviewer[bot]"],
+            "issue_reviewers": ["saturnin-issue-reviewer[bot]"],
+            "allowed_verdicts": ["approved"],
+        }),
+        encoding="utf-8",
+    )
+
+
 def review_attestation_args(**kwargs: str) -> tuple[str, str]:
     task_id = "T-20260924-cli"
     nonce = secrets.token_hex(32)
@@ -1246,6 +1261,70 @@ def test_sandboxed_worker_fails_closed_for_unsupported_stateful_command(
     assert not (callback_dir / CALLBACKS_FILE).exists()
 
 
+def test_sandboxed_reviewer_queues_gate_without_local_signer_access(
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    callback_dir = tmp_path / "callbacks"
+    monkeypatch.setenv(ENV_CALLBACK_DIR, str(callback_dir))
+    monkeypatch.setenv(ENV_CALLBACK_TASK_ID, "T-review")
+
+    code, out = run(
+        capsys,
+        "review",
+        "gate",
+        "JakubMifek/saturnin#11",
+        "--kind",
+        "pr",
+        "--repo",
+        "JakubMifek/saturnin",
+        "--author",
+        "code-worker",
+        "--head-sha",
+        "a" * 40,
+    )
+
+    assert code == 0
+    assert "queued worker callback" in out
+    record = json.loads(
+        (callback_dir / CALLBACKS_FILE).read_text(encoding="utf-8")
+    )
+    assert record["type"] == "trusted_cli"
+    assert record["operation"] == "review_gate"
+    assert record["task_id"] == "T-review"
+
+
+def test_sandboxed_reviewer_cannot_attest_locally(
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    callback_dir = tmp_path / "callbacks"
+    monkeypatch.setenv(ENV_CALLBACK_DIR, str(callback_dir))
+    monkeypatch.setenv(ENV_CALLBACK_TASK_ID, "T-review")
+
+    code = main([
+        "review",
+        "attest",
+        "JakubMifek/saturnin#11",
+        "--kind",
+        "pr",
+        "--author",
+        "code-worker",
+        "--reviewer",
+        "pr-reviewer",
+        "--verdict",
+        "approved",
+        "--head-sha",
+        "a" * 40,
+    ])
+
+    assert code == 1
+    assert "no trusted callback is defined" in capsys.readouterr().err
+    assert not (callback_dir / CALLBACKS_FILE).exists()
+
+
 def test_review_gate_flow(
     home: Path, capsys: pytest.CaptureFixture[str],
     monkeypatch: pytest.MonkeyPatch,
@@ -1321,6 +1400,160 @@ def test_review_gate_flow(
     )
     assert code == 0
     assert "ALLOWED" in out
+
+
+def test_ci_review_gate_uses_read_only_live_decision(
+    home: Path,
+    capsys: pytest.CaptureFixture[str],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    head_sha = "a" * 40
+    seen: dict[str, object] = {}
+    write_service_config(home)
+    monkeypatch.setenv("GITHUB_TOKEN", "read-only-token")
+
+    def decide(service_config, github, repo, number, expected_head):
+        seen.update(
+            repo=repo,
+            number=number,
+            expected_head=expected_head,
+            token=github.token,
+        )
+        return {
+            "repository": repo,
+            "number": number,
+            "head_sha": expected_head,
+            "review_id": 91,
+            "reviewer_identity": "copilot-pull-request-reviewer[bot]",
+        }
+
+    monkeypatch.setattr("saturnin.cli.read_only_pr_gate", decide)
+
+    code, out = run(
+        capsys,
+        "review",
+        "ci-gate",
+        "JakubMifek/saturnin#11",
+        "--head-sha",
+        head_sha,
+    )
+
+    assert code == 0
+    assert "ALLOWED" in out
+    assert seen == {
+        "repo": "JakubMifek/saturnin",
+        "number": 11,
+        "expected_head": head_sha,
+        "token": "read-only-token",
+    }
+
+
+def test_ci_review_gate_fails_without_token(
+    home: Path,
+    capsys: pytest.CaptureFixture[str],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    write_service_config(home)
+    monkeypatch.delenv("GITHUB_TOKEN", raising=False)
+
+    code, out = run(
+        capsys,
+        "review",
+        "ci-gate",
+        "JakubMifek/saturnin#11",
+        "--head-sha",
+        "a" * 40,
+    )
+
+    assert code == 2
+    assert "read-only GitHub token is unavailable" in out
+
+
+def test_issue_review_publisher_uses_protected_app_token(
+    home: Path,
+    capsys: pytest.CaptureFixture[str],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    seen: dict[str, object] = {}
+    write_service_config(home)
+    monkeypatch.setenv(
+        "SATURNIN_ISSUE_REVIEWER_TOKEN",
+        "installation-token",
+    )
+
+    def publish(
+        service_config,
+        github,
+        repository,
+        number,
+        destination_repo,
+        labels,
+        expected_digest,
+        *,
+        ttl_seconds,
+    ):
+        seen.update(
+            repository=repository,
+            number=number,
+            destination_repo=destination_repo,
+            labels=labels,
+            expected_digest=expected_digest,
+            ttl_seconds=ttl_seconds,
+            token=github.token,
+        )
+        return {"comment_id": 55, "reviewer_identity": "reviewer[bot]"}
+
+    monkeypatch.setattr("saturnin.cli.publish_issue_review", publish)
+
+    code, out = run(
+        capsys,
+        "review",
+        "publish-issue-review",
+        "JakubMifek/saturnin#9",
+        "--repo",
+        "JakubMifek/saturnin-ops",
+        "--label",
+        "incident",
+        "--issue-digest",
+        "d" * 64,
+        "--ttl-seconds",
+        "600",
+    )
+
+    assert code == 0
+    assert "comment 55" in out
+    assert seen == {
+        "repository": "JakubMifek/saturnin",
+        "number": 9,
+        "destination_repo": "JakubMifek/saturnin-ops",
+        "labels": ["incident"],
+        "expected_digest": "d" * 64,
+        "ttl_seconds": 600,
+        "token": "installation-token",
+    }
+
+
+def test_issue_review_publisher_fails_without_app_token(
+    home: Path,
+    capsys: pytest.CaptureFixture[str],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    write_service_config(home)
+    monkeypatch.delenv("SATURNIN_ISSUE_REVIEWER_TOKEN", raising=False)
+
+    code, out = run(
+        capsys,
+        "review",
+        "publish-issue-review",
+        "JakubMifek/saturnin#9",
+        "--repo",
+        "JakubMifek/saturnin-ops",
+        "--issue-digest",
+        "d" * 64,
+    )
+
+    assert code == 2
+    assert "protected issue reviewer App token is unavailable" in out
 
 
 def test_review_cli_resolves_omitted_pr_head(

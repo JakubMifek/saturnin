@@ -19,18 +19,11 @@ Make the independent-review requirement mechanical instead of aspirational.
 <!-- generated:pr-review-flow -->
 ```bash
 HEAD_SHA="$(gh pr view <N> --repo JakubMifek/saturnin --json headRefOid --jq .headRefOid)"
-VERDICT=approved
-attestation="$(saturnin review attest JakubMifek/saturnin#<N> --kind pr \
-  --author <author-role> --reviewer pr-reviewer --verdict "$VERDICT" \
-  --head-sha "$HEAD_SHA")"
-saturnin review record JakubMifek/saturnin#<N> --kind pr \
-  --author <author-role> --reviewer pr-reviewer --verdict "$VERDICT" \
-  --head-sha "$HEAD_SHA" --attestation "$attestation"
 saturnin review gate JakubMifek/saturnin#<N> --kind pr \
   --repo JakubMifek/saturnin --author <author-role> --head-sha "$HEAD_SHA"
 ```
 
-Resolve the PR head once and pass that identical SHA through attest, record and gate.
+The review worker's prose verdict is advisory. The configured GitHub reviewer bot must submit the current exact-head approval. This command is queued as a scope-checked trusted callback and the host signer independently re-fetches GitHub before deciding.
 <!-- /generated:pr-review-flow -->
 
 ### Issue flow
@@ -38,20 +31,16 @@ Resolve the PR head once and pass that identical SHA through attest, record and 
 <!-- generated:issue-review-flow -->
 ```bash
 digest="$(python -c 'from saturnin.review import issue_content_digest; print(issue_content_digest("TITLE", "BODY"))')"
-VERDICT=approved
-attestation="$(saturnin review attest <source-owner/source-repo>#<N> --kind issue \
-  --repo <destination-owner/repo> --author <author-role> \
-  --reviewer issue-reviewer --verdict "$VERDICT" \
-  --issue-digest "$digest")"
-saturnin review record <source-owner/source-repo>#<N> --kind issue \
-  --repo <destination-owner/repo> --author <author-role> \
-  --reviewer issue-reviewer --verdict "$VERDICT" \
-  --issue-digest "$digest" --attestation "$attestation"
+gh workflow run issue-review-marker.yml --ref main \
+  -f source='<source-owner/source-repo>#<N>' \
+  -f destination='<destination-owner/repo>' \
+  -f labels='[]' -f ttl_seconds=600 -f issue_digest="$digest"
+gh run watch <protected-workflow-run-id> --exit-status
 saturnin review gate <source-owner/source-repo>#<N> --kind issue \
   --repo <destination-owner/repo> --author <author-role> --issue-digest "$digest"
 ```
 
-Compute the digest from the exact title and body under review, then pass that identical digest through attest, record and gate.
+The protected `issue-review-approval` environment must be approved by an independent reviewer. Its dedicated GitHub App publishes the exact short-lived marker; ordinary worker credentials cannot. The gate is a scope-checked trusted callback and independently re-fetches the marker.
 <!-- /generated:issue-review-flow -->
 
 ## Guarantees

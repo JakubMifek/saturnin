@@ -34,6 +34,8 @@ from saturnin.system_attestation import (
     _notify_ready,
     _credential,
     _open_without_redirects,
+    publish_issue_review,
+    read_only_pr_gate,
     request_attestation,
     request_action,
     request_issue_action,
@@ -87,7 +89,16 @@ def pr_transport(*, state: str = "APPROVED", head: str = HEAD):
                 "enforce_admins": {"enabled": True},
             }
         if path == "/repos/acme/widget/pulls/7":
-            return {"head": {"sha": head}, "user": {"login": "author"}}
+            return {
+                "head": {"sha": head},
+                "base": {
+                    "ref": "main",
+                    "repo": {"full_name": "acme/widget"},
+                },
+                "user": {"login": "author"},
+                "state": "open",
+                "draft": False,
+            }
         if "/reviews?" in path:
             return [] if "page=2" in path else [{
                 "id": 91, "commit_id": head, "state": state,
@@ -470,6 +481,143 @@ def test_gate_rejects_force_push_between_pr_snapshots(tmp_path: Path) -> None:
         service.action(action_request())
 
 
+def test_read_only_ci_gate_repeats_exact_head_review_snapshot() -> None:
+    calls: list[str] = []
+    base = pr_transport()
+
+    def transport(path: str):
+        calls.append(path)
+        return base(path)
+
+    result = read_only_pr_gate(
+        service_config(),
+        GitHub(service_config(), token="read-only", transport=transport),
+        "acme/widget",
+        7,
+        HEAD,
+        now=NOW,
+    )
+
+    assert result["review_id"] == 91
+    assert calls.count("/repos/acme/widget/pulls/7") == 2
+    assert calls.count("/repos/acme/widget/pulls/7/reviews?per_page=100&page=1") == 2
+
+
+@pytest.mark.parametrize(
+    ("change", "message"),
+    [
+        ("dismiss", "no current allowed approval"),
+        ("replace", "state changed"),
+        ("head", "no current allowed approval"),
+        ("api", "rate limited"),
+    ],
+)
+def test_read_only_ci_gate_fails_closed_on_live_state_changes(
+    change: str,
+    message: str,
+) -> None:
+    pull_reads = [0]
+    review_reads = [0]
+
+    def transport(path: str):
+        if path == "/repos/acme/widget/pulls/7":
+            pull_reads[0] += 1
+            head = "b" * 40 if change == "head" and pull_reads[0] == 2 else HEAD
+            return {
+                "head": {"sha": head},
+                "base": {
+                    "ref": "main",
+                    "repo": {"full_name": "acme/widget"},
+                },
+                "user": {"login": "author"},
+                "state": "open",
+                "draft": False,
+            }
+        if "/reviews?" in path:
+            if "page=2" in path:
+                return []
+            review_reads[0] += 1
+            if change == "api" and review_reads[0] == 2:
+                raise SystemAttestationError("rate limited")
+            state = (
+                "DISMISSED"
+                if change == "dismiss" and review_reads[0] == 2
+                else "APPROVED"
+            )
+            review_id = 92 if change == "replace" and review_reads[0] == 2 else 91
+            return [{
+                "id": review_id,
+                "commit_id": HEAD,
+                "state": state,
+                "submitted_at": "2026-09-27T16:00:00Z",
+                "user": {"login": "review-bot", "type": "Bot"},
+            }]
+        raise AssertionError(path)
+
+    with pytest.raises(SystemAttestationError, match=message):
+        read_only_pr_gate(
+            service_config(),
+            GitHub(service_config(), token="read-only", transport=transport),
+            "acme/widget",
+            7,
+            HEAD,
+            now=NOW,
+        )
+
+
+@pytest.mark.parametrize(
+    ("repo", "number", "head"),
+    [
+        ("acme/other", 7, HEAD),
+        ("acme/widget", 0, HEAD),
+        ("acme/widget", 7, "not-a-sha"),
+    ],
+)
+def test_read_only_ci_gate_rejects_untrusted_scope(
+    repo: str, number: int, head: str,
+) -> None:
+    with pytest.raises(SystemAttestationError, match="scope"):
+        read_only_pr_gate(
+            service_config(),
+            GitHub(service_config(), token="read-only", transport=pr_transport()),
+            repo,
+            number,
+            head,
+            now=NOW,
+        )
+
+
+@pytest.mark.parametrize(
+    "pull_change",
+    [
+        {"state": "closed"},
+        {"draft": True},
+        {"base": {"ref": "release", "repo": {"full_name": "acme/widget"}}},
+        {"base": {"ref": "main", "repo": {"full_name": "acme/other"}}},
+    ],
+)
+def test_read_only_ci_gate_rejects_wrong_live_destination(
+    pull_change: dict,
+) -> None:
+    base = pr_transport()
+
+    def transport(path: str):
+        value = base(path)
+        if path == "/repos/acme/widget/pulls/7":
+            return {**value, **pull_change}
+        return value
+
+    with pytest.raises(SystemAttestationError, match="live scope"):
+        read_only_pr_gate(
+            service_config(),
+            GitHub(service_config(), token="read-only", transport=transport),
+            "acme/widget",
+            7,
+            HEAD,
+            now=NOW,
+        )
+
+
 def test_protected_action_rejects_wrong_token_identity_or_permissions(
     tmp_path: Path,
 ) -> None:
@@ -660,6 +808,187 @@ def test_issue_marker_binds_every_field_and_consumes_comment(tmp_path: Path) -> 
     marker["author"] = 7
     with pytest.raises(SystemAttestationError, match="types"):
         service.authorize(request(kind="issue", number=9))
+
+
+def test_protected_issue_reviewer_publishes_exact_identity_bound_marker() -> None:
+    cfg = ServiceConfig(
+        frozenset({"acme/widget"}),
+        frozenset({"pr-review-bot"}),
+        frozenset({"issue-review-bot"}),
+        frozenset({"approved"}),
+        issue_destinations=frozenset({"acme/issues"}),
+    )
+    comments: list[dict] = []
+    expected_digest = hashlib.sha256(
+        json.dumps(
+            {"body": "Reviewed body", "title": "Reviewed title"},
+            sort_keys=True,
+            separators=(",", ":"),
+        ).encode()
+    ).hexdigest()
+
+    def transport(path: str):
+        if path == "/repos/acme/widget/issues/9":
+            return {
+                "title": "Reviewed title",
+                "body": "Reviewed body",
+                "user": {"login": "author"},
+            }
+        if "/comments?" in path:
+            return []
+        raise AssertionError(path)
+
+    def mutate(method: str, path: str, payload: dict):
+        comments.append(payload)
+        return {
+            "id": 55,
+            "body": payload["body"],
+            "created_at": NOW.isoformat(),
+            "updated_at": NOW.isoformat(),
+            "user": {"login": "issue-review-bot", "type": "Bot"},
+        }
+
+    result = publish_issue_review(
+        cfg,
+        GitHub(
+            cfg,
+            token="installation-token",
+            transport=transport,
+            mutation_transport=mutate,
+        ),
+        "acme/widget",
+        9,
+        "acme/issues",
+        ["incident"],
+        expected_digest,
+        now=NOW,
+        ttl_seconds=600,
+        nonce="d" * 64,
+    )
+
+    marker = json.loads(comments[0]["body"][len(ISSUE_MARKER):])
+    assert result["comment_id"] == 55
+    assert result["reviewer_identity"] == "issue-review-bot"
+    assert marker == {
+        "author": "author",
+        "destination_repo": "acme/issues",
+        "digest": expected_digest,
+        "expiry": "2026-09-28T00:10:00+00:00",
+        "issue": 9,
+        "labels": ["incident"],
+        "nonce": "d" * 64,
+        "repository": "acme/widget",
+        "reviewer_role": "issue-reviewer",
+        "verdict": "approved",
+        "zero_context": True,
+    }
+
+
+@pytest.mark.parametrize(
+    ("existing", "author", "response_user", "edited", "message"),
+    [
+        (True, "author", "issue-review-bot", False, "already has"),
+        (False, "issue-review-bot", "issue-review-bot", False, "own issue"),
+        (False, "author", "ordinary-worker", False, "identity"),
+        (False, "author", "issue-review-bot", True, "identity"),
+    ],
+)
+def test_protected_issue_reviewer_rejects_replay_self_review_and_bad_response(
+    existing: bool,
+    author: str,
+    response_user: str,
+    edited: bool,
+    message: str,
+) -> None:
+    cfg = ServiceConfig(
+        frozenset({"acme/widget"}),
+        frozenset({"pr-review-bot"}),
+        frozenset({"issue-review-bot"}),
+        frozenset({"approved"}),
+        issue_destinations=frozenset({"acme/issues"}),
+    )
+
+    def transport(path: str):
+        if path == "/repos/acme/widget/issues/9":
+            return {
+                "title": "Title",
+                "body": "Body",
+                "user": {"login": author},
+            }
+        if "/comments?" in path:
+            return [{
+                "id": 54,
+                "body": ISSUE_MARKER + "{}",
+                "user": {"login": "issue-review-bot", "type": "Bot"},
+            }] if existing else []
+        raise AssertionError(path)
+
+    def mutate(_method: str, _path: str, payload: dict):
+        return {
+            "id": 55,
+            "body": payload["body"] + (" edited" if edited else ""),
+            "created_at": NOW.isoformat(),
+            "updated_at": NOW.isoformat(),
+            "user": {"login": response_user, "type": "Bot"},
+        }
+
+    with pytest.raises(SystemAttestationError, match=message):
+        publish_issue_review(
+            cfg,
+            GitHub(
+                cfg,
+                token="installation-token",
+                transport=transport,
+                mutation_transport=mutate,
+            ),
+            "acme/widget",
+            9,
+            "acme/issues",
+            [],
+            hashlib.sha256(
+                json.dumps(
+                    {"body": "Body", "title": "Title"},
+                    sort_keys=True,
+                    separators=(",", ":"),
+                ).encode()
+            ).hexdigest(),
+            now=NOW,
+            nonce="d" * 64,
+        )
+
+
+def test_protected_issue_reviewer_rejects_content_changed_after_approval() -> None:
+    cfg = ServiceConfig(
+        frozenset({"acme/widget"}),
+        frozenset({"pr-review-bot"}),
+        frozenset({"issue-review-bot"}),
+        frozenset({"approved"}),
+        issue_destinations=frozenset({"acme/issues"}),
+    )
+
+    def transport(path: str):
+        if path == "/repos/acme/widget/issues/9":
+            return {
+                "title": "Changed title",
+                "body": "Body",
+                "user": {"login": "author"},
+            }
+        if "/comments?" in path:
+            return []
+        raise AssertionError(path)
+
+    with pytest.raises(SystemAttestationError, match="changed after review"):
+        publish_issue_review(
+            cfg,
+            GitHub(cfg, token="installation-token", transport=transport),
+            "acme/widget",
+            9,
+            "acme/issues",
+            [],
+            "d" * 64,
+            now=NOW,
+            nonce="e" * 64,
+        )
 
 
 def test_fresh_issue_gate_and_protected_submission_are_digest_bound(

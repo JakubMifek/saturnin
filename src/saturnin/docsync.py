@@ -114,26 +114,20 @@ def _review_flow(config: Config, kind: str) -> str:
         raise GeneratedBlockError(
             f"governance review.{kind}.allowed_reviewer_roles must be a non-empty string list"
         )
-    reviewer = roles[0]
     if kind == "pr":
         repo = config.governance.get("autonomy", {}).get("self_repo", "<owner/repo>")
         return "\n".join(
             [
                 "```bash",
                 f'HEAD_SHA="$(gh pr view <N> --repo {repo} --json headRefOid --jq .headRefOid)"',
-                "VERDICT=approved",
-                f'attestation="$(saturnin review attest {repo}#<N> --kind pr \\',
-                f'  --author <author-role> --reviewer {reviewer} --verdict "$VERDICT" \\',
-                '  --head-sha "$HEAD_SHA")"',
-                f"saturnin review record {repo}#<N> --kind pr \\",
-                f'  --author <author-role> --reviewer {reviewer} --verdict "$VERDICT" \\',
-                '  --head-sha "$HEAD_SHA" --attestation "$attestation"',
                 f"saturnin review gate {repo}#<N> --kind pr \\",
                 f'  --repo {repo} --author <author-role> --head-sha "$HEAD_SHA"',
                 "```",
                 "",
-                "Resolve the PR head once and pass that identical SHA through "
-                "attest, record and gate.",
+                "The review worker's prose verdict is advisory. The configured GitHub "
+                "reviewer bot must submit the current exact-head approval. This command "
+                "is queued as a scope-checked trusted callback and the host signer "
+                "independently re-fetches GitHub before deciding.",
             ]
         )
     if kind == "issue":
@@ -142,21 +136,19 @@ def _review_flow(config: Config, kind: str) -> str:
                 "```bash",
                 "digest=\"$(python -c 'from saturnin.review import "
                 "issue_content_digest; print(issue_content_digest(\"TITLE\", \"BODY\"))')\"",
-                "VERDICT=approved",
-                'attestation="$(saturnin review attest <source-owner/source-repo>#<N> --kind issue \\',
-                "  --repo <destination-owner/repo> --author <author-role> \\",
-                f'  --reviewer {reviewer} --verdict "$VERDICT" \\',
-                '  --issue-digest "$digest")"',
-                "saturnin review record <source-owner/source-repo>#<N> --kind issue \\",
-                "  --repo <destination-owner/repo> --author <author-role> \\",
-                f'  --reviewer {reviewer} --verdict "$VERDICT" \\',
-                '  --issue-digest "$digest" --attestation "$attestation"',
+                "gh workflow run issue-review-marker.yml --ref main \\",
+                "  -f source='<source-owner/source-repo>#<N>' \\",
+                "  -f destination='<destination-owner/repo>' \\",
+                "  -f labels='[]' -f ttl_seconds=600 -f issue_digest=\"$digest\"",
+                "gh run watch <protected-workflow-run-id> --exit-status",
                 "saturnin review gate <source-owner/source-repo>#<N> --kind issue \\",
                 '  --repo <destination-owner/repo> --author <author-role> --issue-digest "$digest"',
                 "```",
                 "",
-                "Compute the digest from the exact title and body under review, "
-                "then pass that identical digest through attest, record and gate.",
+                "The protected `issue-review-approval` environment must be approved by "
+                "an independent reviewer. Its dedicated GitHub App publishes the exact "
+                "short-lived marker; ordinary worker credentials cannot. The gate is a "
+                "scope-checked trusted callback and independently re-fetches the marker.",
             ]
         )
     raise GeneratedBlockError(f"unknown review flow: {kind}")
@@ -311,10 +303,13 @@ def _attestation_boundary(config: Config) -> str:
             "For pull requests the service obtains the live head, author, and exact "
             "commit-bound latest review state directly from GitHub over TLS. For issues "
             "it recomputes title/body digest and accepts one exact, expiring, nonce-bound "
-            "machine marker in an allowlisted bot comment. The marker also binds approved "
-            "labels. Every issue gate is fresh; submission repeats authorization and the "
-            "signer creates exact reviewed content in an independently allowlisted "
-            "destination with a deterministic hidden idempotency marker. Ambiguous "
+            "machine marker in an allowlisted dedicated GitHub App bot comment. A "
+            "default-branch-only protected environment holds that App key and requires "
+            "an independent human approver; ordinary workers cannot publish as the bot. "
+            "The marker also binds approved labels. Every issue gate is fresh; "
+            "submission repeats authorization and the signer creates exact reviewed "
+            "content in an independently allowlisted destination with a deterministic "
+            "hidden idempotency marker. Ambiguous "
             "submission outcomes reconcile only against one exact marker-bearing issue "
             "authored by the protected identity. Evidence expiry limits "
             "new authorization, not later audit verification of a durable record. "
@@ -332,6 +327,12 @@ def _attestation_boundary(config: Config) -> str:
             "bypass identities. Its fixed "
             "non-admin merge identity and root-provisioned credential never enter the "
             "ordinary UID; workers receive neither signing sessions nor credentials.",
+            "",
+            "GitHub-hosted governance cannot access the host signer. Its "
+            "`pull_request_target` job executes only default-branch code with a "
+            "read-only token and repeats a live exact-head review lookup; it signs "
+            "nothing and cannot merge. Sandboxed reviewers queue scope-bound gate "
+            "callbacks for host execution instead of receiving signer socket access.",
         ]
     )
 

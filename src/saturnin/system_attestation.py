@@ -107,6 +107,233 @@ def _github_issue_url(value: object, repo: str, number: object) -> bool:
     )
 
 
+def current_pr_review(
+    config: ServiceConfig,
+    github: GitHub,
+    repo: str,
+    number: int,
+    *,
+    now: datetime,
+) -> dict[str, Any]:
+    pull = github.get(f"/repos/{repo}/pulls/{number}")
+    if not isinstance(pull, dict):
+        raise SystemAttestationError("pull request response is malformed")
+    head = (pull.get("head") or {}).get("sha")
+    author = (pull.get("user") or {}).get("login")
+    if not isinstance(head, str) or not _SHA.fullmatch(head.casefold()):
+        raise SystemAttestationError("pull request head is invalid")
+    if not isinstance(author, str) or not author:
+        raise SystemAttestationError("pull request author is invalid")
+    latest: dict[str, tuple[datetime, int, dict[str, Any]]] = {}
+    for review in github.pages(f"/repos/{repo}/pulls/{number}/reviews"):
+        user = review.get("user") or {}
+        login = str(user.get("login", "")).casefold()
+        review_id = review.get("id")
+        if (
+            type(review_id) is not int
+            or login not in config.pr_reviewers
+            or user.get("type") != "Bot"
+            or review.get("commit_id", "").casefold() != head.casefold()
+        ):
+            continue
+        state = str(review.get("state", "")).casefold()
+        if state not in {
+            "approved", "changes_requested", "rejected", "dismissed"
+        }:
+            continue
+        try:
+            submitted = _iso(review.get("submitted_at"))
+        except SystemAttestationError:
+            continue
+        if submitted > now:
+            continue
+        order = (submitted, review_id)
+        old = latest.get(login)
+        if old is None or order >= old[:2]:
+            latest[login] = (submitted, review_id, review)
+    reviews = [item[2] for item in latest.values()]
+    blocking = [
+        value for value in reviews
+        if str(value.get("state", "")).casefold()
+        in {"changes_requested", "rejected", "dismissed"}
+    ]
+    approved = [
+        value for value in reviews
+        if str(value.get("state", "")).casefold() == "approved"
+    ]
+    if blocking or len(approved) != 1:
+        raise SystemAttestationError("exact head has no current allowed approval")
+    review = approved[0]
+    reviewer = str((review.get("user") or {}).get("login", "")).casefold()
+    if author.casefold() == reviewer:
+        raise SystemAttestationError("reviewer is not independent")
+    return {
+        "repository": repo,
+        "number": number,
+        "head_sha": head.casefold(),
+        "base_ref": str((pull.get("base") or {}).get("ref", "")),
+        "base_repository": str(
+            ((pull.get("base") or {}).get("repo") or {}).get("full_name", "")
+        ).casefold(),
+        "pull_state": str(pull.get("state", "")).casefold(),
+        "draft": pull.get("draft"),
+        "author": author,
+        "reviewer_identity": reviewer,
+        "review_id": int(review["id"]),
+        "review_state": str(review["state"]).casefold(),
+        "submitted_at": _iso(review["submitted_at"]).isoformat(),
+    }
+
+
+def read_only_pr_gate(
+    config: ServiceConfig,
+    github: GitHub,
+    repo: str,
+    number: int,
+    expected_head: str,
+    *,
+    now: datetime | None = None,
+) -> dict[str, Any]:
+    repo = _repo(repo)
+    if (
+        repo not in config.repositories
+        or type(number) is not int
+        or number < 1
+        or not isinstance(expected_head, str)
+        or not _SHA.fullmatch(expected_head)
+    ):
+        raise SystemAttestationError("read-only review scope is invalid")
+    current_time = now or datetime.now(timezone.utc)
+    first = current_pr_review(config, github, repo, number, now=current_time)
+    second = current_pr_review(config, github, repo, number, now=current_time)
+    if first != second:
+        raise SystemAttestationError(
+            "GitHub state changed during read-only review authorization"
+        )
+    if (
+        first["head_sha"] != expected_head.casefold()
+        or first["base_repository"] != repo
+        or first["base_ref"] not in config.pr_base_refs
+        or first["pull_state"] != "open"
+        or first["draft"] is not False
+        or first["review_state"] not in config.allowed_verdicts
+    ):
+        raise SystemAttestationError("pull request live scope changed")
+    return first
+
+
+def publish_issue_review(
+    config: ServiceConfig,
+    github: GitHub,
+    repository: str,
+    number: int,
+    destination_repo: str,
+    labels: list[str],
+    expected_digest: str,
+    *,
+    now: datetime | None = None,
+    ttl_seconds: int = 600,
+    nonce: str | None = None,
+) -> dict[str, Any]:
+    repo = _repo(repository)
+    destination = _repo(destination_repo)
+    current_time = now or datetime.now(timezone.utc)
+    destinations = config.issue_destinations or config.repositories
+    if repo not in config.repositories or destination not in destinations:
+        raise SystemAttestationError("protected issue repository is not allowed")
+    if (
+        type(number) is not int
+        or number < 1
+        or type(ttl_seconds) is not int
+        or ttl_seconds < 60
+        or ttl_seconds > config.maximum_issue_marker_ttl_seconds
+        or len(labels) > 20
+        or any(
+            not isinstance(label, str)
+            or not re.fullmatch(r"[A-Za-z0-9:_. -]{1,50}", label)
+            for label in labels
+        )
+        or len(set(labels)) != len(labels)
+        or not isinstance(expected_digest, str)
+        or not _DIGEST.fullmatch(expected_digest)
+    ):
+        raise SystemAttestationError("issue review publication scope is invalid")
+    issue = github.get(f"/repos/{repo}/issues/{number}")
+    if not isinstance(issue, dict) or "pull_request" in issue:
+        raise SystemAttestationError("issue response is malformed")
+    title = issue.get("title")
+    body = issue.get("body") or ""
+    author = str((issue.get("user") or {}).get("login", ""))
+    if not isinstance(title, str) or not isinstance(body, str) or not author:
+        raise SystemAttestationError("issue response is malformed")
+    if author.casefold() in config.issue_reviewers:
+        raise SystemAttestationError("issue reviewer cannot approve its own issue")
+    existing = [
+        comment for comment in github.pages(
+            f"/repos/{repo}/issues/{number}/comments"
+        )
+        if (
+            isinstance(comment.get("body"), str)
+            and comment["body"].startswith(ISSUE_MARKER)
+            and str((comment.get("user") or {}).get("login", "")).casefold()
+            in config.issue_reviewers
+        )
+    ]
+    if existing:
+        raise SystemAttestationError(
+            "issue already has protected review marker evidence"
+        )
+    marker_nonce = nonce or secrets.token_hex(32)
+    if not _NONCE.fullmatch(marker_nonce):
+        raise SystemAttestationError("issue review nonce is invalid")
+    digest = hashlib.sha256(_canonical({"title": title, "body": body})).hexdigest()
+    if digest != expected_digest:
+        raise SystemAttestationError(
+            "source issue content changed after review approval"
+        )
+    marker = {
+        "repository": repo,
+        "issue": number,
+        "digest": digest,
+        "author": author,
+        "reviewer_role": "issue-reviewer",
+        "verdict": "approved",
+        "zero_context": True,
+        "destination_repo": destination,
+        "labels": sorted(labels),
+        "expiry": (current_time + timedelta(seconds=ttl_seconds)).isoformat(),
+        "nonce": marker_nonce,
+    }
+    marker_body = ISSUE_MARKER + json.dumps(
+        marker, sort_keys=True, separators=(",", ":")
+    )
+    response = github.post_issue_comment(repo, number, marker_body)
+    response_user = response.get("user") or {}
+    created = _iso(response.get("created_at"))
+    updated = _iso(response.get("updated_at"))
+    if (
+        type(response.get("id")) is not int
+        or response.get("body") != marker_body
+        or str(response_user.get("login", "")).casefold()
+        not in config.issue_reviewers
+        or response_user.get("type") != "Bot"
+        or created != updated
+        or created < current_time - timedelta(seconds=30)
+        or created > current_time + timedelta(seconds=30)
+    ):
+        raise SystemAttestationError(
+            "GitHub issue reviewer identity or marker response is invalid"
+        )
+    return {
+        "comment_id": response["id"],
+        "reviewer_identity": str(response_user["login"]).casefold(),
+        "issue_digest": digest,
+        "expiry": marker["expiry"],
+        "nonce": marker_nonce,
+        "marker": marker_body,
+    }
+
+
 def _subject(repo: str, number: object) -> str:
     if type(number) is not int or not 0 < number <= 2_147_483_647:
         raise SystemAttestationError("subject number is invalid")
@@ -406,6 +633,45 @@ class GitHub:
         except OSError:
             raise GitHubMutationError(
                 "GitHub protected issue submission failed"
+            ) from None
+        if len(response_body) > MAX_RESPONSE:
+            raise SystemAttestationError("GitHub response is oversized")
+        try:
+            value = json.loads(response_body)
+        except json.JSONDecodeError as exc:
+            raise SystemAttestationError("GitHub response is malformed") from exc
+        if not isinstance(value, dict):
+            raise SystemAttestationError("GitHub response is malformed")
+        return value
+
+    def post_issue_comment(self, repo: str, number: int, body: str) -> Any:
+        path = f"/repos/{repo}/issues/{number}/comments"
+        if self.mutation_transport:
+            return self.mutation_transport("POST", path, {"body": body})
+        if not self.token:
+            raise SystemAttestationError("protected GitHub credential is unavailable")
+        request = urllib.request.Request(
+            self.config.github_api + path,
+            data=_canonical({"body": body}),
+            method="POST",
+            headers={
+                "Accept": "application/vnd.github+json",
+                "Content-Type": "application/json",
+                "X-GitHub-Api-Version": "2022-11-28",
+                "User-Agent": "saturnin-issue-reviewer/1",
+                "Authorization": f"Bearer {self.token}",
+            },
+        )
+        try:
+            with self.request_transport(
+                request, self.config.request_timeout_seconds
+            ) as response:
+                if response.geturl() != self.config.github_api + path:
+                    raise SystemAttestationError("GitHub redirect was refused")
+                response_body = response.read(MAX_RESPONSE + 1)
+        except (OSError, urllib.error.URLError):
+            raise SystemAttestationError(
+                "GitHub issue review publication failed"
             ) from None
         if len(response_body) > MAX_RESPONSE:
             raise SystemAttestationError("GitHub response is oversized")
@@ -1260,66 +1526,19 @@ class DedicatedSigner:
     def _pr(
         self, repo: str, number: int, subject: str, destination: str
     ) -> dict[str, Any]:
-        pull = self.github.get(f"/repos/{repo}/pulls/{number}")
-        if not isinstance(pull, dict):
-            raise SystemAttestationError("pull request response is malformed")
-        head = (pull.get("head") or {}).get("sha")
-        author = (pull.get("user") or {}).get("login")
-        if not isinstance(head, str) or not _SHA.fullmatch(head.casefold()):
-            raise SystemAttestationError("pull request head is invalid")
-        if not isinstance(author, str) or not author:
-            raise SystemAttestationError("pull request author is invalid")
-        latest: dict[str, tuple[datetime, int, dict[str, Any]]] = {}
-        now = self.now()
-        for review in self.github.pages(f"/repos/{repo}/pulls/{number}/reviews"):
-            user = review.get("user") or {}
-            login = str(user.get("login", "")).casefold()
-            review_id = review.get("id")
-            if (
-                type(review_id) is not int
-                or
-                login not in self.config.pr_reviewers
-                or user.get("type") != "Bot"
-                or review.get("commit_id", "").casefold() != head.casefold()
-            ):
-                continue
-            state = str(review.get("state", "")).casefold()
-            if state not in {"approved", "changes_requested", "rejected", "dismissed"}:
-                continue
-            try:
-                submitted = _iso(review.get("submitted_at"))
-            except SystemAttestationError:
-                continue
-            if submitted > now:
-                continue
-            order = (submitted, review_id)
-            old = latest.get(login)
-            if old is None or order >= old[:2]:
-                latest[login] = (submitted, review_id, review)
-        reviews = [item[2] for item in latest.values()]
-        blocking = [
-            value for value in reviews
-            if str(value.get("state", "")).casefold()
-            in {"changes_requested", "rejected", "dismissed"}
-        ]
-        approved = [
-            value for value in reviews
-            if str(value.get("state", "")).casefold() == "approved"
-        ]
-        if blocking or len(approved) != 1:
-            raise SystemAttestationError("exact head has no current allowed approval")
-        review = max(
-            approved,
-            key=lambda value: (_iso(value.get("submitted_at")), int(value.get("id", 0))),
+        review = current_pr_review(
+            self.config, self.github, repo, number, now=self.now()
         )
-        verdict = str(review["state"]).casefold()
+        verdict = str(review["review_state"]).casefold()
         if verdict not in self.config.allowed_verdicts:
             raise SystemAttestationError("review verdict is not allowed")
-        reviewer = str((review.get("user") or {}).get("login", "")).casefold()
-        nonce = hashlib.sha256(f"pr:{repo}:{review['id']}:{head}".encode()).hexdigest()
+        head = str(review["head_sha"])
+        reviewer = str(review["reviewer_identity"])
+        review_id = int(review["review_id"])
+        nonce = hashlib.sha256(f"pr:{repo}:{review_id}:{head}".encode()).hexdigest()
         return self._evidence(
-            "pr", repo, subject, author, "pr-reviewer", verdict, head.casefold(), "",
-            destination, f"github:review:{review['id']}", nonce, reviewer,
+            "pr", repo, subject, str(review["author"]), "pr-reviewer", verdict,
+            head, "", destination, f"github:review:{review_id}", nonce, reviewer,
             _iso(review["submitted_at"]).timestamp(),
         )
 

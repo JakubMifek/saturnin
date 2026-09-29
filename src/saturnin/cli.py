@@ -24,7 +24,11 @@ from . import escalation as escalation_mod
 from . import telemetry
 from .automation import AutomationLibrary
 from .system_attestation import (
+    GitHub,
+    ServiceConfig,
     SystemAttestationError,
+    publish_issue_review,
+    read_only_pr_gate,
     request_action,
     request_attestation,
     request_issue_action,
@@ -285,6 +289,20 @@ def build_parser() -> argparse.ArgumentParser:
         default="",
         help="current issue title/body digest to match reviews against",
     )
+    ci_gate = review.add_parser(
+        "ci-gate", help="trusted-base read-only live GitHub PR approval gate"
+    )
+    ci_gate.add_argument("subject", help="owner/repository#number")
+    ci_gate.add_argument("--head-sha", required=True)
+    issue_review = review.add_parser(
+        "publish-issue-review",
+        help="publish an approved issue marker as the protected reviewer App",
+    )
+    issue_review.add_argument("subject", help="source owner/repository#number")
+    issue_review.add_argument("--repo", required=True, help="destination repository")
+    issue_review.add_argument("--issue-digest", required=True)
+    issue_review.add_argument("--label", action="append", default=[])
+    issue_review.add_argument("--ttl-seconds", type=int, default=600)
     merge = review.add_parser("merge", help="gate and merge a PR at the reviewed head")
     merge.add_argument("subject", help="owner/repo#number")
     merge.add_argument("--repo", required=True)
@@ -1826,6 +1844,72 @@ def _run_checkpoint(args: argparse.Namespace, config: Config, board: Board, as_j
 
 def _run_review(args: argparse.Namespace, config: Config, as_json: bool) -> int:
     ledger = ReviewLedger(config)
+    if args.review_command == "ci-gate":
+        try:
+            subject_repo, number = _parse_pr_subject(args.subject)
+            expected_head = str(args.head_sha).casefold()
+            if not re.fullmatch(r"[0-9a-f]{40}", expected_head):
+                raise SystemAttestationError("expected head SHA is invalid")
+            token = os.environ.get("GITHUB_TOKEN", "")
+            if not token:
+                raise SystemAttestationError("read-only GitHub token is unavailable")
+            service_config = ServiceConfig.load(
+                config.root / "config" / "attestation.json"
+            )
+            decision = read_only_pr_gate(
+                service_config,
+                GitHub(service_config, token=token),
+                subject_repo,
+                int(number),
+                expected_head,
+            )
+        except (ReviewError, SystemAttestationError, OSError) as exc:
+            _emit(
+                {"allowed": False, "reasons": [str(exc)]},
+                as_json,
+                "BLOCKED: " + str(exc),
+            )
+            return 2
+        _emit(
+            {"allowed": True, **decision},
+            as_json,
+            "ALLOWED: current exact-head GitHub approval",
+        )
+        return 0
+    if args.review_command == "publish-issue-review":
+        try:
+            subject_repo, number = _parse_pr_subject(args.subject)
+            token = os.environ.get("SATURNIN_ISSUE_REVIEWER_TOKEN", "")
+            if not token:
+                raise SystemAttestationError(
+                    "protected issue reviewer App token is unavailable"
+                )
+            service_config = ServiceConfig.load(
+                config.root / "config" / "attestation.json"
+            )
+            result = publish_issue_review(
+                service_config,
+                GitHub(service_config, token=token),
+                subject_repo,
+                int(number),
+                args.repo,
+                args.label,
+                args.issue_digest,
+                ttl_seconds=args.ttl_seconds,
+            )
+        except (ReviewError, SystemAttestationError, OSError) as exc:
+            _emit(
+                {"published": False, "reasons": [str(exc)]},
+                as_json,
+                "BLOCKED: " + str(exc),
+            )
+            return 2
+        _emit(
+            {"published": True, **result},
+            as_json,
+            f"published protected issue review comment {result['comment_id']}",
+        )
+        return 0
     if args.review_command == "seal-rotation":
         path = ledger.seal_rotation_manifest()
         data = json.loads(path.read_text(encoding="utf-8"))

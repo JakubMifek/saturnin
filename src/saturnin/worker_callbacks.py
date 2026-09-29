@@ -401,7 +401,7 @@ def _sandbox_local_command_allowed(args: Namespace) -> bool:
             args.checkpoint_command == "sweep" and args.dry_run
         )
     if args.command == "review":
-        return args.review_command in {"attest", "gate"}
+        return False
     if args.command == "check":
         return not getattr(args, "execute", False)
     if args.command == "automation":
@@ -433,6 +433,7 @@ def _trusted_cli_operation(args: Namespace) -> str | None:
     ):
         return "worktree_cleanup"
     if args.command == "review" and args.review_command in {
+        "gate",
         "record",
         "merge",
         "submit-issue",
@@ -610,7 +611,7 @@ def _run_trusted_cli(
     elif operation == "worktree_cleanup":
         if trusted_role != "janitor":
             raise WorkerCallbackError("only janitor may request worktree cleanup")
-    elif operation == "review_record":
+    elif operation in {"review_gate", "review_record"}:
         allowed = {
             str(role).strip().lower()
             for role in config.governance.get("review", {})
@@ -619,19 +620,23 @@ def _run_trusted_cli(
         }
         if trusted_role.strip().lower() not in allowed:
             raise WorkerCallbackError(
-                f"task role {trusted_role!r} may not record {args.kind} reviews"
+                f"task role {trusted_role!r} may not authorize {args.kind} reviews"
             )
-        _reject_conflicting_identity(
-            args.reviewer.strip().lower(),
-            trusted_role.strip().lower(),
-            "reviewer",
-        )
-        if args.attestation and args.attestation.startswith("@"):
-            raise WorkerCallbackError(
-                "trusted review callbacks require the attestation value inline"
+        if operation == "review_record":
+            _reject_conflicting_identity(
+                args.reviewer.strip().lower(),
+                trusted_role.strip().lower(),
+                "reviewer",
             )
+            if args.attestation and args.attestation.startswith("@"):
+                raise WorkerCallbackError(
+                    "trusted review callbacks require the attestation value inline"
+                )
         _require_review_scope(task, args)
-        if _review_callback_already_recorded(config, args):
+        if (
+            operation == "review_record"
+            and _review_callback_already_recorded(config, args)
+        ):
             return
     elif operation == "review_merge":
         _reject_conflicting_identity(

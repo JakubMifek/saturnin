@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import fcntl
+import json
 import os
 import subprocess
 import sys
@@ -995,15 +996,123 @@ def test_common_sets_private_umask_for_runtime_files(
     assert marker.stat().st_mode & 0o777 == 0o600
 
 
-def test_review_gate_delegates_all_github_authorization_to_service(
+def test_ci_review_gate_uses_trusted_read_only_live_github_decision(
     config: Config,
 ) -> None:
     script = (config.root / "automation/library/review_gate.sh").read_text(
         encoding="utf-8"
     )
-    assert "saturnin review attest" in script
-    assert "saturnin review record" in script
-    assert "saturnin review gate" in script
+    assert "saturnin review ci-gate" in script
+    assert '--config "$repo_root/config/attestation.json"' in script
+    assert "saturnin review attest" not in script
+    assert "saturnin review record" not in script
+    assert "/run/saturnin-attestation" not in script
     assert "curl" not in script
     assert "urllib" not in script
     assert "GITHUB_TOKEN" not in script
+
+
+def test_issue_review_publisher_uses_exact_installation_and_scoped_token(
+    tmp_path: Path,
+) -> None:
+    fake_bin = tmp_path / "bin"
+    fake_bin.mkdir()
+    calls = tmp_path / "calls.jsonl"
+    result = tmp_path / "result.json"
+    fake_curl = fake_bin / "curl"
+    fake_curl.write_text(
+        "#!/usr/bin/env python3\n"
+        "import json, os, sys\n"
+        "args = sys.argv[1:]\n"
+        "with open(os.environ['CALLS'], 'a', encoding='utf-8') as stream:\n"
+        "    stream.write(json.dumps(args) + '\\n')\n"
+        "url = args[-1]\n"
+        "if url.endswith('/installation'):\n"
+        "    print(json.dumps({'id': 42, 'app_id': 12345, "
+        "'repository_selection': 'selected', "
+        "'permissions': {'issues': 'write', 'metadata': 'read'}}))\n"
+        "elif url.endswith('/access_tokens'):\n"
+        "    print(json.dumps({'token': 'installation-token', "
+        "'repository_selection': 'selected', "
+        "'permissions': {'issues': 'write', 'metadata': 'read'}, "
+        "'repositories': [{'full_name': 'acme/widget'}]}))\n"
+        "else:\n"
+        "    raise SystemExit(3)\n",
+        encoding="utf-8",
+    )
+    fake_curl.chmod(0o755)
+    fake_saturnin = fake_bin / "saturnin"
+    fake_saturnin.write_text(
+        "#!/usr/bin/env python3\n"
+        "import json, os, sys\n"
+        "with open(os.environ['RESULT'], 'w', encoding='utf-8') as stream:\n"
+        "    json.dump({'argv': sys.argv[1:], "
+        "'token': os.environ.get('SATURNIN_ISSUE_REVIEWER_TOKEN')}, stream)\n",
+        encoding="utf-8",
+    )
+    fake_saturnin.chmod(0o755)
+    private_key = tmp_path / "app.pem"
+    subprocess.run(
+        [
+            "openssl",
+            "genpkey",
+            "-quiet",
+            "-algorithm",
+            "RSA",
+            "-pkeyopt",
+            "rsa_keygen_bits:2048",
+            "-out",
+            str(private_key),
+        ],
+        check=True,
+    )
+
+    subprocess.run(
+        [
+            str(REPO_ROOT / "automation/library/publish_issue_review.sh"),
+            "acme/widget#9",
+            "acme/issues",
+            '["incident"]',
+            "600",
+            "d" * 64,
+        ],
+        check=True,
+        env={
+            **os.environ,
+            "CALLS": str(calls),
+            "RESULT": str(result),
+            "PATH": f"{fake_bin}:{os.environ['PATH']}",
+            "SATURNIN_ISSUE_REVIEWER_APP_ID": "12345",
+            "SATURNIN_ISSUE_REVIEWER_PRIVATE_KEY_FILE": str(private_key),
+        },
+    )
+
+    curl_calls = [
+        json.loads(line) for line in calls.read_text(encoding="utf-8").splitlines()
+    ]
+    assert curl_calls[0][-1] == (
+        "https://api.github.com/repos/acme/widget/installation"
+    )
+    assert curl_calls[1][-1] == (
+        "https://api.github.com/app/installations/42/access_tokens"
+    )
+    scope = json.loads(curl_calls[1][curl_calls[1].index("--data") + 1])
+    assert scope == {
+        "repositories": ["widget"],
+        "permissions": {"issues": "write", "metadata": "read"},
+    }
+    published = json.loads(result.read_text(encoding="utf-8"))
+    assert published["token"] == "installation-token"
+    assert published["argv"] == [
+        "review",
+        "publish-issue-review",
+        "acme/widget#9",
+        "--repo",
+        "acme/issues",
+        "--issue-digest",
+        "d" * 64,
+        "--ttl-seconds",
+        "600",
+        "--label",
+        "incident",
+    ]
