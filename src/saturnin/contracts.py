@@ -235,4 +235,16 @@ def audit(config: Config | None = None) -> list[str]:
         problems.append("private notes MCP integration must remain disabled and write-free")
     if integration.get("non_scribe_access") != "read-only":
         problems.append("future non-scribe notes MCP access must be read-only")
+    worktree_boundary = (
+        config.policy("mcp")
+        .get("rules", {})
+        .get("repository_worktrees", {})
+        .get("notes", {})
+    )
+    if worktree_boundary.get("writer_roles") != writers:
+        problems.append(
+            "private notes worktree writers must match repository access policy"
+        )
+    if worktree_boundary.get("non_writer_mount") != "read-only":
+        problems.append("private notes non-writer worktrees must mount read-only")
     return problems

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import os
 import shutil
 from pathlib import Path
 
@@ -10,7 +11,7 @@ from saturnin.cli import main
 from saturnin.config import Config
 from saturnin.review import (
     ReviewLedger,
-    review_attestation_signing_key,
+    execution_scoped_review_attestation_key,
     sign_review_attestation,
 )
 
@@ -146,8 +147,18 @@ def test_generated_notes_review_flow_matches_ledger_contract(config: Config) -> 
 
     subject = f"{repo}#42"
     head_sha = "d" * 40
+    task_id = "T-20260929-notes"
+    nonce = "0123456789abcdef" * 4
     attestation = sign_review_attestation(
-        key=review_attestation_signing_key(config, "pr-reviewer"),
+        key=execution_scoped_review_attestation_key(
+            os.environ["SATURNIN_REVIEW_ATTESTATION_KEY"],
+            "pr-reviewer",
+            task_id,
+            nonce,
+            subject,
+            head_sha,
+            "",
+        ),
         subject=subject,
         kind="pr",
         author="scribe",
@@ -158,6 +169,7 @@ def test_generated_notes_review_flow_matches_ledger_contract(config: Config) -> 
         review_profile=review["profile"],
         review_method=review["method"],
         review_checks=review["required_checks"],
+        attestation_id=f"{task_id}:{nonce}",
     )
     record = ReviewLedger(config).record(
         subject=subject,

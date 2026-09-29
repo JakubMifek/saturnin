@@ -258,6 +258,9 @@ class AgentLauncher:
                         trusted_config=self._trusted_config(worker_config),
                         git_objects=git_objects,
                         mcp_config=mcp_path,
+                        worktree_read_only=self._notes_worktree_read_only(
+                            claimed, contract, worker_config
+                        ),
                         signing_socket=(
                             signing_session.socket if signing_session else None
                         ),
@@ -869,6 +872,7 @@ class AgentLauncher:
         trusted_config: Config,
         git_objects: Path,
         mcp_config: Path,
+        worktree_read_only: bool = False,
         review_input: Path | None = None,
         signing_socket: Path | None = None,
     ) -> list[str]:
@@ -973,7 +977,11 @@ class AgentLauncher:
                 ("--ro-bind", source, target)
                 for source, target in dict.fromkeys(read_only_mounts)
             ],
-            ("--bind", worktree, worktree),
+            (
+                "--ro-bind" if worktree_read_only else "--bind",
+                worktree,
+                worktree,
+            ),
             ("--ro-bind", git_control, git_control),
             ("--bind", isolated_home.resolve(), isolated_home.resolve()),
         ]
@@ -993,6 +1001,31 @@ class AgentLauncher:
             command.extend((operation, str(source), str(target)))
         command.extend(("--chdir", str(workdir.resolve()), "--", executable, *args))
         return command
+
+    @staticmethod
+    def _notes_worktree_read_only(
+        task: Task, contract: AgentContract, config: Config
+    ) -> bool:
+        notes = config.policy("repos").get("repos", {}).get("notes", {})
+        notes_value = str(notes.get("slug", ""))
+        if not notes_value or not task.repo:
+            return False
+        notes_slug = normalize_repository_slug(notes_value)
+        task_slug = normalize_repository_slug(task.repo)
+        if task_slug != notes_slug:
+            return False
+        boundary = (
+            config.policy("mcp")
+            .get("rules", {})
+            .get("repository_worktrees", {})
+            .get("notes", {})
+        )
+        writers = boundary.get("writer_roles", [])
+        if boundary.get("non_writer_mount") != "read-only":
+            raise LauncherError(
+                "notes repository non-writer worktrees must be read-only"
+            )
+        return contract.role not in writers
 
     def _stage_worker_board_context(
         self,

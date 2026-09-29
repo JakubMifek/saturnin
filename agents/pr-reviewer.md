@@ -46,7 +46,7 @@ zero-context contract:
 
 <!-- generated:notes-governance -->
 - Sole writer: `scribe`.
-- Every other role: read-only; secrets allowed: false.
+- Every other role: read-only with a read-only worktree mount; secrets allowed: false.
 - Curation requirements: search before create, atomic notes, stable ids, stable aliases, canonical notes, redirects, maps of content, optimize for read only lookup.
 - Public bootstrap packages may only be applied by `scribe`.
 - Every change requires an independent, zero-context rubber-duck `pr-reviewer` review using the `notes-review` profile. Its signed attestation and ledger record must include: factual integrity, duplication, canonical structure, links, retrievability.

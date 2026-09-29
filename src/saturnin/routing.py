@@ -91,6 +91,17 @@ class Router:
         private_notes = self.policy.get("knowledge", {}).get(
             "private_notes_changes", {}
         )
+        precedent = self._private_notes_precedent(task)
+        if precedent is not None:
+            route = self._build(
+                precedent.get("route", {}),
+                precedent.get("id", "?"),
+                additional_roles=additional_roles,
+                lead_role=lead_role,
+            )
+            return self._with_required_collaborators(
+                task, route, additional_roles=additional_roles
+            )
         if self._is_private_notes_change(task):
             writer = private_notes.get("writer_role")
             if lead_role is not None and lead_role != writer:
@@ -177,6 +188,8 @@ class Router:
         return list(dict.fromkeys(r for r in required if r))
 
     def _is_private_notes_change(self, task: Task) -> bool:
+        if self._private_notes_precedent(task) is not None:
+            return False
         private_notes = self.policy.get("knowledge", {}).get(
             "private_notes_changes", {}
         )
@@ -191,6 +204,20 @@ class Router:
             labels
             & {str(value).lower() for value in private_notes.get("labels", [])}
         )
+
+    def _private_notes_precedent(self, task: Task) -> dict[str, Any] | None:
+        private_notes = self.policy.get("knowledge", {}).get(
+            "private_notes_changes", {}
+        )
+        preserved = private_notes.get("preserve_rule_precedence", [])
+        if not isinstance(preserved, list):
+            return None
+        by_id = {rule.get("id"): rule for rule in self.rules}
+        for rule_id in preserved:
+            rule = by_id.get(rule_id)
+            if rule is not None and self._matches(rule.get("when", {}), task):
+                return rule
+        return None
 
     def _private_notes_reviewer(self) -> str | None:
         private_notes = self.policy.get("knowledge", {}).get(
@@ -334,7 +361,7 @@ class Router:
             current.state = "routed"
             current.log("state:routed", actor=effective_actor, note=f"rule={route.rule}")
         task.__dict__.update(current.__dict__)
-        return route
+        return replace(route, squad=tuple(current.squad))
 
     def relabel_and_reroute(
         self,
@@ -413,6 +440,16 @@ class Router:
             problems.append("private notes require a known independent reviewer role")
         if not private_notes.get("labels"):
             problems.append("private notes changes require routing labels")
+        preserved = private_notes.get("preserve_rule_precedence", [])
+        rule_ids = {rule.get("id") for rule in self.rules}
+        if (
+            not isinstance(preserved, list)
+            or not preserved
+            or any(rule_id not in rule_ids for rule_id in preserved)
+        ):
+            problems.append(
+                "private notes changes require valid preserved routing rules"
+            )
         repository_policy = private_notes.get("repository_policy")
         repository = self.repos.get(repository_policy, {})
         if not repository.get("slug"):

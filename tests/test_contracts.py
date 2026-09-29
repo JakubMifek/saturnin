@@ -121,3 +121,14 @@ def test_notes_mcp_stays_disabled_read_only_and_write_free(config: Config) -> No
     }
     integration["write_roles"] = ["scribe"]
     assert any("disabled and write-free" in problem for problem in audit(config))
+
+
+def test_notes_worktree_boundary_is_enforced(config: Config) -> None:
+    boundary = config.policy("mcp")["rules"]["repository_worktrees"]["notes"]
+    boundary["writer_roles"] = ["scribe", "code-worker"]
+    boundary["non_writer_mount"] = "read-write"
+
+    problems = audit(config)
+
+    assert any("worktree writers" in problem for problem in problems)
+    assert any("mount read-only" in problem for problem in problems)

@@ -106,6 +106,7 @@ knowledge:
     repository_policy: notes
     writer_role: scribe
     result_contract: pr-gate
+    preserve_rule_precedence: [escalation, review-pr, review-issue]
 
 rules:
   # The CEO only decides that an escalation is needed; the chief of staff files it.

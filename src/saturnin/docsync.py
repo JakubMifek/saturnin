@@ -423,6 +423,12 @@ def _notes_governance(config: Config) -> str:
     access = notes.get("access", {})
     curation = notes.get("curation", {})
     review = notes.get("change_review", {})
+    boundary = (
+        config.policy("mcp")
+        .get("rules", {})
+        .get("repository_worktrees", {})
+        .get("notes", {})
+    )
     enabled_curation = [
         key.replace("_", " ")
         for key, enabled in curation.items()
@@ -436,7 +442,8 @@ def _notes_governance(config: Config) -> str:
     return "\n".join(
         [
             f"- Sole writer: `{', '.join(access.get('writer_roles', []))}`.",
-            f"- Every other role: {access.get('non_writer_access')}; secrets allowed: "
+            f"- Every other role: {access.get('non_writer_access')} with a "
+            f"{boundary.get('non_writer_mount')} worktree mount; secrets allowed: "
             f"{str(access.get('secrets_allowed', False)).lower()}.",
             "- Curation requirements: " + ", ".join(enabled_curation) + ".",
             f"- Public bootstrap packages may only be applied by "

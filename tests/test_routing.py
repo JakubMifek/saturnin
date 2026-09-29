@@ -219,6 +219,35 @@ def test_notes_repository_rejects_lead_overrides(
         )
 
 
+@pytest.mark.parametrize(
+    ("kind", "labels", "role", "rule"),
+    [
+        ("task", ["blocked"], "chief-of-staff", "escalation"),
+        ("pr-review", [], "pr-reviewer", "review-pr"),
+        ("issue-review", [], "issue-reviewer", "review-issue"),
+    ],
+)
+def test_notes_repository_preserves_governance_route_precedence(
+    config: Config,
+    board: Board,
+    kind: str,
+    labels: list[str],
+    role: str,
+    rule: str,
+) -> None:
+    task = board.create(
+        "Govern notes repository",
+        kind=kind,
+        labels=labels,
+        repo=config.policy("repos")["repos"]["notes"]["slug"],
+    )
+
+    route = Router(config).resolve(task)
+
+    assert route.role == role
+    assert route.rule == rule
+
+
 def test_notes_repository_squad_override_cannot_remove_scribe_lead(
     config: Config, board: Board
 ) -> None:

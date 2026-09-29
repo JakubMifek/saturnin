@@ -476,6 +476,63 @@ def test_worker_command_remounts_worktree_git_control_file_read_only(
     assert protected_index > writable_index
 
 
+def test_notes_non_writer_gets_read_only_worktree_mount(
+    config: Config,
+    board: Board,
+    git_repo: Path,
+) -> None:
+    task = board.create(
+        "Review notes",
+        kind="pr-review",
+        repo=config.policy("repos")["repos"]["notes"]["slug"],
+    )
+    worktree = WorktreeManager(config, repo=git_repo, board=board).create(
+        "feature/review-notes-read-only"
+    )
+    launcher = AgentLauncher(config, board)
+    home = launcher._isolated_home(task.id)
+    mcp_config = config.var_dir / "launches" / f"{task.id}.mcp.json"
+    mcp_config.write_text('{"mcpServers": {}}\n', encoding="utf-8")
+
+    read_only = launcher._notes_worktree_read_only(
+        task, SimpleNamespace(role="pr-reviewer"), config
+    )
+    command = launcher._sandbox_command(
+        "/usr/bin/bwrap",
+        "/usr/bin/pasta",
+        "/usr/bin/copilot",
+        ["--autopilot"],
+        workdir=worktree.path,
+        isolated_home=home,
+        trusted_config=config,
+        git_objects=git_repo / ".git" / "objects",
+        mcp_config=mcp_config,
+        worktree_read_only=read_only,
+    )
+
+    protected = ["--ro-bind", str(worktree.path), str(worktree.path)]
+    writable = ["--bind", str(worktree.path), str(worktree.path)]
+    assert any(
+        command[index:index + 3] == protected
+        for index in range(len(command) - 2)
+    )
+    assert not any(
+        command[index:index + 3] == writable
+        for index in range(len(command) - 2)
+    )
+
+
+def test_notes_scribe_retains_writable_worktree(config: Config, board: Board) -> None:
+    task = board.create(
+        "Curate notes",
+        repo=config.policy("repos")["repos"]["notes"]["slug"],
+    )
+
+    assert not AgentLauncher._notes_worktree_read_only(
+        task, SimpleNamespace(role="scribe"), config
+    )
+
+
 def test_reconcile_applies_worker_callbacks_before_requeue(
     config: Config,
     board: Board,
