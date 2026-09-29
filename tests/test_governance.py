@@ -1,9 +1,12 @@
 from __future__ import annotations
 
+import hashlib
 import json
 import os
+import secrets
 import shutil
 import stat
+import sys
 import threading
 from contextlib import contextmanager
 from concurrent.futures import ThreadPoolExecutor
@@ -25,9 +28,11 @@ from saturnin.governance import (
 )
 from saturnin.jsonlines import durable_append_text
 from saturnin.review import (
+    ReviewRecord,
     ReviewLedger,
     ReviewError,
     _verification_keys,
+    execution_scoped_review_attestation_key,
     issue_content_digest,
     review_attestation_signing_key,
     role_scoped_review_attestation_key,
@@ -39,13 +44,22 @@ OTHER_REPO = "JakubMifek/some-project"
 TEST_HEAD_SHA = "a" * 40
 
 
-def record_review(ledger: ReviewLedger, **kwargs):
-    destination_repo = kwargs.pop(
-        "destination_repo",
-        "JakubMifek/saturnin-ops" if kwargs["kind"] == "issue" else "",
+def execution_attestation(config: Config, **kwargs) -> str:
+    destination_repo = kwargs.get("destination_repo", "")
+    task_id = "T-20260924-test"
+    nonce = secrets.token_hex(32)
+    attestation_id = f"{task_id}:{nonce}"
+    key = execution_scoped_review_attestation_key(
+        os.environ["SATURNIN_REVIEW_ATTESTATION_KEY"],
+        kwargs["reviewer"],
+        task_id,
+        nonce,
+        kwargs["subject"],
+        kwargs.get("head_sha", ""),
+        kwargs.get("issue_digest", ""),
     )
-    attestation = sign_review_attestation(
-        key=review_attestation_signing_key(ledger.config, kwargs["reviewer"]),
+    return sign_review_attestation(
+        key=key,
         subject=kwargs["subject"],
         kind=kwargs["kind"],
         author=kwargs["author"],
@@ -55,6 +69,17 @@ def record_review(ledger: ReviewLedger, **kwargs):
         head_sha=kwargs.get("head_sha", ""),
         issue_digest=kwargs.get("issue_digest", ""),
         destination_repo=destination_repo,
+        attestation_id=attestation_id,
+    )
+
+
+def record_review(ledger: ReviewLedger, **kwargs):
+    destination_repo = kwargs.pop(
+        "destination_repo",
+        "JakubMifek/saturnin-ops" if kwargs["kind"] == "issue" else "",
+    )
+    attestation = execution_attestation(
+        ledger.config, destination_repo=destination_repo, **kwargs
     )
     return ledger.record(
         attestation=attestation,
@@ -326,8 +351,8 @@ def test_self_review_is_impossible(config: Config) -> None:
 def test_review_record_requires_valid_signed_attestation(config: Config) -> None:
     ledger = ReviewLedger(config)
     subject = "JakubMifek/saturnin#signed"
-    attestation = sign_review_attestation(
-        key=review_attestation_signing_key(config, "pr-reviewer"),
+    attestation = execution_attestation(
+        config,
         subject=subject,
         kind="pr",
         author="code-worker",
@@ -369,7 +394,7 @@ def test_review_record_requires_valid_signed_attestation(config: Config) -> None
         )
 
 
-def test_attestation_key_is_scoped_to_reviewer_role(config: Config) -> None:
+def test_retained_legacy_role_key_cannot_authorize_new_record(config: Config) -> None:
     ledger = ReviewLedger(config)
     subject = "JakubMifek/saturnin#role-scoped"
     pr_reviewer_key = review_attestation_signing_key(config, "pr-reviewer")
@@ -384,7 +409,7 @@ def test_attestation_key_is_scoped_to_reviewer_role(config: Config) -> None:
         destination_repo="JakubMifek/saturnin-ops",
     )
 
-    with pytest.raises(ReviewError, match="signature does not match"):
+    with pytest.raises(ReviewError, match="execution-scoped attestation id"):
         ledger.record(
             subject=subject,
             kind="issue",
@@ -416,7 +441,7 @@ def test_role_scoped_attestation_verification_rejects_cross_role_impersonation(
     monkeypatch.setenv("SATURNIN_REVIEW_ATTESTATION_KEY_SCOPE", "role")
     monkeypatch.setenv("SATURNIN_AGENT_ROLE", "issue-reviewer")
 
-    with pytest.raises(ReviewError, match="may not verify reviewer pr-reviewer"):
+    with pytest.raises(ReviewError, match="execution-scoped attestation id"):
         ledger.record(
             subject=subject,
             kind="pr",
@@ -502,7 +527,15 @@ def test_review_key_rotation_retains_history_without_blocking_other_subjects(
 
     with pytest.raises(ReviewError, match="manifest is missing or invalid"):
         ledger.for_subject(old_subject, "pr")
-    manifest_path = ledger.seal_rotation_manifest()
+    assert ledger.has_records_signed_by("old-master-key")
+    monkeypatch.delenv("SATURNIN_REVIEW_ATTESTATION_KEY")
+    monkeypatch.delenv("SATURNIN_REVIEW_ATTESTATION_PREVIOUS_KEY")
+    manifest_path = ledger.seal_rotation_manifest(
+        current_master="new-master-key",
+        previous_master="old-master-key",
+    )
+    monkeypatch.setenv("SATURNIN_REVIEW_ATTESTATION_KEY", "new-master-key")
+    monkeypatch.setenv("SATURNIN_REVIEW_ATTESTATION_PREVIOUS_KEY", "old-master-key")
     assert ledger.for_subject(old_subject, "pr")
     stale_key_attestation = sign_review_attestation(
         key=role_scoped_review_attestation_key("old-master-key", "pr-reviewer"),
@@ -513,7 +546,7 @@ def test_review_key_rotation_retains_history_without_blocking_other_subjects(
         verdict="approved",
         head_sha="c" * 40,
     )
-    with pytest.raises(ReviewError, match="signature does not match"):
+    with pytest.raises(ReviewError, match="execution-scoped attestation id"):
         ledger.record(
             subject="JakubMifek/saturnin#stale-key",
             kind="pr",
@@ -535,15 +568,109 @@ def test_review_key_rotation_retains_history_without_blocking_other_subjects(
     monkeypatch.delenv("SATURNIN_REVIEW_ATTESTATION_PREVIOUS_KEY")
 
     assert ledger.for_subject(new_subject, "pr")
-    with pytest.raises(ReviewError, match="signature does not match"):
+    with pytest.raises(
+        ReviewError, match="ledger digest does not match|signature does not match"
+    ):
         ledger.for_subject(old_subject, "pr")
 
     monkeypatch.setenv("SATURNIN_REVIEW_ATTESTATION_PREVIOUS_KEY", "old-master-key")
     manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
     manifest["attestations"][0]["reviewer"] = "issue-reviewer"
     manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
-    with pytest.raises(ReviewError, match="signature does not match"):
+    with pytest.raises(
+        ReviewError, match="ledger digest does not match|signature does not match"
+    ):
         ledger.for_subject(old_subject, "pr")
+
+
+def test_legacy_records_require_explicit_migration_cutoff(
+    config: Config, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    ledger = ReviewLedger(config)
+    old_master = "retained-legacy-master"
+    new_master = "rotated-execution-master"
+
+    def legacy_record(subject: str, attestation_id: str) -> ReviewRecord:
+        attestation = json.loads(
+            sign_review_attestation(
+                key=role_scoped_review_attestation_key(
+                    old_master, "pr-reviewer"
+                ),
+                subject=subject,
+                kind="pr",
+                author="code-worker",
+                reviewer="pr-reviewer",
+                verdict="approved",
+                head_sha=TEST_HEAD_SHA,
+                attestation_id=attestation_id,
+            )
+        )
+        return ReviewRecord(
+            subject=subject,
+            kind="pr",
+            author="code-worker",
+            reviewer="pr-reviewer",
+            verdict="approved",
+            head_sha=TEST_HEAD_SHA,
+            attestation_id=attestation_id,
+            attestation_signature=(
+                f"{attestation['key_id']}:{attestation['signature']}"
+            ),
+        )
+
+    migrated_subject = "JakubMifek/saturnin#legacy-migrated"
+    migrated = legacy_record(migrated_subject, "legacy-attestation-one")
+    migrated_path = ledger.dir / f"pr-{review.slugify(migrated_subject)}.jsonl"
+    migrated_path.write_text(json.dumps(migrated.to_dict()) + "\n", encoding="utf-8")
+    monkeypatch.setenv("SATURNIN_REVIEW_ATTESTATION_KEY", new_master)
+    monkeypatch.setenv("SATURNIN_REVIEW_ATTESTATION_PREVIOUS_KEY", old_master)
+
+    with pytest.raises(ReviewError, match="manifest is missing or invalid"):
+        ledger.for_subject(migrated_subject, "pr")
+
+    manifest = ledger.seal_rotation_manifest(
+        current_master=new_master,
+        previous_master=old_master,
+    )
+    assert ledger.for_subject(migrated_subject, "pr")
+    manifest_data = json.loads(manifest.read_text(encoding="utf-8"))
+    assert manifest_data["version"] == 2
+    assert len(manifest_data["ledger_digest"]) == 64
+    assert manifest_data["migration_cutoff"]
+
+    late_subject = "JakubMifek/saturnin#legacy-after-cutoff"
+    late = legacy_record(late_subject, "legacy-attestation-two")
+    late_path = ledger.dir / f"pr-{review.slugify(late_subject)}.jsonl"
+    late_path.write_text(json.dumps(late.to_dict()) + "\n", encoding="utf-8")
+    with pytest.raises(ReviewError, match="not sealed by the rotation manifest"):
+        ledger.for_subject(late_subject, "pr")
+
+    forged_new = sign_review_attestation(
+        key=role_scoped_review_attestation_key(old_master, "pr-reviewer"),
+        subject="JakubMifek/saturnin#legacy-forged-new",
+        kind="pr",
+        author="code-worker",
+        reviewer="pr-reviewer",
+        verdict="approved",
+        head_sha="b" * 40,
+        attestation_id="legacy-forged-new",
+    )
+    with pytest.raises(ReviewError, match="execution-scoped attestation id"):
+        ledger.record(
+            subject="JakubMifek/saturnin#legacy-forged-new",
+            kind="pr",
+            author="code-worker",
+            reviewer="pr-reviewer",
+            verdict="approved",
+            head_sha="b" * 40,
+            attestation=forged_new,
+        )
+
+    migrated_data = migrated.to_dict()
+    migrated_data["notes"] = "tampered after migration"
+    migrated_path.write_text(json.dumps(migrated_data) + "\n", encoding="utf-8")
+    with pytest.raises(ReviewError, match="ledger digest does not match"):
+        ledger.for_subject(migrated_subject, "pr")
 
 
 def test_rotation_seal_serializes_concurrent_record_writes(
@@ -1205,6 +1332,8 @@ def test_push_rules(governance: Governance) -> None:
     "command",
     [
         "sudo systemctl restart nginx",
+        "sudo systemd-creds setup",
+        "sudo install -m 0400 credential.secret /var/lib/systemd/credential.secret",
         "systemctl restart nginx",
         "systemctl restart",
         "apt remove python3",
@@ -1300,6 +1429,30 @@ def test_prerequisite_checks_are_narrowly_governed(
     assert not governance.check_server_command(f"{github} serve").allowed
     assert not governance.check_server_command(
         f"{trusted / 'github-mcp-server'} --version"
+    ).allowed
+
+
+@pytest.mark.parametrize(
+    "command",
+    [
+        "systemctl --user start saturnin-attestation.service",
+        "systemctl --user stop saturnin-attestation.service",
+        "systemctl --user restart saturnin-attestation.service",
+        "systemctl --user enable saturnin-attestation.service",
+        "systemctl --user disable saturnin-attestation.service",
+    ],
+)
+def test_signer_unit_lifecycle_is_reserved_for_governed_operation(
+    governance: Governance, command: str
+) -> None:
+    assert not governance.check_server_command(command).allowed
+
+
+def test_suffixless_signer_unit_lifecycle_is_reserved(
+    governance: Governance,
+) -> None:
+    assert not governance.check_server_command(
+        "systemctl --user restart saturnin-attestation"
     ).allowed
 
 
@@ -1479,6 +1632,360 @@ def test_trusted_executable_rejects_writable_path_components(
     assert "group/world-writable" in (
         _trusted_system_path_problem(executable) or ""
     )
+
+
+@pytest.mark.parametrize(
+    "unit",
+    [
+        "saturnin-shadow.service",
+        "saturnin-attestation-alias.service",
+        "saturnin-janitor",
+    ],
+)
+def test_systemctl_rejects_unregistered_or_noncanonical_units(
+    governance: Governance, unit: str
+) -> None:
+    assert not governance.check_server_command(
+        f"systemctl --user restart {unit}"
+    ).allowed
+
+
+def test_generic_writes_cannot_create_sibling_user_units(
+    governance: Governance,
+) -> None:
+    assert not governance.check_server_command(
+        f"curl -o {Path.home() / '.config/systemd/user/saturnin-proxy.service'} "
+        "https://example.test/unit"
+    ).allowed
+
+
+@pytest.mark.parametrize(
+    "command",
+    [
+        f"ln {Path.home() / '.config/systemd/user/saturnin-attestation.service'} "
+        f"{Path.home() / 'unit-alias'}",
+        f"cp -l {Path.home() / '.config/systemd/user/saturnin-attestation.service'} "
+        f"{Path.home() / 'unit-alias'}",
+        f"cp --link {Path.home() / '.config/systemd/user/saturnin-attestation-runtime.pyz'} "
+        f"{Path.home() / 'runtime-alias'}",
+        f"rsync --link-dest={Path.home() / '.config/systemd/user'} source/ destination/",
+    ],
+)
+def test_hard_link_creation_is_denied(
+    governance: Governance, command: str
+) -> None:
+    assert not governance.check_server_command(command).allowed
+
+
+def test_symbolic_link_creation_remains_path_checked(
+    governance: Governance,
+) -> None:
+    decision = governance.check_server_command("ln -s source /home/saturnin/ordinary-link")
+    assert decision.allowed
+
+
+@pytest.mark.parametrize(
+    "relative",
+    [
+        ".config/systemd/user/saturnin-attestation.service",
+        ".config/systemd/user/saturnin-attestation.service.d/override.conf",
+        ".config/systemd/user/saturnin-attestation-runtime.pyz",
+        ".config/systemd/user/default.target.wants/saturnin-attestation.service",
+        ".config/systemd/user/saturnin-credentials/replacement.cred",
+        ".config/systemd/user",
+    ],
+)
+def test_signer_files_are_reserved_for_governed_operation(
+    governance: Governance, relative: str
+) -> None:
+    target = Path.home() / relative
+
+    decision = governance.check_server_command(
+        f"curl -q -o {target} https://example.test/payload"
+    )
+
+    assert not decision.allowed
+
+
+@pytest.mark.parametrize(
+    "relative",
+    [
+        "policies/server_scope.yaml",
+        "policies/governance.yaml",
+        "scripts/install_attestation_unit.sh",
+        "systemd/saturnin-attestation.service",
+        ".venv/bin/saturnin",
+        "src/saturnin/worker_callbacks.py",
+        f".venv/lib/python{sys.version_info.major}.{sys.version_info.minor}"
+        "/site-packages/yaml/__init__.py",
+    ],
+)
+def test_governed_operation_trust_sources_are_reserved(
+    governance: Governance,
+    config: Config,
+    relative: str,
+) -> None:
+    filesystem = config.server_scope["filesystem"]
+    filesystem["writable_root_sources"] = ["data_root"]
+    filesystem["governed_write_paths"] = [relative]
+    source = config.data_root / "payload"
+    source.write_text("payload", encoding="utf-8")
+    decision = governance.check_server_command(
+        f"cp {source} {config.data_root / relative}"
+    )
+
+    assert not decision.allowed
+    assert any(
+        "reserved for a governed operation" in reason
+        or "aliases a governed operation object" in reason
+        for reason in decision.reasons
+    )
+
+
+@pytest.mark.parametrize(
+    "command",
+    [
+        "sort -o {target} {source}",
+        "sort --output={target} {source}",
+        "uniq {source} {target}",
+    ],
+)
+def test_unmodeled_output_utilities_cannot_write_governed_sources(
+    governance: Governance,
+    config: Config,
+    command: str,
+) -> None:
+    target = config.data_root / "policies" / "server_scope.yaml"
+    source = config.data_root / "input"
+    source.write_text("payload\n", encoding="utf-8")
+
+    decision = governance.check_server_command(
+        command.format(target=target, source=source)
+    )
+
+    assert not decision.allowed
+
+
+@pytest.mark.parametrize(
+    "relative",
+    [
+        "policies/server_scope.yaml",
+        "scripts/install_attestation_unit.sh",
+        "systemd/saturnin-attestation.service",
+        ".venv/bin/saturnin",
+        "src/saturnin/worker_callbacks.py",
+    ],
+)
+@pytest.mark.parametrize(
+    "command",
+    [
+        "truncate --size=0 {alias}",
+        "chmod --reference={source} {alias}",
+        "cp {source} {alias}",
+        "tee {alias}",
+    ],
+)
+def test_hardlink_aliases_of_governed_sources_are_denied(
+    governance: Governance,
+    config: Config,
+    relative: str,
+    command: str,
+) -> None:
+    filesystem = config.server_scope["filesystem"]
+    filesystem["writable_root_sources"] = ["data_root"]
+    filesystem["governed_write_paths"] = [relative]
+    filesystem["executable_allowlist"] = [
+        *filesystem.get("executable_allowlist", []),
+        "chmod",
+        "cp",
+        "tee",
+        "truncate",
+    ]
+    governed = config.data_root / relative
+    governed.parent.mkdir(parents=True, exist_ok=True)
+    governed.write_text("trusted", encoding="utf-8")
+    alias = config.data_root / "worker-alias"
+    os.link(governed, alias)
+    source = config.data_root / "payload"
+    source.write_text("payload", encoding="utf-8")
+
+    decision = governance.check_server_command(
+        command.format(alias=alias, source=source)
+    )
+
+    assert not decision.allowed
+    assert any(
+        "aliases a governed operation object" in item
+        or "governed trust directory" in item
+        for item in decision.reasons
+    ), decision.reasons
+
+
+@pytest.mark.parametrize(
+    "command",
+    [
+        "truncate --size=0 {alias}",
+        "chmod --reference={source} {alias}",
+        "cp {source} {alias}",
+        "tee {alias}",
+    ],
+)
+def test_production_runtime_descendant_aliases_are_denied(
+    governance: Governance,
+    config: Config,
+    command: str,
+) -> None:
+    filesystem = config.server_scope["filesystem"]
+    filesystem["writable_root_sources"] = ["data_root"]
+    filesystem["executable_allowlist"] = [
+        *filesystem.get("executable_allowlist", []),
+        "chmod",
+        "cp",
+        "tee",
+        "truncate",
+    ]
+    operation = config.server_scope["operations"]["signer_user_unit"]
+    operation["runtime_sources"] = [
+        {
+            "source": "src/saturnin",
+            "archive": "saturnin",
+            "files": ["worker_callbacks.py"],
+        }
+    ]
+    governed = config.data_root / "src/saturnin/worker_callbacks.py"
+    governed.parent.mkdir(parents=True, exist_ok=True)
+    governed.write_text("trusted", encoding="utf-8")
+    alias = config.data_root / "worker-alias"
+    os.link(governed, alias)
+    source = config.data_root / "payload"
+    source.write_text("payload", encoding="utf-8")
+
+    decision = governance.check_server_command(
+        command.format(alias=alias, source=source)
+    )
+
+    assert not decision.allowed
+    assert any("governed trust directory" in reason for reason in decision.reasons)
+
+
+def test_signer_user_unit_operation_is_exact_and_canonical(
+    governance: Governance, config: Config
+) -> None:
+    executable = config.data_root / "scripts" / "install_attestation_unit.sh"
+    executable.parent.mkdir(parents=True, exist_ok=True)
+    executable.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+    executable.chmod(0o755)
+    config.server_scope["operations"]["signer_user_unit"]["sha256"] = (
+        hashlib.sha256(executable.read_bytes()).hexdigest()
+    )
+    runtime = config.data_root / ".venv" / "bin" / "saturnin"
+    runtime.parent.mkdir(parents=True, exist_ok=True)
+    runtime.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+    runtime.chmod(0o755)
+    template = config.data_root / "systemd" / "saturnin-attestation.service"
+    template.parent.mkdir(parents=True, exist_ok=True)
+    template.write_text("[Unit]\nDescription=test\n", encoding="utf-8")
+    template.chmod(0o644)
+
+    for action in ("install", "status", "uninstall"):
+        assert governance.check_server_command(f"{executable} {action}").allowed
+    for command in (
+        f"{executable}",
+        f"{executable} install extra",
+        f"{executable} restart",
+        "install_attestation_unit.sh install",
+        "scripts/install_attestation_unit.sh install",
+    ):
+        assert not governance.check_server_command(command).allowed
+    assert not governance.check_server_command(
+        "scripts/install_attestation_unit.sh install",
+        cwd=config.data_root,
+    ).allowed
+
+
+def test_signer_user_unit_operation_rejects_symlink(
+    governance: Governance, config: Config, tmp_path: Path
+) -> None:
+    real = tmp_path / "installer"
+    real.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+    real.chmod(0o755)
+    executable = config.data_root / "scripts" / "install_attestation_unit.sh"
+    executable.parent.mkdir(parents=True, exist_ok=True)
+    executable.unlink(missing_ok=True)
+    executable.symlink_to(real)
+
+    assert not governance.check_server_command(f"{executable} install").allowed
+
+
+@pytest.mark.parametrize("unsafe", ["symlink", "group-writable"])
+def test_signer_user_unit_operation_rejects_unsafe_dependency(
+    governance: Governance, config: Config, tmp_path: Path, unsafe: str
+) -> None:
+    executable = config.data_root / "scripts" / "install_attestation_unit.sh"
+    executable.chmod(0o755)
+    dependency = config.data_root / ".venv" / "bin" / "saturnin"
+    dependency.parent.mkdir(parents=True, exist_ok=True)
+    dependency.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+    dependency.chmod(0o755)
+    if unsafe == "symlink":
+        replacement = tmp_path / "runtime"
+        replacement.write_text(":\n", encoding="utf-8")
+        dependency.unlink()
+        dependency.symlink_to(replacement)
+    else:
+        dependency.chmod(0o775)
+
+    decision = governance.check_server_command(f"{executable} install")
+
+    assert not decision.allowed
+    assert "dependency" in decision.reasons[0]
+
+
+def test_signer_user_unit_operation_rejects_untrusted_tool(
+    governance: Governance, config: Config, tmp_path: Path
+) -> None:
+    executable = config.data_root / "scripts" / "install_attestation_unit.sh"
+    executable.chmod(0o755)
+    runtime = config.data_root / ".venv" / "bin" / "saturnin"
+    runtime.parent.mkdir(parents=True, exist_ok=True)
+    runtime.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+    runtime.chmod(0o755)
+    template = config.data_root / "systemd" / "saturnin-attestation.service"
+    template.parent.mkdir(parents=True, exist_ok=True)
+    template.write_text("[Unit]\nDescription=test\n", encoding="utf-8")
+    template.chmod(0o644)
+    fake_tool = tmp_path / "systemctl"
+    fake_tool.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+    fake_tool.chmod(0o755)
+    config.server_scope["operations"]["signer_user_unit"]["trusted_tools"] = [
+        str(fake_tool)
+    ]
+
+    decision = governance.check_server_command(f"{executable} install")
+
+    assert not decision.allowed
+    assert "trusted tool" in decision.reasons[0]
+
+
+def test_signer_user_unit_operation_rejects_writable_parent(
+    governance: Governance, config: Config
+) -> None:
+    executable = config.data_root / "scripts" / "install_attestation_unit.sh"
+    executable.chmod(0o755)
+    runtime = config.data_root / ".venv" / "bin" / "saturnin"
+    runtime.parent.mkdir(parents=True, exist_ok=True)
+    runtime.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+    runtime.chmod(0o755)
+    template = config.data_root / "systemd" / "saturnin-attestation.service"
+    template.parent.mkdir(parents=True, exist_ok=True)
+    template.write_text("[Unit]\nDescription=test\n", encoding="utf-8")
+    template.chmod(0o644)
+    executable.parent.chmod(0o777)
+
+    decision = governance.check_server_command(f"{executable} install")
+
+    assert not decision.allowed
+    assert "parent" in decision.reasons[0]
 
 
 def test_bootstrap_runtime_saturnin_executable_is_trusted(
@@ -2239,7 +2746,6 @@ def test_git_network_subcommands_require_governed_wrappers(
         "mv source /etc/target --suffix .bak",
         "install source /etc/target --mode 600",
         "ln source /etc/target --suffix .bak",
-        "rsync source /etc/target --suffix .bak",
     ],
 )
 def test_destination_commands_reject_options_after_operands(
@@ -2453,7 +2959,7 @@ def test_git_fsck_rejects_undocumented_or_mutating_variants(
     assert "limited to the read-only" in decision.reasons[0]
 
 
-@pytest.mark.parametrize("binary", ["cp", "install", "ln", "mv", "rsync"])
+@pytest.mark.parametrize("binary", ["cp", "install", "ln", "mv"])
 def test_single_destination_operand_is_checked(
     governance: Governance, binary: str
 ) -> None:
@@ -2463,7 +2969,7 @@ def test_single_destination_operand_is_checked(
     assert "outside writable roots" in decision.reasons[0]
 
 
-@pytest.mark.parametrize("binary", ["cp", "install", "ln", "mv", "rsync"])
+@pytest.mark.parametrize("binary", ["cp", "install", "ln"])
 def test_only_final_operand_is_destination_for_multiple_operands(
     governance: Governance, binary: str
 ) -> None:
@@ -2472,6 +2978,66 @@ def test_only_final_operand_is_destination_for_multiple_operands(
     )
 
     assert decision.allowed
+
+
+def test_mv_requires_source_and_destination_in_writable_roots(
+    governance: Governance,
+) -> None:
+    assert governance.check_server_command(
+        "mv /home/saturnin/source /home/saturnin/destination"
+    ).allowed
+
+
+@pytest.mark.parametrize(
+    "command",
+    [
+        "rsync source /home/saturnin/destination",
+        "rsync -e /home/saturnin/evil remote:x /home/saturnin/destination",
+        "rsync --rsh=/home/saturnin/evil remote:x /home/saturnin/destination",
+        "rsync --remove-source-files source /home/saturnin/destination",
+        "rsync --daemon",
+    ],
+)
+def test_rsync_is_denied_as_unmodeled_dynamic_writer(
+    governance: Governance, command: str
+) -> None:
+    decision = governance.check_server_command(command)
+
+    assert not decision.allowed
+    assert "executable allowlist" in decision.reasons[0]
+
+
+@pytest.mark.parametrize(
+    "command",
+    [
+        "mv {governed} /home/saturnin/destination",
+        "mv -t /home/saturnin/destination {governed}",
+        "install -d /home/saturnin/allowed {governed}",
+        "install --directory /home/saturnin/allowed {governed}",
+    ],
+)
+def test_every_mutated_destination_operand_is_checked(
+    governance: Governance,
+    config: Config,
+    command: str,
+) -> None:
+    config.server_scope["filesystem"]["writable_root_sources"] = [
+        "user_home",
+        "data_root",
+    ]
+    governed = config.data_root / "policies/server_scope.yaml"
+    decision = governance.check_server_command(
+        command.format(governed=governed)
+    )
+
+    assert not decision.allowed
+    assert any(
+        text in decision.reasons[0]
+        for text in (
+            "reserved for a governed operation",
+            "aliases a governed operation object",
+        )
+    )
 
 
 def test_forbidden_roots_override_writable_roots(

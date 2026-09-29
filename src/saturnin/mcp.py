@@ -361,8 +361,11 @@ def probe_github_stdio(config: Config | None = None, *, timeout: float = 10) -> 
     config = config or default_config()
     definition = _github_definition(config)
     _, args = server_process("github", definition, config)
-    environment = dict(os.environ)
-    environment.setdefault("GITHUB_PERSONAL_ACCESS_TOKEN", "saturnin-startup-check")
+    environment = {
+        name: os.environ[name]
+        for name in ("PATH", "LANG", "LC_ALL", "LC_CTYPE", "HOME")
+        if name in os.environ
+    }
     with _verified_github_descriptor(config) as (descriptor, _, install):
         _verify_github_version(descriptor, install, _github_version_args(config))
         process = subprocess.Popen(

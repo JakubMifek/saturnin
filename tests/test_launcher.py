@@ -1,13 +1,17 @@
 from __future__ import annotations
 
+import fcntl
+import hashlib
 import json
 import os
 import re
 import shutil
 import subprocess
 import sys
+import sysconfig
 import threading
 import time
+import zipfile
 from contextlib import contextmanager
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -16,6 +20,7 @@ from types import SimpleNamespace
 import pytest
 import yaml
 
+from saturnin import governance as governance_module
 from saturnin import worker_callbacks
 from saturnin.board import Board, utcnow
 from saturnin.checkpoints import Checkpoint, CheckpointStore
@@ -25,8 +30,10 @@ from saturnin.launcher import AgentLauncher, LauncherError
 from saturnin.launcher_host import prerequisite_invocation
 from saturnin.governance import resolve_trusted_executable
 from saturnin.mcp import MCPError, StagedGithubBinary
+from saturnin.launcher import AgentLauncher, LauncherError, _SigningSession
 from saturnin.review import (
     ReviewLedger,
+    execution_scoped_review_attestation_key,
     issue_content_digest,
     review_attestation_signing_key,
     sign_review_attestation,
@@ -121,8 +128,7 @@ def test_launcher_starts_routed_role_with_filtered_mcp(
 
     monkeypatch.setattr("saturnin.launcher.subprocess.Popen", fake_popen)
 
-    launcher = AgentLauncher(config, board)
-    result = launcher.launch(task.id)
+    result = AgentLauncher(config, board).launch(task.id)
 
     assert result is not None
     assert result.pid == 4242
@@ -135,17 +141,9 @@ def test_launcher_starts_routed_role_with_filtered_mcp(
     assert launched_task.launch_deferred_at is None
     assert launched_task.launch_deferred_reason is None
     mcp = json.loads((config.var_dir / "launches" / f"{task.id}.mcp.json").read_text())
-    assert set(mcp["mcpServers"]) == {"github", "filesystem"}
-    github_command = Path(mcp["mcpServers"]["github"]["command"])
-    assert github_command.name == "github-mcp-server"
-    assert github_command.parent.parent == config.var_dir / "launches"
-    assert re.fullmatch(
-        rf"{re.escape(task.id)}\.runtime-[0-9a-f]{{32}}",
-        github_command.parent.name,
-    )
-    assert mcp["mcpServers"]["github"]["args"] == ["stdio", "--read-only"]
+    assert set(mcp["mcpServers"]) == {"filesystem"}
+    assert "GITHUB_PERSONAL_ACCESS_TOKEN" not in json.dumps(mcp)
     assert mcp["mcpServers"]["filesystem"]["args"][-1] == str(worktree.path)
-    assert mcp["mcpServers"]["filesystem"]["command"] == "/usr/bin/npx"
     command = calls[0][0]
     assert "--no-ask-user" in command
     assert "Implement a small fix" in command[-1]
@@ -161,21 +159,6 @@ def test_launcher_starts_routed_role_with_filtered_mcp(
         (config.var_dir / "launches" / f"{task.id}.json").read_text()
     )
     assert metadata["process_start_time_ticks"] == 123456
-    inherited = calls[0][1]["pass_fds"]
-    assert len(inherited) == 1
-    assert [
-        "--ro-bind",
-        f"/proc/self/fd/{inherited[0]}",
-        str(github_command),
-    ] == command[
-        command.index(f"/proc/self/fd/{inherited[0]}") - 1:
-        command.index(f"/proc/self/fd/{inherited[0]}") + 2
-    ]
-    assert github_command.exists()
-
-    monkeypatch.setattr(launcher, "_process_start_time", lambda pid: None)
-    assert launcher.reconcile_exited_launches() == [task.id]
-    assert not github_command.parent.exists()
 
 
 def test_mcp_scripts_launch_through_verified_interpreter(
@@ -242,53 +225,6 @@ def test_mcp_scripts_launch_through_verified_interpreter(
     assert fetch["args"] == ["mcp-server-fetch@2026.8.18"]
 
 
-def test_launcher_binds_verified_mcp_descriptor_after_path_substitution(
-    config: Config,
-    board: Board,
-) -> None:
-    task = board.create("Retain verified MCP inode")
-    Router(config).dispatch(board, task)
-    launcher = AgentLauncher(config, board)
-    contract = launcher._contract(board.get(task.id), config)
-    mcp_launch = launcher._write_mcp_config(board.get(task.id), contract)
-    assert mcp_launch.github_stage is not None
-    stage = mcp_launch.github_stage
-    verified_content = os.pread(stage.descriptor, 4096, 0)
-    replacement = config.root / "replacement-mcp"
-    replacement.write_text("malicious replacement\n", encoding="utf-8")
-    os.replace(replacement, stage.path)
-    workdir = config.root / "race-worktree"
-    workdir.mkdir()
-    (workdir / ".git").write_text("gitdir: elsewhere\n", encoding="utf-8")
-    isolated_home = config.var_dir / "race-home"
-    isolated_home.mkdir()
-    git_objects = config.root / "race-objects"
-    git_objects.mkdir()
-
-    command = launcher._sandbox_command(
-        "/usr/bin/bwrap",
-        "/usr/bin/pasta",
-        "/usr/bin/copilot",
-        [],
-        workdir=workdir,
-        isolated_home=isolated_home,
-        trusted_config=config,
-        git_objects=git_objects,
-        mcp_config=mcp_launch.path,
-        github_stage=stage,
-    )
-
-    source = f"/proc/self/fd/{stage.descriptor}"
-    mount_index = command.index(source)
-    assert command[mount_index - 1:mount_index + 2] == [
-        "--ro-bind",
-        source,
-        str(stage.path),
-    ]
-    assert os.pread(stage.descriptor, 4096, 0) == verified_content
-    cleanup_problem = launcher._cleanup_mcp_launch(mcp_launch, task.id)
-    assert cleanup_problem == "GitHub MCP staged executable identity changed"
-    assert stage.path.read_text() == "malicious replacement\n"
 
 
 def test_launcher_rejects_required_executables_from_worktree_path(
@@ -511,17 +447,22 @@ def test_worker_command_uses_mandatory_os_sandbox(
         mcp_config=mcp_config,
     )
 
-    assert command[:8] == [
+    assert command[:13] == [
         "/usr/bin/pasta",
         "--quiet",
         "--foreground",
+        "--config-net",
         "--no-map-gw",
         "--tcp-ports=none",
         "--udp-ports=none",
+        "--dns-forward",
+        "169.254.1.1",
+        "--dns-host",
+        "127.0.0.53",
         "--",
         "/usr/bin/bwrap",
     ]
-    assert command[8:11] == ["--unshare-all", "--share-net", "--new-session"]
+    assert command[13:16] == ["--unshare-all", "--share-net", "--new-session"]
     assert ["--tmpfs", "/"] == command[
         command.index("--tmpfs"):command.index("--tmpfs") + 2
     ]
@@ -1219,14 +1160,24 @@ def test_trusted_cli_callback_records_review_as_assigned_reviewer(
         stored.review_subject = subject
         stored.review_author = "code-worker"
         stored.review_head_sha = head_sha
+    nonce = "a" * 64
     attestation = sign_review_attestation(
-        key=review_attestation_signing_key(config, "pr-reviewer"),
+        key=execution_scoped_review_attestation_key(
+            "test-review-attestation-key",
+            "pr-reviewer",
+            task.id,
+            nonce,
+            subject,
+            head_sha,
+            "",
+        ),
         subject=subject,
         kind="pr",
         author="code-worker",
         reviewer="pr-reviewer",
         verdict="approved",
         head_sha=head_sha,
+        attestation_id=f"{task.id}:{nonce}",
     )
     callback_dir = AgentLauncher(config, board)._isolated_home(
         task.id
@@ -1839,6 +1790,338 @@ def test_bounded_command_caps_output_and_times_out(git_repo: Path) -> None:
     assert timed_out.returncode != 0
 
 
+def test_governed_timeout_allows_cooperative_transaction_cleanup(
+    git_repo: Path,
+) -> None:
+    marker = git_repo / "cooperative-cleanup"
+    script = (
+        "import pathlib,signal,sys,time;"
+        f"marker=pathlib.Path({str(marker)!r});"
+        "signal.signal(signal.SIGTERM,"
+        "lambda *_:(marker.write_text('rolled-back'),sys.exit(42)));"
+        "time.sleep(30)"
+    )
+
+    result = worker_callbacks._run_bounded_command(
+        [sys.executable, "-c", script],
+        cwd=git_repo,
+        env=os.environ.copy(),
+        timeout=0.05,
+        termination_grace=1,
+    )
+
+    assert result.timed_out
+    assert result.returncode == 42
+    assert marker.read_text(encoding="utf-8") == "rolled-back"
+
+
+def test_governed_command_executes_the_authorized_descriptor(
+    config: Config, tmp_path: Path
+) -> None:
+    executable = config.data_root / "scripts" / "install_attestation_unit.sh"
+    executable.parent.mkdir(parents=True, exist_ok=True)
+    executable.write_text("#!/bin/sh\nprintf original\n", encoding="utf-8")
+    executable.chmod(0o755)
+    config.server_scope["operations"]["signer_user_unit"]["sha256"] = (
+        hashlib.sha256(executable.read_bytes()).hexdigest()
+    )
+    parts = [str(executable), "status"]
+
+    descriptor = worker_callbacks._open_governed_executable(config, parts)
+    assert descriptor is not None
+    executable.write_text("#!/bin/sh\nprintf replaced\n", encoding="utf-8")
+    try:
+        result = worker_callbacks._run_bounded_command(
+            [f"/proc/self/fd/{descriptor}", "status"],
+            cwd=config.data_root,
+            env=os.environ.copy(),
+            pass_fds=(descriptor,),
+        )
+    finally:
+        os.close(descriptor)
+
+    assert result.returncode == 0
+    assert result.stdout == "original"
+
+
+def _prepare_governed_runtime_sources(
+    config: Config,
+) -> tuple[list[str], dict[str, Path]]:
+    operation = config.server_scope["operations"]["signer_user_unit"]
+    executable = config.data_root / operation["executable"]
+    executable.parent.mkdir(parents=True, exist_ok=True)
+    executable.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+    executable.chmod(0o755)
+    operation["sha256"] = hashlib.sha256(executable.read_bytes()).hexdigest()
+    roots: dict[str, Path] = {}
+    for package in operation["runtime_sources"]:
+        source = package["source"].replace(
+            "{python_version}",
+            f"python{sys.version_info.major}.{sys.version_info.minor}",
+        )
+        root = config.data_root / source
+        root.mkdir(parents=True, exist_ok=True)
+        root.chmod(0o755)
+        roots[package["archive"]] = root
+        for relative in package["files"]:
+            path = root / relative
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.parent.chmod(0o755)
+            path.write_text(
+                f"VALUE = {relative!r}\n",
+                encoding="utf-8",
+            )
+            path.chmod(0o644)
+        for relative in package.get("excluded_files", []):
+            relative = relative.replace(
+                "{extension_suffix}",
+                sysconfig.get_config_var("EXT_SUFFIX") or "",
+            )
+            path = root / relative
+            path.write_bytes(b"excluded native extension")
+            path.chmod(0o644)
+    for runtime_file in operation["runtime_files"]:
+        path = config.data_root / runtime_file["source"]
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.parent.chmod(0o755)
+        path.write_text("review: {}\n", encoding="utf-8")
+        path.chmod(0o644)
+    manifest_entries = {
+        f"{package['archive']}/{relative}": (
+            roots[package["archive"]] / relative
+        ).read_bytes()
+        for package in operation["runtime_sources"]
+        for relative in sorted(package["files"])
+    }
+    manifest_entries.update(
+        {
+            runtime_file["archive"]: (
+                config.data_root / runtime_file["source"]
+            ).read_bytes()
+            for runtime_file in operation["runtime_files"]
+        }
+    )
+    manifest = b"".join(
+        f"{name}\0{hashlib.sha256(content).hexdigest()}\n".encode()
+        for name, content in sorted(manifest_entries.items())
+    )
+    operation["runtime_manifest_sha256"] = hashlib.sha256(manifest).hexdigest()
+    return [str(executable), "install"], roots
+
+
+def test_governed_runtime_is_complete_sealed_and_survives_source_mutation(
+    config: Config,
+) -> None:
+    parts, roots = _prepare_governed_runtime_sources(config)
+
+    descriptor = worker_callbacks._open_governed_runtime(config, parts)
+    assert descriptor is not None
+    original = (roots["saturnin"] / "attestation_service.py").read_bytes()
+    (roots["saturnin"] / "attestation_service.py").write_text(
+        "raise RuntimeError('replaced')\n", encoding="utf-8"
+    )
+    (roots["yaml"] / "__init__.py").write_text(
+        "raise RuntimeError('replaced')\n", encoding="utf-8"
+    )
+    governance = config.data_root / "policies" / "governance.yaml"
+    original_governance = governance.read_bytes()
+    governance.write_text("review: {attestation: {session_ttl_seconds: 999999}}\n")
+    try:
+        seals = fcntl.fcntl(descriptor, fcntl.F_GET_SEALS)
+        required = (
+            fcntl.F_SEAL_WRITE
+            | fcntl.F_SEAL_GROW
+            | fcntl.F_SEAL_SHRINK
+            | fcntl.F_SEAL_SEAL
+        )
+        assert seals & required == required
+        with zipfile.ZipFile(f"/proc/self/fd/{descriptor}") as archive:
+            assert archive.read("saturnin/attestation_service.py") == original
+            assert "yaml/__init__.py" in archive.namelist()
+            assert (
+                archive.read("saturnin/governance.runtime.yaml")
+                == original_governance
+            )
+            assert all(
+                name
+                in {
+                    "SATURNIN-RUNTIME-MANIFEST",
+                    "saturnin/governance.runtime.yaml",
+                }
+                or (
+                    name.startswith(("saturnin/", "yaml/"))
+                    and name.endswith(".py")
+                    and ".." not in name.split("/")
+                )
+                for name in archive.namelist()
+            )
+    finally:
+        os.close(descriptor)
+
+
+def test_governed_runtime_manifest_rejection_closes_memfd(
+    config: Config,
+) -> None:
+    parts, _ = _prepare_governed_runtime_sources(config)
+    config.server_scope["operations"]["signer_user_unit"][
+        "runtime_manifest_sha256"
+    ] = "0" * 64
+    before = len(list(Path("/proc/self/fd").iterdir()))
+
+    for _ in range(20):
+        with pytest.raises(
+            WorkerCallbackError,
+            match="authorized manifest",
+        ):
+            worker_callbacks._open_governed_runtime(config, parts)
+
+    assert len(list(Path("/proc/self/fd").iterdir())) == before
+
+
+def test_governed_runtime_acquisition_failure_closes_executable(
+    config: Config,
+    git_repo: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    descriptor = os.open("/dev/null", os.O_RDONLY)
+    monkeypatch.setattr(
+        worker_callbacks,
+        "_open_governed_executable",
+        lambda *_: descriptor,
+    )
+
+    def reject_runtime(*_: object) -> int:
+        raise WorkerCallbackError("runtime rejected")
+
+    monkeypatch.setattr(
+        worker_callbacks,
+        "_open_governed_runtime",
+        reject_runtime,
+    )
+
+    with pytest.raises(WorkerCallbackError, match="runtime rejected"):
+        worker_callbacks._prepare_host_command(
+            config,
+            ["scripts/install_attestation_unit.sh", "install"],
+            git_repo,
+        )
+    with pytest.raises(OSError):
+        os.fstat(descriptor)
+
+
+@pytest.mark.parametrize(
+    "change",
+    [
+        "extra",
+        "unexpected-non-python",
+        "omitted",
+        "external-hardlink",
+        "internal-hardlink",
+        "symlink",
+        "special",
+        "substitution",
+        "saturnin-content",
+        "yaml-content",
+        "policy-content",
+    ],
+)
+def test_governed_runtime_rejects_manifest_and_tree_substitution(
+    config: Config,
+    tmp_path: Path,
+    change: str,
+) -> None:
+    parts, roots = _prepare_governed_runtime_sources(config)
+    operation = config.server_scope["operations"]["signer_user_unit"]
+    if change == "extra":
+        injected = roots["saturnin"] / "injected.py"
+        injected.write_text(
+            "raise RuntimeError('injected')\n", encoding="utf-8"
+        )
+        injected.chmod(0o644)
+    elif change == "unexpected-non-python":
+        (roots["saturnin"] / "payload.txt").write_text(
+            "not an authorized source\n", encoding="utf-8"
+        )
+    elif change == "omitted":
+        (roots["yaml"] / "loader.py").unlink()
+    elif change == "external-hardlink":
+        os.link(
+            roots["saturnin"] / "worker_callbacks.py",
+            config.data_root / "worker-callbacks-alias.py",
+        )
+    elif change == "internal-hardlink":
+        target = roots["saturnin"] / "review.py"
+        target.unlink()
+        os.link(roots["saturnin"] / "routing.py", target)
+    elif change == "symlink":
+        target = roots["saturnin"] / "review.py"
+        target.unlink()
+        target.symlink_to(tmp_path / "outside.py")
+    elif change == "special":
+        target = roots["saturnin"] / "review.py"
+        target.unlink()
+        os.mkfifo(target)
+    elif change == "substitution":
+        operation["runtime_sources"][1]["archive"] = "saturnin"
+    elif change == "saturnin-content":
+        (roots["saturnin"] / "review.py").write_text(
+            "raise RuntimeError('replaced')\n", encoding="utf-8"
+        )
+    elif change == "yaml-content":
+        (roots["yaml"] / "loader.py").write_text(
+            "raise RuntimeError('replaced')\n", encoding="utf-8"
+        )
+    else:
+        (config.data_root / "policies" / "governance.yaml").write_text(
+            "review: {pr: {allowed_reviewer_roles: [attacker]}}\n",
+            encoding="utf-8",
+        )
+
+    with pytest.raises(
+        WorkerCallbackError,
+        match="manifest|symlink|differs|authorized|unexpected|unsafe|special",
+    ):
+        worker_callbacks._open_governed_runtime(config, parts)
+
+
+def test_trusted_directory_rejects_descendant_swap_between_stat_and_open(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    root = tmp_path / "trusted"
+    root.mkdir()
+    target = root / "worker_callbacks.py"
+    target.write_text("trusted\n", encoding="utf-8")
+    replacement = tmp_path / "replacement"
+    replacement.write_text("trusted\n", encoding="utf-8")
+    descriptor = os.open(root, os.O_RDONLY | os.O_DIRECTORY)
+    real_open = os.open
+    swapped = False
+
+    def swapping_open(path: object, flags: int, *args: object, **kwargs: object) -> int:
+        nonlocal swapped
+        if path == "worker_callbacks.py" and kwargs.get("dir_fd") == descriptor:
+            swapped = True
+            target.rename(tmp_path / "original")
+            replacement.rename(target)
+        return real_open(path, flags, *args, **kwargs)
+
+    monkeypatch.setattr(governance_module.os, "open", swapping_open)
+    try:
+        with pytest.raises(
+            governance_module._TrustedDirectoryError,
+            match="changed during acquisition|unsafe or unstable",
+        ):
+            governance_module._trusted_directory_entries(
+                descriptor,
+                expected_files={"worker_callbacks.py"},
+                expected_uid=os.geteuid(),
+            )
+    finally:
+        os.close(descriptor)
+    assert swapped
+
+
 def test_bounded_command_tracks_closed_pipes_and_kills_descendants(
     git_repo: Path,
 ) -> None:
@@ -1857,6 +2140,7 @@ def test_bounded_command_tracks_closed_pipes_and_kills_descendants(
         cwd=git_repo,
         env=os.environ.copy(),
         timeout=0.05,
+        termination_grace=0.05,
     )
 
     assert result.timed_out
@@ -1865,6 +2149,27 @@ def test_bounded_command_tracks_closed_pipes_and_kills_descendants(
     while _process_is_running(child_pid) and time.monotonic() < deadline:
         time.sleep(0.01)
     assert not _process_is_running(child_pid)
+
+
+def test_bounded_command_force_kills_after_termination_grace(
+    git_repo: Path,
+) -> None:
+    result = worker_callbacks._run_bounded_command(
+        [
+            sys.executable,
+            "-c",
+            "import signal,time;signal.signal(signal.SIGTERM,signal.SIG_IGN);"
+            "time.sleep(30)",
+        ],
+        cwd=git_repo,
+        env=os.environ.copy(),
+        timeout=0.05,
+        termination_grace=0.05,
+    )
+
+    assert result.timed_out
+    assert result.forced_termination
+    assert result.returncode != 0
 
 
 def _process_is_running(pid: int) -> bool:
@@ -1944,7 +2249,10 @@ def test_ops_host_git_command_cannot_escape_task_worktree(
     ]
     monkeypatch.setattr("saturnin.governance.os.geteuid", lambda: 1000)
 
-    with pytest.raises(WorkerCallbackError, match="outside task worktree"):
+    with pytest.raises(
+        WorkerCallbackError,
+        match="outside task worktree|reserved for a governed operation",
+    ):
         run_server_command(
             config,
             board,
@@ -2603,34 +2911,6 @@ def test_launcher_rolls_back_claim_when_spawn_fails(
     assert stored.checkpoint_resumed_at is None
     assert stored.history[-1]["event"] == "agent:launch_failed"
     assert not any(entry["event"] == "state:in_progress" for entry in stored.history)
-
-    first_stage = Path(
-        json.loads(
-            (config.var_dir / "launches" / f"{task.id}.mcp.json").read_text()
-        )["mcpServers"]["github"]["command"]
-    )
-    monkeypatch.setattr(
-        "saturnin.launcher.subprocess.Popen",
-        lambda command, **kwargs: (
-            real_popen(command, **kwargs)
-            if command[0] == "git"
-            else SimpleNamespace(pid=4242)
-        ),
-    )
-
-    AgentLauncher(config, board).launch(
-        task.id, resumed_checkpoint="checkpoint-1"
-    )
-
-    second_stage = Path(
-        json.loads(
-            (config.var_dir / "launches" / f"{task.id}.mcp.json").read_text()
-        )["mcpServers"]["github"]["command"]
-    )
-    assert second_stage != first_stage
-    assert not first_stage.parent.exists()
-    assert second_stage.exists()
-    assert board.get(task.id).checkpoint_resumed_at == "checkpoint-1"
 
 
 def test_launcher_terminates_and_rolls_back_when_metadata_persistence_fails(
@@ -3353,10 +3633,7 @@ def test_launcher_uses_trusted_source_for_linked_saturnin_worktree(
     generated = json.loads(
         (config.var_dir / "launches" / f"{task.id}.mcp.json").read_text()
     )
-    assert generated["mcpServers"]["github"]["args"] == [
-        "stdio",
-        "--read-only",
-    ]
+    assert "github" not in generated["mcpServers"]
     assert (config.var_dir / "launches" / f"{task.id}.json").is_file()
 
 
@@ -3375,6 +3652,12 @@ def test_reconcile_exited_launch_keeps_legal_task_state(
     staged.chmod(0o500)
     runtime_metadata = runtime.stat()
     staged_metadata = staged.stat()
+    mcp_file = config.var_dir / "launches" / f"{task.id}.mcp.json"
+    mcp_file.write_text(
+        '{"mcpServers":{"github":{"env":{"GITHUB_PERSONAL_ACCESS_TOKEN":"runtime"}}}}',
+        encoding="utf-8",
+    )
+    mcp_file.chmod(0o600)
     launch_file.write_text(
         json.dumps(
             {
@@ -3384,7 +3667,7 @@ def test_reconcile_exited_launch_keeps_legal_task_state(
                 "process_start_time_ticks": 123456,
                 "started_at": utcnow(),
                 "cwd": str(config.root),
-                "mcp_config": str(config.root / ".mcp.json"),
+                "mcp_config": str(mcp_file),
                 "log": str(config.var_dir / "launches" / f"{task.id}.log"),
                 "github_runtime": {
                     "directory": str(runtime),
@@ -3416,6 +3699,7 @@ def test_reconcile_exited_launch_keeps_legal_task_state(
     assert restored.history[-1]["event"] == "agent:launch_failed"
     assert not launch_file.exists()
     assert not runtime.exists()
+    assert not mcp_file.exists()
 
 
 def test_reconcile_exited_poller_launch_keeps_waiting_task(
@@ -3541,31 +3825,6 @@ def test_reconcile_records_failure_when_pid_belongs_to_different_process(
     assert board.get(task.id).state == "in_progress"
     assert not launch_file.exists()
 
-    contract = launcher._contract(board.get(task.id), config)
-    stale = config.var_dir / "launches" / f"{task.id}.runtime"
-    stale.mkdir()
-    outside = config.root / "unrelated-runtime-target"
-    outside.write_text("do not replace\n", encoding="utf-8")
-    (stale / "github-mcp-server").symlink_to(outside)
-    first_config = launcher._write_mcp_config(board.get(task.id), contract)
-    first_stage = Path(
-        json.loads(first_config.path.read_text())["mcpServers"]["github"]["command"]
-    )
-    second_config = launcher._write_mcp_config(board.get(task.id), contract)
-    second_stage = Path(
-        json.loads(second_config.path.read_text())["mcpServers"]["github"]["command"]
-    )
-    assert first_config.github_stage is not None
-    assert second_config.github_stage is not None
-    first_config.github_stage.close()
-    second_config.github_stage.close()
-
-    assert first_stage != second_stage
-    assert first_stage.exists()
-    assert second_stage.exists()
-    assert (stale / "github-mcp-server").is_symlink()
-    assert outside.read_text() == "do not replace\n"
-
 
 @pytest.mark.parametrize(
     "proc_stat",
@@ -3657,7 +3916,7 @@ def test_launcher_keeps_engine_source_for_managed_repository(
     assert calls[0]["env"]["PYTHONPATH"].split(":")[0] == str(config.root / "src")
 
 
-def test_launcher_worker_environment_uses_allowlist_and_mcp_scoped_github_token(
+def test_launcher_worker_environment_never_exposes_github_token(
     config: Config, board: Board, git_repo: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     task = board.create("Constrain worker environment")
@@ -3715,23 +3974,70 @@ def test_launcher_worker_environment_uses_allowlist_and_mcp_scoped_github_token(
     assert "GITHUB_TOKEN" not in environment
     assert "SATURNIN_REVIEW_ATTESTATION_KEY" not in environment
     assert "SATURNIN_REVIEW_ATTESTATION_PREVIOUS_KEY" not in environment
+    assert "SATURNIN_REVIEW_SIGNING_SOCKET" not in environment
+    assert "SATURNIN_REVIEW_SIGNING_NONCE" not in environment
+    assert "CREDENTIALS_DIRECTORY" not in environment
     assert environment["SATURNIN_AGENT_ROLE"] == contract.role
     assert "AWS_SECRET_ACCESS_KEY" not in environment
     assert "host" not in environment["PYTHONPATH"]
-    mcp_launch = launcher._write_mcp_config(
+    mcp_path = launcher._write_mcp_config(
         board.get(task.id),
         contract,
         config=worker_config,
         worktree_scope=worktree.path,
-    )
-    mcp_path = mcp_launch.path
+    ).path
     mcp = json.loads(mcp_path.read_text(encoding="utf-8"))
     assert mcp_path.stat().st_mode & 0o777 == 0o600
-    assert mcp["mcpServers"]["github"]["env"] == {
-        "GITHUB_PERSONAL_ACCESS_TOKEN": "scoped-read-token"
-    }
-    assert mcp_launch.github_stage is not None
-    mcp_launch.github_stage.close()
+    assert "github" not in mcp["mcpServers"]
+    assert "scoped-read-token" not in mcp_path.read_text(encoding="utf-8")
+
+
+def test_launcher_reads_systemd_credentials_without_exposing_master_to_worker(
+    config: Config,
+    board: Board,
+    git_repo: Path,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    task = board.create("Use systemd credentials")
+    Router(config).dispatch(board, task)
+    worktree = WorktreeManager(config, repo=git_repo, board=board).create(
+        "feature/systemd-credential"
+    )
+    with board.edit(task.id) as stored:
+        stored.branch = "feature/systemd-credential"
+        stored.worktree = str(worktree.path)
+    credentials = tmp_path / "credentials"
+    credentials.mkdir(mode=0o700)
+    (credentials / "saturnin-review-attestation-key").write_text(
+        "master-from-systemd", encoding="utf-8"
+    )
+    for path in credentials.iterdir():
+        path.chmod(0o600)
+    monkeypatch.setenv("CREDENTIALS_DIRECTORY", str(credentials))
+    monkeypatch.delenv("SATURNIN_REVIEW_ATTESTATION_KEY", raising=False)
+    monkeypatch.delenv("SATURNIN_GITHUB_MCP_TOKEN", raising=False)
+
+    launcher = AgentLauncher(config, board)
+    worker_config = launcher._worker_config(worktree.path)
+    contract = launcher._contract(board.get(task.id), worker_config)
+    environment = launcher._worker_environment(
+        worker_config,
+        contract,
+        task=board.get(task.id),
+        workdir=worktree.path,
+    )
+    mcp_path = launcher._write_mcp_config(
+        board.get(task.id),
+        contract,
+        config=worker_config,
+        worktree_scope=worktree.path,
+    ).path
+    mcp = json.loads(mcp_path.read_text(encoding="utf-8"))
+
+    assert "SATURNIN_REVIEW_ATTESTATION_KEY" not in environment
+    assert "CREDENTIALS_DIRECTORY" not in environment
+    assert "github" not in mcp["mcpServers"]
 
 
 def test_launcher_preserves_approved_config_path_under_isolated_home(
@@ -3805,7 +4111,7 @@ def test_launcher_rejects_approved_config_destination_collisions(
         AgentLauncher(config, board)._isolated_home("duplicate-destination")
 
 
-def test_launcher_injects_role_scoped_attestation_key_only_for_reviewers(
+def test_launcher_injects_only_scoped_signing_session_for_reviewers(
     config: Config, board: Board, git_repo: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     monkeypatch.setenv("SATURNIN_REVIEW_ATTESTATION_PREVIOUS_KEY", "old-master-key")
@@ -3849,41 +4155,22 @@ def test_launcher_injects_role_scoped_attestation_key_only_for_reviewers(
         task=board.get(task.id),
         workdir=worktree.path,
         review_input=review_input,
+        signing_session=_SigningSession(
+            config.var_dir / "signing-session.sock", "public-session-nonce"
+        ),
     )
 
-    role_key = environment["SATURNIN_REVIEW_ATTESTATION_KEY"]
-    assert role_key != "test-review-attestation-key"
-    assert environment["SATURNIN_REVIEW_ATTESTATION_KEY_SCOPE"] == "role"
+    assert "SATURNIN_REVIEW_ATTESTATION_KEY" not in environment
+    assert "SATURNIN_REVIEW_ATTESTATION_KEY_SCOPE" not in environment
     assert environment["SATURNIN_AGENT_ROLE"] == "pr-reviewer"
     assert "SATURNIN_REVIEW_ATTESTATION_PREVIOUS_KEY" not in environment
-
-    attestation = sign_review_attestation(
-        key=role_key,
-        subject="JakubMifek/saturnin#reviewer-key",
-        kind="pr",
-        author="code-worker",
-        reviewer="pr-reviewer",
-        verdict="approved",
-        head_sha="c" * 40,
+    assert environment["SATURNIN_REVIEW_SIGNING_NONCE"] == "public-session-nonce"
+    assert environment["SATURNIN_REVIEW_SIGNING_SOCKET"].endswith(
+        "signing-session.sock"
     )
-    with monkeypatch.context() as scoped:
-        scoped.setenv("SATURNIN_REVIEW_ATTESTATION_KEY", role_key)
-        scoped.setenv("SATURNIN_REVIEW_ATTESTATION_KEY_SCOPE", "role")
-        scoped.setenv("SATURNIN_AGENT_ROLE", "pr-reviewer")
-        scoped.setenv("SATURNIN_REVIEW_ATTESTATION_PREVIOUS_KEY", "old-master-key")
-        ReviewLedger(config).record(
-            subject="JakubMifek/saturnin#reviewer-key",
-            kind="pr",
-            author="code-worker",
-            reviewer="pr-reviewer",
-            verdict="approved",
-            head_sha="c" * 40,
-            attestation=attestation,
-        )
-    assert ReviewLedger(config).for_subject("JakubMifek/saturnin#reviewer-key", "pr")
 
 
-def test_launcher_refuses_reviewer_without_attestation_key(
+def test_launcher_refuses_reviewer_without_signing_session(
     config: Config, board: Board, git_repo: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     head_sha = "d" * 40
@@ -3922,7 +4209,7 @@ def test_launcher_refuses_reviewer_without_attestation_key(
         verified_review_input,
     )
 
-    with pytest.raises(LauncherError, match="requires SATURNIN_REVIEW_ATTESTATION_KEY"):
+    with pytest.raises(LauncherError, match="requires a signing session"):
         launcher._worker_environment(
             worker_config,
             contract,
@@ -3973,6 +4260,9 @@ def test_launcher_stages_pr_diff_for_exact_review_head_before_signing(
         task=task,
         workdir=git_repo,
         review_input=review_input,
+        signing_session=_SigningSession(
+            config.var_dir / "signing-session.sock", "public-session-nonce"
+        ),
     )
 
     assert calls == [
@@ -3998,7 +4288,8 @@ def test_launcher_stages_pr_diff_for_exact_review_head_before_signing(
     assert "diff --git a/app.py b/app.py" in review_input.path.read_text()
     assert "diff --git a/app.py b/app.py" not in prompt
     assert review_input.path.stat().st_mode & 0o777 == 0o600
-    assert "SATURNIN_REVIEW_ATTESTATION_KEY" in environment
+    assert "SATURNIN_REVIEW_ATTESTATION_KEY" not in environment
+    assert "SATURNIN_REVIEW_SIGNING_SOCKET" in environment
 
 
 def test_launcher_keeps_large_verified_pr_diff_out_of_command_arguments(
@@ -4161,38 +4452,6 @@ def test_launcher_keeps_large_verified_issue_body_out_of_prompt(
     assert staged_payload["body"] == body
 
 
-def test_launcher_rejects_unverified_github_binary(
-    config: Config,
-    board: Board,
-    git_repo: Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    config.policy("mcp")["launcher"]["enabled"] = True
-    task = board.create("Implement checksum validation")
-    Router(config).dispatch(board, task)
-    worktree = WorktreeManager(config, repo=git_repo, board=board).create(
-        "feature/checksum-validation"
-    )
-    with board.edit(task.id) as stored:
-        stored.branch = "feature/checksum-validation"
-        stored.worktree = str(worktree.path)
-    monkeypatch.setattr("saturnin.launcher.shutil.which", lambda _: "/usr/bin/copilot")
-    verification_roots: list[Path] = []
-
-    def reject_binary(trusted: Config, destination: Path) -> Path:
-        verification_roots.append(trusted.root)
-        raise MCPError("checksum mismatch")
-
-    monkeypatch.setattr(
-        "saturnin.launcher.stage_github_binary",
-        reject_binary,
-    )
-
-    with pytest.raises(LauncherError, match="checksum mismatch"):
-        AgentLauncher(config, board).launch(task.id)
-
-    assert verification_roots == [config.data_root]
-    assert board.get(task.id).state == "routed"
 
 
 def test_launcher_rejects_branch_local_github_replacement(
@@ -4287,3 +4546,20 @@ def test_launcher_policy_always_comes_from_canonical_checkout(
 def test_root_mcp_config_has_no_blanket_grants() -> None:
     config = json.loads((Path(__file__).parents[1] / ".mcp.json").read_text())
     assert config["mcpServers"] == {}
+
+
+def test_copilot_mcp_config_is_passed_as_a_file_reference(
+    config: Config,
+    board: Board,
+) -> None:
+    launcher = AgentLauncher(config, board)
+    mcp_config = config.var_dir / "launches" / "task.mcp.json"
+
+    args = launcher._agent_args(
+        prompt="Inspect the repository",
+        mcp_config=mcp_config,
+        task_id="T-1",
+    )
+
+    option = args.index("--additional-mcp-config")
+    assert args[option + 1] == f"@{mcp_config}"

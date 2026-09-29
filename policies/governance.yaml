@@ -80,10 +80,18 @@ review:
     author_may_review: false
     allowed_reviewer_roles: [issue-reviewer]
   attestation:
-    # Review records are accepted only with an HMAC-signed attestation produced
-    # by the reviewer execution, binding identity, subject, verdict and content.
+    # The master keys exist only in the private signing service. A routed
+    # reviewer receives a process-bound, expiring, single-use signing session.
     required: true
     role_scoped: true
+    execution_scoped: true
+    legacy_migration: rotation-manifest-v2-required
+    service_socket: "%t/saturnin-attestation/control.sock"
+    session_ttl_seconds: 900
+    supervisor_units:
+      - saturnin-improve.service
+      - saturnin-resume.service
+      - saturnin-discovery.service
     key_env: SATURNIN_REVIEW_ATTESTATION_KEY
     previous_key_env: SATURNIN_REVIEW_ATTESTATION_PREVIOUS_KEY
     key_scope_env: SATURNIN_REVIEW_ATTESTATION_KEY_SCOPE

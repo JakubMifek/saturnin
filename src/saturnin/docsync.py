@@ -208,6 +208,161 @@ def _server_prerequisites(config: Config) -> str:
         ]
     )
     return "\n".join(lines)
+def _credential_admin(config: Config) -> dict[str, Any]:
+    value = config.policy("server_scope").get("administrator_credential_recovery")
+    if not isinstance(value, dict) or value.get("runtime_allowed") is not False:
+        raise GeneratedBlockError(
+            "server_scope administrator credential recovery must deny runtime access"
+        )
+    return value
+
+
+def _credential_admin_setup(config: Config) -> str:
+    policy = _credential_admin(config)
+    key = policy["host_key_path"]
+    owner = policy["required_host_key_owner"]
+    group = policy["required_host_key_group"]
+    mode = policy["required_host_key_mode"].lstrip("0")
+    return "\n".join(
+        [
+            "This is a bounded human-administrator operation; Saturnin and its "
+            "workers remain forbidden from using privilege elevation.",
+            "",
+            "```bash",
+            "sudo systemd-creds setup",
+            f"sudo stat -c '%U %G %a %n' {key}",
+            "```",
+            "",
+            f"The metadata check must report `{owner} {group} {mode}`. Never print "
+            "the host key contents.",
+        ]
+    )
+
+
+def _credential_admin_recovery(config: Config) -> str:
+    policy = _credential_admin(config)
+    key = policy["host_key_path"]
+    machine_id = policy["machine_id_path"]
+    account = policy["service_account"]
+    variable = policy["backup_root_variable"]
+    return "\n".join(
+        [
+            "The destination must be a mounted, encrypted, offline or separate "
+            "filesystem. Set its path in the administrator shell and reject an "
+            "empty or relative value:",
+            "",
+            "```bash",
+            f"read -r -p 'Encrypted backup mount: ' {variable}",
+            f'test -n "${{{variable}}}" && test "${{{variable}#/}}" != "${{{variable}}}"',
+            f'sudo install -d -o root -g root -m 0700 "${{{variable}}}/saturnin/systemd"',
+            f"sudo install -m 0400 {key} "
+            f'"${{{variable}}}/saturnin/systemd/credential.secret"',
+            f"sudo install -m 0444 {machine_id} "
+            f'"${{{variable}}}/saturnin/systemd/machine-id"',
+            f"id -u {account}",
+            "```",
+            "",
+            "Record the reported UID and account name in the protected backup "
+            "inventory. For recovery, keep all Saturnin timers stopped and run:",
+            "",
+            "```bash",
+            f"read -r -p 'Encrypted backup mount: ' {variable}",
+            f'test -n "${{{variable}}}" && test "${{{variable}#/}}" != "${{{variable}}}"',
+            f'sudo cmp --silent {machine_id} '
+            f'"${{{variable}}}/saturnin/systemd/machine-id"',
+            f"id -u {account}",
+            f'sudo install -o root -g root -m 0400 '
+            f'"${{{variable}}}/saturnin/systemd/credential.secret" {key}',
+            "```",
+            "",
+            "The administrator must verify the recorded UID and account name "
+            "before restoring the host key.",
+        ]
+    )
+
+
+def _signer_unit_interface(config: Config) -> str:
+    operation = config.policy("server_scope").get("operations", {}).get(
+        "signer_user_unit"
+    )
+    if not isinstance(operation, dict):
+        raise GeneratedBlockError("server_scope signer_user_unit operation is required")
+    executable = operation.get("executable")
+    actions = operation.get("allowed_actions")
+    unit = operation.get("unit")
+    runtime_snapshot = operation.get("runtime_snapshot")
+    scope = operation.get("scope")
+    if (
+        not isinstance(executable, str)
+        or not isinstance(actions, list)
+        or not all(isinstance(action, str) for action in actions)
+        or not isinstance(unit, str)
+        or not isinstance(runtime_snapshot, str)
+        or not isinstance(scope, str)
+    ):
+        raise GeneratedBlockError("server_scope signer_user_unit operation is invalid")
+    commands = "\n".join(
+        'saturnin check command "$SATURNIN_HOME/'
+        f'{executable} {action}" --execute --task <task-id>'
+        for action in actions
+    )
+    return (
+        f"This interface is restricted to the `{scope}`-scoped `{unit}` unit.\n\n"
+        f"```bash\n{commands}\n```\n\n"
+        "Install is retry-safe and restores the prior signer definition and state "
+        "after a partial failure. Status performs no mutation. Uninstall removes "
+        f"only the signer definition, enablement link, and pinned runtime snapshot "
+        f"`{runtime_snapshot}`, leaves encrypted credentials in place, and is safe "
+        "to repeat."
+    )
+
+
+def _attestation_boundary(config: Config) -> str:
+    policy = config.governance.get("review", {}).get("attestation", {})
+    if (
+        policy.get("required") is not True
+        or policy.get("execution_scoped") is not True
+        or policy.get("legacy_migration") != "rotation-manifest-v2-required"
+        or not isinstance(policy.get("service_socket"), str)
+    ):
+        raise GeneratedBlockError(
+            "governance review.attestation must require execution-scoped service signing"
+        )
+    ttl = policy.get("session_ttl_seconds")
+    if not isinstance(ttl, int) or ttl <= 0:
+        raise GeneratedBlockError(
+            "governance review.attestation.session_ttl_seconds must be positive"
+        )
+    return "\n".join(
+        [
+            "During autonomous operation, the master and previous keys are loaded only by "
+            "`saturnin-attestation.service` in its private mount, network, "
+            "runtime, and credential namespace. Supervisor and worker units do "
+            "not load either credential. Explicit owner lifecycle commands may "
+            "decrypt them in bounded process memory only while the signer and "
+            "supervisors are stopped.",
+            "",
+            "The signer remains disabled until the owner rotates the master and "
+            "seals a version-2 migration manifest. That manifest enumerates the "
+            "exact immutable historical attestations, records a signed ledger "
+            "digest and timestamp cutoff, and never permits a legacy role-scoped "
+            "signature to authorize a new record.",
+            "",
+            "For a routed reviewer task, the trusted launcher asks the service "
+            "for a session bound to task, role, author, subject, immutable head "
+            "or issue digest, a random nonce, and the launched process identity. "
+            f"The session expires after {ttl} seconds, accepts one signature, "
+            "and verifies that the connecting process descends from that exact "
+            "launch. Its Unix socket is bind-mounted only into that reviewer's "
+            "sandbox; `/run` and `/proc` remain isolated for all workers.",
+            "",
+            "No worker receives a master or derived key in argv, environment, "
+            "files, descriptors, logs, board data, or Git. Ordinary workers do "
+            "not receive the session socket. The signed ledger retains only "
+            "scope, key identifier, nonce, and signature, never plaintext key "
+            "material.",
+        ]
+    )
 
 
 def _roles_table(config: Config) -> str:
@@ -262,6 +417,10 @@ GENERATORS: dict[str, Callable[[Config], str]] = {
     "server-prerequisites": _server_prerequisites,
     "pr-review-flow": _pr_review_flow,
     "issue-review-flow": _issue_review_flow,
+    "credential-admin-setup": _credential_admin_setup,
+    "credential-admin-recovery": _credential_admin_recovery,
+    "signer-unit-interface": _signer_unit_interface,
+    "attestation-boundary": _attestation_boundary,
     "roles": _roles_table,
     "routing": _routing_table,
     "backlog": _backlog_table,

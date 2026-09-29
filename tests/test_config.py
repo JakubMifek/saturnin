@@ -4,9 +4,10 @@ import re
 import subprocess
 from pathlib import Path
 
+import pytest
 import yaml
 
-from saturnin.config import find_root
+from saturnin.config import ConfigError, default_config, find_root
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 
@@ -43,6 +44,37 @@ def test_find_root_preserves_saturnin_home_precedence(
     monkeypatch.setenv("SATURNIN_HOME", str(explicit))
 
     assert find_root(tmp_path) == explicit
+
+
+def test_default_config_uses_packaged_governance_for_signer(
+    tmp_path: Path, monkeypatch
+) -> None:
+    (tmp_path / "policies").mkdir()
+    (tmp_path / "policies" / "governance.yaml").write_text(
+        "review: {source: mutable}\n", encoding="utf-8"
+    )
+    monkeypatch.setenv("SATURNIN_HOME", str(tmp_path))
+    monkeypatch.setenv("SATURNIN_SEALED_GOVERNANCE", "runtime-archive")
+    monkeypatch.setattr(
+        "saturnin.config.pkgutil.get_data",
+        lambda package, resource: b"review: {source: sealed}\n",
+    )
+
+    assert default_config().governance["review"]["source"] == "sealed"
+
+
+@pytest.mark.parametrize("content", [None, b"[]\n"])
+def test_default_config_rejects_invalid_packaged_governance(
+    tmp_path: Path, monkeypatch, content: bytes | None
+) -> None:
+    monkeypatch.setenv("SATURNIN_HOME", str(tmp_path))
+    monkeypatch.setenv("SATURNIN_SEALED_GOVERNANCE", "runtime-archive")
+    monkeypatch.setattr(
+        "saturnin.config.pkgutil.get_data", lambda package, resource: content
+    )
+
+    with pytest.raises(ConfigError, match="sealed governance policy"):
+        default_config()
 
 
 def test_ci_runs_untrusted_tests_only_for_push_and_pull_request() -> None:

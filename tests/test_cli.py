@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import errno
 import json
+import os
+import secrets
 import subprocess
 import threading
 from datetime import datetime, timedelta, timezone
@@ -19,8 +21,8 @@ from saturnin.discovery import InboundIssue, IssueDiscovery
 from saturnin.escalation import submit_task_escalation
 from saturnin.launcher import AgentLauncher, LauncherError
 from saturnin.review import (
+    execution_scoped_review_attestation_key,
     issue_content_digest,
-    review_attestation_signing_key,
     sign_review_attestation,
 )
 from saturnin.routing import Router
@@ -38,8 +40,19 @@ def run(capsys: pytest.CaptureFixture[str], *argv: str) -> tuple[int, str]:
 
 
 def review_attestation_args(**kwargs: str) -> tuple[str, str]:
+    task_id = "T-20260924-cli"
+    nonce = secrets.token_hex(32)
+    attestation_id = f"{task_id}:{nonce}"
     attestation = sign_review_attestation(
-        key=review_attestation_signing_key(Config.load(), kwargs["reviewer"]),
+        key=execution_scoped_review_attestation_key(
+            os.environ["SATURNIN_REVIEW_ATTESTATION_KEY"],
+            kwargs["reviewer"],
+            task_id,
+            nonce,
+            kwargs["subject"],
+            kwargs.get("head_sha", ""),
+            kwargs.get("issue_digest", ""),
+        ),
         subject=kwargs["subject"],
         kind=kwargs["kind"],
         author=kwargs["author"],
@@ -48,6 +61,7 @@ def review_attestation_args(**kwargs: str) -> tuple[str, str]:
         head_sha=kwargs.get("head_sha", ""),
         issue_digest=kwargs.get("issue_digest", ""),
         destination_repo=kwargs.get("repo", ""),
+        attestation_id=attestation_id,
     )
     return ("--attestation", attestation)
 

@@ -80,3 +80,9 @@ automations:
     path: scripts/install_user_units.sh
     owner_role: ops-worker
     triggers: [systemd, timer, schedule, units]
+
+  - id: install-attestation-unit
+    description: Atomically install, inspect, or remove only the user-scoped attestation signer.
+    path: scripts/install_attestation_unit.sh
+    owner_role: ops-worker
+    triggers: [systemd, attestation, signer, unit]
