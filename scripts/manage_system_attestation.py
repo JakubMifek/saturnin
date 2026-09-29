@@ -61,11 +61,11 @@ FILES = {
 OBSOLETE_FILES = ("usr/lib/systemd/system/saturnin-attestation.socket",)
 EXPECTED_SHA256 = {
     "src/saturnin/system_attestation.py":
-        "89840e3464c339a09275a32d9c43d0c63e50cbe9e79ac9249fb2102af103f46f",
+        "e04c9c30dbb1731e35f7eea3ec6f556068a3ef6f39861c3bba8868ba26f9f941",
     "config/attestation.json":
-        "203d56027f000b87c4a14e972e97655151986969c6d8c0e96fa8ac4c6416a2d1",
+        "c2a098d610d8f0f20e8e4c790455f039aec2ef4f9d0e904a6945834c3264105c",
     "systemd/system/saturnin-attestation.service":
-        "273be113a975986c4f3fdead4c03da7f38d9e3e6559047482f467c8854234a4c",
+        "487fe6e1694bbb15d1ab889e141f370de25a01d99cb70bc84fb88bbed1b398fc",
     "systemd/system/saturnin-attestation.sysusers":
         "0059e8a1ead80a9b47399f04a1430a1cecf7b70479b224dc8efe084e27fa2187",
     "systemd/system/saturnin-attestation.tmpfiles":
@@ -293,6 +293,19 @@ def _credential_paths(root: Path) -> tuple[Path, Path]:
 
 def _archive_path(root: Path) -> Path:
     return _credential_paths(root)[0].with_name("archive.keys.cred")
+
+
+def _github_token_path(root: Path) -> Path:
+    return _credential_paths(root)[0].with_name("github.token.cred")
+
+
+def _validate_github_token(value: bytes) -> None:
+    if (
+        not 20 <= len(value) <= 512
+        or not value.isascii()
+        or any(character in b" \t\r\n\v\f" for character in value)
+    ):
+        raise InstallError("protected GitHub credential is invalid")
 
 
 def _rollback_path(root: Path) -> Path:
@@ -592,19 +605,49 @@ def _open_legacy(root: Path) -> list[Source] | None:
 def _migrate_or_provision(root: Path, runner: Runner) -> list[Path]:
     current, previous = _credential_paths(root)
     archive = _archive_path(root)
+    github_token = _github_token_path(root)
+    created: list[Path] = []
+    if root != Path("/") and not github_token.exists():
+        github_token.parent.mkdir(parents=True, exist_ok=True)
+        _atomic_credentials(
+            root,
+            {
+                github_token: _encode_blob_checked(
+                    runner, b"production-shape-test-token", "github.token"
+                )
+            },
+            runner,
+            restart=False,
+        )
+        created.append(github_token)
+    if not github_token.is_file() or github_token.is_symlink():
+        raise InstallError(
+            "root-provisioned protected GitHub credential is required"
+        )
+    token_metadata = github_token.lstat()
+    if (
+        not stat.S_ISREG(token_metadata.st_mode)
+        or token_metadata.st_nlink != 1
+        or stat.S_IMODE(token_metadata.st_mode) != 0o600
+        or (root == Path("/") and token_metadata.st_uid != 0)
+    ):
+        raise InstallError("protected GitHub credential file is unsafe")
+    _validate_github_token(
+        runner.decrypt(github_token.read_bytes(), "github.token")
+    )
     existing = (current.exists(), previous.exists())
     if any(existing):
         if not all(existing):
             raise InstallError("partial system credential state is forbidden")
         if archive.exists():
-            return []
+            return created
         values = {
             archive: _encode_blob_checked(
                 runner, _encode_archive([]), "archive.keys"
             ),
         }
         _atomic_credentials(root, values, runner, restart=False)
-        return [archive]
+        return [*created, archive]
     if archive.exists():
         raise InstallError("partial system credential state is forbidden")
     opened = _open_legacy(root)
@@ -635,7 +678,7 @@ def _migrate_or_provision(root: Path, runner: Runner) -> list[Path]:
     }
     _atomic_credentials(root, values, runner, restart=False)
     current_plain = previous_plain = b""
-    return [current, previous, archive]
+    return [*created, current, previous, archive]
 
 
 def status(root: Path, runner: Runner | None = None) -> None:
@@ -672,6 +715,11 @@ def status(root: Path, runner: Runner | None = None) -> None:
     current, previous = _credential_paths(root)
     archive = _archive_path(root)
     codec = runner or (SystemRunner() if root == Path("/") else FakeRunner())
+    _validate_github_token(
+        codec.decrypt(
+            _read_credential(root, _github_token_path(root)), "github.token"
+        )
+    )
     current_plain = codec.decrypt(_read_credential(root, current), "current.key")
     previous_plain = codec.decrypt(_read_credential(root, previous), "previous.key")
     archive_plain = _decode_archive(

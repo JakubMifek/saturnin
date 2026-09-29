@@ -26,6 +26,7 @@ from saturnin.review import (
     sign_review_attestation,
 )
 from saturnin.routing import Router
+from saturnin.system_attestation import SystemAttestationError
 from saturnin.worktrees import CleanupPlan, WorktreeManager
 from saturnin.worker_callbacks import (
     CALLBACKS_FILE,
@@ -1245,9 +1246,23 @@ def test_sandboxed_worker_fails_closed_for_unsupported_stateful_command(
     assert not (callback_dir / CALLBACKS_FILE).exists()
 
 
-def test_review_gate_flow(home: Path, capsys: pytest.CaptureFixture[str]) -> None:
+def test_review_gate_flow(
+    home: Path, capsys: pytest.CaptureFixture[str],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     subject = "JakubMifek/saturnin#42"
     head_sha = "a" * 40
+    live = [False]
+
+    def protected_decision(**_kwargs):
+        if not live[0]:
+            raise SystemAttestationError("no current allowed approval")
+        return {
+            "allowed": True, "head_sha": head_sha, "review_id": 91,
+            "reviewer_identity": "review-bot", "nonce": "d" * 64,
+        }
+
+    monkeypatch.setattr("saturnin.cli.request_action", protected_decision)
     assert (
         run(
             capsys,
@@ -1265,6 +1280,7 @@ def test_review_gate_flow(home: Path, capsys: pytest.CaptureFixture[str]) -> Non
         )[0]
         == 2
     )
+    live[0] = True
     run(
         capsys,
         "review",
@@ -1315,6 +1331,13 @@ def test_review_cli_resolves_omitted_pr_head(
     monkeypatch.setattr(
         "saturnin.cli.run_gh",
         lambda args: json.dumps({"head": {"sha": head_sha}}),
+    )
+    monkeypatch.setattr(
+        "saturnin.cli.request_action",
+        lambda **_kwargs: {
+            "allowed": True, "head_sha": head_sha, "review_id": 91,
+            "reviewer_identity": "review-bot", "nonce": "d" * 64,
+        },
     )
 
     assert run(
@@ -1684,6 +1707,12 @@ def test_review_merge_blocks_when_pr_head_changed_after_approval(
         raise AssertionError(f"unexpected gh call: {args}")
 
     monkeypatch.setattr("saturnin.cli.run_gh", fake_run_gh)
+    monkeypatch.setattr(
+        "saturnin.cli.request_action",
+        lambda **_kwargs: (_ for _ in ()).throw(
+            SystemAttestationError("exact head has no current allowed approval")
+        ),
+    )
 
     code, out = run(
         capsys,
@@ -1697,7 +1726,7 @@ def test_review_merge_blocks_when_pr_head_changed_after_approval(
     )
 
     assert code == 2
-    assert "no review records match the current head SHA" in out
+    assert "exact head has no current allowed approval" in out
     assert calls == [["api", "repos/JakubMifek/saturnin/pulls/7"]]
 
 
@@ -1743,6 +1772,18 @@ def test_review_merge_uses_expected_head_precondition(
 
     monkeypatch.setattr("saturnin.cli.run_gh", fake_run_gh)
 
+    def protected_merge(**kwargs):
+        assert kwargs["expected_head"] == head_sha
+        assert kwargs["merge_method"] == "squash"
+        return {
+            "allowed": True, "head_sha": head_sha, "review_id": 91,
+            "reviewer_identity": "review-bot", "nonce": "d" * 64,
+            "merged": True, "message": "Pull Request successfully merged",
+            "sha": "d" * 40,
+        }
+
+    monkeypatch.setattr("saturnin.cli.request_action", protected_merge)
+
     code, out = run(
         capsys,
         "review",
@@ -1758,7 +1799,7 @@ def test_review_merge_uses_expected_head_precondition(
 
     assert code == 0
     assert "successfully merged" in out
-    assert calls[1][:4] == ["api", "--method", "PUT", "repos/JakubMifek/saturnin/pulls/8/merge"]
+    assert calls == [["api", "repos/JakubMifek/saturnin/pulls/8"]]
 
 
 def test_review_submit_issue_uses_reviewed_title_and_body_digest(

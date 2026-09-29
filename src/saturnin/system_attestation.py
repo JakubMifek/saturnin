@@ -19,6 +19,7 @@ import json
 import os
 import pwd
 import re
+import secrets
 import signal
 import socket
 import sqlite3
@@ -31,7 +32,7 @@ import urllib.error
 import urllib.parse
 import urllib.request
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Callable
 
@@ -115,6 +116,10 @@ class ServiceConfig:
     maximum_issue_marker_ttl_seconds: int = 3600
     authorization_limit: int = 30
     authorization_window_seconds: int = 60
+    pr_base_refs: tuple[str, ...] = ("main",)
+    required_check_runs: tuple[str, ...] = ("test",)
+    action_ttl_seconds: int = 60
+    protected_actor_login: str = "saturnin-merge-bot"
 
     @classmethod
     def load(cls, path: Path = CONFIG_PATH) -> "ServiceConfig":
@@ -126,6 +131,8 @@ class ServiceConfig:
             "repositories", "pr_reviewers", "issue_reviewers", "allowed_verdicts",
             "github_api", "request_timeout_seconds", "maximum_issue_marker_ttl_seconds",
             "authorization_limit", "authorization_window_seconds",
+            "pr_base_refs", "required_check_runs", "action_ttl_seconds",
+            "protected_actor_login",
         }:
             raise SystemAttestationError("service configuration schema is invalid")
         api = raw.get("github_api", "https://api.github.com")
@@ -150,6 +157,7 @@ class ServiceConfig:
             marker_ttl = int(raw.get("maximum_issue_marker_ttl_seconds", 3600))
             authorization_limit = int(raw.get("authorization_limit", 30))
             authorization_window = int(raw.get("authorization_window_seconds", 60))
+            action_ttl = int(raw.get("action_ttl_seconds", 60))
         except (TypeError, ValueError) as exc:
             raise SystemAttestationError("service configuration bounds are invalid") from exc
         if (
@@ -157,14 +165,40 @@ class ServiceConfig:
             or not 0 < marker_ttl <= 3600
             or not 0 < authorization_limit <= 1000
             or not 0 < authorization_window <= 3600
+            or not 5 <= action_ttl <= 300
         ):
             raise SystemAttestationError("service configuration bounds are invalid")
+        base_refs = raw.get("pr_base_refs", ["main"])
+        check_runs = raw.get("required_check_runs", ["test"])
+        protected_actor = str(
+            raw.get("protected_actor_login", "saturnin-merge-bot")
+        ).casefold()
+        if (
+            not isinstance(base_refs, list)
+            or not isinstance(check_runs, list)
+            or not base_refs
+            or not check_runs
+            or any(
+                not isinstance(value, str)
+                or not re.fullmatch(r"[A-Za-z0-9._/-]{1,128}", value)
+                for value in [*base_refs, *check_runs]
+            )
+            or len(set(base_refs)) != len(base_refs)
+            or len(set(check_runs)) != len(check_runs)
+            or not re.fullmatch(r"[A-Za-z0-9](?:[A-Za-z0-9-]{0,37})", protected_actor)
+            or protected_actor in pr_reviewers
+        ):
+            raise SystemAttestationError("protected action policy is invalid")
         return cls(
             repositories, pr_reviewers, issue_reviewers, verdicts,
             request_timeout_seconds=timeout,
             maximum_issue_marker_ttl_seconds=marker_ttl,
             authorization_limit=authorization_limit,
             authorization_window_seconds=authorization_window,
+            pr_base_refs=tuple(base_refs),
+            required_check_runs=tuple(check_runs),
+            action_ttl_seconds=action_ttl,
+            protected_actor_login=protected_actor,
         )
 
 
@@ -177,14 +211,22 @@ class GitHub:
         token: str = "",
         transport: Callable[[str], Any] | None = None,
         request_transport: Callable[[urllib.request.Request, float], Any] | None = None,
+        mutation_transport: Callable[[str, str, dict[str, Any]], Any] | None = None,
     ) -> None:
         self.config = config
         self.token = token
         self.transport = transport
         self.request_transport = request_transport or _open_without_redirects
+        self.mutation_transport = mutation_transport
 
     def get(self, path: str) -> Any:
-        if not re.fullmatch(r"/repos/[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+/[A-Za-z0-9?&=._/-]+", path):
+        if not (
+            path == "/user"
+            or re.fullmatch(
+                r"/repos/[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+(?:/[A-Za-z0-9?&=._/-]+)?",
+                path,
+            )
+        ):
             raise SystemAttestationError("GitHub API path is invalid")
         if ".." in path or "//" in path or "\\" in path:
             raise SystemAttestationError("GitHub API path is invalid")
@@ -228,6 +270,70 @@ class GitHub:
             if len(values) < 100:
                 return result
         raise SystemAttestationError("GitHub authorization pagination limit exceeded")
+
+    def check_runs(self, repo: str, head: str) -> list[dict[str, Any]]:
+        result: list[dict[str, Any]] = []
+        for page in range(1, 11):
+            value = self.get(
+                f"/repos/{repo}/commits/{head}/check-runs?per_page=100&page={page}"
+            )
+            if (
+                not isinstance(value, dict)
+                or type(value.get("total_count")) is not int
+                or not isinstance(value.get("check_runs"), list)
+                or len(value["check_runs"]) > 100
+                or any(not isinstance(item, dict) for item in value["check_runs"])
+            ):
+                raise SystemAttestationError("GitHub check-runs response is malformed")
+            result.extend(value["check_runs"])
+            if len(value["check_runs"]) < 100:
+                if len(result) != value["total_count"]:
+                    raise SystemAttestationError(
+                        "GitHub check-runs pagination is inconsistent"
+                    )
+                return result
+        raise SystemAttestationError("GitHub check-runs pagination limit exceeded")
+
+    def put(self, path: str, payload: dict[str, Any]) -> Any:
+        if not re.fullmatch(
+            r"/repos/[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+/pulls/[1-9][0-9]*/merge",
+            path,
+        ):
+            raise SystemAttestationError("GitHub mutation path is invalid")
+        if self.mutation_transport:
+            return self.mutation_transport("PUT", path, payload)
+        encoded = _canonical(payload)
+        request = urllib.request.Request(
+            self.config.github_api + path,
+            data=encoded,
+            method="PUT",
+            headers={
+                "Accept": "application/vnd.github+json",
+                "Content-Type": "application/json",
+                "User-Agent": "saturnin-protected-merge/1",
+                "Authorization": f"Bearer {self.token}",
+            },
+        )
+        if not self.token:
+            raise SystemAttestationError("protected GitHub credential is unavailable")
+        try:
+            with self.request_transport(
+                request, self.config.request_timeout_seconds
+            ) as response:
+                if response.geturl() != self.config.github_api + path:
+                    raise SystemAttestationError("GitHub redirect was refused")
+                body = response.read(MAX_RESPONSE + 1)
+        except (OSError, urllib.error.URLError):
+            raise SystemAttestationError("GitHub protected merge failed") from None
+        if len(body) > MAX_RESPONSE:
+            raise SystemAttestationError("GitHub response is oversized")
+        try:
+            value = json.loads(body)
+        except json.JSONDecodeError as exc:
+            raise SystemAttestationError("GitHub response is malformed") from exc
+        if not isinstance(value, dict):
+            raise SystemAttestationError("GitHub response is malformed")
+        return value
 
 
 class _RejectRedirects(urllib.request.HTTPRedirectHandler):
@@ -280,6 +386,11 @@ class DedicatedSigner:
                 "CREATE TABLE IF NOT EXISTS consumed ("
                 "evidence_id TEXT PRIMARY KEY, scope_hash TEXT NOT NULL, "
                 "attestation TEXT NOT NULL, created_at TEXT NOT NULL)"
+            )
+            db.execute(
+                "CREATE TABLE IF NOT EXISTS actions ("
+                "nonce TEXT PRIMARY KEY, scope_hash TEXT NOT NULL, "
+                "result TEXT NOT NULL, created_at TEXT NOT NULL)"
             )
 
     def _db(self) -> sqlite3.Connection:
@@ -383,6 +494,217 @@ class DedicatedSigner:
             ):
                 return {"status": "verified", "key_state": key_state}
         raise SystemAttestationError("attestation signature does not match")
+
+    def action(self, request: dict[str, Any]) -> dict[str, Any]:
+        required = {
+            "action", "operation", "repository", "number", "destination_repo",
+            "expected_head", "merge_method", "nonce",
+        }
+        if (
+            not isinstance(request, dict)
+            or set(request) != required
+            or request["action"] != "decide"
+            or request["operation"] not in {"gate", "merge"}
+            or not _NONCE.fullmatch(str(request["nonce"]))
+            or request["merge_method"] not in {"merge", "squash", "rebase"}
+        ):
+            raise SystemAttestationError("protected action request schema is invalid")
+        repo = _repo(request["repository"])
+        destination = _repo(request["destination_repo"])
+        number = request["number"]
+        _subject(repo, number)
+        if repo not in self.config.repositories or destination != repo:
+            raise SystemAttestationError("protected action repository is not allowed")
+        expected_head = str(request["expected_head"]).casefold()
+        if not _SHA.fullmatch(expected_head):
+            raise SystemAttestationError("protected action head is invalid")
+        scope = {
+            "operation": request["operation"],
+            "repository": repo,
+            "number": number,
+            "destination_repo": destination,
+            "expected_head": expected_head,
+            "merge_method": request["merge_method"],
+            "nonce": request["nonce"],
+        }
+        scope_hash = hashlib.sha256(_canonical(scope)).hexdigest()
+        with self.lock, closing(self._db()) as db, db:
+            db.execute("BEGIN IMMEDIATE")
+            old = db.execute(
+                "SELECT scope_hash, result FROM actions WHERE nonce=?",
+                (request["nonce"],),
+            ).fetchone()
+            if old:
+                db.execute("COMMIT")
+                if hmac.compare_digest(old[0], scope_hash):
+                    prior = json.loads(old[1])
+                    if (
+                        prior.get("operation") == "gate"
+                        and _iso(prior.get("expires_at")) <= self.now()
+                    ):
+                        raise SystemAttestationError(
+                            "protected action decision is expired"
+                        )
+                    return prior
+                raise SystemAttestationError("protected action nonce was already consumed")
+            evidence = self._live_pr_action(repo, number, destination, expected_head)
+            decision = {
+                "allowed": True,
+                **scope,
+                **evidence,
+                "expires_at": (
+                    self.now() + timedelta(seconds=self.config.action_ttl_seconds)
+                ).isoformat(),
+            }
+            if request["operation"] == "merge":
+                repeated = self._live_pr_action(
+                    repo, number, destination, expected_head
+                )
+                if repeated != evidence:
+                    raise SystemAttestationError(
+                        "GitHub state changed during protected merge authorization"
+                    )
+                merged = self.github.put(
+                    f"/repos/{repo}/pulls/{number}/merge",
+                    {"sha": expected_head, "merge_method": request["merge_method"]},
+                )
+                decision.update({
+                    "merged": merged.get("merged") is True,
+                    "message": str(merged.get("message", "")),
+                    "sha": str(merged.get("sha", "")),
+                })
+                if not decision["merged"]:
+                    raise SystemAttestationError("GitHub rejected protected merge")
+            signed = dict(decision)
+            signed["signature"] = hmac.new(
+                self.current_key, _canonical(decision), hashlib.sha256
+            ).hexdigest()
+            serialized = json.dumps(signed, sort_keys=True, separators=(",", ":"))
+            db.execute(
+                "INSERT INTO actions VALUES (?, ?, ?, ?)",
+                (request["nonce"], scope_hash, serialized, self.now().isoformat()),
+            )
+            db.execute("COMMIT")
+            return signed
+
+    def _live_pr_action(
+        self, repo: str, number: int, destination: str, expected_head: str
+    ) -> dict[str, Any]:
+        actor = self._protected_actor(repo)
+        evidence = self._pr(repo, number, _subject(repo, number), destination)
+        if evidence["head_sha"] != expected_head:
+            raise SystemAttestationError("pull request head changed")
+        pull = self.github.get(f"/repos/{repo}/pulls/{number}")
+        if not isinstance(pull, dict):
+            raise SystemAttestationError("pull request response is malformed")
+        base = pull.get("base") or {}
+        base_repo = base.get("repo") or {}
+        base_sha = str(base.get("sha", "")).casefold()
+        if (
+            str(base_repo.get("full_name", "")).casefold() != destination
+            or base.get("ref") not in self.config.pr_base_refs
+            or not _SHA.fullmatch(base_sha)
+            or pull.get("state") != "open"
+            or pull.get("draft") is not False
+            or pull.get("mergeable") is not True
+            or pull.get("mergeable_state") not in {"clean", "has_hooks"}
+        ):
+            raise SystemAttestationError("pull request is not currently mergeable")
+        protection = self.github.get(
+            f"/repos/{repo}/branches/{base['ref']}/protection"
+        )
+        if not isinstance(protection, dict):
+            raise SystemAttestationError("branch protection response is malformed")
+        review_rule = protection.get("required_pull_request_reviews")
+        status_rule = protection.get("required_status_checks")
+        bypass = (
+            review_rule.get("bypass_pull_request_allowances")
+            if isinstance(review_rule, dict) else None
+        )
+        contexts = set()
+        if isinstance(status_rule, dict):
+            contexts.update(
+                value for value in status_rule.get("contexts", [])
+                if isinstance(value, str)
+            )
+            contexts.update(
+                value.get("context") for value in status_rule.get("checks", [])
+                if isinstance(value, dict) and isinstance(value.get("context"), str)
+            )
+        if (
+            not isinstance(review_rule, dict)
+            or review_rule.get("dismiss_stale_reviews") is not True
+            or type(review_rule.get("required_approving_review_count")) is not int
+            or review_rule["required_approving_review_count"] < 1
+            or not isinstance(bypass, dict)
+            or any(bypass.get(kind) for kind in ("users", "teams", "apps"))
+            or not isinstance(status_rule, dict)
+            or status_rule.get("strict") is not True
+            or not set(self.config.required_check_runs) <= contexts
+        ):
+            raise SystemAttestationError(
+                "branch protection does not enforce the protected action contract"
+            )
+        if evidence["author"].casefold() == (
+            "github:" + evidence["reviewer_identity"]
+        ).casefold() or evidence["reviewer_identity"] == actor:
+            raise SystemAttestationError("reviewer is not independent")
+        checks = self.github.check_runs(repo, expected_head)
+        accepted: list[dict[str, Any]] = []
+        check_ids: set[int] = set()
+        for check in checks:
+            name = check.get("name")
+            if name not in self.config.required_check_runs:
+                continue
+            check_id = check.get("id")
+            if type(check_id) is not int or check_id in check_ids:
+                raise SystemAttestationError("required check result is ambiguous")
+            check_ids.add(check_id)
+            accepted.append(check)
+        if (
+            {str(value.get("name")) for value in accepted}
+            != set(self.config.required_check_runs)
+            or any(
+            value.get("status") != "completed" or value.get("conclusion") != "success"
+                for value in accepted
+            )
+        ):
+            raise SystemAttestationError("required checks are not green")
+        return {
+            "head_sha": evidence["head_sha"],
+            "base_ref": str(base["ref"]),
+            "base_sha": base_sha,
+            "reviewer_identity": evidence["reviewer_identity"],
+            "review_id": int(evidence["authorization_evidence_id"].rsplit(":", 1)[1]),
+            "review_state": evidence["verdict"],
+            "check_runs": sorted(
+                f"{value['name']}:{value['id']}" for value in accepted
+            ),
+            "protected_actor": actor,
+            "protection_hash": hashlib.sha256(_canonical(protection)).hexdigest(),
+        }
+
+    def _protected_actor(self, repo: str) -> str:
+        if not self.github.token:
+            raise SystemAttestationError("protected GitHub credential is unavailable")
+        actor = self.github.get("/user")
+        repository = self.github.get(f"/repos/{repo}")
+        permissions = repository.get("permissions") if isinstance(repository, dict) else None
+        if (
+            not isinstance(actor, dict)
+            or str(actor.get("login", "")).casefold()
+            != self.config.protected_actor_login
+            or actor.get("type") != "User"
+            or not isinstance(repository, dict)
+            or str(repository.get("full_name", "")).casefold() != repo
+            or not isinstance(permissions, dict)
+            or permissions.get("push") is not True
+            or permissions.get("admin") is not False
+        ):
+            raise SystemAttestationError(
+                "protected GitHub credential identity or permissions are invalid"
+            )
+        return self.config.protected_actor_login
 
     @staticmethod
     def _v2_unsigned(payload: dict[str, Any]) -> dict[str, Any]:
@@ -738,6 +1060,49 @@ def request_attestation(
     return response["attestation"]
 
 
+def request_action(
+    *, operation: str, repository: str, number: int, destination_repo: str,
+    expected_head: str, merge_method: str = "squash", nonce: str | None = None,
+    socket_path: Path = SOCKET_PATH, expected_uid: int | None = None,
+) -> dict[str, Any]:
+    action_nonce = nonce or secrets.token_hex(32)
+    response = _socket_request(
+        {
+            "action": "decide", "operation": operation,
+            "repository": repository, "number": number,
+            "destination_repo": destination_repo, "expected_head": expected_head,
+            "merge_method": merge_method, "nonce": action_nonce,
+        },
+        socket_path=socket_path,
+        expected_uid=expected_uid,
+    )
+    if set(response) == {"error"}:
+        raise SystemAttestationError(str(response["error"]))
+    required = {
+        "allowed", "operation", "repository", "number", "destination_repo",
+        "expected_head", "merge_method", "nonce", "head_sha", "base_ref",
+        "base_sha",
+        "reviewer_identity", "review_id", "review_state", "check_runs",
+        "expires_at", "signature",
+    }
+    if not isinstance(response, dict) or not required <= set(response):
+        raise SystemAttestationError("protected signer decision is malformed")
+    if (
+        response["allowed"] is not True
+        or response["operation"] != operation
+        or response["repository"] != repository.casefold()
+        or response["destination_repo"] != destination_repo.casefold()
+        or response["number"] != number
+        or response["expected_head"] != expected_head.casefold()
+        or response["head_sha"] != expected_head.casefold()
+        or response["merge_method"] != merge_method
+        or response["nonce"] != action_nonce
+        or _iso(response["expires_at"]) <= datetime.now(timezone.utc)
+    ):
+        raise SystemAttestationError("protected signer denied the action")
+    return response
+
+
 def verify_attestation(
     attestation: str,
     *,
@@ -975,7 +1340,13 @@ def serve() -> None:
     current = _credential("current.key")
     previous = _credential("previous.key", optional=True) or None
     archive = _archive_credential(_credential("archive.keys"))
-    token = _credential("github.token", optional=True).decode()
+    token = _credential("github.token").decode()
+    if (
+        not 20 <= len(token) <= 512
+        or not token.isascii()
+        or any(character.isspace() for character in token)
+    ):
+        raise SystemAttestationError("protected GitHub credential is invalid")
     signer = DedicatedSigner(
         config, GitHub(config, token), current, previous, archive_keys=archive
     )
@@ -1038,6 +1409,24 @@ def serve() -> None:
                     ).hexdigest()
                     outcome = "authorized"
                     response = {"attestation": attestation}
+                elif request.get("action") == "decide":
+                    if not limiter.allow(peer_uid):
+                        outcome = "rate_limited"
+                        raise SystemAttestationError("authorization rate limit exceeded")
+                    response = signer.action(request)
+                    evidence_hash = hashlib.sha256(
+                        f"github:review:{response['review_id']}".encode()
+                    ).hexdigest()
+                    scope_hash = hashlib.sha256(
+                        _canonical({
+                            key: response[key]
+                            for key in (
+                                "operation", "repository", "number",
+                                "destination_repo", "head_sha", "nonce",
+                            )
+                        })
+                    ).hexdigest()
+                    outcome = f"{response['operation']}_authorized"
                 elif (
                     set(request) == {"action", "attestation", "historical"}
                     and request["action"] == "verify"

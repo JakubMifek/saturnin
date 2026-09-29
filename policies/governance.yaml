@@ -89,6 +89,11 @@ review:
     listener_creator: service-process
     runtime: /usr/lib/saturnin-attestation/system_attestation.py
     state: /var/lib/saturnin-attestation
+    live_action_authority: protected-signer-only
+    live_action_ttl_seconds: 60
+    required_check_runs: [test]
+    protected_merge_credential: /etc/saturnin-attestation/github.token.cred
+    protected_merge_expected_head: true
     role_scoped: true
     execution_scoped: false
     legacy_migration: reviewed-current-previous-keys-to-root-service

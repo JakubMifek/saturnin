@@ -23,7 +23,11 @@ import yaml
 from . import escalation as escalation_mod
 from . import telemetry
 from .automation import AutomationLibrary
-from .system_attestation import SystemAttestationError, request_attestation
+from .system_attestation import (
+    SystemAttestationError,
+    request_action,
+    request_attestation,
+)
 from .board import CONTAINER_KINDS, TRANSITIONS, Board, BoardError, Task
 from .checkpoints import Checkpoint, CheckpointStore
 from .config import Config, ConfigError, find_root, load_yaml
@@ -1875,46 +1879,32 @@ def _run_review(args: argparse.Namespace, config: Config, as_json: bool) -> int:
     if args.review_command == "merge":
         subject_repo, number = _parse_pr_subject(args.subject, repo=args.repo)
         head_sha = _current_pr_head(args.subject, args.repo)
-        governance = Governance(config)
-        records = ledger.for_subject(args.subject, "pr")
-        decision = governance.merge_allowed(
-            repo=args.repo,
-            author=args.author,
-            records=records,
-            head_sha=head_sha,
-        )
-        if not decision.allowed:
+        try:
+            response = request_action(
+                operation="merge",
+                repository=subject_repo,
+                number=int(number),
+                destination_repo=args.repo,
+                expected_head=head_sha,
+                merge_method=args.method,
+            )
+        except (SystemAttestationError, OSError) as exc:
             _emit(
-                {"allowed": False, "reasons": decision.reasons, "head_sha": head_sha},
+                {"allowed": False, "reasons": [str(exc)], "head_sha": head_sha},
                 as_json,
-                "BLOCKED: " + "; ".join(decision.reasons),
+                "BLOCKED: " + str(exc),
             )
             return 2
-        try:
-            response = json.loads(
-                run_gh(
-                    [
-                        "api",
-                        "--method",
-                        "PUT",
-                        f"repos/{subject_repo}/pulls/{number}/merge",
-                        "-f",
-                        f"sha={head_sha}",
-                        "-f",
-                        f"merge_method={args.method}",
-                    ]
-                )
-            )
-        except (MirrorError, json.JSONDecodeError) as exc:
-            raise ReviewError(f"governed merge failed for {args.subject}: {exc}") from exc
         _emit(
             {
-                "allowed": True,
-                "reasons": decision.reasons,
+                "allowed": response["allowed"],
                 "head_sha": head_sha,
                 "merged": bool(response.get("merged")),
                 "message": str(response.get("message", "")),
                 "sha": str(response.get("sha", "")),
+                "review_id": response["review_id"],
+                "reviewer_identity": response["reviewer_identity"],
+                "decision_nonce": response["nonce"],
             },
             as_json,
             str(response.get("message", "merge attempted")),
@@ -2008,18 +1998,41 @@ def _run_review(args: argparse.Namespace, config: Config, as_json: bool) -> int:
             args.subject,
             getattr(args, "repo", None),
         )
+    if args.kind == "pr":
+        subject_repo, number = _parse_pr_subject(args.subject, repo=args.repo)
+        try:
+            live = request_action(
+                operation="gate",
+                repository=subject_repo,
+                number=int(number),
+                destination_repo=args.repo,
+                expected_head=head_sha,
+            )
+        except (SystemAttestationError, OSError) as exc:
+            _emit(
+                {"allowed": False, "reasons": [str(exc)]},
+                as_json,
+                "BLOCKED: " + str(exc),
+            )
+            return 2
+        _emit(
+            {
+                "allowed": True,
+                "reasons": ["fresh protected-signer decision"],
+                "head_sha": live["head_sha"],
+                "review_id": live["review_id"],
+                "reviewer_identity": live["reviewer_identity"],
+                "decision_nonce": live["nonce"],
+            },
+            as_json,
+            "ALLOWED: fresh protected-signer decision",
+        )
+        return 0
     governance = Governance(config)
     records = ledger.for_subject(args.subject, args.kind)
-    decision = (
-        governance.merge_allowed(
-            repo=args.repo, author=args.author, records=records,
-            head_sha=head_sha,
-        )
-        if args.kind == "pr"
-        else governance.issue_submission_allowed(
+    decision = governance.issue_submission_allowed(
             repo=args.repo, author=args.author, records=records,
             issue_digest=getattr(args, "issue_digest", ""),
-        )
     )
     _emit(
         {"allowed": decision.allowed, "reasons": decision.reasons},

@@ -316,9 +316,14 @@ def _attestation_boundary(config: Config) -> str:
             "allowlists; caller claims and socket credentials are not authority.",
             "",
             "Consumed evidence and its exact idempotent attestation are serialized in "
-            "dedicated state. Altered reuse fails. The ordinary client authenticates a "
-            "root-owned service peer and records the returned scope in ReviewLedger; "
-            "workers receive neither signing sessions nor credentials.",
+            "dedicated state for audit only. Altered reuse fails. Every PR gate obtains "
+            "a fresh, expiring, one-time protected decision over the live head, base, "
+            "review ID/state/identity and required checks. Merge repeats that lookup "
+            "immediately before the signer uses GitHub's expected-head atomic merge "
+            "API. The signer also requires strict branch protection with stale-review "
+            "dismissal, required reviews/checks and no bypass identities. Its fixed "
+            "non-admin merge identity and root-provisioned credential never enter the "
+            "ordinary UID; workers receive neither signing sessions nor credentials.",
         ]
     )
 

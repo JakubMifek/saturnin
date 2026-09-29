@@ -24,9 +24,21 @@ independently recomputed title/body digest, author, role, verdict, destination,
 expiry, and nonce. Evidence consumption is durable and idempotent only for the
 identical scope. The covered `expires_at` is stable upstream evidence metadata:
 the marker expiry for issues and the review submission time for pull requests.
-Issue marker expiry is enforced before first issuance. The field remains signed
-evidence, but it does not expire an already signed ReviewLedger record during
-later verification.
+Issue marker expiry is enforced before first issuance. The field remains signed evidence, but it does not expire an already signed
+ReviewLedger record during later verification.
+
+Those durable attestations are audit records, never live action authority.
+Every PR gate requests a new signer decision bound to operation, repository,
+PR, destination, exact live head/base, reviewer identity, review ID/state,
+required successful checks, nonce, and a 60-second expiry. The signer performs
+the same independent lookup again immediately before merge and invokes
+GitHub's merge API itself with the expected head SHA. Nonces are serialized in
+root-controlled state, so identical retry is idempotent and altered or
+concurrent reuse fails closed.
+The signer requires strict destination-branch protection with stale-review
+dismissal, the configured review and check requirements, and empty bypass
+allowances. Its fixed merge account must have write but not administration
+permission, so GitHub rechecks review and status policy atomically at merge.
 
 The daemon itself creates, verifies, listens on, and removes the canonical
 AF_UNIX socket. Socket activation is forbidden: `SO_PEERCRED` therefore names
@@ -60,6 +72,14 @@ root-owned copy with `/usr/bin/python3 -I`. The checkout digest is not an
 authority. Isolated mode excludes checkout-local modules before the
 administrator pins and digest-checks every artifact descriptor.
 
+Merge authority requires a separately provisioned encrypted `github.token`
+credential in the root-owned configuration directory. It is not accepted from
+the operator environment or ordinary `gh` storage. Production installation
+refuses to start without that credential; provisioning it and removing merge
+authority from the ordinary account are human GitHub administration steps.
+The allowlisted reviewer is a distinct GitHub-controlled bot identity; GitHub,
+not the ordinary caller, assigns that identity and review state.
+
 Rotation moves the outgoing previous key into a root-encrypted,
 duplicate-free `archive.keys` credential. The archive is verification-only,
 is never a signing or new-record authorization source, and is bounded at 16
@@ -69,9 +89,10 @@ Rollback restores the exact current, previous, and archive snapshot.
 
 ## Consequences
 
-Compromise of the ordinary UID, checkout, board, launcher, or socket client
-cannot choose signed fields or expose keys. Review workers receive no signing
-session. Availability now depends on GitHub and the system service. The reviewed
+Compromise of the ordinary UID, checkout, board, launcher, historical ledger,
+or socket client cannot choose trusted live fields, expose keys, or execute a
+merge. Review workers receive no signing session. Availability now depends on
+GitHub and the system service. The reviewed
 legacy migration preserves existing attestations without accepting arbitrary
 user-owned key material; only an absent reviewed legacy source causes a fresh
 key bootstrap. Durable ledger availability therefore requires retaining every

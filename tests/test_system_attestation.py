@@ -5,6 +5,7 @@ import base64
 import hashlib
 import hmac
 import os
+import secrets
 import socket
 import struct
 import threading
@@ -30,6 +31,7 @@ from saturnin.system_attestation import (
     _credential,
     _open_without_redirects,
     request_attestation,
+    request_action,
     verify_attestation,
 )
 from saturnin.governance import Governance
@@ -56,6 +58,28 @@ def service_config() -> ServiceConfig:
 
 def pr_transport(*, state: str = "APPROVED", head: str = HEAD):
     def get(path: str):
+        if path == "/user":
+            return {"login": "saturnin-merge-bot", "type": "User"}
+        if path == "/repos/acme/widget":
+            return {
+                "full_name": "acme/widget",
+                "permissions": {"push": True, "admin": False},
+            }
+        if path == "/repos/acme/widget/branches/main/protection":
+            return {
+                "required_pull_request_reviews": {
+                    "dismiss_stale_reviews": True,
+                    "required_approving_review_count": 1,
+                    "bypass_pull_request_allowances": {
+                        "users": [], "teams": [], "apps": [],
+                    },
+                },
+                "required_status_checks": {
+                    "strict": True,
+                    "contexts": ["test"],
+                    "checks": [],
+                },
+            }
         if path == "/repos/acme/widget/pulls/7":
             return {"head": {"sha": head}, "user": {"login": "author"}}
         if "/reviews?" in path:
@@ -66,6 +90,75 @@ def pr_transport(*, state: str = "APPROVED", head: str = HEAD):
             }]
         raise AssertionError(path)
     return get
+
+
+def action_transport(
+    *, state: str = "APPROVED", head: str = HEAD,
+    reviewer: str = "review-bot", reviewer_type: str = "Bot",
+    check_conclusion: str = "success",
+):
+    def get(path: str):
+        if path == "/user":
+            return {"login": "saturnin-merge-bot", "type": "User"}
+        if path == "/repos/acme/widget":
+            return {
+                "full_name": "acme/widget",
+                "permissions": {"push": True, "admin": False},
+            }
+        if path == "/repos/acme/widget/branches/main/protection":
+            return {
+                "required_pull_request_reviews": {
+                    "dismiss_stale_reviews": True,
+                    "required_approving_review_count": 1,
+                    "bypass_pull_request_allowances": {
+                        "users": [], "teams": [], "apps": [],
+                    },
+                },
+                "required_status_checks": {
+                    "strict": True, "contexts": ["test"], "checks": [],
+                },
+            }
+        if path == "/repos/acme/widget/pulls/7":
+            return {
+                "head": {"sha": head},
+                "base": {
+                    "ref": "main",
+                    "sha": "f" * 40,
+                    "repo": {"full_name": "acme/widget"},
+                },
+                "user": {"login": "author"},
+                "state": "open",
+                "draft": False,
+                "mergeable": True,
+                "mergeable_state": "clean",
+            }
+        if "/reviews?" in path:
+            return [] if "page=2" in path else [{
+                "id": 91, "commit_id": head, "state": state,
+                "submitted_at": "2026-09-27T16:00:00Z",
+                "user": {"login": reviewer, "type": reviewer_type},
+            }]
+        if "/check-runs?" in path:
+            return {
+                "total_count": 1,
+                "check_runs": [{
+                    "id": 501, "name": "test", "status": "completed",
+                    "conclusion": check_conclusion,
+                }],
+            }
+        raise AssertionError(path)
+    return get
+
+
+def action_request(**changes):
+    value = {
+        "action": "decide", "operation": "gate",
+        "repository": "acme/widget", "number": 7,
+        "destination_repo": "acme/widget", "expected_head": HEAD,
+        "merge_method": "squash", "nonce": "d" * 64,
+    }
+    value.update(changes)
+    return value
 
 
 def signer(tmp_path: Path, transport=pr_transport()) -> DedicatedSigner:
@@ -192,6 +285,258 @@ def test_concurrent_process_shaped_requests_have_one_exact_result(
             range(16),
         ))
     assert len(set(values)) == 1
+
+
+def test_fresh_gate_decision_binds_live_review_head_base_checks_and_nonce(
+    tmp_path: Path,
+) -> None:
+    cfg = service_config()
+    service = DedicatedSigner(
+        cfg, GitHub(cfg, token="protected", transport=action_transport()),
+        b"c" * 48, b"p" * 48, tmp_path / "actions.sqlite3",
+        now=lambda: NOW,
+    )
+    result = service.action(action_request())
+    assert result["allowed"] is True
+    assert result["operation"] == "gate"
+    assert result["head_sha"] == HEAD
+    assert result["base_ref"] == "main"
+    assert result["base_sha"] == "f" * 40
+    assert result["reviewer_identity"] == "review-bot"
+    assert result["review_id"] == 91
+    assert result["review_state"] == "approved"
+    assert result["check_runs"] == ["test:501"]
+    assert result["nonce"] == "d" * 64
+    assert result["expires_at"] == "2026-09-28T00:01:00+00:00"
+    assert len(result["signature"]) == 64
+
+
+@pytest.mark.parametrize(
+    "change",
+    [
+        {"operation": "delete"},
+        {"nonce": "short"},
+        {"expected_head": "not-a-sha"},
+        {"destination_repo": "acme/other"},
+        {"merge_method": "force"},
+        {"extra": True},
+    ],
+)
+def test_protected_action_rejects_caller_selected_authority(
+    tmp_path: Path, change: dict,
+) -> None:
+    value = action_request()
+    value.update(change)
+    cfg = service_config()
+    service = DedicatedSigner(
+        cfg, GitHub(cfg, token="protected", transport=action_transport()),
+        b"c" * 48, None, tmp_path / "invalid.sqlite3", now=lambda: NOW,
+    )
+    with pytest.raises(SystemAttestationError):
+        service.action(value)
+
+
+@pytest.mark.parametrize("state", ["CHANGES_REQUESTED", "DISMISSED"])
+def test_historical_audit_cannot_authorize_revoked_same_head_action(
+    tmp_path: Path, state: str,
+) -> None:
+    current_state = ["APPROVED"]
+
+    def transport(path: str):
+        return action_transport(state=current_state[0])(path)
+
+    cfg = service_config()
+    service = DedicatedSigner(
+        cfg, GitHub(cfg, token="protected", transport=transport),
+        b"c" * 48, b"p" * 48, tmp_path / "revoked.sqlite3",
+        now=lambda: NOW,
+    )
+    historical = service.authorize(request())
+    assert service.verify(historical, historical=True)["status"] == "verified"
+    current_state[0] = state
+    with pytest.raises(SystemAttestationError, match="no current allowed approval"):
+        service.action(action_request())
+    assert service.verify(historical, historical=True)["status"] == "verified"
+
+
+def test_ordinary_identity_cannot_forge_protected_reviewer(
+    tmp_path: Path,
+) -> None:
+    cfg = service_config()
+    for transport in (
+        action_transport(reviewer="ordinary-worker"),
+        action_transport(reviewer_type="User"),
+    ):
+        service = DedicatedSigner(
+            cfg, GitHub(cfg, token="protected", transport=transport),
+            b"c" * 48, b"p" * 48, tmp_path / secrets.token_hex(4) / "state.sqlite3",
+            now=lambda: NOW,
+        )
+        with pytest.raises(SystemAttestationError, match="no current allowed approval"):
+            service.action(action_request())
+
+
+@pytest.mark.parametrize(
+    ("transport", "message"),
+    [
+        (action_transport(check_conclusion="failure"), "checks are not green"),
+        (action_transport(head="b" * 40), "head changed"),
+    ],
+)
+def test_protected_action_rejects_failed_checks_and_head_changes(
+    tmp_path: Path, transport, message: str,
+) -> None:
+    cfg = service_config()
+    service = DedicatedSigner(
+        cfg, GitHub(cfg, token="protected", transport=transport),
+        b"c" * 48, None, tmp_path / message.replace(" ", "-") / "state.sqlite3",
+        now=lambda: NOW,
+    )
+    with pytest.raises(SystemAttestationError, match=message):
+        service.action(action_request())
+
+
+def test_protected_action_rejects_wrong_token_identity_or_permissions(
+    tmp_path: Path,
+) -> None:
+    base = action_transport()
+
+    def transport(path: str):
+        if path == "/user":
+            return {"login": "ordinary-worker", "type": "User"}
+        if path == "/repos/acme/widget":
+            return {
+                "full_name": "acme/widget",
+                "permissions": {"push": True, "admin": True},
+            }
+        return base(path)
+
+    cfg = service_config()
+    service = DedicatedSigner(
+        cfg, GitHub(cfg, token="ordinary", transport=transport),
+        b"c" * 48, None, tmp_path / "identity.sqlite3", now=lambda: NOW,
+    )
+    with pytest.raises(SystemAttestationError, match="identity or permissions"):
+        service.action(action_request())
+
+
+def test_protected_action_requires_nonbypassable_branch_protection(
+    tmp_path: Path,
+) -> None:
+    base = action_transport()
+
+    def transport(path: str):
+        if path.endswith("/branches/main/protection"):
+            return {
+                "required_pull_request_reviews": {
+                    "dismiss_stale_reviews": False,
+                    "required_approving_review_count": 1,
+                    "bypass_pull_request_allowances": {
+                        "users": [{"login": "saturnin-merge-bot"}],
+                        "teams": [], "apps": [],
+                    },
+                },
+                "required_status_checks": {
+                    "strict": False, "contexts": ["test"], "checks": [],
+                },
+            }
+        return base(path)
+
+    cfg = service_config()
+    service = DedicatedSigner(
+        cfg, GitHub(cfg, token="protected", transport=transport),
+        b"c" * 48, None, tmp_path / "protection.sqlite3", now=lambda: NOW,
+    )
+    with pytest.raises(SystemAttestationError, match="branch protection"):
+        service.action(action_request())
+
+
+def test_merge_revalidates_then_uses_expected_head_atomic_api(
+    tmp_path: Path,
+) -> None:
+    calls: list[tuple[str, str, dict]] = []
+
+    def mutate(method: str, path: str, payload: dict):
+        calls.append((method, path, payload))
+        return {"merged": True, "message": "merged", "sha": "e" * 40}
+
+    cfg = service_config()
+    service = DedicatedSigner(
+        cfg,
+        GitHub(
+            cfg, token="protected",
+            transport=action_transport(), mutation_transport=mutate,
+        ),
+        b"c" * 48, None, tmp_path / "merge.sqlite3", now=lambda: NOW,
+    )
+    result = service.action(action_request(operation="merge"))
+    assert result["merged"] is True
+    assert calls == [(
+        "PUT", "/repos/acme/widget/pulls/7/merge",
+        {"sha": HEAD, "merge_method": "squash"},
+    )]
+
+
+def test_protected_action_replay_is_exact_and_altered_nonce_reuse_fails(
+    tmp_path: Path,
+) -> None:
+    cfg = service_config()
+    services = [
+        DedicatedSigner(
+            cfg, GitHub(cfg, token="protected", transport=action_transport()),
+            b"c" * 48, None, tmp_path / "shared.sqlite3", now=lambda: NOW,
+        )
+        for _ in range(4)
+    ]
+    with ThreadPoolExecutor(max_workers=4) as pool:
+        results = list(pool.map(
+            lambda index: services[index].action(action_request()),
+            range(4),
+        ))
+    assert len({json.dumps(value, sort_keys=True) for value in results}) == 1
+    with pytest.raises(SystemAttestationError, match="nonce was already consumed"):
+        services[0].action(action_request(merge_method="rebase"))
+
+
+def test_gate_replay_expires_fail_closed(tmp_path: Path) -> None:
+    current = [NOW]
+    cfg = service_config()
+    service = DedicatedSigner(
+        cfg, GitHub(cfg, token="protected", transport=action_transport()),
+        b"c" * 48, None, tmp_path / "expiry.sqlite3",
+        now=lambda: current[0],
+    )
+    service.action(action_request())
+    current[0] += timedelta(seconds=61)
+    with pytest.raises(SystemAttestationError, match="decision is expired"):
+        service.action(action_request())
+
+
+def test_merge_detects_review_or_check_change_before_mutation(
+    tmp_path: Path,
+) -> None:
+    review_calls = [0]
+
+    def transport(path: str):
+        if "/reviews?" in path and "page=1" in path:
+            review_calls[0] += 1
+            state = "APPROVED" if review_calls[0] == 1 else "DISMISSED"
+            return action_transport(state=state)(path)
+        return action_transport()(path)
+
+    cfg = service_config()
+    mutated: list[bool] = []
+    service = DedicatedSigner(
+        cfg,
+        GitHub(
+            cfg, token="protected", transport=transport,
+            mutation_transport=lambda *_args: mutated.append(True),
+        ),
+        b"c" * 48, None, tmp_path / "race.sqlite3", now=lambda: NOW,
+    )
+    with pytest.raises(SystemAttestationError, match="no current allowed approval"):
+        service.action(action_request(operation="merge"))
+    assert not mutated
 
 
 def test_issue_marker_binds_every_field_and_consumes_comment(tmp_path: Path) -> None:
@@ -707,6 +1052,46 @@ def test_socket_client_checks_peer_and_response_schema(
         verify_attestation("signed", socket_path=path, expected_uid=os.getuid())
     thread.join(timeout=5)
 
+    path.unlink()
+    decision = {
+        "allowed": True,
+        "operation": "gate",
+        "repository": "acme/widget",
+        "number": 7,
+        "destination_repo": "acme/widget",
+        "expected_head": HEAD,
+        "merge_method": "squash",
+        "nonce": "d" * 64,
+        "head_sha": HEAD,
+        "base_ref": "main",
+        "base_sha": "f" * 40,
+        "reviewer_identity": "review-bot",
+        "review_id": 91,
+        "review_state": "approved",
+        "check_runs": ["test:501"],
+        "protected_actor": "saturnin-merge-bot",
+        "protection_hash": "e" * 64,
+        "expires_at": "2099-01-01T00:00:00+00:00",
+        "signature": "c" * 64,
+    }
+    thread = _one_shot_server(path, decision)
+    assert request_action(
+        operation="gate", repository="acme/widget", number=7,
+        destination_repo="acme/widget", expected_head=HEAD,
+        nonce="d" * 64, socket_path=path, expected_uid=os.getuid(),
+    ) == decision
+    thread.join(timeout=5)
+
+    path.unlink()
+    thread = _one_shot_server(path, {**decision, "head_sha": "b" * 40})
+    with pytest.raises(SystemAttestationError, match="denied"):
+        request_action(
+            operation="gate", repository="acme/widget", number=7,
+            destination_repo="acme/widget", expected_head=HEAD,
+            nonce="d" * 64, socket_path=path, expected_uid=os.getuid(),
+        )
+    thread.join(timeout=5)
+
 
 def test_signer_created_listener_exposes_actual_creator_identity(
     tmp_path: Path,
@@ -838,6 +1223,66 @@ def test_github_authorization_header_uses_token_without_disclosure(
     assert caught.value.__cause__ is None
     _audit("denied", hashlib.sha256(b"evidence").hexdigest(), "")
     assert token not in capsys.readouterr().err
+
+
+def test_github_protected_merge_transport_is_fixed_and_expected_head_bound() -> None:
+    seen = {}
+
+    class Response:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *args):
+            return None
+
+        def geturl(self):
+            return "https://api.github.com/repos/acme/widget/pulls/7/merge"
+
+        def read(self, _size):
+            return b'{"merged":true,"sha":"abc"}'
+
+    def open_request(request, timeout):
+        seen["url"] = request.full_url
+        seen["method"] = request.method
+        seen["authorization"] = request.get_header("Authorization")
+        seen["payload"] = json.loads(request.data)
+        seen["timeout"] = timeout
+        return Response()
+
+    client = GitHub(
+        service_config(), token="protected-token",
+        request_transport=open_request,
+    )
+    assert client.put(
+        "/repos/acme/widget/pulls/7/merge",
+        {"sha": HEAD, "merge_method": "squash"},
+    )["merged"] is True
+    assert seen == {
+        "url": "https://api.github.com/repos/acme/widget/pulls/7/merge",
+        "method": "PUT",
+        "authorization": "Bearer protected-token",
+        "payload": {"sha": HEAD, "merge_method": "squash"},
+        "timeout": 10,
+    }
+    with pytest.raises(SystemAttestationError, match="mutation path"):
+        client.put("/repos/acme/widget/issues/7", {})
+    with pytest.raises(SystemAttestationError, match="credential"):
+        GitHub(service_config(), request_transport=open_request).put(
+            "/repos/acme/widget/pulls/7/merge", {"sha": HEAD}
+        )
+
+
+def test_check_run_pagination_fails_closed_on_inconsistent_or_oversized_data() -> None:
+    cfg = service_config()
+    inconsistent = GitHub(
+        cfg,
+        transport=lambda _path: {"total_count": 2, "check_runs": []},
+    )
+    with pytest.raises(SystemAttestationError, match="inconsistent"):
+        inconsistent.check_runs("acme/widget", HEAD)
+    malformed = GitHub(cfg, transport=lambda _path: {"check_runs": "bad"})
+    with pytest.raises(SystemAttestationError, match="malformed"):
+        malformed.check_runs("acme/widget", HEAD)
 
 
 def test_github_client_rejects_redirect_and_malformed_response(
