@@ -247,4 +247,6 @@ def audit(config: Config | None = None) -> list[str]:
         )
     if worktree_boundary.get("non_writer_mount") != "read-only":
         problems.append("private notes non-writer worktrees must mount read-only")
+    if worktree_boundary.get("require_canonical_origin") is not True:
+        problems.append("private notes worktrees must require their canonical origin")
     return problems

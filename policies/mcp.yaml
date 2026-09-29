@@ -52,6 +52,7 @@ rules:
     notes:
       writer_roles: [scribe]
       non_writer_mount: read-only
+      require_canonical_origin: true
 
 # The notes lookup integration is only a declared future boundary. It is not a
 # server entry, cannot be launched, and grants no write path in this change.

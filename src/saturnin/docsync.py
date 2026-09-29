@@ -443,7 +443,8 @@ def _notes_governance(config: Config) -> str:
         [
             f"- Sole writer: `{', '.join(access.get('writer_roles', []))}`.",
             f"- Every other role: {access.get('non_writer_access')} with a "
-            f"{boundary.get('non_writer_mount')} worktree mount; secrets allowed: "
+            f"canonical-origin-bound {boundary.get('non_writer_mount')} worktree "
+            f"mount; secrets allowed: "
             f"{str(access.get('secrets_allowed', False)).lower()}.",
             "- Curation requirements: " + ", ".join(enabled_curation) + ".",
             f"- Public bootstrap packages may only be applied by "

@@ -132,3 +132,8 @@ def test_notes_worktree_boundary_is_enforced(config: Config) -> None:
 
     assert any("worktree writers" in problem for problem in problems)
     assert any("mount read-only" in problem for problem in problems)
+
+    boundary["writer_roles"] = ["scribe"]
+    boundary["non_writer_mount"] = "read-only"
+    boundary["require_canonical_origin"] = False
+    assert any("canonical origin" in problem for problem in audit(config))

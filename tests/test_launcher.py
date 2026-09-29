@@ -489,13 +489,25 @@ def test_notes_non_writer_gets_read_only_worktree_mount(
     worktree = WorktreeManager(config, repo=git_repo, board=board).create(
         "feature/review-notes-read-only"
     )
+    subprocess.run(
+        [
+            "git",
+            "-C",
+            str(git_repo),
+            "remote",
+            "set-url",
+            "origin",
+            "https://github.com/JakubMifek/saturnin-notes.git",
+        ],
+        check=True,
+    )
     launcher = AgentLauncher(config, board)
     home = launcher._isolated_home(task.id)
     mcp_config = config.var_dir / "launches" / f"{task.id}.mcp.json"
     mcp_config.write_text('{"mcpServers": {}}\n', encoding="utf-8")
 
     read_only = launcher._notes_worktree_read_only(
-        task, SimpleNamespace(role="pr-reviewer"), config
+        task, SimpleNamespace(role="pr-reviewer"), config, worktree.path
     )
     command = launcher._sandbox_command(
         "/usr/bin/bwrap",
@@ -522,15 +534,56 @@ def test_notes_non_writer_gets_read_only_worktree_mount(
     )
 
 
-def test_notes_scribe_retains_writable_worktree(config: Config, board: Board) -> None:
+def test_notes_scribe_retains_writable_worktree(
+    config: Config, board: Board, git_repo: Path
+) -> None:
     task = board.create(
         "Curate notes",
         repo=config.policy("repos")["repos"]["notes"]["slug"],
     )
-
-    assert not AgentLauncher._notes_worktree_read_only(
-        task, SimpleNamespace(role="scribe"), config
+    subprocess.run(
+        [
+            "git",
+            "-C",
+            str(git_repo),
+            "remote",
+            "set-url",
+            "origin",
+            "git@github.com:JakubMifek/saturnin-notes.git",
+        ],
+        check=True,
     )
+
+    assert not AgentLauncher(config, board)._notes_worktree_read_only(
+        task, SimpleNamespace(role="scribe"), config, git_repo
+    )
+
+
+def test_notes_worktree_rejects_repository_alias_mismatch(
+    config: Config, board: Board, git_repo: Path
+) -> None:
+    task = board.create(
+        "Review notes",
+        kind="pr-review",
+        repo=config.policy("repos")["repos"]["notes"]["slug"],
+    )
+    subprocess.run(
+        [
+            "git",
+            "-C",
+            str(git_repo),
+            "remote",
+            "set-url",
+            "origin",
+            "https://github.com/JakubMifek/saturnin.git",
+        ],
+        check=True,
+    )
+
+    with pytest.raises(LauncherError, match="canonical origin"):
+        AgentLauncher(config, board)._notes_worktree_read_only(
+            task, SimpleNamespace(role="pr-reviewer"), config, git_repo
+        )
 
 
 def test_reconcile_applies_worker_callbacks_before_requeue(

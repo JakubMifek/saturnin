@@ -259,7 +259,7 @@ class AgentLauncher:
                         git_objects=git_objects,
                         mcp_config=mcp_path,
                         worktree_read_only=self._notes_worktree_read_only(
-                            claimed, contract, worker_config
+                            claimed, contract, worker_config, workdir
                         ),
                         signing_socket=(
                             signing_session.socket if signing_session else None
@@ -1002,17 +1002,21 @@ class AgentLauncher:
         command.extend(("--chdir", str(workdir.resolve()), "--", executable, *args))
         return command
 
-    @staticmethod
     def _notes_worktree_read_only(
-        task: Task, contract: AgentContract, config: Config
+        self,
+        task: Task,
+        contract: AgentContract,
+        config: Config,
+        workdir: Path,
     ) -> bool:
         notes = config.policy("repos").get("repos", {}).get("notes", {})
         notes_value = str(notes.get("slug", ""))
-        if not notes_value or not task.repo:
+        if not notes_value:
             return False
         notes_slug = normalize_repository_slug(notes_value)
-        task_slug = normalize_repository_slug(task.repo)
-        if task_slug != notes_slug:
+        task_slug = normalize_repository_slug(task.repo) if task.repo else None
+        origin_slug = self._worktree_repository_slug(workdir, config)
+        if notes_slug not in (task_slug, origin_slug):
             return False
         boundary = (
             config.policy("mcp")
@@ -1025,7 +1029,37 @@ class AgentLauncher:
             raise LauncherError(
                 "notes repository non-writer worktrees must be read-only"
             )
+        if boundary.get("require_canonical_origin") is not True:
+            raise LauncherError("notes repository canonical-origin binding is required")
+        if task_slug != notes_slug or origin_slug != notes_slug:
+            raise LauncherError(
+                "notes repository task and worktree must match the canonical origin"
+            )
         return contract.role not in writers
+
+    def _worktree_repository_slug(
+        self, workdir: Path, config: Config
+    ) -> str | None:
+        output = self._git_output(
+            ["remote", "get-url", "--all", "origin"],
+            cwd=workdir,
+            required=False,
+        )
+        trusted_proxy_hosts = config.governance.get("git", {}).get(
+            "trusted_github_proxy_hosts", []
+        )
+        slugs = {
+            normalize_repository_slug(slug)
+            for url in output.splitlines()
+            if (
+                slug := github_repo_slug(
+                    url.strip(), trusted_proxy_hosts=trusted_proxy_hosts
+                )
+            )
+        }
+        if len(slugs) > 1:
+            raise LauncherError("worktree origin resolves to multiple repositories")
+        return next(iter(slugs), None)
 
     def _stage_worker_board_context(
         self,
