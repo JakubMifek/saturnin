@@ -23,9 +23,10 @@ checkout, use this fixed bootstrap sequence:
 
 Before that sequence, a human must create the dedicated
 `saturnin-merge-bot` GitHub account and a fine-grained token limited to
-`saturnin` (Contents and Pull requests write) and `saturnin-ops` (Issues
-write), with no Administration permission on either repository. Add that
-account with Write, not Admin, repository access. At a
+`saturnin` (Contents and Pull requests write, Administration read, and Checks
+read) and `saturnin-ops` (Issues write). Grant no Administration **write**
+permission on either repository. Add that account with Write, not Admin,
+repository access. At a
 trusted root console—not an ordinary-UID shell, environment, file, pipe, or
 clipboard—encrypt the token under its fixed credential name:
 
@@ -96,7 +97,7 @@ group to resolve bidirectionally to UID 1000 and GID 1000; a missing or reused
 identity fails closed before the administration lock or any other mutation.
 
 <!-- generated:attestation-boundary -->
-The system `saturnin-attestation.service` runs as the non-login `saturnin-signer` identity from root-controlled runtime and configuration. The system manager decrypts current, previous, and bounded retired HMAC credentials into its private credential tmpfs; ordinary workers never receive key material. The service, not PID 1, creates the canonical listener. Clients authenticate its kernel-reported UID plus the stable signer-owned socket directory and endpoint identity; this deliberately avoids cross-UID ptrace-gated `/proc` inspection. Systemd readiness is reported only after protected credential validation and listener creation.
+The system `saturnin-attestation.service` runs as the non-login `saturnin-signer` identity from root-controlled runtime and configuration. The system manager decrypts current, previous, and bounded retired HMAC credentials into its private credential tmpfs; ordinary workers never receive key material. The service, not PID 1, creates the canonical listener. Clients authenticate its kernel-reported UID plus the stable signer-owned socket directory and endpoint identity; this deliberately avoids cross-UID ptrace-gated `/proc` inspection. Systemd readiness is reported only after protected identity, repository role, branch-protection access, check-run access, credential validation, and listener creation.
 
 For pull requests the service obtains the live head, author, and exact commit-bound latest review state directly from GitHub over TLS. For issues it recomputes title/body digest and accepts one exact, expiring, nonce-bound machine marker in an allowlisted dedicated GitHub App bot comment. A default-branch-only protected environment holds that App key and requires an independent human approver; ordinary workers cannot publish as the bot. The marker also binds approved labels. Every issue gate is fresh; submission repeats authorization and the signer creates exact reviewed content in an independently allowlisted destination with a deterministic hidden idempotency marker. Ambiguous submission outcomes reconcile only against one exact marker-bearing issue authored by the protected identity. Evidence expiry limits new authorization, not later audit verification of a durable record. Socket filesystem access permits transport only: independent GitHub authorization remains required. Repository and API origins are fixed allowlists; caller claims and socket credentials are not authority.
 

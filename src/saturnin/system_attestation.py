@@ -1390,6 +1390,19 @@ class DedicatedSigner:
             )
         return self.config.protected_actor_login
 
+    def _verify_protected_access(self) -> None:
+        for repo in sorted(self.config.repositories):
+            self._protected_actor(repo)
+            for base_ref in self.config.pr_base_refs:
+                protection = self.github.get(
+                    f"/repos/{repo}/branches/{base_ref}/protection"
+                )
+                if not isinstance(protection, dict):
+                    raise SystemAttestationError(
+                        "branch protection response is malformed"
+                    )
+                self.github.check_runs(repo, base_ref)
+
     @staticmethod
     def _v2_unsigned(payload: dict[str, Any]) -> dict[str, Any]:
         string_fields = _ATTESTATION_FIELDS - {"zero_context"}
@@ -2045,7 +2058,7 @@ def _notify_ready() -> None:
         notification.settimeout(5)
         notification.connect(address)
         notification.sendall(
-            b"READY=1\nSTATUS=Protected GitHub identity and listener verified"
+            b"READY=1\nSTATUS=Protected GitHub access and listener verified"
         )
     except OSError:
         raise SystemAttestationError("systemd readiness notification failed") from None
@@ -2068,8 +2081,7 @@ def serve() -> None:
     signer = DedicatedSigner(
         config, GitHub(config, token), current, previous, archive_keys=archive
     )
-    for repository in sorted(config.repositories):
-        signer._protected_actor(repository)
+    signer._verify_protected_access()
     listener = _create_listener()
     _notify_ready()
     stopping = threading.Event()

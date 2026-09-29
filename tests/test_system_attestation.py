@@ -643,6 +643,48 @@ def test_protected_action_rejects_wrong_token_identity_or_permissions(
         service.action(action_request())
 
 
+def test_startup_verifies_protected_policy_and_check_endpoints(
+    tmp_path: Path,
+) -> None:
+    cfg = service_config()
+    service = DedicatedSigner(
+        cfg,
+        GitHub(cfg, token="protected", transport=action_transport()),
+        b"c" * 48,
+        None,
+        tmp_path / "startup.sqlite3",
+        now=lambda: NOW,
+    )
+
+    service._verify_protected_access()
+
+
+@pytest.mark.parametrize("blocked_endpoint", ["protection", "check-runs"])
+def test_startup_fails_closed_when_protected_endpoint_is_forbidden(
+    tmp_path: Path,
+    blocked_endpoint: str,
+) -> None:
+    cfg = service_config()
+    base = action_transport()
+
+    def transport(path: str):
+        if blocked_endpoint in path:
+            raise SystemAttestationError(f"{blocked_endpoint} endpoint returned 403")
+        return base(path)
+
+    service = DedicatedSigner(
+        cfg,
+        GitHub(cfg, token="protected", transport=transport),
+        b"c" * 48,
+        None,
+        tmp_path / f"{blocked_endpoint}.sqlite3",
+        now=lambda: NOW,
+    )
+
+    with pytest.raises(SystemAttestationError, match="403"):
+        service._verify_protected_access()
+
+
 def test_protected_action_requires_nonbypassable_branch_protection(
     tmp_path: Path,
 ) -> None:
@@ -1944,7 +1986,7 @@ def test_readiness_is_emitted_only_to_fixed_systemd_datagram(
         monkeypatch.setenv("NOTIFY_SOCKET", str(path))
         _notify_ready()
         assert receiver.recv(4096) == (
-            b"READY=1\nSTATUS=Protected GitHub identity and listener verified"
+            b"READY=1\nSTATUS=Protected GitHub access and listener verified"
         )
     finally:
         receiver.close()

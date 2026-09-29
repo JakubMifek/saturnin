@@ -298,7 +298,9 @@ def _attestation_boundary(config: Config) -> str:
             "listener. Clients authenticate its kernel-reported UID plus the stable "
             "signer-owned socket directory and endpoint identity; this deliberately "
             "avoids cross-UID ptrace-gated `/proc` inspection. Systemd readiness is "
-            "reported only after protected credential validation and listener creation.",
+            "reported only after protected identity, repository role, "
+            "branch-protection access, check-run access, credential validation, and "
+            "listener creation.",
             "",
             "For pull requests the service obtains the live head, author, and exact "
             "commit-bound latest review state directly from GitHub over TLS. For issues "

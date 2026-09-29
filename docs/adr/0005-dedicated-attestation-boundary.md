@@ -120,6 +120,11 @@ credential in the root-owned configuration directory. It is not accepted from
 the operator environment or ordinary `gh` storage. Production installation
 refuses to start without that credential; provisioning it and removing merge
 authority from the ordinary account are human GitHub administration steps.
+The fine-grained token has Contents and Pull requests write plus
+Administration and Checks read on the fixed PR repository, and Issues write
+only on the fixed issue destination. The account remains a Write collaborator,
+not an administrator. Readiness probes both protected read endpoints before
+the listener becomes available.
 The allowlisted reviewer is a distinct GitHub-controlled bot identity; GitHub,
 not the ordinary caller, assigns that identity and review state.
 New v2 review records must also match a byte-identical signer-issued row in the
