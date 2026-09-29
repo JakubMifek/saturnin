@@ -28,6 +28,7 @@ from saturnin.system_attestation import (
     _archive_credential,
     _audit,
     _create_listener,
+    _notify_ready,
     _credential,
     _open_without_redirects,
     request_attestation,
@@ -1148,6 +1149,26 @@ def test_signer_created_listener_exposes_actual_creator_identity(
         client.close()
         listener.close()
         path.unlink(missing_ok=True)
+
+
+def test_readiness_is_emitted_only_to_fixed_systemd_datagram(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    path = tmp_path / "notify.sock"
+    receiver = socket.socket(socket.AF_UNIX, socket.SOCK_DGRAM)
+    receiver.bind(str(path))
+    receiver.settimeout(5)
+    try:
+        monkeypatch.setenv("NOTIFY_SOCKET", str(path))
+        _notify_ready()
+        assert receiver.recv(4096) == (
+            b"READY=1\nSTATUS=Protected GitHub identity and listener verified"
+        )
+    finally:
+        receiver.close()
+    monkeypatch.setenv("NOTIFY_SOCKET", "relative.sock")
+    with pytest.raises(SystemAttestationError, match="invalid"):
+        _notify_ready()
 
 
 def test_inherited_listener_identifies_creator_not_acceptor(

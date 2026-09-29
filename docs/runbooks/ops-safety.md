@@ -65,6 +65,9 @@ It atomically publishes the fixed `/usr/sbin/saturnin-attestation-admin`
 interface; its grammar accepts only five actions and no paths, commands, units,
 users, ownership changes, or packages. Repeat this bootstrap for reviewed
 administrator updates; do not execute a replacement directly from a checkout.
+Production source acquisition requires exact reviewed checkout files owned by
+the fixed operator UID 1000; only the staged administrator and installed
+artifacts are required to be root-owned.
 
 <!-- generated:signer-unit-interface -->
 This human-administrator interface manages only the `system`-scoped `saturnin-attestation.service` unit.
@@ -90,7 +93,7 @@ group to resolve bidirectionally to UID 1000 and GID 1000; a missing or reused
 identity fails closed before the administration lock or any other mutation.
 
 <!-- generated:attestation-boundary -->
-The system `saturnin-attestation.service` runs as the non-login `saturnin-signer` identity from root-controlled runtime and configuration. The system manager decrypts current, previous, and bounded retired HMAC credentials into its private credential tmpfs; ordinary workers never receive key material. The service, not PID 1, creates the canonical listener. Clients authenticate its kernel-reported UID plus the stable signer-owned socket directory and endpoint identity; this deliberately avoids cross-UID ptrace-gated `/proc` inspection.
+The system `saturnin-attestation.service` runs as the non-login `saturnin-signer` identity from root-controlled runtime and configuration. The system manager decrypts current, previous, and bounded retired HMAC credentials into its private credential tmpfs; ordinary workers never receive key material. The service, not PID 1, creates the canonical listener. Clients authenticate its kernel-reported UID plus the stable signer-owned socket directory and endpoint identity; this deliberately avoids cross-UID ptrace-gated `/proc` inspection. Systemd readiness is reported only after protected credential validation and listener creation.
 
 For pull requests the service obtains the live head, author, and exact commit-bound latest review state directly from GitHub over TLS. For issues it recomputes title/body digest and accepts one exact, expiring, nonce-bound machine marker in an allowlisted bot comment. Evidence expiry limits new authorization, not later verification of an already signed durable record. Socket filesystem access permits transport only: independent GitHub authorization remains required. Repository and API origins are fixed allowlists; caller claims and socket credentials are not authority.
 

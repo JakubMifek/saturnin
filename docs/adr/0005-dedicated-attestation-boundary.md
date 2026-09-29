@@ -55,6 +55,11 @@ bounded per peer UID. Audit records contain only an outcome and hashes of the
 evidence identifier and authorization scope. SIGTERM stops acceptance and
 closes the inherited listener cleanly.
 
+The system unit is `Type=notify`. Readiness is emitted only after protected
+GitHub credential identity/permissions validation and canonical listener
+creation, so installer and rotation health checks cannot succeed during
+startup validation.
+
 The one authorized legacy migration source is fixed at
 `/home/jakubmifek/.config/systemd/user/saturnin-credentials` for UID 1000.
 The administrator opens its exact files without following links, pins and
@@ -73,7 +78,9 @@ fixed root-owned bootstrap directory, compare that copy to a SHA-256 obtained
 from independently approved exact-head evidence, and only then invoke the same
 root-owned copy with `/usr/bin/python3 -I`. The checkout digest is not an
 authority. Isolated mode excludes checkout-local modules before the
-administrator pins and digest-checks every artifact descriptor.
+administrator pins and digest-checks every artifact descriptor. It reads
+reviewed checkout artifacts as the fixed operator UID while requiring its own
+staged executable and every installed target to remain root-controlled.
 
 Merge authority requires a separately provisioned encrypted `github.token`
 credential in the root-owned configuration directory. It is not accepted from

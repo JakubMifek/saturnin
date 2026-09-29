@@ -61,11 +61,11 @@ FILES = {
 OBSOLETE_FILES = ("usr/lib/systemd/system/saturnin-attestation.socket",)
 EXPECTED_SHA256 = {
     "src/saturnin/system_attestation.py":
-        "685b08828c41d4777c286669b8b824abe40448f8c29ac5062a89c8b8c6cc6f2f",
+        "bdd02f429f2cd1678a7e981b924350346a48268745c4604dab0dc2fc2f8861ab",
     "config/attestation.json":
         "c2a098d610d8f0f20e8e4c790455f039aec2ef4f9d0e904a6945834c3264105c",
     "systemd/system/saturnin-attestation.service":
-        "487fe6e1694bbb15d1ab889e141f370de25a01d99cb70bc84fb88bbed1b398fc",
+        "01c2e033f54a655ef2d3a2c7048ce3af606b19e2d46128471372bc434b5bb43a",
     "systemd/system/saturnin-attestation.sysusers":
         "0059e8a1ead80a9b47399f04a1430a1cecf7b70479b224dc8efe084e27fa2187",
     "systemd/system/saturnin-attestation.tmpfiles":
@@ -165,6 +165,10 @@ def _validate_operator_identity() -> None:
         or gid_group.gr_name != OPERATOR_NAME
     ):
         raise InstallError("fixed socket operator identity does not match reviewed UID/GID")
+
+
+def _reviewed_source_uid(root: Path) -> int:
+    return OPERATOR_UID if root == Path("/") else os.getuid()
 
 
 def _open_source(path: Path, uid: int, *, mode: int | None = None) -> Source:
@@ -682,10 +686,10 @@ def _migrate_or_provision(root: Path, runner: Runner) -> list[Path]:
 
 
 def status(root: Path, runner: Runner | None = None) -> None:
-    uid = 0 if root == Path("/") else os.getuid()
+    source_uid = _reviewed_source_uid(root)
     for source_name, target_name in FILES.items():
         if PROJECT != Path("/usr"):
-            source = _open_source(PROJECT / source_name, uid)
+            source = _open_source(PROJECT / source_name, source_uid)
             try:
                 if _digest_bytes(source.content) != EXPECTED_SHA256[source_name]:
                     raise InstallError(f"reviewed source digest mismatch: {source.path}")
@@ -753,16 +757,18 @@ def install(root: Path, test_mode: bool, runner: Runner | None = None) -> None:
     if PROJECT == Path("/usr"):
         status(root, codec)
         return
-    uid = os.getuid()
+    source_uid = _reviewed_source_uid(root)
     sources: list[tuple[Source, str]] = []
     admin_source: Source | None = None
     for source_name, target_name in FILES.items():
-        source = _open_source(PROJECT / source_name, uid)
+        source = _open_source(PROJECT / source_name, source_uid)
         if _digest_bytes(source.content) != EXPECTED_SHA256[source_name]:
             source.close()
             raise InstallError(f"reviewed source digest mismatch: {source.path}")
         sources.append((source, target_name))
-    admin_source = _open_source(ADMIN_SOURCE, uid)
+    admin_source = _open_source(
+        ADMIN_SOURCE, 0 if root == Path("/") else os.getuid()
+    )
     stage = root / f".saturnin-attestation-stage-{os.getpid()}"
     if stage.exists() or stage.is_symlink():
         raise InstallError("transaction stage already exists")

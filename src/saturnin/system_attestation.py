@@ -1365,6 +1365,27 @@ def _create_listener(
         raise
 
 
+def _notify_ready() -> None:
+    address = os.environ.get("NOTIFY_SOCKET", "")
+    if not address:
+        raise SystemAttestationError("systemd readiness socket is unavailable")
+    if address.startswith("@"):
+        address = "\0" + address[1:]
+    if not address.startswith(("/", "\0")) or len(address.encode()) > 107:
+        raise SystemAttestationError("systemd readiness socket is invalid")
+    notification = socket.socket(socket.AF_UNIX, socket.SOCK_DGRAM)
+    try:
+        notification.settimeout(5)
+        notification.connect(address)
+        notification.sendall(
+            b"READY=1\nSTATUS=Protected GitHub identity and listener verified"
+        )
+    except OSError:
+        raise SystemAttestationError("systemd readiness notification failed") from None
+    finally:
+        notification.close()
+
+
 def serve() -> None:
     config = ServiceConfig.load()
     current = _credential("current.key")
@@ -1383,6 +1404,7 @@ def serve() -> None:
     for repository in sorted(config.repositories):
         signer._protected_actor(repository)
     listener = _create_listener()
+    _notify_ready()
     stopping = threading.Event()
     limiter = AuthorizationLimiter(
         config.authorization_limit, config.authorization_window_seconds

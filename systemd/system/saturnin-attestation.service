@@ -5,7 +5,8 @@ After=network-online.target
 Wants=network-online.target
 
 [Service]
-Type=simple
+Type=notify
+NotifyAccess=main
 User=saturnin-signer
 Group=saturnin-signer
 ExecStart=/usr/bin/python3 -I /usr/lib/saturnin-attestation/system_attestation.py serve

@@ -33,6 +33,11 @@ def run(root: Path, action: str, *, check: bool = True) -> subprocess.CompletedP
     return subprocess.CompletedProcess(args, 0, "", "")
 
 
+def test_production_source_identity_is_operator_not_root(tmp_path: Path) -> None:
+    assert admin._reviewed_source_uid(Path("/")) == admin.OPERATOR_UID
+    assert admin._reviewed_source_uid(tmp_path) == os.getuid()
+
+
 def test_fake_root_transaction_install_status_rotate_rollback_uninstall(
     tmp_path: Path,
 ) -> None:
