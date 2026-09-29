@@ -21,6 +21,29 @@ SHA-256 and fixed staged pathname in `sha256sum --check` format; do not create
 it from this checkout or from an ordinary-UID process. From the exact reviewed
 checkout, use this fixed bootstrap sequence:
 
+Before that sequence, a human must create the dedicated
+`saturnin-merge-bot` GitHub account and a fine-grained token limited to this
+repository with Contents and Pull requests write access but no Administration
+permission. Add that account with Write, not Admin, repository access. At a
+trusted root console—not an ordinary-UID shell, environment, file, pipe, or
+clipboard—encrypt the token under its fixed credential name:
+
+```bash
+/usr/bin/install -d -o root -g root -m 0750 /etc/saturnin-attestation
+/bin/bash -c 'umask 077; IFS= read -r -s token; printf %s "$token" | /usr/bin/systemd-creds encrypt --name=github.token - /etc/saturnin-attestation/github.token.cred; unset token'
+/usr/bin/chown root:root /etc/saturnin-attestation/github.token.cred
+/usr/bin/chmod 0600 /etc/saturnin-attestation/github.token.cred
+```
+
+Configure `main` branch protection to apply to administrators, dismiss stale
+approvals, require one approving review, require the strict `test` check, and
+grant no bypass to any user, team, app, role, or repository owner. Enable
+approval reviews from the configured Copilot reviewer. Replace the ordinary
+UID's GitHub credential with a fine-grained token lacking Administration and
+default-branch bypass authority. The service validates the protected token's
+fixed login and effective write/non-admin repository permissions before
+creating its socket; installation rolls back if that validation fails.
+
 ```bash
 cd /path/to/exact-reviewed-checkout
 sudo /usr/bin/install -d -o root -g root -m 0700 /run/saturnin-attestation-bootstrap
@@ -67,17 +90,17 @@ group to resolve bidirectionally to UID 1000 and GID 1000; a missing or reused
 identity fails closed before the administration lock or any other mutation.
 
 <!-- generated:attestation-boundary -->
-The system `saturnin-attestation.service` runs as the non-login `saturnin-signer` identity from root-controlled runtime and configuration. The system manager decrypts current, previous, and bounded retired HMAC credentials into its private credential tmpfs; ordinary workers never receive key material. The service, not PID 1, creates the canonical listener, so client `SO_PEERCRED` verification authenticates the signer UID and process.
+The system `saturnin-attestation.service` runs as the non-login `saturnin-signer` identity from root-controlled runtime and configuration. The system manager decrypts current, previous, and bounded retired HMAC credentials into its private credential tmpfs; ordinary workers never receive key material. The service, not PID 1, creates the canonical listener. Clients authenticate its kernel-reported UID plus the stable signer-owned socket directory and endpoint identity; this deliberately avoids cross-UID ptrace-gated `/proc` inspection.
 
 For pull requests the service obtains the live head, author, and exact commit-bound latest review state directly from GitHub over TLS. For issues it recomputes title/body digest and accepts one exact, expiring, nonce-bound machine marker in an allowlisted bot comment. Evidence expiry limits new authorization, not later verification of an already signed durable record. Socket filesystem access permits transport only: independent GitHub authorization remains required. Repository and API origins are fixed allowlists; caller claims and socket credentials are not authority.
 
-Consumed evidence and its exact idempotent attestation are serialized in dedicated state for audit only. Altered reuse fails. Every PR gate obtains a fresh, expiring, one-time protected decision over the live head, base, review ID/state/identity and required checks. Merge repeats that lookup immediately before the signer uses GitHub's expected-head atomic merge API. The signer also requires strict branch protection with stale-review dismissal, required reviews/checks and no bypass identities. Its fixed non-admin merge identity and root-provisioned credential never enter the ordinary UID; workers receive neither signing sessions nor credentials.
+Consumed evidence and its exact idempotent attestation are serialized in dedicated state for audit only. Altered reuse fails. Every PR gate obtains a fresh, expiring, one-time protected decision over the live head, base, review ID/state/identity and required checks. Merge repeats that lookup immediately before the signer uses GitHub's expected-head atomic merge API. The signer also requires strict branch protection with stale-review dismissal, required reviews/checks, administrator enforcement and no bypass identities. Its fixed non-admin merge identity and root-provisioned credential never enter the ordinary UID; workers receive neither signing sessions nor credentials.
 <!-- /generated:attestation-boundary -->
 
 ### Provisioning and rotation
 
 The system manager decrypts `current.key.cred`, `previous.key.cred`,
-`archive.keys.cred`, and the optional `github.token` credential-store entry
+`archive.keys.cred`, and the mandatory `github.token` credential-store entry
 into its credential tmpfs. The administrator interface
 generates key bytes in process and streams them directly to `systemd-creds`;
 it never accepts or prints a key.

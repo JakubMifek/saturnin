@@ -79,6 +79,7 @@ def pr_transport(*, state: str = "APPROVED", head: str = HEAD):
                     "contexts": ["test"],
                     "checks": [],
                 },
+                "enforce_admins": {"enabled": True},
             }
         if path == "/repos/acme/widget/pulls/7":
             return {"head": {"sha": head}, "user": {"login": "author"}}
@@ -117,6 +118,7 @@ def action_transport(
                 "required_status_checks": {
                     "strict": True, "contexts": ["test"], "checks": [],
                 },
+                "enforce_admins": {"enabled": True},
             }
         if path == "/repos/acme/widget/pulls/7":
             return {
@@ -396,6 +398,28 @@ def test_protected_action_rejects_failed_checks_and_head_changes(
         service.action(action_request())
 
 
+def test_gate_rejects_force_push_between_pr_snapshots(tmp_path: Path) -> None:
+    base = action_transport()
+    pull_calls = [0]
+
+    def transport(path: str):
+        if path == "/repos/acme/widget/pulls/7":
+            pull_calls[0] += 1
+            value = base(path)
+            if pull_calls[0] >= 2:
+                value["head"]["sha"] = "b" * 40
+            return value
+        return base(path)
+
+    cfg = service_config()
+    service = DedicatedSigner(
+        cfg, GitHub(cfg, token="protected", transport=transport),
+        b"c" * 48, None, tmp_path / "force-push.sqlite3", now=lambda: NOW,
+    )
+    with pytest.raises(SystemAttestationError, match="currently mergeable"):
+        service.action(action_request())
+
+
 def test_protected_action_rejects_wrong_token_identity_or_permissions(
     tmp_path: Path,
 ) -> None:
@@ -439,6 +463,7 @@ def test_protected_action_requires_nonbypassable_branch_protection(
                 "required_status_checks": {
                     "strict": False, "contexts": ["test"], "checks": [],
                 },
+                "enforce_admins": {"enabled": False},
             }
         return base(path)
 
@@ -1005,10 +1030,12 @@ def test_service_config_rejects_missing_lists_and_non_numeric_bounds(
 
 def _one_shot_server(path: Path, response: dict) -> threading.Thread:
     ready = threading.Event()
+    path.parent.chmod(0o2750)
 
     def run() -> None:
         listener = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
         listener.bind(str(path))
+        path.chmod(0o660)
         listener.listen(1)
         ready.set()
         connection, _ = listener.accept()
@@ -1026,12 +1053,9 @@ def _one_shot_server(path: Path, response: dict) -> threading.Thread:
 
 
 def test_socket_client_checks_peer_and_response_schema(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    tmp_path: Path,
 ) -> None:
     path = tmp_path / "sign.sock"
-    monkeypatch.setattr(
-        "saturnin.system_attestation._trusted_service_process", lambda pid: True
-    )
     thread = _one_shot_server(path, {"attestation": "signed"})
     assert request_attestation(
         kind="pr", repository="acme/widget", number=7,

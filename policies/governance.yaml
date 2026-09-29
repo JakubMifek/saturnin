@@ -94,6 +94,7 @@ review:
     required_check_runs: [test]
     protected_merge_credential: /etc/saturnin-attestation/github.token.cred
     protected_merge_expected_head: true
+    branch_protection_enforce_admins: true
     role_scoped: true
     execution_scoped: false
     legacy_migration: reviewed-current-previous-keys-to-root-service

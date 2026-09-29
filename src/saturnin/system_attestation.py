@@ -595,23 +595,13 @@ class DedicatedSigner:
         if evidence["head_sha"] != expected_head:
             raise SystemAttestationError("pull request head changed")
         pull = self.github.get(f"/repos/{repo}/pulls/{number}")
-        if not isinstance(pull, dict):
-            raise SystemAttestationError("pull request response is malformed")
-        base = pull.get("base") or {}
-        base_repo = base.get("repo") or {}
-        base_sha = str(base.get("sha", "")).casefold()
-        if (
-            str(base_repo.get("full_name", "")).casefold() != destination
-            or base.get("ref") not in self.config.pr_base_refs
-            or not _SHA.fullmatch(base_sha)
-            or pull.get("state") != "open"
-            or pull.get("draft") is not False
-            or pull.get("mergeable") is not True
-            or pull.get("mergeable_state") not in {"clean", "has_hooks"}
-        ):
-            raise SystemAttestationError("pull request is not currently mergeable")
+        snapshot = self._pull_snapshot(
+            pull, repo, number, destination, expected_head
+        )
+        base_ref = snapshot["base_ref"]
+        base_sha = snapshot["base_sha"]
         protection = self.github.get(
-            f"/repos/{repo}/branches/{base['ref']}/protection"
+            f"/repos/{repo}/branches/{base_ref}/protection"
         )
         if not isinstance(protection, dict):
             raise SystemAttestationError("branch protection response is malformed")
@@ -638,6 +628,8 @@ class DedicatedSigner:
             or review_rule["required_approving_review_count"] < 1
             or not isinstance(bypass, dict)
             or any(bypass.get(kind) for kind in ("users", "teams", "apps"))
+            or not isinstance(protection.get("enforce_admins"), dict)
+            or protection["enforce_admins"].get("enabled") is not True
             or not isinstance(status_rule, dict)
             or status_rule.get("strict") is not True
             or not set(self.config.required_check_runs) <= contexts
@@ -670,9 +662,30 @@ class DedicatedSigner:
             )
         ):
             raise SystemAttestationError("required checks are not green")
+        final_evidence = self._pr(
+            repo, number, _subject(repo, number), destination
+        )
+        final_protection = self.github.get(
+            f"/repos/{repo}/branches/{base_ref}/protection"
+        )
+        final_checks = self.github.check_runs(repo, expected_head)
+        final_snapshot = self._pull_snapshot(
+            self.github.get(f"/repos/{repo}/pulls/{number}"),
+            repo, number, destination, expected_head,
+        )
+        if (
+            final_evidence != evidence
+            or final_snapshot != snapshot
+            or final_protection != protection
+            or sorted(final_checks, key=lambda value: int(value.get("id", 0)))
+            != sorted(checks, key=lambda value: int(value.get("id", 0)))
+        ):
+            raise SystemAttestationError(
+                "GitHub state changed during protected action authorization"
+            )
         return {
             "head_sha": evidence["head_sha"],
-            "base_ref": str(base["ref"]),
+            "base_ref": base_ref,
             "base_sha": base_sha,
             "reviewer_identity": evidence["reviewer_identity"],
             "review_id": int(evidence["authorization_evidence_id"].rsplit(":", 1)[1]),
@@ -682,6 +695,37 @@ class DedicatedSigner:
             ),
             "protected_actor": actor,
             "protection_hash": hashlib.sha256(_canonical(protection)).hexdigest(),
+        }
+
+    def _pull_snapshot(
+        self, pull: Any, repo: str, number: int, destination: str,
+        expected_head: str,
+    ) -> dict[str, str]:
+        if not isinstance(pull, dict):
+            raise SystemAttestationError("pull request response is malformed")
+        base = pull.get("base") or {}
+        base_repo = base.get("repo") or {}
+        head = pull.get("head") or {}
+        head_sha = str(head.get("sha", "")).casefold()
+        base_sha = str(base.get("sha", "")).casefold()
+        if (
+            pull.get("number", number) != number
+            or head_sha != expected_head
+            or str(base_repo.get("full_name", "")).casefold() != destination
+            or base.get("ref") not in self.config.pr_base_refs
+            or not _SHA.fullmatch(base_sha)
+            or pull.get("state") != "open"
+            or pull.get("draft") is not False
+            or pull.get("mergeable") is not True
+            or pull.get("mergeable_state") not in {"clean", "has_hooks"}
+        ):
+            raise SystemAttestationError("pull request is not currently mergeable")
+        return {
+            "repository": repo,
+            "number": str(number),
+            "head_sha": head_sha,
+            "base_ref": str(base["ref"]),
+            "base_sha": base_sha,
         }
 
     def _protected_actor(self, repo: str) -> str:
@@ -1015,42 +1059,17 @@ def _canonical_signed(payload: dict[str, Any]) -> bytes:
 def request_attestation(
     *, kind: str, repository: str, number: int, destination_repo: str,
     socket_path: Path = SOCKET_PATH, expected_uid: int | None = None,
+    expected_gid: int = SOCKET_GROUP_GID,
 ) -> str:
-    request = {
-        "action": "authorize", "kind": kind, "repository": repository,
-        "number": number, "destination_repo": destination_repo,
-    }
-    encoded = _canonical(request) + b"\n"
-    if len(encoded) > MAX_REQUEST:
-        raise SystemAttestationError("request is oversized")
-    client = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
-    client.settimeout(10)
-    try:
-        client.connect(str(socket_path))
-        pid, uid, _ = struct.unpack("3i", client.getsockopt(
-            socket.SOL_SOCKET, socket.SO_PEERCRED, struct.calcsize("3i")
-        ))
-        trusted_uid = (
-            pwd.getpwnam("saturnin-signer").pw_uid
-            if expected_uid is None else expected_uid
-        )
-        if uid != trusted_uid or pid <= 1 or not _trusted_service_process(pid):
-            raise SystemAttestationError("dedicated signer identity is not trusted")
-        client.sendall(encoded)
-        body = bytearray()
-        while b"\n" not in body and len(body) <= MAX_RESPONSE:
-            chunk = client.recv(4096)
-            if not chunk:
-                break
-            body.extend(chunk)
-    finally:
-        client.close()
-    if len(body) > MAX_RESPONSE or b"\n" not in body:
-        raise SystemAttestationError("dedicated signer response is invalid")
-    try:
-        response = json.loads(bytes(body).split(b"\n", 1)[0])
-    except json.JSONDecodeError as exc:
-        raise SystemAttestationError("dedicated signer response is malformed") from exc
+    response = _socket_request(
+        {
+            "action": "authorize", "kind": kind, "repository": repository,
+            "number": number, "destination_repo": destination_repo,
+        },
+        socket_path=socket_path,
+        expected_uid=expected_uid,
+        expected_gid=expected_gid,
+    )
     if not isinstance(response, dict) or set(response) not in ({"attestation"}, {"error"}):
         raise SystemAttestationError("dedicated signer response schema is invalid")
     if "error" in response:
@@ -1064,6 +1083,7 @@ def request_action(
     *, operation: str, repository: str, number: int, destination_repo: str,
     expected_head: str, merge_method: str = "squash", nonce: str | None = None,
     socket_path: Path = SOCKET_PATH, expected_uid: int | None = None,
+    expected_gid: int = SOCKET_GROUP_GID,
 ) -> dict[str, Any]:
     action_nonce = nonce or secrets.token_hex(32)
     response = _socket_request(
@@ -1075,6 +1095,7 @@ def request_action(
         },
         socket_path=socket_path,
         expected_uid=expected_uid,
+        expected_gid=expected_gid,
     )
     if set(response) == {"error"}:
         raise SystemAttestationError(str(response["error"]))
@@ -1109,6 +1130,7 @@ def verify_attestation(
     historical: bool = False,
     socket_path: Path = SOCKET_PATH,
     expected_uid: int | None = None,
+    expected_gid: int = SOCKET_GROUP_GID,
 ) -> dict[str, Any]:
     response = _socket_request(
         {
@@ -1118,6 +1140,7 @@ def verify_attestation(
         },
         socket_path=socket_path,
         expected_uid=expected_uid,
+        expected_gid=expected_gid,
     )
     if set(response) == {"error"}:
         raise SystemAttestationError(str(response["error"]))
@@ -1131,7 +1154,8 @@ def verify_attestation(
 
 
 def _socket_request(
-    request: dict[str, Any], *, socket_path: Path, expected_uid: int | None
+    request: dict[str, Any], *, socket_path: Path, expected_uid: int | None,
+    expected_gid: int,
 ) -> dict[str, Any]:
     encoded = _canonical(request) + b"\n"
     if len(encoded) > MAX_REQUEST:
@@ -1139,16 +1163,25 @@ def _socket_request(
     client = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
     client.settimeout(10)
     try:
+        trusted_uid = (
+            pwd.getpwnam("saturnin-signer").pw_uid
+            if expected_uid is None else expected_uid
+        )
+        identity = _trusted_socket_identity(
+            socket_path, trusted_uid, expected_gid
+        )
         client.connect(str(socket_path))
         pid, uid, _ = struct.unpack(
             "3i",
             client.getsockopt(socket.SOL_SOCKET, socket.SO_PEERCRED, struct.calcsize("3i")),
         )
-        trusted_uid = (
-            pwd.getpwnam("saturnin-signer").pw_uid
-            if expected_uid is None else expected_uid
-        )
-        if uid != trusted_uid or pid <= 1 or not _trusted_service_process(pid):
+        if (
+            uid != trusted_uid
+            or pid <= 1
+            or _trusted_socket_identity(
+                socket_path, trusted_uid, expected_gid
+            ) != identity
+        ):
             raise SystemAttestationError("dedicated signer identity is not trusted")
         client.sendall(encoded)
         body = bytearray()
@@ -1170,32 +1203,29 @@ def _socket_request(
     return response
 
 
-def _trusted_service_process(pid: int) -> bool:
-    """Bind the peer to the installed executable and system service cgroup."""
+def _trusted_socket_identity(
+    socket_path: Path, expected_uid: int, expected_gid: int
+) -> tuple[int, int]:
     try:
-        executable = Path(f"/proc/{pid}/exe").resolve(strict=True)
-        metadata = executable.stat()
-        cgroup = Path(f"/proc/{pid}/cgroup").read_text(encoding="utf-8")
-        command = Path(f"/proc/{pid}/cmdline").read_bytes().split(b"\0")
-        runtime = Path("/usr/lib/saturnin-attestation/system_attestation.py")
-        runtime_metadata = runtime.lstat()
+        parent = socket_path.parent.lstat()
+        endpoint = socket_path.lstat()
     except OSError:
-        return False
-    return (
-        executable.parent in {Path("/usr/bin"), Path("/bin")}
-        and executable.name.startswith("python3")
-        and metadata.st_uid == 0
-        and not metadata.st_mode & 0o022
-        and any(
-            part == b"/usr/lib/saturnin-attestation/system_attestation.py"
-            for part in command
-        )
-        and stat.S_ISREG(runtime_metadata.st_mode)
-        and runtime_metadata.st_uid == 0
-        and runtime_metadata.st_nlink == 1
-        and not runtime_metadata.st_mode & 0o022
-        and "saturnin-attestation.service" in cgroup
-    )
+        raise SystemAttestationError(
+            "dedicated signer socket identity is unavailable"
+        ) from None
+    if (
+        not stat.S_ISDIR(parent.st_mode)
+        or parent.st_uid != expected_uid
+        or parent.st_gid != expected_gid
+        or stat.S_IMODE(parent.st_mode) != 0o2750
+        or not stat.S_ISSOCK(endpoint.st_mode)
+        or endpoint.st_uid != expected_uid
+        or endpoint.st_gid != expected_gid
+        or stat.S_IMODE(endpoint.st_mode) != 0o660
+        or endpoint.st_nlink != 1
+    ):
+        raise SystemAttestationError("dedicated signer socket identity is not trusted")
+    return endpoint.st_dev, endpoint.st_ino
 
 
 def _credential(name: str, *, optional: bool = False) -> bytes:
@@ -1350,6 +1380,8 @@ def serve() -> None:
     signer = DedicatedSigner(
         config, GitHub(config, token), current, previous, archive_keys=archive
     )
+    for repository in sorted(config.repositories):
+        signer._protected_actor(repository)
     listener = _create_listener()
     stopping = threading.Event()
     limiter = AuthorizationLimiter(

@@ -38,12 +38,15 @@ concurrent reuse fails closed.
 The signer requires strict destination-branch protection with stale-review
 dismissal, the configured review and check requirements, and empty bypass
 allowances. Its fixed merge account must have write but not administration
-permission, so GitHub rechecks review and status policy atomically at merge.
+permission, and protection must apply to administrators, so GitHub rechecks
+review and status policy atomically at merge.
 
 The daemon itself creates, verifies, listens on, and removes the canonical
-AF_UNIX socket. Socket activation is forbidden: `SO_PEERCRED` therefore names
-the dedicated signer process that created the listener, rather than PID 1.
-The setgid runtime directory assigns the fixed operator group and the daemon
+AF_UNIX socket. Socket activation is forbidden. Clients authenticate the
+kernel-reported dedicated signer UID and stable inode beneath the exact
+signer-owned setgid directory before and after connection; they do not depend
+on ptrace-gated cross-UID `/proc/<pid>/exe` access. The runtime directory
+assigns the fixed operator group and the daemon
 sets exact mode `0660`; ordinary group members cannot replace entries in the
 `2750` directory. Its only network client constructs HTTPS requests to the
 exact `https://api.github.com` origin;

@@ -303,8 +303,9 @@ def _attestation_boundary(config: Config) -> str:
             "The system manager decrypts current, previous, and bounded retired HMAC "
             "credentials into its private credential tmpfs; ordinary workers never "
             "receive key material. The service, not PID 1, creates the canonical "
-            "listener, so client `SO_PEERCRED` verification authenticates the signer "
-            "UID and process.",
+            "listener. Clients authenticate its kernel-reported UID plus the stable "
+            "signer-owned socket directory and endpoint identity; this deliberately "
+            "avoids cross-UID ptrace-gated `/proc` inspection.",
             "",
             "For pull requests the service obtains the live head, author, and exact "
             "commit-bound latest review state directly from GitHub over TLS. For issues "
@@ -321,7 +322,8 @@ def _attestation_boundary(config: Config) -> str:
             "review ID/state/identity and required checks. Merge repeats that lookup "
             "immediately before the signer uses GitHub's expected-head atomic merge "
             "API. The signer also requires strict branch protection with stale-review "
-            "dismissal, required reviews/checks and no bypass identities. Its fixed "
+            "dismissal, required reviews/checks, administrator enforcement and no "
+            "bypass identities. Its fixed "
             "non-admin merge identity and root-provisioned credential never enter the "
             "ordinary UID; workers receive neither signing sessions nor credentials.",
         ]
