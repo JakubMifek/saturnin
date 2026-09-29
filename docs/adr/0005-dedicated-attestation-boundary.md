@@ -35,6 +35,10 @@ the same independent lookup again immediately before merge and invokes
 GitHub's merge API itself with the expected head SHA. Nonces are serialized in
 root-controlled state, so identical retry is idempotent and altered or
 concurrent reuse fails closed.
+Issue gates likewise obtain fresh short-lived decisions. Issue submission
+repeats the source issue/comment lookup, and the signer itself creates the
+digest-bound title and body with the marker-approved labels in an explicitly
+allowlisted destination.
 The signer requires strict destination-branch protection with stale-review
 dismissal, the configured review and check requirements, and empty bypass
 allowances. Its fixed merge account must have write but not administration
@@ -64,9 +68,10 @@ The one authorized legacy migration source is fixed at
 `/home/jakubmifek/.config/systemd/user/saturnin-credentials` for UID 1000.
 The administrator opens its exact files without following links, pins and
 rechecks file, directory, mount, and content identity, decrypts with the two
-reviewed legacy names, verifies reviewed plaintext hashes, and re-encrypts to
-the fixed `current.key` and `previous.key` names. This is a reviewed migration,
-not a fresh-key bootstrap. The dedicated service strictly verifies the exact
+reviewed legacy names, and verifies reviewed plaintext hashes. Fresh root-only
+current and previous keys are always generated; legacy keys enter only the
+bounded verification archive and can never authorize new records. The
+dedicated service strictly verifies the exact
 historical role- and execution-scoped schemas with those keys; legacy payloads
 can never authorize a new record. Plaintext is never written. Any partial
 system state, substitution, mutation, or mismatch aborts and restores all
@@ -89,6 +94,8 @@ refuses to start without that credential; provisioning it and removing merge
 authority from the ordinary account are human GitHub administration steps.
 The allowlisted reviewer is a distinct GitHub-controlled bot identity; GitHub,
 not the ordinary caller, assigns that identity and review state.
+New v2 review records must also match a byte-identical signer-issued row in the
+root-owned authorization database.
 
 Rotation moves the outgoing previous key into a root-encrypted,
 duplicate-free `archive.keys` credential. The archive is verification-only,
@@ -103,7 +110,7 @@ Compromise of the ordinary UID, checkout, board, launcher, historical ledger,
 or socket client cannot choose trusted live fields, expose keys, or execute a
 merge. Review workers receive no signing session. Availability now depends on
 GitHub and the system service. The reviewed
-legacy migration preserves existing attestations without accepting arbitrary
-user-owned key material; only an absent reviewed legacy source causes a fresh
-key bootstrap. Durable ledger availability therefore requires retaining every
+legacy migration preserves existing attestations without accepting legacy
+user-owned key material as current authority. Durable ledger availability
+therefore requires retaining every
 verification key used by retained records.

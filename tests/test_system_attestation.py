@@ -17,9 +17,11 @@ from pathlib import Path
 
 import pytest
 
+import saturnin.system_attestation as system_attestation
 from saturnin.system_attestation import (
     DedicatedSigner,
     GitHub,
+    ISSUE_MARKER,
     AuthorizationLimiter,
     ARCHIVE_MAX_KEYS,
     ServiceConfig,
@@ -33,6 +35,7 @@ from saturnin.system_attestation import (
     _open_without_redirects,
     request_attestation,
     request_action,
+    request_issue_action,
     verify_attestation,
 )
 from saturnin.governance import Governance
@@ -164,6 +167,49 @@ def action_request(**changes):
     return value
 
 
+def issue_action_fixture(*, expiry: datetime | None = None):
+    title = "Reviewed issue"
+    body = "Exact reviewed body"
+    digest = hashlib.sha256(
+        json.dumps(
+            {"body": body, "title": title},
+            sort_keys=True, separators=(",", ":"),
+        ).encode()
+    ).hexdigest()
+    expires = expiry or (NOW + timedelta(minutes=5))
+    marker = {
+        "repository": "acme/widget", "issue": 9, "digest": digest,
+        "author": "author", "reviewer_role": "issue-reviewer",
+        "verdict": "approved", "zero_context": True,
+        "destination_repo": "acme/issues",
+        "labels": ["incident"],
+        "expiry": expires.isoformat(), "nonce": "e" * 32,
+    }
+
+    def transport(path: str):
+        if path == "/user":
+            return {"login": "saturnin-merge-bot", "type": "User"}
+        if path == "/repos/acme/issues":
+            return {
+                "full_name": "acme/issues",
+                "permissions": {"push": True, "admin": False},
+            }
+        if path == "/repos/acme/widget/issues/9":
+            return {
+                "title": title, "body": body,
+                "user": {"login": "author"},
+            }
+        if "/repos/acme/widget/issues/9/comments?" in path:
+            return [] if "page=2" in path else [{
+                "id": 55,
+                "body": ISSUE_MARKER + json.dumps(marker),
+                "created_at": NOW.isoformat(), "updated_at": NOW.isoformat(),
+                "user": {"login": "review-bot", "type": "Bot"},
+            }]
+        raise AssertionError(path)
+    return title, body, digest, marker, transport
+
+
 def signer(tmp_path: Path, transport=pr_transport()) -> DedicatedSigner:
     cfg = service_config()
     return DedicatedSigner(
@@ -241,7 +287,7 @@ def test_same_evidence_id_rejects_altered_scope(tmp_path: Path) -> None:
         frozenset({"acme/widget", "acme/other"}), service.config.pr_reviewers,
         service.config.issue_reviewers, service.config.allowed_verdicts,
     )
-    with pytest.raises(SystemAttestationError, match="already consumed"):
+    with pytest.raises(SystemAttestationError, match="not allowlisted"):
         service.authorize(request(destination_repo="acme/other"))
 
 
@@ -575,6 +621,7 @@ def test_issue_marker_binds_every_field_and_consumes_comment(tmp_path: Path) -> 
         "author": "author", "reviewer_role": "issue-reviewer",
         "verdict": "approved", "zero_context": True,
         "destination_repo": "acme/widget",
+        "labels": [],
         "expiry": (NOW + timedelta(minutes=5)).isoformat(), "nonce": "d" * 32,
     }
 
@@ -598,7 +645,8 @@ def test_issue_marker_binds_every_field_and_consumes_comment(tmp_path: Path) -> 
     assert json.loads(value)["issue_digest"] == digest
     assert service.authorize(request(kind="issue", number=9)) == value
     current[0] += timedelta(minutes=6)
-    assert service.authorize(request(kind="issue", number=9)) == value
+    with pytest.raises(SystemAttestationError, match="expired"):
+        service.authorize(request(kind="issue", number=9))
     marker["expiry"] = (NOW - timedelta(seconds=1)).isoformat()
     with pytest.raises(SystemAttestationError, match="expired"):
         DedicatedSigner(
@@ -609,6 +657,184 @@ def test_issue_marker_binds_every_field_and_consumes_comment(tmp_path: Path) -> 
     marker["author"] = 7
     with pytest.raises(SystemAttestationError, match="types"):
         service.authorize(request(kind="issue", number=9))
+
+
+def test_fresh_issue_gate_and_protected_submission_are_digest_bound(
+    tmp_path: Path,
+) -> None:
+    title, body, digest, _marker, transport = issue_action_fixture()
+    cfg = ServiceConfig(
+        frozenset({"acme/widget"}), frozenset({"review-bot"}),
+        frozenset({"review-bot"}), frozenset({"approved"}),
+        issue_destinations=frozenset({"acme/issues"}),
+    )
+    mutations: list[tuple[str, str, dict]] = []
+
+    def mutate(method: str, path: str, payload: dict):
+        mutations.append((method, path, payload))
+        return {
+            "number": 77,
+            "html_url": "https://github.com/acme/issues/issues/77",
+        }
+
+    service = DedicatedSigner(
+        cfg,
+        GitHub(
+            cfg, token="protected", transport=transport,
+            mutation_transport=mutate,
+        ),
+        b"k" * 48, None, tmp_path / "issue-actions.sqlite3",
+        now=lambda: NOW,
+    )
+    gate_request = {
+        "action": "decide_issue", "operation": "issue_gate",
+        "repository": "acme/widget", "number": 9,
+        "destination_repo": "acme/issues", "issue_digest": digest,
+        "title": "", "body": "", "labels": [], "nonce": "d" * 64,
+    }
+    gate = service.issue_action(gate_request)
+    assert gate["comment_id"] == 55
+    assert gate["reviewer_identity"] == "review-bot"
+    assert gate["expires_at"] == "2026-09-28T00:01:00+00:00"
+    with pytest.raises(SystemAttestationError, match="labels were not approved"):
+        service.issue_action({
+            **gate_request, "operation": "issue_submit", "title": title,
+            "body": body, "labels": ["unreviewed"], "nonce": "e" * 64,
+        })
+    submission = service.issue_action({
+        **gate_request, "operation": "issue_submit", "title": title,
+        "body": body, "labels": ["incident"], "nonce": "f" * 64,
+    })
+    assert submission["submitted"] is True
+    assert submission["url"].endswith("/issues/77")
+    assert service.issue_action({
+        **gate_request, "operation": "issue_submit", "title": title,
+        "body": body, "labels": ["incident"], "nonce": "f" * 64,
+    }) == submission
+    assert mutations == [(
+        "POST", "/repos/acme/issues/issues",
+        {"title": title, "body": body, "labels": ["incident"]},
+    )]
+
+
+def test_issue_actions_fail_closed_after_expiry_and_on_content_change(
+    tmp_path: Path,
+) -> None:
+    title, body, digest, marker, transport = issue_action_fixture()
+    current = [NOW]
+    cfg = ServiceConfig(
+        frozenset({"acme/widget"}), frozenset({"review-bot"}),
+        frozenset({"review-bot"}), frozenset({"approved"}),
+        issue_destinations=frozenset({"acme/issues"}),
+    )
+    service = DedicatedSigner(
+        cfg, GitHub(cfg, token="protected", transport=transport),
+        b"k" * 48, None, tmp_path / "issue-expiry.sqlite3",
+        now=lambda: current[0],
+    )
+    request_value = {
+        "action": "decide_issue", "operation": "issue_gate",
+        "repository": "acme/widget", "number": 9,
+        "destination_repo": "acme/issues", "issue_digest": digest,
+        "title": "", "body": "", "labels": [], "nonce": "d" * 64,
+    }
+    service.issue_action(request_value)
+    current[0] += timedelta(seconds=61)
+    with pytest.raises(SystemAttestationError, match="decision is expired"):
+        service.issue_action(request_value)
+    marker["expiry"] = (NOW - timedelta(seconds=1)).isoformat()
+    with pytest.raises(SystemAttestationError, match="expired"):
+        service.issue_action({**request_value, "nonce": "e" * 64})
+    with pytest.raises(SystemAttestationError, match="content digest changed"):
+        service.issue_action({
+            **request_value, "operation": "issue_submit",
+            "title": title, "body": body + " changed", "nonce": "f" * 64,
+        })
+
+
+def test_ambiguous_issue_submission_is_reserved_and_never_retried(
+    tmp_path: Path,
+) -> None:
+    title, body, digest, _marker, transport = issue_action_fixture()
+    calls = [0]
+
+    def fail_after_possible_creation(method: str, path: str, payload: dict):
+        calls[0] += 1
+        raise SystemAttestationError("GitHub API response was lost")
+
+    cfg = ServiceConfig(
+        frozenset({"acme/widget"}), frozenset({"review-bot"}),
+        frozenset({"review-bot"}), frozenset({"approved"}),
+        issue_destinations=frozenset({"acme/issues"}),
+    )
+    service = DedicatedSigner(
+        cfg,
+        GitHub(
+            cfg, token="protected", transport=transport,
+            mutation_transport=fail_after_possible_creation,
+        ),
+        b"k" * 48, None, tmp_path / "ambiguous.sqlite3", now=lambda: NOW,
+    )
+    request_value = {
+        "action": "decide_issue", "operation": "issue_submit",
+        "repository": "acme/widget", "number": 9,
+        "destination_repo": "acme/issues", "issue_digest": digest,
+        "title": title, "body": body, "labels": ["incident"], "nonce": "f" * 64,
+    }
+    with pytest.raises(SystemAttestationError, match="response was lost"):
+        service.issue_action(request_value)
+    with pytest.raises(SystemAttestationError, match="requires reconciliation"):
+        service.issue_action(request_value)
+    assert calls == [1]
+
+
+def test_issue_action_rejects_multiple_markers_and_snapshot_change(
+    tmp_path: Path,
+) -> None:
+    _title, _body, digest, _marker, base_transport = issue_action_fixture()
+    request_value = {
+        "action": "decide_issue", "operation": "issue_gate",
+        "repository": "acme/widget", "number": 9,
+        "destination_repo": "acme/issues", "issue_digest": digest,
+        "title": "", "body": "", "labels": [], "nonce": "d" * 64,
+    }
+    cfg = ServiceConfig(
+        frozenset({"acme/widget"}), frozenset({"review-bot"}),
+        frozenset({"review-bot"}), frozenset({"approved"}),
+        issue_destinations=frozenset({"acme/issues"}),
+    )
+
+    def duplicate_transport(path: str):
+        value = base_transport(path)
+        if "/comments?" in path and "page=2" not in path:
+            second = dict(value[0])
+            second["id"] = 56
+            return [*value, second]
+        return value
+
+    duplicate = DedicatedSigner(
+        cfg, GitHub(cfg, token="protected", transport=duplicate_transport),
+        b"k" * 48, None, tmp_path / "duplicate.sqlite3", now=lambda: NOW,
+    )
+    with pytest.raises(SystemAttestationError, match="exactly one"):
+        duplicate.issue_action(request_value)
+
+    issue_reads = [0]
+
+    def changing_transport(path: str):
+        value = base_transport(path)
+        if path == "/repos/acme/widget/issues/9":
+            issue_reads[0] += 1
+            if issue_reads[0] == 2:
+                return {**value, "body": "changed after first snapshot"}
+        return value
+
+    changing = DedicatedSigner(
+        cfg, GitHub(cfg, token="protected", transport=changing_transport),
+        b"k" * 48, None, tmp_path / "changing.sqlite3", now=lambda: NOW,
+    )
+    with pytest.raises(SystemAttestationError, match="scope does not match"):
+        changing.issue_action(request_value)
 
 
 def test_current_and_previous_verification_no_downgrade(tmp_path: Path) -> None:
@@ -746,7 +972,10 @@ def test_archive_v2_verification_cannot_authorize_a_new_record(
         now=lambda: NOW,
         archive_keys=(retired,),
     )
-    assert verifier.verify(old_signer.authorize(request())) == {
+    attestation = old_signer.authorize(request())
+    with pytest.raises(SystemAttestationError, match="not issued"):
+        verifier.verify(attestation)
+    assert verifier.verify(attestation, historical=True) == {
         "status": "verified",
         "key_state": "archive",
     }
@@ -1220,6 +1449,8 @@ def test_signer_listener_rejects_preexisting_non_socket(tmp_path: Path) -> None:
 def test_github_client_rejects_paths_and_bounds_pagination() -> None:
     cfg = service_config()
     client = GitHub(cfg, transport=lambda path: [])
+    with pytest.raises(SystemAttestationError, match="repository"):
+        system_attestation._repo("not/a/repository")
     with pytest.raises(SystemAttestationError, match="path"):
         client.get("https://evil.invalid/repos/acme/widget")
     with pytest.raises(SystemAttestationError, match="path"):
@@ -1275,6 +1506,161 @@ def test_github_authorization_header_uses_token_without_disclosure(
     assert caught.value.__cause__ is None
     _audit("denied", hashlib.sha256(b"evidence").hexdigest(), "")
     assert token not in capsys.readouterr().err
+
+
+def test_github_issue_post_and_issue_client_validate_exact_response(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    seen: dict[str, object] = {}
+
+    class Response:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *args):
+            return None
+
+        def geturl(self):
+            return "https://api.github.com/repos/acme/issues/issues"
+
+        def read(self, _size):
+            return json.dumps({
+                "number": 77,
+                "html_url": "https://github.com/acme/issues/issues/77",
+            }).encode()
+
+    def open_request(request, timeout):
+        seen["method"] = request.method
+        seen["body"] = json.loads(request.data)
+        seen["authorization"] = request.get_header("Authorization")
+        seen["timeout"] = timeout
+        return Response()
+
+    created = GitHub(
+        service_config(), token="protected-token",
+        request_transport=open_request,
+    ).post_issue("acme/issues", "Title", "Body", ["incident"])
+    assert created["number"] == 77
+    assert seen["method"] == "POST"
+    assert seen["body"] == {
+        "title": "Title", "body": "Body", "labels": ["incident"],
+    }
+    assert seen["authorization"] == "Bearer protected-token"
+
+    expiry = (datetime.now(timezone.utc) + timedelta(minutes=1)).isoformat()
+
+    def socket_response(request, **kwargs):
+        return {
+            "allowed": True,
+            **{key: request[key] for key in (
+                "operation", "repository", "number", "destination_repo",
+                "issue_digest", "title", "body", "labels", "nonce",
+            )},
+            "reviewer_identity": "review-bot", "comment_id": 55,
+            "review_state": "approved", "approved_labels": ["incident"],
+            "expires_at": expiry, "signature": "a" * 64,
+            "submitted": True, "issue_number": 77,
+            "url": "https://github.com/acme/issues/issues/77",
+        }
+
+    monkeypatch.setattr(system_attestation, "_socket_request", socket_response)
+    result = request_issue_action(
+        operation="issue_submit", repository="acme/widget", number=9,
+        destination_repo="acme/issues", issue_digest="a" * 64,
+        title="Title", body="Body", labels=["incident"], nonce="d" * 64,
+    )
+    assert result["issue_number"] == 77
+
+    monkeypatch.setattr(
+        system_attestation, "_socket_request",
+        lambda request, **kwargs: {**socket_response(request), "title": "altered"},
+    )
+    with pytest.raises(SystemAttestationError, match="denied"):
+        request_issue_action(
+            operation="issue_submit", repository="acme/widget", number=9,
+            destination_repo="acme/issues", issue_digest="a" * 64,
+            title="Title", body="Body", labels=["incident"], nonce="d" * 64,
+        )
+    monkeypatch.setattr(
+        system_attestation, "_socket_request",
+        lambda request, **kwargs: {"error": "signer unavailable"},
+    )
+    with pytest.raises(SystemAttestationError, match="signer unavailable"):
+        request_issue_action(
+            operation="issue_gate", repository="acme/widget", number=9,
+            destination_repo="acme/issues", issue_digest="a" * 64,
+        )
+
+    def gate_response(request, **kwargs):
+        return {
+            "allowed": True,
+            **{key: request[key] for key in (
+                "operation", "repository", "number", "destination_repo",
+                "issue_digest", "title", "body", "labels", "nonce",
+            )},
+            "reviewer_identity": "review-bot", "comment_id": 55,
+            "review_state": "approved", "approved_labels": [],
+            "expires_at": expiry, "signature": "a" * 64,
+        }
+
+    monkeypatch.setattr(system_attestation, "_socket_request", gate_response)
+    gate = request_issue_action(
+        operation="issue_gate", repository="acme/widget", number=9,
+        destination_repo="acme/issues", issue_digest="a" * 64,
+    )
+    assert len(gate["nonce"]) == 64
+
+    with pytest.raises(SystemAttestationError, match="credential"):
+        GitHub(service_config()).post_issue("acme/issues", "Title", "Body", [])
+
+    def failed_post(_request, _timeout):
+        raise urllib.error.URLError("unavailable")
+
+    with pytest.raises(SystemAttestationError, match="submission failed"):
+        GitHub(
+            service_config(), token="protected-token",
+            request_transport=failed_post,
+        ).post_issue("acme/issues", "Title", "Body", [])
+
+    class InvalidResponse(Response):
+        def read(self, _size):
+            return b"not-json"
+
+    with pytest.raises(SystemAttestationError, match="malformed"):
+        GitHub(
+            service_config(), token="protected-token",
+            request_transport=lambda request, timeout: InvalidResponse(),
+        ).post_issue("acme/issues", "Title", "Body", [])
+
+    class OversizedResponse(Response):
+        def read(self, _size):
+            return b"x" * (system_attestation.MAX_RESPONSE + 1)
+
+    with pytest.raises(SystemAttestationError, match="oversized"):
+        GitHub(
+            service_config(), token="protected-token",
+            request_transport=lambda request, timeout: OversizedResponse(),
+        ).post_issue("acme/issues", "Title", "Body", [])
+
+    class ListResponse(Response):
+        def read(self, _size):
+            return b"[]"
+
+    with pytest.raises(SystemAttestationError, match="malformed"):
+        GitHub(
+            service_config(), token="protected-token",
+            request_transport=lambda request, timeout: ListResponse(),
+        ).post_issue("acme/issues", "Title", "Body", [])
+
+    class RedirectResponse(Response):
+        def geturl(self):
+            return "https://evil.invalid/capture"
+
+    with pytest.raises(SystemAttestationError, match="redirect"):
+        GitHub(
+            service_config(), token="protected-token",
+            request_transport=lambda request, timeout: RedirectResponse(),
+        ).post_issue("acme/issues", "Title", "Body", [])
 
 
 def test_github_protected_merge_transport_is_fixed_and_expected_head_bound() -> None:

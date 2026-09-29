@@ -92,6 +92,8 @@ review:
     live_action_authority: protected-signer-only
     live_action_ttl_seconds: 60
     required_check_runs: [test]
+    issue_destinations: [JakubMifek/saturnin-ops]
+    protected_issue_submission: true
     protected_merge_credential: /etc/saturnin-attestation/github.token.cred
     protected_merge_expected_head: true
     branch_protection_enforce_admins: true

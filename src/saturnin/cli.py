@@ -27,6 +27,7 @@ from .system_attestation import (
     SystemAttestationError,
     request_action,
     request_attestation,
+    request_issue_action,
 )
 from .board import CONTAINER_KINDS, TRANSITIONS, Board, BoardError, Task
 from .checkpoints import Checkpoint, CheckpointStore
@@ -1912,81 +1913,38 @@ def _run_review(args: argparse.Namespace, config: Config, as_json: bool) -> int:
         return 0 if response.get("merged") else 2
     if args.review_command == "submit-issue":
         digest = issue_content_digest(args.title, args.body)
-        governance = Governance(config)
-        records = ledger.for_subject(args.subject, "issue")
-        decision = governance.issue_submission_allowed(
-            repo=args.repo,
-            author=args.author,
-            records=records,
-            issue_digest=digest,
-        )
-        if not decision.allowed:
+        try:
+            subject_repo, number = _parse_pr_subject(args.subject)
+            nonce = hashlib.sha256(json.dumps(
+                {
+                    "operation": "issue_submit", "subject": args.subject.casefold(),
+                    "destination": args.repo.casefold(), "digest": digest,
+                    "labels": sorted(args.label),
+                },
+                sort_keys=True, separators=(",", ":"),
+            ).encode()).hexdigest()
+            response = request_issue_action(
+                operation="issue_submit", repository=subject_repo,
+                number=int(number), destination_repo=args.repo,
+                issue_digest=digest, title=args.title, body=args.body,
+                labels=args.label, nonce=nonce,
+            )
+        except (ReviewError, SystemAttestationError, OSError) as exc:
             _emit(
-                {"allowed": False, "reasons": decision.reasons, "issue_digest": digest},
+                {"allowed": False, "reasons": [str(exc)], "issue_digest": digest},
                 as_json,
-                "BLOCKED: " + "; ".join(decision.reasons),
+                "BLOCKED: " + str(exc),
             )
             return 2
-        identity = _issue_submission_identity(args.subject, args.repo, digest)
-        submissions = config.var_dir / "issue-submissions"
-        submissions.mkdir(parents=True, exist_ok=True, mode=0o700)
-        submissions.chmod(0o700)
-        submission_path = submissions / f"{identity}.json"
-        submission_lock = config.var_dir / "locks" / f"governed-issue-{identity}"
-        try:
-            with file_lock(submission_lock):
-                url = _read_issue_submission(
-                    submission_path,
-                    identity=identity,
-                    subject=args.subject,
-                    repo=args.repo,
-                    digest=digest,
-                )
-                if not url:
-                    submission = {
-                        "identity": identity,
-                        "subject": args.subject,
-                        "repo": args.repo.casefold(),
-                        "issue_digest": digest,
-                        "status": "started",
-                        "url": "",
-                    }
-                    atomic_replace_text(
-                        submission_path,
-                        json.dumps(submission, sort_keys=True) + "\n",
-                        mode=PRIVATE_FILE_MODE,
-                    )
-                    create_args = [
-                        "issue",
-                        "create",
-                        "--repo",
-                        args.repo,
-                        "--title",
-                        args.title,
-                        "--body",
-                        args.body,
-                    ]
-                    for label in args.label:
-                        create_args.extend(["--label", label])
-                    output = run_gh(create_args)
-                    url = output.strip().splitlines()[-1].strip() if output.strip() else ""
-                    if url:
-                        submission.update({"status": "finished", "url": url})
-                        atomic_replace_text(
-                            submission_path,
-                            json.dumps(submission, sort_keys=True) + "\n",
-                            mode=PRIVATE_FILE_MODE,
-                        )
-        except MirrorError as exc:
-            raise ReviewError(f"governed issue submission failed for {args.subject}: {exc}") from exc
-        if not url:
-            raise ReviewError("governed issue submission returned no issue URL")
+        url = str(response["url"])
         _emit(
             {
                 "allowed": True,
-                "reasons": decision.reasons,
+                "reasons": ["fresh protected-signer issue submission"],
                 "issue_digest": digest,
                 "url": url,
+                "comment_id": response["comment_id"],
+                "decision_nonce": response["nonce"],
             },
             as_json,
             url,
@@ -2028,18 +1986,31 @@ def _run_review(args: argparse.Namespace, config: Config, as_json: bool) -> int:
             "ALLOWED: fresh protected-signer decision",
         )
         return 0
-    governance = Governance(config)
-    records = ledger.for_subject(args.subject, args.kind)
-    decision = governance.issue_submission_allowed(
-            repo=args.repo, author=args.author, records=records,
+    try:
+        subject_repo, number = _parse_pr_subject(args.subject)
+        live = request_issue_action(
+            operation="issue_gate", repository=subject_repo,
+            number=int(number), destination_repo=args.repo,
             issue_digest=getattr(args, "issue_digest", ""),
-    )
+        )
+    except (ReviewError, SystemAttestationError, OSError) as exc:
+        _emit(
+            {"allowed": False, "reasons": [str(exc)]},
+            as_json,
+            "BLOCKED: " + str(exc),
+        )
+        return 2
     _emit(
-        {"allowed": decision.allowed, "reasons": decision.reasons},
+        {
+            "allowed": True,
+            "reasons": ["fresh protected-signer issue decision"],
+            "comment_id": live["comment_id"],
+            "decision_nonce": live["nonce"],
+        },
         as_json,
-        ("ALLOWED: " if decision.allowed else "BLOCKED: ") + "; ".join(decision.reasons),
+        "ALLOWED: fresh protected-signer issue decision",
     )
-    return 0 if decision.allowed else 2
+    return 0
 
 
 def _run_automation(args: argparse.Namespace, config: Config, board: Board, as_json: bool) -> int:

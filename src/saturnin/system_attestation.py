@@ -111,6 +111,7 @@ class ServiceConfig:
     pr_reviewers: frozenset[str]
     issue_reviewers: frozenset[str]
     allowed_verdicts: frozenset[str]
+    issue_destinations: frozenset[str] = frozenset()
     github_api: str = "https://api.github.com"
     request_timeout_seconds: float = 10
     maximum_issue_marker_ttl_seconds: int = 3600
@@ -133,6 +134,7 @@ class ServiceConfig:
             "authorization_limit", "authorization_window_seconds",
             "pr_base_refs", "required_check_runs", "action_ttl_seconds",
             "protected_actor_login",
+            "issue_destinations",
         }:
             raise SystemAttestationError("service configuration schema is invalid")
         api = raw.get("github_api", "https://api.github.com")
@@ -146,6 +148,9 @@ class ServiceConfig:
                 str(item).casefold() for item in raw["issue_reviewers"]
             )
             verdicts = frozenset(str(item).casefold() for item in raw["allowed_verdicts"])
+            issue_destinations = frozenset(
+                _repo(item) for item in raw.get("issue_destinations", [])
+            )
         except (KeyError, TypeError) as exc:
             raise SystemAttestationError("service configuration lists are invalid") from exc
         if not repositories or not pr_reviewers or not issue_reviewers:
@@ -191,6 +196,7 @@ class ServiceConfig:
             raise SystemAttestationError("protected action policy is invalid")
         return cls(
             repositories, pr_reviewers, issue_reviewers, verdicts,
+            issue_destinations=issue_destinations,
             request_timeout_seconds=timeout,
             maximum_issue_marker_ttl_seconds=marker_ttl,
             authorization_limit=authorization_limit,
@@ -335,6 +341,47 @@ class GitHub:
             raise SystemAttestationError("GitHub response is malformed")
         return value
 
+    def post_issue(
+        self, repo: str, title: str, body: str, labels: list[str]
+    ) -> Any:
+        path = f"/repos/{repo}/issues"
+        if self.mutation_transport:
+            return self.mutation_transport(
+                "POST", path, {"title": title, "body": body, "labels": labels}
+            )
+        if not self.token:
+            raise SystemAttestationError("protected GitHub credential is unavailable")
+        encoded = _canonical({"title": title, "body": body, "labels": labels})
+        request = urllib.request.Request(
+            self.config.github_api + path,
+            data=encoded,
+            method="POST",
+            headers={
+                "Accept": "application/vnd.github+json",
+                "Content-Type": "application/json",
+                "User-Agent": "saturnin-protected-issue/1",
+                "Authorization": f"Bearer {self.token}",
+            },
+        )
+        try:
+            with self.request_transport(
+                request, self.config.request_timeout_seconds
+            ) as response:
+                if response.geturl() != self.config.github_api + path:
+                    raise SystemAttestationError("GitHub redirect was refused")
+                response_body = response.read(MAX_RESPONSE + 1)
+        except (OSError, urllib.error.URLError):
+            raise SystemAttestationError("GitHub protected issue submission failed") from None
+        if len(response_body) > MAX_RESPONSE:
+            raise SystemAttestationError("GitHub response is oversized")
+        try:
+            value = json.loads(response_body)
+        except json.JSONDecodeError as exc:
+            raise SystemAttestationError("GitHub response is malformed") from exc
+        if not isinstance(value, dict):
+            raise SystemAttestationError("GitHub response is malformed")
+        return value
+
 
 class _RejectRedirects(urllib.request.HTTPRedirectHandler):
     def redirect_request(self, request, fp, code, msg, headers, newurl):
@@ -406,17 +453,29 @@ class DedicatedSigner:
             raise SystemAttestationError("request schema is invalid")
         repository = _repo(request["repository"])
         destination = _repo(request["destination_repo"])
-        if repository not in self.config.repositories or destination not in self.config.repositories:
-            raise SystemAttestationError("repository is not allowlisted")
         number = request["number"]
         subject = _subject(repository, number)
         if request["kind"] == "pr":
+            if (
+                repository not in self.config.repositories
+                or destination != repository
+            ):
+                raise SystemAttestationError("repository is not allowlisted")
             evidence = self._pr(repository, number, subject, destination)
         elif request["kind"] == "issue":
+            destinations = (
+                self.config.issue_destinations or self.config.repositories
+            )
+            if (
+                repository not in self.config.repositories
+                or destination not in destinations
+            ):
+                raise SystemAttestationError("repository is not allowlisted")
             evidence = self._issue(repository, number, subject, destination)
         else:
             raise SystemAttestationError("review kind is invalid")
         authorization_current = bool(evidence.pop("_authorization_current", True))
+        evidence.pop("_approved_labels", None)
         scope_hash = hashlib.sha256(_canonical(evidence)).hexdigest()
         evidence_id = evidence["authorization_evidence_id"]
         with self.lock, closing(self._db()) as db, db:
@@ -427,6 +486,8 @@ class DedicatedSigner:
             ).fetchone()
             if row:
                 db.execute("COMMIT")
+                if not authorization_current:
+                    raise SystemAttestationError("authorization evidence is expired")
                 if hmac.compare_digest(row[0], scope_hash):
                     return str(row[1])
                 raise SystemAttestationError("authorization evidence was already consumed")
@@ -492,6 +553,21 @@ class DedicatedSigner:
                     signature,
                 )
             ):
+                if (
+                    payload.get("schema") == "saturnin-attestation-v2"
+                    and not historical
+                ):
+                    with closing(self._db()) as db:
+                        issued = db.execute(
+                            "SELECT attestation FROM consumed WHERE evidence_id=?",
+                            (payload["authorization_evidence_id"],),
+                        ).fetchone()
+                    if issued is None or not hmac.compare_digest(
+                        str(issued[0]), attestation
+                    ):
+                        raise SystemAttestationError(
+                            "attestation was not issued by the protected signer"
+                        )
                 return {"status": "verified", "key_state": key_state}
         raise SystemAttestationError("attestation signature does not match")
 
@@ -583,6 +659,167 @@ class DedicatedSigner:
             db.execute(
                 "INSERT INTO actions VALUES (?, ?, ?, ?)",
                 (request["nonce"], scope_hash, serialized, self.now().isoformat()),
+            )
+            db.execute("COMMIT")
+            return signed
+
+    def issue_action(self, request: dict[str, Any]) -> dict[str, Any]:
+        required = {
+            "action", "operation", "repository", "number", "destination_repo",
+            "issue_digest", "title", "body", "labels", "nonce",
+        }
+        if (
+            not isinstance(request, dict)
+            or set(request) != required
+            or request["action"] != "decide_issue"
+            or request["operation"] not in {"issue_gate", "issue_submit"}
+            or not _NONCE.fullmatch(str(request["nonce"]))
+            or not _DIGEST.fullmatch(str(request["issue_digest"]))
+            or not isinstance(request["title"], str)
+            or not isinstance(request["body"], str)
+            or not isinstance(request["labels"], list)
+            or any(
+                not isinstance(label, str)
+                or not re.fullmatch(r"[A-Za-z0-9:_. -]{1,50}", label)
+                for label in request["labels"]
+            )
+            or len(request["labels"]) > 20
+            or len(request["title"]) > 256
+            or len(request["body"].encode()) > 64 * 1024
+        ):
+            raise SystemAttestationError("protected issue request schema is invalid")
+        repo = _repo(request["repository"])
+        destination = _repo(request["destination_repo"])
+        number = request["number"]
+        subject = _subject(repo, number)
+        destinations = self.config.issue_destinations or self.config.repositories
+        if repo not in self.config.repositories or destination not in destinations:
+            raise SystemAttestationError("protected issue repository is not allowed")
+        if request["operation"] == "issue_submit":
+            digest = hashlib.sha256(_canonical({
+                "title": request["title"], "body": request["body"],
+            })).hexdigest()
+            if digest != request["issue_digest"]:
+                raise SystemAttestationError("protected issue content digest changed")
+        elif request["title"] or request["body"] or request["labels"]:
+            raise SystemAttestationError("issue gate accepts no submission content")
+        scope = {
+            key: request[key]
+            for key in (
+                "operation", "repository", "number", "destination_repo",
+                "issue_digest", "title", "body", "labels", "nonce",
+            )
+        }
+        scope["repository"] = repo
+        scope["destination_repo"] = destination
+        scope_hash = hashlib.sha256(_canonical(scope)).hexdigest()
+        with self.lock, closing(self._db()) as db, db:
+            db.execute("BEGIN IMMEDIATE")
+            old = db.execute(
+                "SELECT scope_hash, result FROM actions WHERE nonce=?",
+                (request["nonce"],),
+            ).fetchone()
+            if old:
+                db.execute("COMMIT")
+                prior = json.loads(old[1])
+                if not hmac.compare_digest(old[0], scope_hash):
+                    raise SystemAttestationError(
+                        "protected action nonce was already consumed"
+                    )
+                if (
+                    prior.get("operation") == "issue_submit"
+                    and not prior.get("submitted")
+                ):
+                    raise SystemAttestationError(
+                        "protected issue submission requires reconciliation"
+                    )
+                if (
+                    prior.get("operation") == "issue_gate"
+                    and _iso(prior.get("expires_at")) <= self.now()
+                ):
+                    raise SystemAttestationError(
+                        "protected action decision is expired"
+                    )
+                return prior
+            self._protected_actor(destination)
+            evidence = self._issue(repo, number, subject, destination)
+            if (
+                not evidence.pop("_authorization_current", False)
+                or evidence["issue_digest"] != request["issue_digest"]
+            ):
+                raise SystemAttestationError(
+                    "issue has no current matching authorization"
+                )
+            repeated = self._issue(repo, number, subject, destination)
+            if not repeated.pop("_authorization_current", False) or repeated != evidence:
+                raise SystemAttestationError(
+                    "GitHub state changed during protected issue authorization"
+                )
+            self._protected_actor(destination)
+            approved_labels = sorted(evidence.pop("_approved_labels"))
+            repeated.pop("_approved_labels")
+            if (
+                request["operation"] == "issue_submit"
+                and sorted(request["labels"]) != approved_labels
+            ):
+                raise SystemAttestationError(
+                    "protected issue labels were not approved"
+                )
+            expiry = min(
+                _iso(evidence["expires_at"]),
+                self.now() + timedelta(seconds=self.config.action_ttl_seconds),
+            )
+            decision: dict[str, Any] = {
+                "allowed": True, **scope,
+                "reviewer_identity": evidence["reviewer_identity"],
+                "comment_id": int(
+                    evidence["authorization_evidence_id"].rsplit(":", 1)[1]
+                ),
+                "review_state": evidence["verdict"],
+                "approved_labels": approved_labels,
+                "expires_at": expiry.isoformat(),
+            }
+            signed = dict(decision)
+            signed["signature"] = hmac.new(
+                self.current_key, _canonical(decision), hashlib.sha256
+            ).hexdigest()
+            serialized = json.dumps(signed, sort_keys=True, separators=(",", ":"))
+            db.execute(
+                "INSERT INTO actions VALUES (?, ?, ?, ?)",
+                (request["nonce"], scope_hash, serialized, self.now().isoformat()),
+            )
+            db.execute("COMMIT")
+            if request["operation"] == "issue_gate":
+                return signed
+
+            submission = self.github.post_issue(
+                destination, request["title"], request["body"], request["labels"]
+            )
+            if (
+                not isinstance(submission, dict)
+                or type(submission.get("number")) is not int
+                or not isinstance(submission.get("html_url"), str)
+                or not submission["html_url"].startswith(
+                    f"https://github.com/{destination}/issues/"
+                )
+            ):
+                raise SystemAttestationError(
+                    "GitHub protected issue response is invalid"
+                )
+            decision.update({
+                "submitted": True,
+                "issue_number": submission["number"],
+                "url": submission["html_url"],
+            })
+            signed = dict(decision)
+            signed["signature"] = hmac.new(
+                self.current_key, _canonical(decision), hashlib.sha256
+            ).hexdigest()
+            serialized = json.dumps(signed, sort_keys=True, separators=(",", ":"))
+            db.execute("BEGIN IMMEDIATE")
+            db.execute(
+                "UPDATE actions SET result=? WHERE nonce=? AND scope_hash=?",
+                (serialized, request["nonce"], scope_hash),
             )
             db.execute("COMMIT")
             return signed
@@ -934,7 +1171,7 @@ class DedicatedSigner:
             value for value in reviews
             if str(value.get("state", "")).casefold() == "approved"
         ]
-        if blocking or not approved:
+        if blocking or len(approved) != 1:
             raise SystemAttestationError("exact head has no current allowed approval")
         review = max(
             approved,
@@ -985,14 +1222,16 @@ class DedicatedSigner:
                 continue
             if isinstance(marker, dict) and created == updated:
                 candidates.append((comment_id, marker, login, created))
-        if not candidates:
-            raise SystemAttestationError("issue has no valid review marker")
+        if len(candidates) != 1:
+            raise SystemAttestationError(
+                "issue must have exactly one valid review marker"
+            )
         comment_id, marker, reviewer_identity, comment_created = max(
             candidates, key=lambda item: item[0]
         )
         required = {
             "repository", "issue", "digest", "author", "reviewer_role", "verdict",
-            "zero_context", "destination_repo", "expiry", "nonce",
+            "zero_context", "destination_repo", "labels", "expiry", "nonce",
         }
         if set(marker) != required:
             raise SystemAttestationError("issue review marker schema is invalid")
@@ -1002,7 +1241,18 @@ class DedicatedSigner:
                 "repository", "digest", "author", "reviewer_role", "verdict",
                 "destination_repo", "expiry", "nonce",
             )
-        ) or type(marker["issue"]) is not int or type(marker["zero_context"]) is not bool:
+        ) or (
+            type(marker["issue"]) is not int
+            or type(marker["zero_context"]) is not bool
+            or not isinstance(marker["labels"], list)
+            or len(marker["labels"]) > 20
+            or any(
+                not isinstance(label, str)
+                or not re.fullmatch(r"[A-Za-z0-9:_. -]{1,50}", label)
+                for label in marker["labels"]
+            )
+            or len(set(marker["labels"])) != len(marker["labels"])
+        ):
             raise SystemAttestationError("issue review marker types are invalid")
         expiry = _iso(marker["expiry"])
         now = self.now()
@@ -1032,6 +1282,7 @@ class DedicatedSigner:
             reviewer_identity, expiry.timestamp(),
         )
         evidence["_authorization_current"] = expiry > now
+        evidence["_approved_labels"] = sorted(marker["labels"])
         return evidence
 
     @staticmethod
@@ -1121,6 +1372,62 @@ def request_action(
         or _iso(response["expires_at"]) <= datetime.now(timezone.utc)
     ):
         raise SystemAttestationError("protected signer denied the action")
+    return response
+
+
+def request_issue_action(
+    *, operation: str, repository: str, number: int, destination_repo: str,
+    issue_digest: str, title: str = "", body: str = "",
+    labels: list[str] | None = None, nonce: str | None = None,
+    socket_path: Path = SOCKET_PATH, expected_uid: int | None = None,
+    expected_gid: int = SOCKET_GROUP_GID,
+) -> dict[str, Any]:
+    action_nonce = nonce or secrets.token_hex(32)
+    response = _socket_request(
+        {
+            "action": "decide_issue", "operation": operation,
+            "repository": repository, "number": number,
+            "destination_repo": destination_repo,
+            "issue_digest": issue_digest, "title": title, "body": body,
+            "labels": labels or [], "nonce": action_nonce,
+        },
+        socket_path=socket_path, expected_uid=expected_uid, expected_gid=expected_gid,
+    )
+    if set(response) == {"error"}:
+        raise SystemAttestationError(str(response["error"]))
+    required = {
+        "allowed", "operation", "repository", "number", "destination_repo",
+        "issue_digest", "title", "body", "labels", "nonce",
+        "reviewer_identity", "comment_id", "review_state", "expires_at",
+        "approved_labels", "signature",
+    }
+    if (
+        not isinstance(response, dict)
+        or not required <= set(response)
+        or response["allowed"] is not True
+        or response["operation"] != operation
+        or response["repository"] != repository.casefold()
+        or response["destination_repo"] != destination_repo.casefold()
+        or response["number"] != number
+        or response["issue_digest"] != issue_digest
+        or response["title"] != title
+        or response["body"] != body
+        or response["labels"] != (labels or [])
+        or response["nonce"] != action_nonce
+        or _iso(response["expires_at"]) <= datetime.now(timezone.utc)
+        or (
+            operation == "issue_submit"
+            and (
+                response.get("submitted") is not True
+                or type(response.get("issue_number")) is not int
+                or not isinstance(response.get("url"), str)
+                or not response["url"].startswith(
+                    f"https://github.com/{destination_repo.casefold()}/issues/"
+                )
+            )
+        )
+    ):
+        raise SystemAttestationError("protected signer denied the issue action")
     return response
 
 
@@ -1477,6 +1784,24 @@ def serve() -> None:
                             for key in (
                                 "operation", "repository", "number",
                                 "destination_repo", "head_sha", "nonce",
+                            )
+                        })
+                    ).hexdigest()
+                    outcome = f"{response['operation']}_authorized"
+                elif request.get("action") == "decide_issue":
+                    if not limiter.allow(peer_uid):
+                        outcome = "rate_limited"
+                        raise SystemAttestationError("authorization rate limit exceeded")
+                    response = signer.issue_action(request)
+                    evidence_hash = hashlib.sha256(
+                        f"github:comment:{response['comment_id']}".encode()
+                    ).hexdigest()
+                    scope_hash = hashlib.sha256(
+                        _canonical({
+                            key: response[key]
+                            for key in (
+                                "operation", "repository", "number",
+                                "destination_repo", "issue_digest", "nonce",
                             )
                         })
                     ).hexdigest()

@@ -311,8 +311,11 @@ def _attestation_boundary(config: Config) -> str:
             "For pull requests the service obtains the live head, author, and exact "
             "commit-bound latest review state directly from GitHub over TLS. For issues "
             "it recomputes title/body digest and accepts one exact, expiring, nonce-bound "
-            "machine marker in an allowlisted bot comment. Evidence expiry limits new "
-            "authorization, not later verification of an already signed durable record. "
+            "machine marker in an allowlisted bot comment. The marker also binds approved "
+            "labels. Every issue gate is fresh; submission repeats authorization and the "
+            "signer creates exact reviewed content in an independently allowlisted "
+            "destination. Evidence expiry limits "
+            "new authorization, not later audit verification of a durable record. "
             "Socket filesystem access permits transport only: independent GitHub "
             "authorization remains required. Repository and API origins are fixed "
             "allowlists; caller claims and socket credentials are not authority.",

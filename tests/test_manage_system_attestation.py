@@ -325,11 +325,13 @@ def test_authorized_legacy_migration_reencrypts_reviewed_plaintext(
     admin.install(root, True, codec)
 
     current, previous = admin._credential_paths(root)
-    assert codec.decrypt(current.read_bytes(), "current.key") == current_plain
-    assert codec.decrypt(previous.read_bytes(), "previous.key") == previous_plain
+    new_current = codec.decrypt(current.read_bytes(), "current.key")
+    new_previous = codec.decrypt(previous.read_bytes(), "previous.key")
+    assert new_current not in {current_plain, previous_plain}
+    assert new_previous not in {current_plain, previous_plain, new_current}
     assert admin._decode_archive(
         codec.decrypt(admin._archive_path(root).read_bytes(), "archive.keys")
-    ) == []
+    ) == [current_plain, previous_plain]
 
 
 def test_source_descriptor_rejects_links_and_mutation(tmp_path: Path) -> None:

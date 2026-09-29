@@ -61,9 +61,9 @@ FILES = {
 OBSOLETE_FILES = ("usr/lib/systemd/system/saturnin-attestation.socket",)
 EXPECTED_SHA256 = {
     "src/saturnin/system_attestation.py":
-        "bdd02f429f2cd1678a7e981b924350346a48268745c4604dab0dc2fc2f8861ab",
+        "1d778aaad1ab5e7c16edfad4d03f8afd83bdb21bbfdb90fce913605b6df65a9f",
     "config/attestation.json":
-        "c2a098d610d8f0f20e8e4c790455f039aec2ef4f9d0e904a6945834c3264105c",
+        "1f435d399ffe63e310e15150e48575069461c8f3e88972b219d1a44ccab29d32",
     "systemd/system/saturnin-attestation.service":
         "01c2e033f54a655ef2d3a2c7048ce3af606b19e2d46128471372bc434b5bb43a",
     "systemd/system/saturnin-attestation.sysusers":
@@ -655,30 +655,30 @@ def _migrate_or_provision(root: Path, runner: Runner) -> list[Path]:
     if archive.exists():
         raise InstallError("partial system credential state is forbidden")
     opened = _open_legacy(root)
-    if opened is None:
-        current_plain = _new_key()
-        previous_plain = _new_key()
-    else:
+    legacy_plaintexts: list[bytes] = []
+    if opened is not None:
         try:
-            plaintexts = []
             for source, (_filename, legacy_name, expected, _target) in zip(opened, LEGACY):
                 plaintext = runner.decrypt(source.content, legacy_name, LEGACY_UID)
                 if _digest_bytes(plaintext) != expected:
                     raise InstallError("legacy credential plaintext identity mismatch")
                 _validate_key(plaintext, legacy_name)
-                plaintexts.append(plaintext)
+                legacy_plaintexts.append(plaintext)
             for source in opened:
                 _revalidate(source)
-            current_plain, previous_plain = plaintexts
         finally:
             for source in opened:
                 source.close()
+    current_plain = _new_key()
+    previous_plain = _new_key()
     if current_plain == previous_plain:
         raise InstallError("current and previous credentials must differ")
     values = {
         current: _encode_checked(runner, current_plain, "current.key"),
         previous: _encode_checked(runner, previous_plain, "previous.key"),
-        archive: _encode_blob_checked(runner, _encode_archive([]), "archive.keys"),
+        archive: _encode_blob_checked(
+            runner, _encode_archive(legacy_plaintexts), "archive.keys"
+        ),
     }
     _atomic_credentials(root, values, runner, restart=False)
     current_plain = previous_plain = b""

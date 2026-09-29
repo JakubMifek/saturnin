@@ -1617,10 +1617,18 @@ def test_checkpoint_sweep_fails_closed_without_live_launch_or_pause_marker(
 
 
 def test_issue_review_gate_requires_matching_digest(
-    home: Path, capsys: pytest.CaptureFixture[str]
+    home: Path, capsys: pytest.CaptureFixture[str],
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    subject = "draft-for-managed-repo"
+    subject = "JakubMifek/saturnin#42"
     digest = "b" * 64
+    monkeypatch.setattr(
+        "saturnin.cli.request_issue_action",
+        lambda **kwargs: {
+            "allowed": True, "comment_id": 55,
+            "nonce": "d" * 64, "issue_digest": kwargs["issue_digest"],
+        },
+    )
     run(
         capsys,
         "review",
@@ -1805,7 +1813,7 @@ def test_review_merge_uses_expected_head_precondition(
 def test_review_submit_issue_uses_reviewed_title_and_body_digest(
     home: Path, capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    subject = "managed-issue-draft"
+    subject = "JakubMifek/saturnin#42"
     title = "Need safer rollout guardrails"
     body = "Gate deployments on verified backup snapshots."
     digest = issue_content_digest(title, body)
@@ -1836,18 +1844,16 @@ def test_review_submit_issue_uses_reviewed_title_and_body_digest(
             repo="JakubMifek/saturnin-ops",
         ),
     )
-    calls: list[list[str]] = []
+    calls: list[dict] = []
 
-    def fake_run_gh(args: list[str]) -> str:
-        calls.append(args)
-        if args[:2] == ["issue", "create"]:
-            assert args[args.index("--title") + 1] == title
-            created_body = args[args.index("--body") + 1]
-            assert created_body == body
-            return "https://github.com/JakubMifek/saturnin-ops/issues/77\n"
-        raise AssertionError(f"unexpected gh call: {args}")
+    def protected_issue(**kwargs):
+        calls.append(kwargs)
+        return {
+            "allowed": True, "url": "https://github.com/JakubMifek/saturnin-ops/issues/77",
+            "comment_id": 55, "nonce": kwargs["nonce"],
+        }
 
-    monkeypatch.setattr("saturnin.cli.run_gh", fake_run_gh)
+    monkeypatch.setattr("saturnin.cli.request_issue_action", protected_issue)
 
     code, out = run(
         capsys,
@@ -1868,21 +1874,16 @@ def test_review_submit_issue_uses_reviewed_title_and_body_digest(
 
     assert code == 0
     assert out.strip().endswith("/issues/77")
-    assert calls[0][:5] == [
-        "issue",
-        "create",
-        "--repo",
-        "JakubMifek/saturnin-ops",
-        "--title",
-    ]
-    assert calls[0][5] == title
-    assert calls[0][-2:] == ["--label", "incident"]
+    assert calls[0]["title"] == title
+    assert calls[0]["body"] == body
+    assert calls[0]["labels"] == ["incident"]
+    assert calls[0]["issue_digest"] == digest
 
 
 def test_review_submit_issue_reuses_existing_exact_payload(
     home: Path, capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    subject = "managed-issue-draft"
+    subject = "JakubMifek/saturnin#42"
     title = "Need safer rollout guardrails"
     body = "Gate deployments on verified backup snapshots."
     repo = "JakubMifek/saturnin-ops"
@@ -1914,15 +1915,16 @@ def test_review_submit_issue_reuses_existing_exact_payload(
             repo=repo,
         ),
     )
-    calls: list[list[str]] = []
+    calls: list[dict] = []
 
-    def fake_run_gh(args: list[str]) -> str:
-        calls.append(args)
-        if args[:2] == ["issue", "create"]:
-            return "https://github.com/JakubMifek/saturnin-ops/issues/77\n"
-        raise AssertionError(f"unexpected gh call: {args}")
+    def protected_issue(**kwargs):
+        calls.append(kwargs)
+        return {
+            "allowed": True, "url": "https://github.com/JakubMifek/saturnin-ops/issues/77",
+            "comment_id": 55, "nonce": kwargs["nonce"],
+        }
 
-    monkeypatch.setattr("saturnin.cli.run_gh", fake_run_gh)
+    monkeypatch.setattr("saturnin.cli.request_issue_action", protected_issue)
 
     code, out = run(
         capsys,
@@ -1957,13 +1959,14 @@ def test_review_submit_issue_reuses_existing_exact_payload(
     )
     assert code == 0
     assert out.strip().endswith("/issues/77")
-    assert len(calls) == 1
+    assert len(calls) == 2
+    assert calls[0]["nonce"] == calls[1]["nonce"]
 
 
 def test_review_submit_issue_identity_is_scoped_to_subject(
     home: Path, capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    subjects = ("first-draft", "second-draft")
+    subjects = ("JakubMifek/saturnin#41", "JakubMifek/saturnin#42")
     repo = "JakubMifek/saturnin-ops"
     title = "Shared title"
     body = "Shared reviewed body"
@@ -1996,13 +1999,17 @@ def test_review_submit_issue_identity_is_scoped_to_subject(
                 repo=repo,
             ),
         )
-    calls: list[list[str]] = []
+    calls: list[dict] = []
 
-    def fake_run_gh(args: list[str]) -> str:
-        calls.append(args)
-        return f"https://github.com/JakubMifek/saturnin-ops/issues/{len(calls)}\n"
+    def protected_issue(**kwargs):
+        calls.append(kwargs)
+        return {
+            "allowed": True,
+            "url": f"https://github.com/JakubMifek/saturnin-ops/issues/{len(calls)}",
+            "comment_id": 55, "nonce": kwargs["nonce"],
+        }
 
-    monkeypatch.setattr("saturnin.cli.run_gh", fake_run_gh)
+    monkeypatch.setattr("saturnin.cli.request_issue_action", protected_issue)
 
     for subject in subjects:
         code, _ = run(
@@ -2022,14 +2029,13 @@ def test_review_submit_issue_identity_is_scoped_to_subject(
         assert code == 0
 
     assert len(calls) == 2
-    submissions = list((home / "var" / "issue-submissions").glob("*.json"))
-    assert len(submissions) == 2
+    assert calls[0]["nonce"] != calls[1]["nonce"]
 
 
 def test_review_submit_issue_binds_exact_whitespace(
     home: Path, capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    subject = "exact-issue-draft"
+    subject = "JakubMifek/saturnin#42"
     repo = "JakubMifek/saturnin-ops"
     title = "  Exact title  "
     body = "\nExact body\n"
@@ -2061,13 +2067,16 @@ def test_review_submit_issue_binds_exact_whitespace(
             repo=repo,
         ),
     )
-    calls: list[list[str]] = []
+    calls: list[dict] = []
 
-    def fake_run_gh(args: list[str]) -> str:
-        calls.append(args)
-        return "https://github.com/JakubMifek/saturnin-ops/issues/78\n"
+    def protected_issue(**kwargs):
+        calls.append(kwargs)
+        return {
+            "allowed": True, "url": "https://github.com/JakubMifek/saturnin-ops/issues/78",
+            "comment_id": 55, "nonce": kwargs["nonce"],
+        }
 
-    monkeypatch.setattr("saturnin.cli.run_gh", fake_run_gh)
+    monkeypatch.setattr("saturnin.cli.request_issue_action", protected_issue)
 
     code, _ = run(
         capsys,
@@ -2085,15 +2094,15 @@ def test_review_submit_issue_binds_exact_whitespace(
     )
 
     assert code == 0
-    assert calls[0][calls[0].index("--title") + 1] == title
-    assert calls[0][calls[0].index("--body") + 1] == body
+    assert calls[0]["title"] == title
+    assert calls[0]["body"] == body
     assert issue_content_digest(title.strip(), body.strip()) != digest
 
 
 def test_review_submit_issue_blocks_when_reviewed_content_differs(
     home: Path, capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    subject = "content-mismatch-draft"
+    subject = "JakubMifek/saturnin#42"
     reviewed_digest = "e" * 64
     run(
         capsys,
@@ -2122,7 +2131,12 @@ def test_review_submit_issue_blocks_when_reviewed_content_differs(
             repo="JakubMifek/saturnin-ops",
         ),
     )
-    monkeypatch.setattr("saturnin.cli.run_gh", lambda args: (_ for _ in ()).throw(AssertionError(args)))
+    monkeypatch.setattr(
+        "saturnin.cli.request_issue_action",
+        lambda **_kwargs: (_ for _ in ()).throw(
+            SystemAttestationError("issue has no current matching authorization")
+        ),
+    )
 
     code, out = run(
         capsys,
@@ -2140,7 +2154,7 @@ def test_review_submit_issue_blocks_when_reviewed_content_differs(
     )
 
     assert code == 2
-    assert "no issue review records match the current issue-content digest" in out
+    assert "no current matching authorization" in out
 
 
 def test_checkpoint_sweep_does_not_mutate_when_launcher_is_disabled(
