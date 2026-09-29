@@ -1059,21 +1059,26 @@ def test_socket_client_checks_peer_and_response_schema(
     thread = _one_shot_server(path, {"attestation": "signed"})
     assert request_attestation(
         kind="pr", repository="acme/widget", number=7,
-        destination_repo="acme/widget", socket_path=path, expected_uid=os.getuid(),
+        destination_repo="acme/widget", socket_path=path,
+        expected_uid=os.getuid(), expected_gid=os.getgid(),
     ) == "signed"
     thread.join(timeout=5)
 
     path.unlink()
     thread = _one_shot_server(path, {"status": "verified", "key_state": "current"})
     assert verify_attestation(
-        "signed", socket_path=path, expected_uid=os.getuid()
+        "signed", socket_path=path, expected_uid=os.getuid(),
+        expected_gid=os.getgid(),
     ) == {"status": "verified", "key_state": "current"}
     thread.join(timeout=5)
 
     path.unlink()
     thread = _one_shot_server(path, {"error": "denied"})
     with pytest.raises(SystemAttestationError, match="denied"):
-        verify_attestation("signed", socket_path=path, expected_uid=os.getuid())
+        verify_attestation(
+            "signed", socket_path=path, expected_uid=os.getuid(),
+            expected_gid=os.getgid(),
+        )
     thread.join(timeout=5)
 
     path.unlink()
@@ -1103,6 +1108,7 @@ def test_socket_client_checks_peer_and_response_schema(
         operation="gate", repository="acme/widget", number=7,
         destination_repo="acme/widget", expected_head=HEAD,
         nonce="d" * 64, socket_path=path, expected_uid=os.getuid(),
+        expected_gid=os.getgid(),
     ) == decision
     thread.join(timeout=5)
 
@@ -1113,6 +1119,7 @@ def test_socket_client_checks_peer_and_response_schema(
             operation="gate", repository="acme/widget", number=7,
             destination_repo="acme/widget", expected_head=HEAD,
             nonce="d" * 64, socket_path=path, expected_uid=os.getuid(),
+            expected_gid=os.getgid(),
         )
     thread.join(timeout=5)
 
