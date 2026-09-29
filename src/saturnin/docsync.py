@@ -143,16 +143,16 @@ def _review_flow(config: Config, kind: str) -> str:
                 "digest=\"$(python -c 'from saturnin.review import "
                 "issue_content_digest; print(issue_content_digest(\"TITLE\", \"BODY\"))')\"",
                 "VERDICT=approved",
-                'attestation="$(saturnin review attest <draft-id> --kind issue \\',
-                "  --repo <owner/repo> --author <author-role> \\",
+                'attestation="$(saturnin review attest <source-owner/source-repo>#<N> --kind issue \\',
+                "  --repo <destination-owner/repo> --author <author-role> \\",
                 f'  --reviewer {reviewer} --verdict "$VERDICT" \\',
                 '  --issue-digest "$digest")"',
-                "saturnin review record <draft-id> --kind issue \\",
-                "  --repo <owner/repo> --author <author-role> \\",
+                "saturnin review record <source-owner/source-repo>#<N> --kind issue \\",
+                "  --repo <destination-owner/repo> --author <author-role> \\",
                 f'  --reviewer {reviewer} --verdict "$VERDICT" \\',
                 '  --issue-digest "$digest" --attestation "$attestation"',
-                "saturnin review gate <draft-id> --kind issue \\",
-                '  --repo <owner/repo> --author <author-role> --issue-digest "$digest"',
+                "saturnin review gate <source-owner/source-repo>#<N> --kind issue \\",
+                '  --repo <destination-owner/repo> --author <author-role> --issue-digest "$digest"',
                 "```",
                 "",
                 "Compute the digest from the exact title and body under review, "
@@ -314,7 +314,9 @@ def _attestation_boundary(config: Config) -> str:
             "machine marker in an allowlisted bot comment. The marker also binds approved "
             "labels. Every issue gate is fresh; submission repeats authorization and the "
             "signer creates exact reviewed content in an independently allowlisted "
-            "destination. Evidence expiry limits "
+            "destination with a deterministic hidden idempotency marker. Ambiguous "
+            "submission outcomes reconcile only against one exact marker-bearing issue "
+            "authored by the protected identity. Evidence expiry limits "
             "new authorization, not later audit verification of a durable record. "
             "Socket filesystem access permits transport only: independent GitHub "
             "authorization remains required. Repository and API origins are fixed "

@@ -299,7 +299,9 @@ def build_parser() -> argparse.ArgumentParser:
         "submit-issue",
         help="gate and submit reviewed issue content to a managed repository",
     )
-    issue_submit.add_argument("subject", help="review subject id used in review record")
+    issue_submit.add_argument(
+        "subject", help="trusted source issue as owner/repository#number"
+    )
     issue_submit.add_argument("--repo", required=True)
     issue_submit.add_argument("--author", required=True)
     issue_submit.add_argument("--title", required=True)

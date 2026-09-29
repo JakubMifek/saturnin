@@ -43,6 +43,7 @@ SOCKET_GROUP_GID = 1000
 CONFIG_PATH = Path("/etc/saturnin-attestation/config.json")
 STATE_PATH = Path("/var/lib/saturnin-attestation/authorizations.sqlite3")
 ISSUE_MARKER = "saturnin-attestation:v1 "
+ISSUE_SUBMISSION_MARKER = "<!-- saturnin-protected-submission:v1 {} -->"
 _REPO = re.compile(r"[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+")
 _SHA = re.compile(r"[0-9a-f]{40}")
 _DIGEST = re.compile(r"[0-9a-f]{64}")
@@ -75,6 +76,12 @@ class SystemAttestationError(RuntimeError):
     """A fail-closed request, authorization, or service identity error."""
 
 
+class GitHubMutationError(SystemAttestationError):
+    def __init__(self, message: str, *, safe_to_retry: bool = False):
+        super().__init__(message)
+        self.safe_to_retry = safe_to_retry
+
+
 def _canonical(data: dict[str, Any]) -> bytes:
     return json.dumps(data, sort_keys=True, separators=(",", ":")).encode()
 
@@ -85,6 +92,19 @@ def _repo(value: object) -> str:
     if any(component in {".", ".."} for component in value.split("/")):
         raise SystemAttestationError("repository must be an owner/repository slug")
     return value.casefold()
+
+
+def _github_issue_url(value: object, repo: str, number: object) -> bool:
+    if not isinstance(value, str) or type(number) is not int:
+        return False
+    parsed = urllib.parse.urlsplit(value)
+    return (
+        parsed.scheme == "https"
+        and parsed.netloc == "github.com"
+        and not parsed.query
+        and not parsed.fragment
+        and parsed.path.casefold() == f"/{repo.casefold()}/issues/{number}"
+    )
 
 
 def _subject(repo: str, number: object) -> str:
@@ -242,6 +262,8 @@ class GitHub:
             self.config.github_api + path,
             headers={
                 "Accept": "application/vnd.github+json",
+                "Cache-Control": "no-cache",
+                "X-GitHub-Api-Version": "2022-11-28",
                 "User-Agent": "saturnin-dedicated-attestation/1",
                 **({"Authorization": f"Bearer {self.token}"} if self.token else {}),
             },
@@ -359,6 +381,7 @@ class GitHub:
             headers={
                 "Accept": "application/vnd.github+json",
                 "Content-Type": "application/json",
+                "X-GitHub-Api-Version": "2022-11-28",
                 "User-Agent": "saturnin-protected-issue/1",
                 "Authorization": f"Bearer {self.token}",
             },
@@ -370,8 +393,20 @@ class GitHub:
                 if response.geturl() != self.config.github_api + path:
                     raise SystemAttestationError("GitHub redirect was refused")
                 response_body = response.read(MAX_RESPONSE + 1)
-        except (OSError, urllib.error.URLError):
-            raise SystemAttestationError("GitHub protected issue submission failed") from None
+        except urllib.error.HTTPError as exc:
+            safe = 400 <= exc.code < 500 and exc.code != 408
+            raise GitHubMutationError(
+                "GitHub protected issue submission failed", safe_to_retry=safe
+            ) from None
+        except urllib.error.URLError as exc:
+            safe = isinstance(exc.reason, (socket.gaierror, ConnectionRefusedError))
+            raise GitHubMutationError(
+                "GitHub protected issue submission failed", safe_to_retry=safe
+            ) from None
+        except OSError:
+            raise GitHubMutationError(
+                "GitHub protected issue submission failed"
+            ) from None
         if len(response_body) > MAX_RESPONSE:
             raise SystemAttestationError("GitHub response is oversized")
         try:
@@ -685,7 +720,10 @@ class DedicatedSigner:
             )
             or len(request["labels"]) > 20
             or len(request["title"]) > 256
-            or len(request["body"].encode()) > 64 * 1024
+            or len(request["body"].encode()) > (
+                64 * 1024
+                - len(("\n\n" + ISSUE_SUBMISSION_MARKER.format("f" * 64)).encode())
+            )
         ):
             raise SystemAttestationError("protected issue request schema is invalid")
         repo = _repo(request["repository"])
@@ -730,8 +768,17 @@ class DedicatedSigner:
                     prior.get("operation") == "issue_submit"
                     and not prior.get("submitted")
                 ):
-                    raise SystemAttestationError(
-                        "protected issue submission requires reconciliation"
+                    self._protected_actor(destination)
+                    found = self._find_issue_submission(
+                        destination, prior["title"], prior["body"],
+                        prior["labels"], prior["nonce"],
+                    )
+                    if found is None:
+                        raise SystemAttestationError(
+                            "protected issue submission requires reconciliation"
+                        )
+                    return self._complete_issue_submission(
+                        db, prior, found, scope_hash
                     )
                 if (
                     prior.get("operation") == "issue_gate"
@@ -784,6 +831,12 @@ class DedicatedSigner:
                 self.current_key, _canonical(decision), hashlib.sha256
             ).hexdigest()
             serialized = json.dumps(signed, sort_keys=True, separators=(",", ":"))
+            found = None
+            if request["operation"] == "issue_submit":
+                found = self._find_issue_submission(
+                    destination, request["title"], request["body"],
+                    request["labels"], request["nonce"],
+                )
             db.execute(
                 "INSERT INTO actions VALUES (?, ?, ?, ?)",
                 (request["nonce"], scope_hash, serialized, self.now().isoformat()),
@@ -792,37 +845,119 @@ class DedicatedSigner:
             if request["operation"] == "issue_gate":
                 return signed
 
-            submission = self.github.post_issue(
-                destination, request["title"], request["body"], request["labels"]
-            )
-            if (
-                not isinstance(submission, dict)
-                or type(submission.get("number")) is not int
-                or not isinstance(submission.get("html_url"), str)
-                or not submission["html_url"].startswith(
-                    f"https://github.com/{destination}/issues/"
+            if found is None:
+                submission_body = self._issue_submission_body(
+                    request["body"], request["nonce"]
                 )
-            ):
+                try:
+                    response = self.github.post_issue(
+                        destination, request["title"], submission_body,
+                        request["labels"],
+                    )
+                except GitHubMutationError as exc:
+                    if exc.safe_to_retry:
+                        db.execute("BEGIN IMMEDIATE")
+                        db.execute(
+                            "DELETE FROM actions WHERE nonce=? AND scope_hash=?",
+                            (request["nonce"], scope_hash),
+                        )
+                        db.execute("COMMIT")
+                    raise
+                found = self._matching_issue_submission(
+                    response, destination, request["title"], submission_body,
+                    request["labels"],
+                )
+            if found is None:
                 raise SystemAttestationError(
                     "GitHub protected issue response is invalid"
                 )
-            decision.update({
-                "submitted": True,
-                "issue_number": submission["number"],
-                "url": submission["html_url"],
-            })
-            signed = dict(decision)
-            signed["signature"] = hmac.new(
-                self.current_key, _canonical(decision), hashlib.sha256
-            ).hexdigest()
-            serialized = json.dumps(signed, sort_keys=True, separators=(",", ":"))
-            db.execute("BEGIN IMMEDIATE")
-            db.execute(
-                "UPDATE actions SET result=? WHERE nonce=? AND scope_hash=?",
-                (serialized, request["nonce"], scope_hash),
+            return self._complete_issue_submission(db, decision, found, scope_hash)
+
+    @staticmethod
+    def _issue_submission_body(body: str, nonce: str) -> str:
+        return f"{body}\n\n{ISSUE_SUBMISSION_MARKER.format(nonce)}"
+
+    def _matching_issue_submission(
+        self, value: Any, destination: str, title: str, body: str,
+        labels: list[str],
+    ) -> dict[str, Any] | None:
+        if not isinstance(value, dict) or "pull_request" in value:
+            return None
+        issue_labels = value.get("labels")
+        issue_user = value.get("user") or {}
+        issue_url = value.get("html_url")
+        if (
+            type(value.get("number")) is not int
+            or value.get("title") != title
+            or value.get("body") != body
+            or str(issue_user.get("login", "")).casefold()
+            != self.config.protected_actor_login
+            or issue_user.get("type") != "User"
+            or value.get("created_at") != value.get("updated_at")
+            or not isinstance(value.get("created_at"), str)
+            or _iso(value["created_at"]) > self.now()
+            or not isinstance(issue_labels, list)
+            or any(
+                not isinstance(label, dict)
+                or not isinstance(label.get("name"), str)
+                for label in issue_labels
             )
-            db.execute("COMMIT")
-            return signed
+            or sorted(label["name"] for label in issue_labels) != sorted(labels)
+            or not _github_issue_url(
+                issue_url, destination, value.get("number")
+            )
+        ):
+            return None
+        return {"number": value["number"], "url": issue_url}
+
+    def _find_issue_submission(
+        self, destination: str, title: str, body: str, labels: list[str],
+        nonce: str,
+    ) -> dict[str, Any] | None:
+        marked_body = self._issue_submission_body(body, nonce)
+        matches = [
+            match
+            for value in self.github.pages(
+                f"/repos/{destination}/issues?state=all"
+            )
+            if (
+                ISSUE_SUBMISSION_MARKER.format(nonce)
+                in str(value.get("body") or "")
+                and (
+                    match := self._matching_issue_submission(
+                        value, destination, title, marked_body, labels
+                    )
+                ) is not None
+            )
+        ]
+        if len(matches) > 1:
+            raise SystemAttestationError(
+                "multiple protected issue submissions require reconciliation"
+            )
+        return matches[0] if matches else None
+
+    def _complete_issue_submission(
+        self, db: sqlite3.Connection, decision: dict[str, Any],
+        submission: dict[str, Any], scope_hash: str,
+    ) -> dict[str, Any]:
+        decision = {
+            **decision, "submitted": True,
+            "issue_number": submission["number"], "url": submission["url"],
+        }
+        signed = dict(decision)
+        signed["signature"] = hmac.new(
+            self.current_key, _canonical(decision), hashlib.sha256
+        ).hexdigest()
+        serialized = json.dumps(signed, sort_keys=True, separators=(",", ":"))
+        db.execute("BEGIN IMMEDIATE")
+        changed = db.execute(
+            "UPDATE actions SET result=? WHERE nonce=? AND scope_hash=?",
+            (serialized, decision["nonce"], scope_hash),
+        ).rowcount
+        db.execute("COMMIT")
+        if changed != 1:
+            raise SystemAttestationError("protected issue reservation was lost")
+        return signed
 
     def _live_pr_action(
         self, repo: str, number: int, destination: str, expected_head: str
@@ -1229,6 +1364,8 @@ class DedicatedSigner:
         comment_id, marker, reviewer_identity, comment_created = max(
             candidates, key=lambda item: item[0]
         )
+        if author.casefold() == reviewer_identity:
+            raise SystemAttestationError("issue author cannot approve their own issue")
         required = {
             "repository", "issue", "digest", "author", "reviewer_role", "verdict",
             "zero_context", "destination_repo", "labels", "expiry", "nonce",
@@ -1420,9 +1557,9 @@ def request_issue_action(
             and (
                 response.get("submitted") is not True
                 or type(response.get("issue_number")) is not int
-                or not isinstance(response.get("url"), str)
-                or not response["url"].startswith(
-                    f"https://github.com/{destination_repo.casefold()}/issues/"
+                or not _github_issue_url(
+                    response.get("url"), destination_repo,
+                    response.get("issue_number"),
                 )
             )
         )

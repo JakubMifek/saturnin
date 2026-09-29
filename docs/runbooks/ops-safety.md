@@ -41,7 +41,9 @@ approvals, require one approving review, require the strict `test` check, and
 grant no bypass to any user, team, app, role, or repository owner. Enable
 approval reviews from the configured Copilot reviewer. Replace the ordinary
 UID's GitHub credential with a fine-grained token lacking Administration and
-default-branch bypass authority. The service validates the protected token's
+default-branch bypass authority and lacking Issues write access to
+`saturnin-ops`; otherwise that ordinary credential could edit protected issue
+submission evidence. The service validates the protected token's
 fixed login and effective write/non-admin repository permissions before
 creating its socket; installation rolls back if that validation fails.
 
@@ -96,7 +98,7 @@ identity fails closed before the administration lock or any other mutation.
 <!-- generated:attestation-boundary -->
 The system `saturnin-attestation.service` runs as the non-login `saturnin-signer` identity from root-controlled runtime and configuration. The system manager decrypts current, previous, and bounded retired HMAC credentials into its private credential tmpfs; ordinary workers never receive key material. The service, not PID 1, creates the canonical listener. Clients authenticate its kernel-reported UID plus the stable signer-owned socket directory and endpoint identity; this deliberately avoids cross-UID ptrace-gated `/proc` inspection. Systemd readiness is reported only after protected credential validation and listener creation.
 
-For pull requests the service obtains the live head, author, and exact commit-bound latest review state directly from GitHub over TLS. For issues it recomputes title/body digest and accepts one exact, expiring, nonce-bound machine marker in an allowlisted bot comment. The marker also binds approved labels. Every issue gate is fresh; submission repeats authorization and the signer creates exact reviewed content in an independently allowlisted destination. Evidence expiry limits new authorization, not later audit verification of a durable record. Socket filesystem access permits transport only: independent GitHub authorization remains required. Repository and API origins are fixed allowlists; caller claims and socket credentials are not authority.
+For pull requests the service obtains the live head, author, and exact commit-bound latest review state directly from GitHub over TLS. For issues it recomputes title/body digest and accepts one exact, expiring, nonce-bound machine marker in an allowlisted bot comment. The marker also binds approved labels. Every issue gate is fresh; submission repeats authorization and the signer creates exact reviewed content in an independently allowlisted destination with a deterministic hidden idempotency marker. Ambiguous submission outcomes reconcile only against one exact marker-bearing issue authored by the protected identity. Evidence expiry limits new authorization, not later audit verification of a durable record. Socket filesystem access permits transport only: independent GitHub authorization remains required. Repository and API origins are fixed allowlists; caller claims and socket credentials are not authority.
 
 Consumed evidence and its exact idempotent attestation are serialized in dedicated state for audit only. Altered reuse fails. Every PR gate obtains a fresh, expiring, one-time protected decision over the live head, base, review ID/state/identity and required checks. Merge repeats that lookup immediately before the signer uses GitHub's expected-head atomic merge API. The signer also requires strict branch protection with stale-review dismissal, required reviews/checks, administrator enforcement and no bypass identities. Its fixed non-admin merge identity and root-provisioned credential never enter the ordinary UID; workers receive neither signing sessions nor credentials.
 <!-- /generated:attestation-boundary -->

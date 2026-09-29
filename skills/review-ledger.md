@@ -39,16 +39,16 @@ Resolve the PR head once and pass that identical SHA through attest, record and 
 ```bash
 digest="$(python -c 'from saturnin.review import issue_content_digest; print(issue_content_digest("TITLE", "BODY"))')"
 VERDICT=approved
-attestation="$(saturnin review attest <draft-id> --kind issue \
-  --repo <owner/repo> --author <author-role> \
+attestation="$(saturnin review attest <source-owner/source-repo>#<N> --kind issue \
+  --repo <destination-owner/repo> --author <author-role> \
   --reviewer issue-reviewer --verdict "$VERDICT" \
   --issue-digest "$digest")"
-saturnin review record <draft-id> --kind issue \
-  --repo <owner/repo> --author <author-role> \
+saturnin review record <source-owner/source-repo>#<N> --kind issue \
+  --repo <destination-owner/repo> --author <author-role> \
   --reviewer issue-reviewer --verdict "$VERDICT" \
   --issue-digest "$digest" --attestation "$attestation"
-saturnin review gate <draft-id> --kind issue \
-  --repo <owner/repo> --author <author-role> --issue-digest "$digest"
+saturnin review gate <source-owner/source-repo>#<N> --kind issue \
+  --repo <destination-owner/repo> --author <author-role> --issue-digest "$digest"
 ```
 
 Compute the digest from the exact title and body under review, then pass that identical digest through attest, record and gate.

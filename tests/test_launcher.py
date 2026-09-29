@@ -1178,6 +1178,7 @@ def test_trusted_cli_issue_submission_requires_originating_task_subject(
     with board.edit(task.id) as stored:
         stored.role = "code-worker"
         stored.state = "in_progress"
+        stored.review_subject = "JakubMifek/saturnin#9"
     callback_dir = AgentLauncher(config, board)._isolated_home(
         task.id
     ) / ".saturnin-callbacks"
@@ -1205,7 +1206,7 @@ def test_trusted_cli_issue_submission_requires_originating_task_subject(
         encoding="utf-8",
     )
 
-    with pytest.raises(WorkerCallbackError, match="originating task id"):
+    with pytest.raises(WorkerCallbackError, match="trusted review_subject"):
         apply_queued(config, board, task_id=task.id, callback_dir=str(callback_dir))
 
 

@@ -21,6 +21,7 @@ import saturnin.system_attestation as system_attestation
 from saturnin.system_attestation import (
     DedicatedSigner,
     GitHub,
+    GitHubMutationError,
     ISSUE_MARKER,
     AuthorizationLimiter,
     ARCHIVE_MAX_KEYS,
@@ -194,6 +195,8 @@ def issue_action_fixture(*, expiry: datetime | None = None):
                 "full_name": "acme/issues",
                 "permissions": {"push": True, "admin": False},
             }
+        if path.startswith("/repos/acme/issues/issues?"):
+            return []
         if path == "/repos/acme/widget/issues/9":
             return {
                 "title": title, "body": body,
@@ -673,8 +676,11 @@ def test_fresh_issue_gate_and_protected_submission_are_digest_bound(
     def mutate(method: str, path: str, payload: dict):
         mutations.append((method, path, payload))
         return {
-            "number": 77,
-            "html_url": "https://github.com/acme/issues/issues/77",
+            "number": 77, "title": title, "body": payload["body"],
+            "labels": [{"name": "incident"}],
+            "user": {"login": "saturnin-merge-bot", "type": "User"},
+            "created_at": NOW.isoformat(), "updated_at": NOW.isoformat(),
+            "html_url": "https://github.com/Acme/Issues/issues/77",
         }
 
     service = DedicatedSigner(
@@ -713,7 +719,12 @@ def test_fresh_issue_gate_and_protected_submission_are_digest_bound(
     }) == submission
     assert mutations == [(
         "POST", "/repos/acme/issues/issues",
-        {"title": title, "body": body, "labels": ["incident"]},
+        {
+            "title": title,
+            "body": body + "\n\n<!-- saturnin-protected-submission:v1 "
+            + "f" * 64 + " -->",
+            "labels": ["incident"],
+        },
     )]
 
 
@@ -755,12 +766,27 @@ def test_issue_actions_fail_closed_after_expiry_and_on_content_change(
 def test_ambiguous_issue_submission_is_reserved_and_never_retried(
     tmp_path: Path,
 ) -> None:
-    title, body, digest, _marker, transport = issue_action_fixture()
+    title, body, digest, _marker, base_transport = issue_action_fixture()
     calls = [0]
+    created_payload: list[dict] = []
 
     def fail_after_possible_creation(method: str, path: str, payload: dict):
         calls[0] += 1
+        created_payload.append(payload)
         raise SystemAttestationError("GitHub API response was lost")
+
+    def edited_transport(path: str):
+        if path.startswith("/repos/acme/issues/issues?") and created_payload:
+            return [{
+                "number": 77, "title": title,
+                "body": created_payload[0]["body"],
+                "labels": [{"name": "incident"}],
+                "user": {"login": "saturnin-merge-bot", "type": "User"},
+                "created_at": NOW.isoformat(),
+                "updated_at": (NOW + timedelta(seconds=1)).isoformat(),
+                "html_url": "https://github.com/acme/issues/issues/77",
+            }]
+        return base_transport(path)
 
     cfg = ServiceConfig(
         frozenset({"acme/widget"}), frozenset({"review-bot"}),
@@ -770,7 +796,7 @@ def test_ambiguous_issue_submission_is_reserved_and_never_retried(
     service = DedicatedSigner(
         cfg,
         GitHub(
-            cfg, token="protected", transport=transport,
+            cfg, token="protected", transport=edited_transport,
             mutation_transport=fail_after_possible_creation,
         ),
         b"k" * 48, None, tmp_path / "ambiguous.sqlite3", now=lambda: NOW,
@@ -786,6 +812,108 @@ def test_ambiguous_issue_submission_is_reserved_and_never_retried(
     with pytest.raises(SystemAttestationError, match="requires reconciliation"):
         service.issue_action(request_value)
     assert calls == [1]
+
+
+def test_issue_submission_recovers_safe_failure_and_reconciles_ambiguous_success(
+    tmp_path: Path,
+) -> None:
+    title, body, digest, _marker, base_transport = issue_action_fixture()
+    cfg = ServiceConfig(
+        frozenset({"acme/widget"}), frozenset({"review-bot"}),
+        frozenset({"review-bot"}), frozenset({"approved"}),
+        issue_destinations=frozenset({"acme/issues"}),
+    )
+    request_value = {
+        "action": "decide_issue", "operation": "issue_submit",
+        "repository": "acme/widget", "number": 9,
+        "destination_repo": "acme/issues", "issue_digest": digest,
+        "title": title, "body": body, "labels": ["incident"], "nonce": "f" * 64,
+    }
+    attempts = [0]
+
+    def safe_then_success(method: str, path: str, payload: dict):
+        attempts[0] += 1
+        if attempts[0] == 1:
+            raise GitHubMutationError("connection refused", safe_to_retry=True)
+        return {
+            "number": 77, "title": title, "body": payload["body"],
+            "labels": [{"name": "incident"}],
+            "user": {"login": "saturnin-merge-bot", "type": "User"},
+            "created_at": NOW.isoformat(), "updated_at": NOW.isoformat(),
+            "html_url": "https://github.com/acme/issues/issues/77",
+        }
+
+    safe_service = DedicatedSigner(
+        cfg,
+        GitHub(
+            cfg, token="protected", transport=base_transport,
+            mutation_transport=safe_then_success,
+        ),
+        b"k" * 48, None, tmp_path / "safe-retry.sqlite3", now=lambda: NOW,
+    )
+    with pytest.raises(GitHubMutationError, match="connection refused"):
+        safe_service.issue_action(request_value)
+    assert safe_service.issue_action(request_value)["submitted"] is True
+    assert attempts == [2]
+
+    lookups = [0]
+
+    def failed_preflight(path: str):
+        if path.startswith("/repos/acme/issues/issues?"):
+            lookups[0] += 1
+            if lookups[0] == 1:
+                raise SystemAttestationError("destination lookup failed")
+        return base_transport(path)
+
+    preflight_service = DedicatedSigner(
+        cfg,
+        GitHub(
+            cfg, token="protected", transport=failed_preflight,
+            mutation_transport=lambda method, path, payload: {
+                "number": 79, "title": title, "body": payload["body"],
+                "labels": [{"name": "incident"}],
+                "user": {"login": "saturnin-merge-bot", "type": "User"},
+                "created_at": NOW.isoformat(), "updated_at": NOW.isoformat(),
+                "html_url": "https://github.com/acme/issues/issues/79",
+            },
+        ),
+        b"p" * 48, None, tmp_path / "preflight.sqlite3", now=lambda: NOW,
+    )
+    with pytest.raises(SystemAttestationError, match="lookup failed"):
+        preflight_service.issue_action(request_value)
+    assert preflight_service.issue_action(request_value)["submitted"] is True
+
+    created = [False]
+    marked_body = body + "\n\n<!-- saturnin-protected-submission:v1 " + "f" * 64 + " -->"
+
+    def reconcile_transport(path: str):
+        if path.startswith("/repos/acme/issues/issues?") and created[0]:
+            return [{
+                "number": 78, "title": title, "body": marked_body,
+                "labels": [{"name": "incident"}],
+                "user": {"login": "saturnin-merge-bot", "type": "User"},
+                "created_at": NOW.isoformat(), "updated_at": NOW.isoformat(),
+                "html_url": "https://github.com/acme/issues/issues/78",
+            }]
+        return base_transport(path)
+
+    def ambiguous_creation(method: str, path: str, payload: dict):
+        created[0] = True
+        raise GitHubMutationError("response lost")
+
+    ambiguous_service = DedicatedSigner(
+        cfg,
+        GitHub(
+            cfg, token="protected", transport=reconcile_transport,
+            mutation_transport=ambiguous_creation,
+        ),
+        b"m" * 48, None, tmp_path / "reconcile.sqlite3", now=lambda: NOW,
+    )
+    with pytest.raises(GitHubMutationError, match="response lost"):
+        ambiguous_service.issue_action(request_value)
+    reconciled = ambiguous_service.issue_action(request_value)
+    assert reconciled["submitted"] is True
+    assert reconciled["issue_number"] == 78
 
 
 def test_issue_action_rejects_multiple_markers_and_snapshot_change(
@@ -835,6 +963,34 @@ def test_issue_action_rejects_multiple_markers_and_snapshot_change(
     )
     with pytest.raises(SystemAttestationError, match="scope does not match"):
         changing.issue_action(request_value)
+
+
+def test_issue_action_rejects_self_review(tmp_path: Path) -> None:
+    _title, _body, digest, marker, base_transport = issue_action_fixture()
+    marker["author"] = "review-bot"
+
+    def transport(path: str):
+        value = base_transport(path)
+        if path == "/repos/acme/widget/issues/9":
+            return {**value, "user": {"login": "review-bot"}}
+        return value
+
+    cfg = ServiceConfig(
+        frozenset({"acme/widget"}), frozenset({"review-bot"}),
+        frozenset({"review-bot"}), frozenset({"approved"}),
+        issue_destinations=frozenset({"acme/issues"}),
+    )
+    service = DedicatedSigner(
+        cfg, GitHub(cfg, token="protected", transport=transport),
+        b"k" * 48, None, tmp_path / "self-review.sqlite3", now=lambda: NOW,
+    )
+    with pytest.raises(SystemAttestationError, match="own issue"):
+        service.issue_action({
+            "action": "decide_issue", "operation": "issue_gate",
+            "repository": "acme/widget", "number": 9,
+            "destination_repo": "acme/issues", "issue_digest": digest,
+            "title": "", "body": "", "labels": [], "nonce": "d" * 64,
+        })
 
 
 def test_current_and_previous_verification_no_downgrade(tmp_path: Path) -> None:

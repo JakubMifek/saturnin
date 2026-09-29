@@ -649,9 +649,10 @@ def _run_trusted_cli(
             "author",
         )
         _require_task_repository(config, task, args.repo)
-        if args.subject != task.id:
+        if not task.review_subject or args.subject != task.review_subject:
             raise WorkerCallbackError(
-                f"issue submission subject must be the originating task id {task.id}"
+                "issue submission source must match the originating task's "
+                "trusted review_subject"
             )
     elif operation == "automation_propose":
         if trusted_role != "automation-smith":

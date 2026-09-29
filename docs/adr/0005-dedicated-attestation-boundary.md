@@ -38,7 +38,13 @@ concurrent reuse fails closed.
 Issue gates likewise obtain fresh short-lived decisions. Issue submission
 repeats the source issue/comment lookup, and the signer itself creates the
 digest-bound title and body with the marker-approved labels in an explicitly
-allowlisted destination.
+allowlisted destination. It appends a deterministic, nonce-bound hidden marker.
+Before mutation and after any ambiguous result, the signer paginates the
+destination and accepts only one exact marker-bearing issue authored by its
+protected GitHub identity with unchanged creation/update timestamps. The
+ordinary credential has no destination Issues-write permission. Definite
+pre-send failures release the reservation; ambiguous outcomes remain pending
+unless that protected issue is found.
 The signer requires strict destination-branch protection with stale-review
 dismissal, the configured review and check requirements, and empty bypass
 allowances. Its fixed merge account must have write but not administration
