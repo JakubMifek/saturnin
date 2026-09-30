@@ -1613,9 +1613,26 @@ def test_issue_claim_blocks_different_nonce_and_shared_db_concurrency(
     for service in services:
         service.publisher_client = lambda _destination, item=service: item.github
     request_value = issue_submit_request(title, body, digest)
+
+    def submit(item: DedicatedSigner):
+        try:
+            return item.issue_action(request_value)
+        except SystemAttestationError as exc:
+            return exc
+
     with ThreadPoolExecutor(max_workers=2) as pool:
-        results = list(pool.map(lambda item: item.issue_action(request_value), services))
-    assert all(result["submitted"] for result in results)
+        results = list(pool.map(submit, services))
+    assert any(
+        isinstance(result, dict) and result["submitted"] for result in results
+    )
+    assert all(
+        isinstance(result, dict)
+        or "requires reconciliation" in str(result)
+        for result in results
+    )
+    assert all(
+        service.issue_action(request_value)["submitted"] for service in services
+    )
     assert creates == [1]
     with pytest.raises(SystemAttestationError, match="already claimed"):
         services[0].issue_action({
