@@ -108,6 +108,22 @@ def _github_issue_url(value: object, repo: str, number: object) -> bool:
     )
 
 
+def _no_pull_request_bypass_allowances(review_rule: dict[str, Any]) -> bool:
+    if "bypass_pull_request_allowances" not in review_rule:
+        return True
+    bypass = review_rule["bypass_pull_request_allowances"]
+    if not isinstance(bypass, dict):
+        return False
+    if not bypass:
+        return True
+    kinds = {"users", "teams", "apps"}
+    return (
+        set(bypass) == kinds
+        and all(isinstance(bypass[kind], list) for kind in kinds)
+        and all(not bypass[kind] for kind in kinds)
+    )
+
+
 def current_pr_review(
     config: ServiceConfig,
     github: GitHub,
@@ -1776,10 +1792,6 @@ class DedicatedSigner:
             raise SystemAttestationError("branch protection response is malformed")
         review_rule = protection.get("required_pull_request_reviews")
         status_rule = protection.get("required_status_checks")
-        bypass = (
-            review_rule.get("bypass_pull_request_allowances")
-            if isinstance(review_rule, dict) else None
-        )
         contexts = set()
         if isinstance(status_rule, dict):
             contexts.update(
@@ -1795,8 +1807,7 @@ class DedicatedSigner:
             or review_rule.get("dismiss_stale_reviews") is not True
             or type(review_rule.get("required_approving_review_count")) is not int
             or review_rule["required_approving_review_count"] < 1
-            or not isinstance(bypass, dict)
-            or any(bypass.get(kind) for kind in ("users", "teams", "apps"))
+            or not _no_pull_request_bypass_allowances(review_rule)
             or not isinstance(protection.get("enforce_admins"), dict)
             or protection["enforce_admins"].get("enabled") is not True
             or not isinstance(status_rule, dict)
