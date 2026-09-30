@@ -39,6 +39,8 @@ Issue gates likewise obtain fresh short-lived decisions. Issue submission
 repeats the source issue/comment lookup, and the signer itself creates the
 digest-bound title and body with the marker-approved labels in an explicitly
 allowlisted destination. It appends a deterministic, nonce-bound hidden marker.
+The marker contains a signer-authenticated claim that an ordinary worker
+cannot forge onto another publisher-authored issue.
 Before mutation and after any ambiguous result, the signer paginates the
 destination and accepts only one exact open marker-bearing issue authored by a
 dedicated publisher App with unchanged creation/update timestamps. It obtains
@@ -50,7 +52,11 @@ finds revocation, expiry, closure, an API failure, or changed evidence, the
 signer closes the exact safely attributable destination issue as not planned,
 records a signed terminal containment result, emits hash-only audit evidence,
 and never reports success. A failed or ambiguous close is recorded and
-escalated as containment failure. Definite pre-send failures release the
+escalated as containment failure. Delayed reconciliation revalidates the
+source before destination lookup. If the authenticated marker was edited away,
+appears ambiguously, or cannot be fetched after revocation, the signer records
+a signed terminal containment failure rather than leaving a retry that could
+later become success. Definite pre-send failures release the
 reservation; ambiguous, successful, and containment outcomes retain the
 source/destination/digest claim so another nonce cannot duplicate publication.
 This exception does not weaken PR review, check, head, or merge freshness.

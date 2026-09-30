@@ -1189,8 +1189,7 @@ def test_fresh_issue_gate_and_protected_submission_are_digest_bound(
         "POST", "/repos/acme/issues/issues",
         {
             "title": title,
-            "body": body + "\n\n<!-- saturnin-protected-submission:v1 "
-            + "f" * 64 + " -->",
+            "body": body + "\n\n" + submission["idempotency_marker"],
             "labels": ["incident"],
         },
     )]
@@ -1361,12 +1360,12 @@ def test_issue_submission_recovers_safe_failure_and_reconciles_ambiguous_success
     assert preflight_service.issue_action(request_value)["submitted"] is True
 
     created = [False]
-    marked_body = body + "\n\n<!-- saturnin-protected-submission:v1 " + "f" * 64 + " -->"
+    marked_body = [""]
 
     def reconcile_transport(path: str):
         if path.startswith("/repos/acme/issues/issues?") and created[0]:
             return [{
-                "number": 78, "title": title, "body": marked_body,
+                "number": 78, "title": title, "body": marked_body[0],
                 "labels": [{"name": "incident"}], "state": "open",
                 "user": {
                     "login": "saturnin-issue-publisher[bot]", "type": "Bot"
@@ -1378,6 +1377,7 @@ def test_issue_submission_recovers_safe_failure_and_reconciles_ambiguous_success
 
     def ambiguous_creation(method: str, path: str, payload: dict):
         created[0] = True
+        marked_body[0] = payload["body"]
         raise GitHubMutationError("response lost")
 
     ambiguous_service = DedicatedSigner(
@@ -1446,6 +1446,7 @@ def test_post_create_revocation_is_contained_or_escalated(
     title, body, digest, _marker, base_transport = issue_action_fixture()
     source_reads = [0]
     mutations: list[str] = []
+    posted_body = [""]
 
     def transport(path: str):
         value = base_transport(path)
@@ -1458,11 +1459,12 @@ def test_post_create_revocation_is_contained_or_escalated(
     def mutate(method: str, _path: str, payload: dict):
         mutations.append(method)
         if method == "POST":
+            posted_body[0] = payload["body"]
             return published_issue(title, payload["body"])
         if containment_mode == "failure":
             raise SystemAttestationError("close API failed")
         response = published_issue(
-            title, body + "\n\n" + ISSUE_SUBMISSION_MARKER.format("f" * 64),
+            title, posted_body[0],
             state="closed",
         )
         if containment_mode == "mismatch":
@@ -1499,18 +1501,36 @@ def test_post_create_revocation_is_contained_or_escalated(
     assert result["containment_failed"] is (containment_mode != "success")
 
 
+@pytest.mark.parametrize(
+    "reconciliation", ["exact", "edited", "marker-removed", "api-error"]
+)
 def test_ambiguous_reconciliation_revalidates_and_contains_revocation(
-    tmp_path: Path,
+    tmp_path: Path, reconciliation: str,
 ) -> None:
     title, body, digest, _marker, base_transport = issue_action_fixture()
     created = [False]
     revoked = [False]
-    marked = body + "\n\n" + ISSUE_SUBMISSION_MARKER.format("f" * 64)
+    edited = [False]
+    marked = [""]
     mutations: list[str] = []
 
     def transport(path: str):
         if path.startswith("/repos/acme/issues/issues?"):
-            return [published_issue(title, marked)] if created[0] else []
+            if not created[0]:
+                return []
+            if reconciliation == "api-error":
+                raise SystemAttestationError("destination lookup failed")
+            issue = published_issue(title, marked[0])
+            if edited[0]:
+                issue.update({
+                    "title": "edited after creation",
+                    "body": (
+                        "edited\n" + marked[0]
+                        if reconciliation == "edited" else "marker removed"
+                    ),
+                    "updated_at": (NOW + timedelta(seconds=1)).isoformat(),
+                })
+            return [issue]
         value = base_transport(path)
         if path == "/repos/acme/widget/issues/9" and revoked[0]:
             return {**value, "state": "closed"}
@@ -1520,8 +1540,15 @@ def test_ambiguous_reconciliation_revalidates_and_contains_revocation(
         mutations.append(method)
         if method == "POST":
             created[0] = True
+            marked[0] = _payload["body"]
             raise GitHubMutationError("creation response lost")
-        return published_issue(title, marked, state="closed")
+        if reconciliation == "exact":
+            return published_issue(title, marked[0], state="closed")
+        response = published_issue(
+            "edited after creation", "edited\n" + marked[0], state="closed"
+        )
+        response["updated_at"] = (NOW + timedelta(seconds=1)).isoformat()
+        return response
 
     cfg = ServiceConfig(
         frozenset({"acme/widget"}), frozenset({"review-bot"}),
@@ -1538,11 +1565,24 @@ def test_ambiguous_reconciliation_revalidates_and_contains_revocation(
     with pytest.raises(GitHubMutationError, match="response lost"):
         service.issue_action(request_value)
     revoked[0] = True
+    edited[0] = reconciliation != "exact"
     with pytest.raises(SystemAttestationError, match="revoked after"):
         service.issue_action(request_value)
-    assert mutations == ["POST", "PATCH"]
+    assert mutations == (
+        ["POST", "PATCH"] if reconciliation == "exact" else ["POST"]
+    )
     with pytest.raises(SystemAttestationError, match="revoked after creation"):
         service.issue_action(request_value)
+    db = service._db()
+    try:
+        result = json.loads(
+            db.execute(
+                "SELECT result FROM actions WHERE nonce=?", ("f" * 64,)
+            ).fetchone()[0]
+        )
+    finally:
+        db.close()
+    assert result["containment_failed"] is (reconciliation != "exact")
 
 
 def test_issue_claim_blocks_different_nonce_and_shared_db_concurrency(

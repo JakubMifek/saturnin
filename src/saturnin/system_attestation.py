@@ -1338,22 +1338,39 @@ class DedicatedSigner:
                             "protected issue publication was revoked after creation"
                         )
                     publisher = self._publisher(destination)
+                    current = self._issue_decision_is_current(
+                        prior, repo, number, subject, destination
+                    )
+                    if not current:
+                        marker = prior.get("idempotency_marker")
+                        try:
+                            found = (
+                                self._find_issue_submission(
+                                    publisher, destination, prior["title"],
+                                    prior["body"], prior["labels"], marker,
+                                )
+                                if isinstance(marker, str) else None
+                            )
+                        except (KeyError, SystemAttestationError):
+                            found = None
+                        if found is None:
+                            self._record_containment_failure(
+                                db, prior, scope_hash
+                            )
+                        else:
+                            self._contain_issue_submission(
+                                db, publisher, prior, found, scope_hash
+                            )
+                        raise SystemAttestationError(
+                            "source authorization was revoked after issue publication"
+                        )
                     found = self._find_issue_submission(
                         publisher, destination, prior["title"], prior["body"],
-                        prior["labels"], prior["nonce"],
+                        prior["labels"], prior["idempotency_marker"],
                     )
                     if found is None:
                         raise SystemAttestationError(
                             "protected issue submission requires reconciliation"
-                        )
-                    if not self._issue_decision_is_current(
-                        prior, repo, number, subject, destination
-                    ):
-                        self._contain_issue_submission(
-                            db, publisher, prior, found, scope_hash
-                        )
-                        raise SystemAttestationError(
-                            "source authorization was revoked after issue publication"
                         )
                     return self._complete_issue_submission(
                         db, prior, found, scope_hash
@@ -1407,6 +1424,13 @@ class DedicatedSigner:
                     "evidence": evidence,
                     "labels": approved_labels,
                 })).hexdigest(),
+                "idempotency_marker": ISSUE_SUBMISSION_MARKER.format(
+                    hmac.new(
+                        self.current_key,
+                        b"issue-publication-marker:" + scope_hash.encode(),
+                        hashlib.sha256,
+                    ).hexdigest()
+                ),
                 "expires_at": expiry.isoformat(),
             }
             signed = dict(decision)
@@ -1419,7 +1443,7 @@ class DedicatedSigner:
                 assert publisher is not None
                 found = self._find_issue_submission(
                     publisher, destination, request["title"], request["body"],
-                    request["labels"], request["nonce"],
+                    request["labels"], decision["idempotency_marker"],
                 )
                 claim_hash = hashlib.sha256(_canonical({
                     "repository": repo,
@@ -1472,7 +1496,7 @@ class DedicatedSigner:
                 )
             if found is None:
                 submission_body = self._issue_submission_body(
-                    request["body"], request["nonce"]
+                    request["body"], decision["idempotency_marker"]
                 )
                 try:
                     response = publisher.post_issue(
@@ -1512,8 +1536,8 @@ class DedicatedSigner:
             return self._complete_issue_submission(db, decision, found, scope_hash)
 
     @staticmethod
-    def _issue_submission_body(body: str, nonce: str) -> str:
-        return f"{body}\n\n{ISSUE_SUBMISSION_MARKER.format(nonce)}"
+    def _issue_submission_body(body: str, marker: str) -> str:
+        return f"{body}\n\n{marker}"
 
     def _issue_decision_is_current(
         self,
@@ -1577,17 +1601,16 @@ class DedicatedSigner:
 
     def _find_issue_submission(
         self, github: GitHub, destination: str, title: str, body: str,
-        labels: list[str], nonce: str,
+        labels: list[str], marker: str,
     ) -> dict[str, Any] | None:
-        marked_body = self._issue_submission_body(body, nonce)
+        marked_body = self._issue_submission_body(body, marker)
         matches = [
             match
             for value in github.pages(
                 f"/repos/{destination}/issues?state=all"
             )
             if (
-                ISSUE_SUBMISSION_MARKER.format(nonce)
-                in str(value.get("body") or "")
+                marker in str(value.get("body") or "")
                 and (
                     match := self._matching_issue_submission(
                         value, destination, title, marked_body, labels
@@ -1600,6 +1623,38 @@ class DedicatedSigner:
                 "multiple protected issue submissions require reconciliation"
             )
         return matches[0] if matches else None
+
+    def _record_containment_failure(
+        self,
+        db: sqlite3.Connection,
+        decision: dict[str, Any],
+        scope_hash: str,
+    ) -> None:
+        terminal = {
+            **decision,
+            "submitted": False,
+            "issue_number": None,
+            "url": "",
+            "contained": False,
+            "containment_failed": True,
+        }
+        signed = dict(terminal)
+        signed["signature"] = hmac.new(
+            self.current_key, _canonical(terminal), hashlib.sha256
+        ).hexdigest()
+        db.execute("BEGIN IMMEDIATE")
+        changed = db.execute(
+            "UPDATE actions SET result=? WHERE nonce=? AND scope_hash=?",
+            (
+                json.dumps(signed, sort_keys=True, separators=(",", ":")),
+                decision["nonce"],
+                scope_hash,
+            ),
+        ).rowcount
+        db.execute("COMMIT")
+        if changed != 1:
+            raise SystemAttestationError("protected issue reservation was lost")
+        _audit("containment-failed", "", scope_hash)
 
     def _contain_issue_submission(
         self,
@@ -1622,7 +1677,7 @@ class DedicatedSigner:
                 and response.get("state_reason") == "not_planned"
                 and response.get("title") == decision["title"]
                 and response.get("body") == self._issue_submission_body(
-                    decision["body"], decision["nonce"]
+                    decision["body"], decision["idempotency_marker"]
                 )
                 and isinstance(user, dict)
                 and str(user.get("login", "")).casefold()
@@ -1633,7 +1688,7 @@ class DedicatedSigner:
                     decision["destination_repo"],
                     submission["number"],
                 )
-                and ISSUE_SUBMISSION_MARKER.format(decision["nonce"])
+                and decision["idempotency_marker"]
                 in str(response.get("body") or "")
                 and isinstance(response.get("labels"), list)
                 and all(
