@@ -23,7 +23,16 @@ import yaml
 from . import escalation as escalation_mod
 from . import telemetry
 from .automation import AutomationLibrary
-from .attestation_service import AttestationServiceError, sign_from_session
+from .system_attestation import (
+    GitHub,
+    ServiceConfig,
+    SystemAttestationError,
+    publish_issue_review,
+    read_only_pr_gate,
+    request_action,
+    request_attestation,
+    request_issue_action,
+)
 from .board import CONTAINER_KINDS, TRANSITIONS, Board, BoardError, Task
 from .checkpoints import Checkpoint, CheckpointStore
 from .config import Config, ConfigError, find_root, load_yaml
@@ -280,6 +289,20 @@ def build_parser() -> argparse.ArgumentParser:
         default="",
         help="current issue title/body digest to match reviews against",
     )
+    ci_gate = review.add_parser(
+        "ci-gate", help="trusted-base read-only live GitHub PR approval gate"
+    )
+    ci_gate.add_argument("subject", help="owner/repository#number")
+    ci_gate.add_argument("--head-sha", required=True)
+    issue_review = review.add_parser(
+        "publish-issue-review",
+        help="publish an approved issue marker as the protected reviewer App",
+    )
+    issue_review.add_argument("subject", help="source owner/repository#number")
+    issue_review.add_argument("--repo", required=True, help="destination repository")
+    issue_review.add_argument("--issue-digest", required=True)
+    issue_review.add_argument("--label", action="append", default=[])
+    issue_review.add_argument("--ttl-seconds", type=int, default=600)
     merge = review.add_parser("merge", help="gate and merge a PR at the reviewed head")
     merge.add_argument("subject", help="owner/repo#number")
     merge.add_argument("--repo", required=True)
@@ -294,7 +317,9 @@ def build_parser() -> argparse.ArgumentParser:
         "submit-issue",
         help="gate and submit reviewed issue content to a managed repository",
     )
-    issue_submit.add_argument("subject", help="review subject id used in review record")
+    issue_submit.add_argument(
+        "subject", help="trusted source issue as owner/repository#number"
+    )
     issue_submit.add_argument("--repo", required=True)
     issue_submit.add_argument("--author", required=True)
     issue_submit.add_argument("--title", required=True)
@@ -1819,6 +1844,72 @@ def _run_checkpoint(args: argparse.Namespace, config: Config, board: Board, as_j
 
 def _run_review(args: argparse.Namespace, config: Config, as_json: bool) -> int:
     ledger = ReviewLedger(config)
+    if args.review_command == "ci-gate":
+        try:
+            subject_repo, number = _parse_pr_subject(args.subject)
+            expected_head = str(args.head_sha).casefold()
+            if not re.fullmatch(r"[0-9a-f]{40}", expected_head):
+                raise SystemAttestationError("expected head SHA is invalid")
+            token = os.environ.get("GITHUB_TOKEN", "")
+            if not token:
+                raise SystemAttestationError("read-only GitHub token is unavailable")
+            service_config = ServiceConfig.load(
+                config.root / "config" / "attestation.json"
+            )
+            decision = read_only_pr_gate(
+                service_config,
+                GitHub(service_config, token=token),
+                subject_repo,
+                int(number),
+                expected_head,
+            )
+        except (ReviewError, SystemAttestationError, OSError) as exc:
+            _emit(
+                {"allowed": False, "reasons": [str(exc)]},
+                as_json,
+                "BLOCKED: " + str(exc),
+            )
+            return 2
+        _emit(
+            {"allowed": True, **decision},
+            as_json,
+            "ALLOWED: current exact-head GitHub approval",
+        )
+        return 0
+    if args.review_command == "publish-issue-review":
+        try:
+            subject_repo, number = _parse_pr_subject(args.subject)
+            token = os.environ.get("SATURNIN_ISSUE_REVIEWER_TOKEN", "")
+            if not token:
+                raise SystemAttestationError(
+                    "protected issue reviewer App token is unavailable"
+                )
+            service_config = ServiceConfig.load(
+                config.root / "config" / "attestation.json"
+            )
+            result = publish_issue_review(
+                service_config,
+                GitHub(service_config, token=token),
+                subject_repo,
+                int(number),
+                args.repo,
+                args.label,
+                args.issue_digest,
+                ttl_seconds=args.ttl_seconds,
+            )
+        except (ReviewError, SystemAttestationError, OSError) as exc:
+            _emit(
+                {"published": False, "reasons": [str(exc)]},
+                as_json,
+                "BLOCKED: " + str(exc),
+            )
+            return 2
+        _emit(
+            {"published": True, **result},
+            as_json,
+            f"published protected issue review comment {result['comment_id']}",
+        )
+        return 0
     if args.review_command == "seal-rotation":
         path = ledger.seal_rotation_manifest()
         data = json.loads(path.read_text(encoding="utf-8"))
@@ -1830,20 +1921,18 @@ def _run_review(args: argparse.Namespace, config: Config, as_json: bool) -> int:
         return 0
     if args.review_command == "attest":
         try:
-            attestation = sign_from_session(
-                {
-                    "subject": args.subject,
-                    "kind": args.kind,
-                    "author": args.author,
-                    "reviewer": args.reviewer,
-                    "verdict": args.verdict,
-                    "zero_context": not args.with_context,
-                    "head_sha": args.head_sha,
-                    "issue_digest": args.issue_digest,
-                    "destination_repo": args.repo,
-                }
+            subject_repo, separator, number_text = args.subject.rpartition("#")
+            if not separator or not number_text.isdecimal():
+                raise SystemAttestationError(
+                    "subject must be an exact owner/repository#number"
+                )
+            attestation = request_attestation(
+                kind=args.kind,
+                repository=subject_repo,
+                number=int(number_text),
+                destination_repo=args.repo or subject_repo,
             )
-        except AttestationServiceError as exc:
+        except SystemAttestationError as exc:
             raise ReviewError(str(exc)) from exc
         _emit({"attestation": attestation}, as_json, attestation)
         return 0
@@ -1877,46 +1966,32 @@ def _run_review(args: argparse.Namespace, config: Config, as_json: bool) -> int:
     if args.review_command == "merge":
         subject_repo, number = _parse_pr_subject(args.subject, repo=args.repo)
         head_sha = _current_pr_head(args.subject, args.repo)
-        governance = Governance(config)
-        records = ledger.for_subject(args.subject, "pr")
-        decision = governance.merge_allowed(
-            repo=args.repo,
-            author=args.author,
-            records=records,
-            head_sha=head_sha,
-        )
-        if not decision.allowed:
+        try:
+            response = request_action(
+                operation="merge",
+                repository=subject_repo,
+                number=int(number),
+                destination_repo=args.repo,
+                expected_head=head_sha,
+                merge_method=args.method,
+            )
+        except (SystemAttestationError, OSError) as exc:
             _emit(
-                {"allowed": False, "reasons": decision.reasons, "head_sha": head_sha},
+                {"allowed": False, "reasons": [str(exc)], "head_sha": head_sha},
                 as_json,
-                "BLOCKED: " + "; ".join(decision.reasons),
+                "BLOCKED: " + str(exc),
             )
             return 2
-        try:
-            response = json.loads(
-                run_gh(
-                    [
-                        "api",
-                        "--method",
-                        "PUT",
-                        f"repos/{subject_repo}/pulls/{number}/merge",
-                        "-f",
-                        f"sha={head_sha}",
-                        "-f",
-                        f"merge_method={args.method}",
-                    ]
-                )
-            )
-        except (MirrorError, json.JSONDecodeError) as exc:
-            raise ReviewError(f"governed merge failed for {args.subject}: {exc}") from exc
         _emit(
             {
-                "allowed": True,
-                "reasons": decision.reasons,
+                "allowed": response["allowed"],
                 "head_sha": head_sha,
                 "merged": bool(response.get("merged")),
                 "message": str(response.get("message", "")),
                 "sha": str(response.get("sha", "")),
+                "review_id": response["review_id"],
+                "reviewer_identity": response["reviewer_identity"],
+                "decision_nonce": response["nonce"],
             },
             as_json,
             str(response.get("message", "merge attempted")),
@@ -1924,81 +1999,38 @@ def _run_review(args: argparse.Namespace, config: Config, as_json: bool) -> int:
         return 0 if response.get("merged") else 2
     if args.review_command == "submit-issue":
         digest = issue_content_digest(args.title, args.body)
-        governance = Governance(config)
-        records = ledger.for_subject(args.subject, "issue")
-        decision = governance.issue_submission_allowed(
-            repo=args.repo,
-            author=args.author,
-            records=records,
-            issue_digest=digest,
-        )
-        if not decision.allowed:
+        try:
+            subject_repo, number = _parse_pr_subject(args.subject)
+            nonce = hashlib.sha256(json.dumps(
+                {
+                    "operation": "issue_submit", "subject": args.subject.casefold(),
+                    "destination": args.repo.casefold(), "digest": digest,
+                    "labels": sorted(args.label),
+                },
+                sort_keys=True, separators=(",", ":"),
+            ).encode()).hexdigest()
+            response = request_issue_action(
+                operation="issue_submit", repository=subject_repo,
+                number=int(number), destination_repo=args.repo,
+                issue_digest=digest, title=args.title, body=args.body,
+                labels=args.label, nonce=nonce,
+            )
+        except (ReviewError, SystemAttestationError, OSError) as exc:
             _emit(
-                {"allowed": False, "reasons": decision.reasons, "issue_digest": digest},
+                {"allowed": False, "reasons": [str(exc)], "issue_digest": digest},
                 as_json,
-                "BLOCKED: " + "; ".join(decision.reasons),
+                "BLOCKED: " + str(exc),
             )
             return 2
-        identity = _issue_submission_identity(args.subject, args.repo, digest)
-        submissions = config.var_dir / "issue-submissions"
-        submissions.mkdir(parents=True, exist_ok=True, mode=0o700)
-        submissions.chmod(0o700)
-        submission_path = submissions / f"{identity}.json"
-        submission_lock = config.var_dir / "locks" / f"governed-issue-{identity}"
-        try:
-            with file_lock(submission_lock):
-                url = _read_issue_submission(
-                    submission_path,
-                    identity=identity,
-                    subject=args.subject,
-                    repo=args.repo,
-                    digest=digest,
-                )
-                if not url:
-                    submission = {
-                        "identity": identity,
-                        "subject": args.subject,
-                        "repo": args.repo.casefold(),
-                        "issue_digest": digest,
-                        "status": "started",
-                        "url": "",
-                    }
-                    atomic_replace_text(
-                        submission_path,
-                        json.dumps(submission, sort_keys=True) + "\n",
-                        mode=PRIVATE_FILE_MODE,
-                    )
-                    create_args = [
-                        "issue",
-                        "create",
-                        "--repo",
-                        args.repo,
-                        "--title",
-                        args.title,
-                        "--body",
-                        args.body,
-                    ]
-                    for label in args.label:
-                        create_args.extend(["--label", label])
-                    output = run_gh(create_args)
-                    url = output.strip().splitlines()[-1].strip() if output.strip() else ""
-                    if url:
-                        submission.update({"status": "finished", "url": url})
-                        atomic_replace_text(
-                            submission_path,
-                            json.dumps(submission, sort_keys=True) + "\n",
-                            mode=PRIVATE_FILE_MODE,
-                        )
-        except MirrorError as exc:
-            raise ReviewError(f"governed issue submission failed for {args.subject}: {exc}") from exc
-        if not url:
-            raise ReviewError("governed issue submission returned no issue URL")
+        url = str(response["url"])
         _emit(
             {
                 "allowed": True,
-                "reasons": decision.reasons,
+                "reasons": ["fresh protected-signer issue submission"],
                 "issue_digest": digest,
                 "url": url,
+                "comment_id": response["comment_id"],
+                "decision_nonce": response["nonce"],
             },
             as_json,
             url,
@@ -2010,25 +2042,61 @@ def _run_review(args: argparse.Namespace, config: Config, as_json: bool) -> int:
             args.subject,
             getattr(args, "repo", None),
         )
-    governance = Governance(config)
-    records = ledger.for_subject(args.subject, args.kind)
-    decision = (
-        governance.merge_allowed(
-            repo=args.repo, author=args.author, records=records,
-            head_sha=head_sha,
+    if args.kind == "pr":
+        subject_repo, number = _parse_pr_subject(args.subject, repo=args.repo)
+        try:
+            live = request_action(
+                operation="gate",
+                repository=subject_repo,
+                number=int(number),
+                destination_repo=args.repo,
+                expected_head=head_sha,
+            )
+        except (SystemAttestationError, OSError) as exc:
+            _emit(
+                {"allowed": False, "reasons": [str(exc)]},
+                as_json,
+                "BLOCKED: " + str(exc),
+            )
+            return 2
+        _emit(
+            {
+                "allowed": True,
+                "reasons": ["fresh protected-signer decision"],
+                "head_sha": live["head_sha"],
+                "review_id": live["review_id"],
+                "reviewer_identity": live["reviewer_identity"],
+                "decision_nonce": live["nonce"],
+            },
+            as_json,
+            "ALLOWED: fresh protected-signer decision",
         )
-        if args.kind == "pr"
-        else governance.issue_submission_allowed(
-            repo=args.repo, author=args.author, records=records,
+        return 0
+    try:
+        subject_repo, number = _parse_pr_subject(args.subject)
+        live = request_issue_action(
+            operation="issue_gate", repository=subject_repo,
+            number=int(number), destination_repo=args.repo,
             issue_digest=getattr(args, "issue_digest", ""),
         )
-    )
+    except (ReviewError, SystemAttestationError, OSError) as exc:
+        _emit(
+            {"allowed": False, "reasons": [str(exc)]},
+            as_json,
+            "BLOCKED: " + str(exc),
+        )
+        return 2
     _emit(
-        {"allowed": decision.allowed, "reasons": decision.reasons},
+        {
+            "allowed": True,
+            "reasons": ["fresh protected-signer issue decision"],
+            "comment_id": live["comment_id"],
+            "decision_nonce": live["nonce"],
+        },
         as_json,
-        ("ALLOWED: " if decision.allowed else "BLOCKED: ") + "; ".join(decision.reasons),
+        "ALLOWED: fresh protected-signer issue decision",
     )
-    return 0 if decision.allowed else 2
+    return 0
 
 
 def _run_automation(args: argparse.Namespace, config: Config, board: Board, as_json: bool) -> int:

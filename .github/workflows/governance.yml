@@ -70,6 +70,5 @@ jobs:
       - name: Independent review gate (rule 3)
         env:
           GITHUB_TOKEN: ${{ github.token }}
-          SATURNIN_REVIEW_ATTESTATION_KEY: ${{ github.token }}
         working-directory: trusted
-        run: automation/library/review_gate.sh pr "${{ github.event.pull_request.base.repo.full_name }}#${{ github.event.pull_request.number }}" "${{ github.event.pull_request.base.repo.full_name }}"
+        run: automation/library/review_gate.sh pr "${{ github.event.pull_request.base.repo.full_name }}#${{ github.event.pull_request.number }}" "${{ github.event.pull_request.head.sha }}"

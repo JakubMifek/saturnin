@@ -1,0 +1,17 @@
+{
+  "repositories": ["jakubmifek/saturnin"],
+  "issue_destinations": ["jakubmifek/saturnin-ops"],
+  "pr_reviewers": ["copilot-pull-request-reviewer[bot]"],
+  "issue_reviewers": ["saturnin-issue-reviewer[bot]"],
+  "allowed_verdicts": ["approved"],
+  "github_api": "https://api.github.com",
+  "request_timeout_seconds": 10,
+  "maximum_issue_marker_ttl_seconds": 3600,
+  "authorization_limit": 30,
+  "authorization_window_seconds": 60,
+  "pr_base_refs": ["main"],
+  "required_check_runs": ["test"],
+  "action_ttl_seconds": 60,
+  "protected_actor_login": "saturnin-merge-bot",
+  "publisher_actor_login": "saturnin-issue-publisher[bot]"
+}

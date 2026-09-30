@@ -39,6 +39,7 @@ everything else is a thin Python module with tests.
 | Router | `saturnin/routing.py` | First-match dispatch, refuses to route work to the CEO. |
 | Governance | `saturnin/governance.py` | Branch, push, merge, issue and server-command gates. |
 | Review ledger | `saturnin/review.py` | Append-only review verdicts; latest per reviewer wins. |
+| Dedicated signer | `/usr/lib/saturnin-attestation/system_attestation.py` | Root-installed service independently authorizes exact GitHub evidence and signs it with systemd encrypted credentials. |
 | Worktrees | `saturnin/worktrees.py` | Create/list worktrees, plan and apply stale cleanup. |
 | Checkpoints | `saturnin/checkpoints.py` | Handoff notes and delayed resume. |
 | Automation | `saturnin/automation.py` | Registry search + repeat detection. |
@@ -65,7 +66,7 @@ board/reviews/     <kind>-<subject>.jsonl      (runtime, gitignored)
 var/worktrees/     one directory per feature branch
 var/logs/          janitor.log and friends
 var/reports/       improvement-<timestamp>.json
-systemd/           user units for the scheduled workers
+systemd/           user worker units and reviewed dedicated system signer units
 ```
 
 State is plain text on purpose: it survives crashes, diffs well, and can be
@@ -74,7 +75,10 @@ inspected with `cat` when everything else is on fire.
 ## Runtime
 
 The primary runtime is the local Debian server, running as the unprivileged
-`saturnin` user with systemd **user** timers (`systemd/`). GitHub Actions is an
+`saturnin` user with systemd **user** timers (`systemd/`). The attestation
+signer is the sole exception: a boot-activated, non-login
+`saturnin-signer` system service with root-controlled runtime, configuration,
+state, and encrypted credentials. GitHub Actions is an
 integration helper only: it runs the test suite and the review gate on PRs; it
 never owns state and never schedules the orchestrator.
 

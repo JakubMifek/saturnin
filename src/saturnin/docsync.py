@@ -114,26 +114,20 @@ def _review_flow(config: Config, kind: str) -> str:
         raise GeneratedBlockError(
             f"governance review.{kind}.allowed_reviewer_roles must be a non-empty string list"
         )
-    reviewer = roles[0]
     if kind == "pr":
         repo = config.governance.get("autonomy", {}).get("self_repo", "<owner/repo>")
         return "\n".join(
             [
                 "```bash",
                 f'HEAD_SHA="$(gh pr view <N> --repo {repo} --json headRefOid --jq .headRefOid)"',
-                "VERDICT=approved",
-                f'attestation="$(saturnin review attest {repo}#<N> --kind pr \\',
-                f'  --author <author-role> --reviewer {reviewer} --verdict "$VERDICT" \\',
-                '  --head-sha "$HEAD_SHA")"',
-                f"saturnin review record {repo}#<N> --kind pr \\",
-                f'  --author <author-role> --reviewer {reviewer} --verdict "$VERDICT" \\',
-                '  --head-sha "$HEAD_SHA" --attestation "$attestation"',
                 f"saturnin review gate {repo}#<N> --kind pr \\",
                 f'  --repo {repo} --author <author-role> --head-sha "$HEAD_SHA"',
                 "```",
                 "",
-                "Resolve the PR head once and pass that identical SHA through "
-                "attest, record and gate.",
+                "The review worker's prose verdict is advisory. The configured GitHub "
+                "reviewer bot must submit the current exact-head approval. This command "
+                "is queued as a scope-checked trusted callback and the host signer "
+                "independently re-fetches GitHub before deciding.",
             ]
         )
     if kind == "issue":
@@ -142,21 +136,19 @@ def _review_flow(config: Config, kind: str) -> str:
                 "```bash",
                 "digest=\"$(python -c 'from saturnin.review import "
                 "issue_content_digest; print(issue_content_digest(\"TITLE\", \"BODY\"))')\"",
-                "VERDICT=approved",
-                'attestation="$(saturnin review attest <draft-id> --kind issue \\',
-                "  --repo <owner/repo> --author <author-role> \\",
-                f'  --reviewer {reviewer} --verdict "$VERDICT" \\',
-                '  --issue-digest "$digest")"',
-                "saturnin review record <draft-id> --kind issue \\",
-                "  --repo <owner/repo> --author <author-role> \\",
-                f'  --reviewer {reviewer} --verdict "$VERDICT" \\',
-                '  --issue-digest "$digest" --attestation "$attestation"',
-                "saturnin review gate <draft-id> --kind issue \\",
-                '  --repo <owner/repo> --author <author-role> --issue-digest "$digest"',
+                "gh workflow run issue-review-marker.yml --ref main \\",
+                "  -f source='<source-owner/source-repo>#<N>' \\",
+                "  -f destination='<destination-owner/repo>' \\",
+                "  -f labels='[]' -f ttl_seconds=600 -f issue_digest=\"$digest\"",
+                "gh run watch <protected-workflow-run-id> --exit-status",
+                "saturnin review gate <source-owner/source-repo>#<N> --kind issue \\",
+                '  --repo <destination-owner/repo> --author <author-role> --issue-digest "$digest"',
                 "```",
                 "",
-                "Compute the digest from the exact title and body under review, "
-                "then pass that identical digest through attest, record and gate.",
+                "The protected `issue-review-approval` environment must be approved by "
+                "an independent reviewer. Its dedicated GitHub App publishes the exact "
+                "short-lived marker; ordinary worker credentials cannot. The gate is a "
+                "scope-checked trusted callback and independently re-fetches the marker.",
             ]
         )
     raise GeneratedBlockError(f"unknown review flow: {kind}")
@@ -249,10 +241,10 @@ def _credential_admin_recovery(config: Config) -> str:
 
 def _signer_unit_interface(config: Config) -> str:
     operation = config.policy("server_scope").get("operations", {}).get(
-        "signer_user_unit"
+        "signer_system_service"
     )
     if not isinstance(operation, dict):
-        raise GeneratedBlockError("server_scope signer_user_unit operation is required")
+        raise GeneratedBlockError("server_scope signer_system_service operation is required")
     executable = operation.get("executable")
     actions = operation.get("allowed_actions")
     unit = operation.get("unit")
@@ -266,20 +258,21 @@ def _signer_unit_interface(config: Config) -> str:
         or not isinstance(runtime_snapshot, str)
         or not isinstance(scope, str)
     ):
-        raise GeneratedBlockError("server_scope signer_user_unit operation is invalid")
+        raise GeneratedBlockError("server_scope signer_system_service operation is invalid")
     commands = "\n".join(
-        'saturnin check command "$SATURNIN_HOME/'
-        f'{executable} {action}" --execute --task <task-id>'
+        f'sudo /usr/sbin/saturnin-attestation-admin {action}'
         for action in actions
     )
     return (
-        f"This interface is restricted to the `{scope}`-scoped `{unit}` unit.\n\n"
+        f"This human-administrator interface manages only the `{scope}`-scoped `{unit}` unit.\n\n"
         f"```bash\n{commands}\n```\n\n"
         "Install is retry-safe and restores the prior signer definition and state "
-        "after a partial failure. Status performs no mutation. Uninstall removes "
-        f"only the signer definition, enablement link, and pinned runtime snapshot "
-        f"`{runtime_snapshot}`, leaves encrypted credentials in place, and is safe "
-        "to repeat."
+        "after a partial failure. Status performs no mutation. Rotate and rollback "
+        "decrypt each generation under root, validate its identity, and re-encrypt "
+        "it with its destination embedded name before atomic publication. Both "
+        "restart the service and require an active health result; any failure "
+        "restores the complete prior credential set and service. No action accepts "
+        "a path, unit, owner, package, or arbitrary command."
     )
 
 
@@ -287,46 +280,73 @@ def _attestation_boundary(config: Config) -> str:
     policy = config.governance.get("review", {}).get("attestation", {})
     if (
         policy.get("required") is not True
-        or policy.get("execution_scoped") is not True
-        or policy.get("legacy_migration") != "rotation-manifest-v2-required"
+        or policy.get("authorization_source") != "github-api"
+        or policy.get("service_identity") != "saturnin-signer"
+        or policy.get("listener_creator") != "service-process"
         or not isinstance(policy.get("service_socket"), str)
     ):
         raise GeneratedBlockError(
-            "governance review.attestation must require execution-scoped service signing"
-        )
-    ttl = policy.get("session_ttl_seconds")
-    if not isinstance(ttl, int) or ttl <= 0:
-        raise GeneratedBlockError(
-            "governance review.attestation.session_ttl_seconds must be positive"
+            "governance review.attestation must require dedicated GitHub authorization"
         )
     return "\n".join(
         [
-            "During autonomous operation, the master and previous keys are loaded only by "
-            "`saturnin-attestation.service` in its private mount, network, "
-            "runtime, and credential namespace. Supervisor and worker units do "
-            "not load either credential. Explicit owner lifecycle commands may "
-            "decrypt them in bounded process memory only while the signer and "
-            "supervisors are stopped.",
+            "The system `saturnin-attestation.service` runs as the non-login "
+            "`saturnin-signer` identity from root-controlled runtime and configuration. "
+            "The system manager decrypts current, previous, and bounded retired HMAC "
+            "credentials plus the separate destination-publisher App credential into "
+            "its private credential tmpfs; ordinary workers never receive key "
+            "material. The service, not PID 1, creates the canonical "
+            "listener. Clients authenticate its kernel-reported UID plus the stable "
+            "signer-owned socket directory and endpoint identity; this deliberately "
+            "avoids cross-UID ptrace-gated `/proc` inspection. Systemd readiness is "
+            "reported only after protected identity, repository role, "
+            "branch-protection access, check-run access, credential validation, and "
+            "listener creation.",
             "",
-            "The signer remains disabled until the owner rotates the master and "
-            "seals a version-2 migration manifest. That manifest enumerates the "
-            "exact immutable historical attestations, records a signed ledger "
-            "digest and timestamp cutoff, and never permits a legacy role-scoped "
-            "signature to authorize a new record.",
+            "For pull requests the service obtains the live head, author, and exact "
+            "commit-bound latest review state directly from GitHub over TLS. For issues "
+            "it recomputes title/body digest and accepts one exact, expiring, nonce-bound "
+            "machine marker in an allowlisted dedicated GitHub App bot comment. A "
+            "default-branch-only protected environment holds that App key and requires "
+            "an independent human approver; ordinary workers cannot publish as the bot. "
+            "The marker also binds approved labels. Every issue gate is fresh; "
+            "submission repeats authorization and the signer creates exact reviewed "
+            "content through a separate selected-repository publisher App restricted "
+            "to Metadata read and Issues write in an independently allowlisted "
+            "destination with a deterministic hidden idempotency marker. "
+            "The marker is authenticated by the signer so an ordinary worker cannot "
+            "forge attribution onto another publisher-authored issue. It rechecks "
+            "source authorization immediately before and after creation. GitHub has no "
+            "atomic cross-repository conditional create, so this narrow residual race "
+            "is accepted only for issue publication: post-create revocation triggers "
+            "automatic closure of the exact attributable destination issue, a signed "
+            "terminal result, and audit escalation, never success. Ambiguous "
+            "submission outcomes reconcile only against one exact marker-bearing issue "
+            "authored by the protected identity. Delayed reconciliation revalidates "
+            "the source first; if a revoked publication was edited, became ambiguous, "
+            "or cannot be fetched, the signer records terminal containment failure "
+            "instead of permitting a later success. Evidence expiry limits "
+            "new authorization, not later audit verification of a durable record. "
+            "Socket filesystem access permits transport only: independent GitHub "
+            "authorization remains required. Repository and API origins are fixed "
+            "allowlists; caller claims and socket credentials are not authority.",
             "",
-            "For a routed reviewer task, the trusted launcher asks the service "
-            "for a session bound to task, role, author, subject, immutable head "
-            "or issue digest, a random nonce, and the launched process identity. "
-            f"The session expires after {ttl} seconds, accepts one signature, "
-            "and verifies that the connecting process descends from that exact "
-            "launch. Its Unix socket is bind-mounted only into that reviewer's "
-            "sandbox; `/run` and `/proc` remain isolated for all workers.",
+            "Consumed evidence and its exact idempotent attestation are serialized in "
+            "dedicated state for audit only. Altered reuse fails. Every PR gate obtains "
+            "a fresh, expiring, one-time protected decision over the live head, base, "
+            "review ID/state/identity and required checks. Merge repeats that lookup "
+            "immediately before the signer uses GitHub's expected-head atomic merge "
+            "API. The signer also requires strict branch protection with stale-review "
+            "dismissal, required reviews/checks, administrator enforcement and no "
+            "bypass identities. Its fixed "
+            "non-admin merge identity and root-provisioned credential never enter the "
+            "ordinary UID; workers receive neither signing sessions nor credentials.",
             "",
-            "No worker receives a master or derived key in argv, environment, "
-            "files, descriptors, logs, board data, or Git. Ordinary workers do "
-            "not receive the session socket. The signed ledger retains only "
-            "scope, key identifier, nonce, and signature, never plaintext key "
-            "material.",
+            "GitHub-hosted governance cannot access the host signer. Its "
+            "`pull_request_target` job executes only default-branch code with a "
+            "read-only token and repeats a live exact-head review lookup; it signs "
+            "nothing and cannot merge. Sandboxed reviewers queue scope-bound gate "
+            "callbacks for host execution instead of receiving signer socket access.",
         ]
     )
 

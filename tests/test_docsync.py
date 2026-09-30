@@ -14,6 +14,15 @@ REPO_ROOT = Path(__file__).resolve().parents[1]
 
 @pytest.fixture()
 def docs_home(config: Config) -> Config:
+    config.governance["review"]["attestation"]["authorization_source"] = "github-api"
+    governance = config.root / "policies" / "governance.yaml"
+    governance.write_text(
+        governance.read_text(encoding="utf-8").replace(
+            "authorization_source: test-local",
+            "authorization_source: github-api",
+        ),
+        encoding="utf-8",
+    )
     for name in ("docs", ".github"):
         shutil.copytree(REPO_ROOT / name, config.root / name)
     return config
@@ -106,8 +115,8 @@ def test_review_flow_blocks_are_policy_rendered(docs_home: Config) -> None:
     policy = docs_home.root / "policies" / "governance.yaml"
     policy.write_text(
         policy.read_text().replace(
-            "allowed_reviewer_roles: [pr-reviewer]",
-            "allowed_reviewer_roles: [review-bot]",
+            "self_repo: JakubMifek/saturnin",
+            "self_repo: example/other",
         )
     )
     docs_home._cache.clear()
@@ -118,7 +127,7 @@ def test_review_flow_blocks_are_policy_rendered(docs_home: Config) -> None:
     assert docs_home.root / "agents" / "pr-reviewer.md" in stale
     docsync.render(docs_home)
     rendered = (docs_home.root / "skills" / "review-ledger.md").read_text(encoding="utf-8")
-    assert "--reviewer review-bot" in rendered
+    assert "--repo example/other" in rendered
 
 
 def test_audit_checks_generated_blocks_in_skills(docs_home: Config) -> None:
@@ -244,7 +253,7 @@ def test_documents_ignores_unrelated_generated_prose(docs_home: Config) -> None:
     assert path not in docsync.documents(docs_home)
 
 
-def test_documented_pr_review_flow_records_attested_head() -> None:
+def test_documented_pr_review_flow_uses_live_exact_head_gate() -> None:
     runbook = (REPO_ROOT / "docs" / "runbooks" / "day-1-startup.md").read_text(
         encoding="utf-8"
     )
@@ -253,11 +262,11 @@ def test_documented_pr_review_flow_records_attested_head() -> None:
     )
 
     assert "HEAD_SHA=\"$(gh pr view" in runbook
-    assert "VERDICT=approved" in runbook
-    assert "--head-sha \"$HEAD_SHA\")" in runbook
-    assert "--head-sha \"$HEAD_SHA\" --attestation \"$attestation\"" in runbook
-    assert "Review attestation created for that revision" in template
-    assert "--head-sha \"$HEAD_SHA\" --attestation \"$attestation\"" in template
+    assert '--head-sha "$HEAD_SHA"' in runbook
+    assert "review attest" not in runbook
+    assert "review record" not in runbook
+    assert "reviewer bot submitted an approval for exactly" in template
+    assert "Protected merge gate passes" in template
 
 
 def test_generated_pr_review_flows_pass_same_head_sha() -> None:
@@ -275,5 +284,6 @@ def test_generated_pr_review_flows_pass_same_head_sha() -> None:
         assert blocks, path
         for block in blocks:
             assert 'HEAD_SHA="$(gh pr view' in block
-            assert block.count('--head-sha "$HEAD_SHA"') == 3
-            assert "--reviewer pr-reviewer" in block
+            assert block.count('--head-sha "$HEAD_SHA"') == 1
+            assert "review attest" not in block
+            assert "review record" not in block
