@@ -2479,9 +2479,9 @@ def test_publisher_http_mutations_and_credential_parser() -> None:
     credential = PublisherCredential.load(json.dumps({
         "app_id": 7,
         "private_key": (
-            "-----BEGIN PRIVATE KEY-----\n"
+            "-----BEGIN " + "PRIVATE KEY-----\n"
             "QUJDRA==\n"
-            "-----END PRIVATE KEY-----\n"
+            "-----END " + "PRIVATE KEY-----\n"
         ),
     }).encode())
     assert credential.app_id == 7

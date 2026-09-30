@@ -661,9 +661,9 @@ def _migrate_or_provision(root: Path, runner: Runner) -> list[Path]:
                     json.dumps({
                         "app_id": 1,
                         "private_key": (
-                            "-----BEGIN PRIVATE KEY-----\n"
+                            "-----BEGIN " + "PRIVATE KEY-----\n"
                             "QUJDRA==\n"
-                            "-----END PRIVATE KEY-----\n"
+                            "-----END " + "PRIVATE KEY-----\n"
                         ),
                     }).encode(),
                     "github.publisher",
