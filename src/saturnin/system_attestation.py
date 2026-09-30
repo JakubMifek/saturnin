@@ -1346,6 +1346,15 @@ class DedicatedSigner:
                         raise SystemAttestationError(
                             "protected issue submission requires reconciliation"
                         )
+                    if not self._issue_decision_is_current(
+                        prior, repo, number, subject, destination
+                    ):
+                        self._contain_issue_submission(
+                            db, publisher, prior, found, scope_hash
+                        )
+                        raise SystemAttestationError(
+                            "source authorization was revoked after issue publication"
+                        )
                     return self._complete_issue_submission(
                         db, prior, found, scope_hash
                     )
@@ -1394,6 +1403,10 @@ class DedicatedSigner:
                 ),
                 "review_state": evidence["verdict"],
                 "approved_labels": approved_labels,
+                "source_authorization_hash": hashlib.sha256(_canonical({
+                    "evidence": evidence,
+                    "labels": approved_labels,
+                })).hexdigest(),
                 "expires_at": expiry.isoformat(),
             }
             signed = dict(decision)
@@ -1487,18 +1500,9 @@ class DedicatedSigner:
                 raise SystemAttestationError(
                     "GitHub protected issue response is invalid"
                 )
-            try:
-                post_evidence, post_labels = self._current_issue_authorization(
-                    repo, number, subject, destination
-                )
-                post_current = (
-                    post_evidence == evidence
-                    and post_labels == approved_labels
-                    and _iso(decision["expires_at"]) > self.now()
-                )
-            except SystemAttestationError:
-                post_current = False
-            if not post_current:
+            if not self._issue_decision_is_current(
+                decision, repo, number, subject, destination
+            ):
                 self._contain_issue_submission(
                     db, publisher, decision, found, scope_hash
                 )
@@ -1510,6 +1514,32 @@ class DedicatedSigner:
     @staticmethod
     def _issue_submission_body(body: str, nonce: str) -> str:
         return f"{body}\n\n{ISSUE_SUBMISSION_MARKER.format(nonce)}"
+
+    def _issue_decision_is_current(
+        self,
+        decision: dict[str, Any],
+        repo: str,
+        number: int,
+        subject: str,
+        destination: str,
+    ) -> bool:
+        try:
+            evidence, labels = self._current_issue_authorization(
+                repo, number, subject, destination
+            )
+            current_hash = hashlib.sha256(_canonical({
+                "evidence": evidence,
+                "labels": labels,
+            })).hexdigest()
+            return (
+                hmac.compare_digest(
+                    current_hash, decision["source_authorization_hash"]
+                )
+                and labels == decision["approved_labels"]
+                and _iso(decision["expires_at"]) > self.now()
+            )
+        except (KeyError, SystemAttestationError):
+            return False
 
     def _matching_issue_submission(
         self, value: Any, destination: str, title: str, body: str,

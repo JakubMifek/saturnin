@@ -1499,6 +1499,52 @@ def test_post_create_revocation_is_contained_or_escalated(
     assert result["containment_failed"] is (containment_mode != "success")
 
 
+def test_ambiguous_reconciliation_revalidates_and_contains_revocation(
+    tmp_path: Path,
+) -> None:
+    title, body, digest, _marker, base_transport = issue_action_fixture()
+    created = [False]
+    revoked = [False]
+    marked = body + "\n\n" + ISSUE_SUBMISSION_MARKER.format("f" * 64)
+    mutations: list[str] = []
+
+    def transport(path: str):
+        if path.startswith("/repos/acme/issues/issues?"):
+            return [published_issue(title, marked)] if created[0] else []
+        value = base_transport(path)
+        if path == "/repos/acme/widget/issues/9" and revoked[0]:
+            return {**value, "state": "closed"}
+        return value
+
+    def mutate(method: str, _path: str, _payload: dict):
+        mutations.append(method)
+        if method == "POST":
+            created[0] = True
+            raise GitHubMutationError("creation response lost")
+        return published_issue(title, marked, state="closed")
+
+    cfg = ServiceConfig(
+        frozenset({"acme/widget"}), frozenset({"review-bot"}),
+        frozenset({"review-bot"}), frozenset({"approved"}),
+        issue_destinations=frozenset({"acme/issues"}),
+    )
+    service = DedicatedSigner(
+        cfg, GitHub(cfg, transport=transport, mutation_transport=mutate),
+        b"k" * 48, None, tmp_path / "ambiguous-revoked.sqlite3",
+        now=lambda: NOW,
+    )
+    service.publisher_client = lambda _destination: service.github
+    request_value = issue_submit_request(title, body, digest)
+    with pytest.raises(GitHubMutationError, match="response lost"):
+        service.issue_action(request_value)
+    revoked[0] = True
+    with pytest.raises(SystemAttestationError, match="revoked after"):
+        service.issue_action(request_value)
+    assert mutations == ["POST", "PATCH"]
+    with pytest.raises(SystemAttestationError, match="revoked after creation"):
+        service.issue_action(request_value)
+
+
 def test_issue_claim_blocks_different_nonce_and_shared_db_concurrency(
     tmp_path: Path,
 ) -> None:

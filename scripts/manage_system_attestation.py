@@ -62,7 +62,7 @@ FILES = {
 OBSOLETE_FILES = ("usr/lib/systemd/system/saturnin-attestation.socket",)
 EXPECTED_SHA256 = {
     "src/saturnin/system_attestation.py":
-        "5ed84fdcf8376388953dc3b51fdde8a92bcaf0af30ffc4de1191a927164b3526",
+        "89a95a26bb735b570cff4fd214cb09192c4cecd0c91e0e8e4939b67eaff03cf3",
     "config/attestation.json":
         "a56a1aa897016322a1f00aa82d10953b5cbf6d69219329a783f3f9ea1146f06a",
     "systemd/system/saturnin-attestation.service":
