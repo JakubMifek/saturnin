@@ -58,6 +58,29 @@ NOW = datetime(2026, 9, 28, tzinfo=timezone.utc)
 HEAD = "a" * 40
 
 
+def production_branch_protection() -> dict:
+    return {
+        "required_pull_request_reviews": {
+            "url": "https://api.github.com/repos/acme/widget/branches/main/protection/required_pull_request_reviews",
+            "dismiss_stale_reviews": True,
+            "require_code_owner_reviews": False,
+            "require_last_push_approval": True,
+            "required_approving_review_count": 1,
+        },
+        "required_status_checks": {
+            "url": "https://api.github.com/repos/acme/widget/branches/main/protection/required_status_checks",
+            "strict": True,
+            "contexts": ["test"],
+            "checks": [{"context": "test", "app_id": None}],
+        },
+        "enforce_admins": {
+            "enabled": True,
+            "url": "https://api.github.com/repos/acme/widget/branches/main/protection/enforce_admins",
+        },
+        "restrictions": None,
+    }
+
+
 def service_config() -> ServiceConfig:
     return ServiceConfig(
         frozenset({"acme/widget"}),
@@ -77,21 +100,7 @@ def pr_transport(*, state: str = "APPROVED", head: str = HEAD):
                 "permissions": {"push": True, "admin": False},
             }
         if path == "/repos/acme/widget/branches/main/protection":
-            return {
-                "required_pull_request_reviews": {
-                    "dismiss_stale_reviews": True,
-                    "required_approving_review_count": 1,
-                    "bypass_pull_request_allowances": {
-                        "users": [], "teams": [], "apps": [],
-                    },
-                },
-                "required_status_checks": {
-                    "strict": True,
-                    "contexts": ["test"],
-                    "checks": [],
-                },
-                "enforce_admins": {"enabled": True},
-            }
+            return production_branch_protection()
         if path == "/repos/acme/widget/pulls/7":
             return {
                 "head": {"sha": head},
@@ -127,19 +136,7 @@ def action_transport(
                 "permissions": {"push": True, "admin": False},
             }
         if path == "/repos/acme/widget/branches/main/protection":
-            return {
-                "required_pull_request_reviews": {
-                    "dismiss_stale_reviews": True,
-                    "required_approving_review_count": 1,
-                    "bypass_pull_request_allowances": {
-                        "users": [], "teams": [], "apps": [],
-                    },
-                },
-                "required_status_checks": {
-                    "strict": True, "contexts": ["test"], "checks": [],
-                },
-                "enforce_admins": {"enabled": True},
-            }
+            return production_branch_protection()
         if path == "/repos/acme/widget/pulls/7":
             return {
                 "head": {"sha": head},
@@ -742,6 +739,243 @@ def test_protected_action_requires_nonbypassable_branch_protection(
         b"c" * 48, None, tmp_path / "protection.sqlite3", now=lambda: NOW,
     )
     with pytest.raises(SystemAttestationError, match="branch protection"):
+        service.action(action_request())
+
+
+@pytest.mark.parametrize("operation", ["gate", "merge"])
+@pytest.mark.parametrize(
+    "allowances",
+    [
+        pytest.param("omitted", id="omitted"),
+        pytest.param({}, id="explicit-empty-object"),
+        pytest.param(
+            {"users": [], "teams": [], "apps": []},
+            id="canonical-complete-empty",
+        ),
+    ],
+)
+def test_protected_action_accepts_github_empty_bypass_shapes(
+    tmp_path: Path,
+    operation: str,
+    allowances: object,
+) -> None:
+    base = action_transport()
+
+    def transport(path: str):
+        if path.endswith("/branches/main/protection"):
+            protection = production_branch_protection()
+            if allowances != "omitted":
+                protection["required_pull_request_reviews"][
+                    "bypass_pull_request_allowances"
+                ] = allowances
+            return protection
+        return base(path)
+
+    cfg = service_config()
+    service = DedicatedSigner(
+        cfg,
+        GitHub(
+            cfg,
+            token="protected",
+            transport=transport,
+            mutation_transport=lambda *_args: {
+                "merged": True,
+                "message": "merged",
+                "sha": "e" * 40,
+            },
+        ),
+        b"c" * 48,
+        None,
+        tmp_path / f"valid-{operation}-{type(allowances).__name__}.sqlite3",
+        now=lambda: NOW,
+    )
+
+    result = service.action(action_request(operation=operation))
+
+    assert result["allowed"] is True
+    assert result.get("merged", operation != "merge") is True
+
+
+@pytest.mark.parametrize(
+    "allowances",
+    [
+        pytest.param(None, id="null"),
+        pytest.param(0, id="integer"),
+        pytest.param("empty", id="scalar"),
+        pytest.param([], id="list"),
+        pytest.param({"users": []}, id="partial-users"),
+        pytest.param({"teams": []}, id="partial-teams"),
+        pytest.param({"apps": []}, id="partial-apps"),
+        pytest.param(
+            {"users": [], "teams": []},
+            id="partial-two-keys",
+        ),
+        pytest.param(
+            {"users": [], "teams": [], "apps": [], "roles": []},
+            id="extra-key",
+        ),
+        pytest.param(
+            {"users": {}, "teams": [], "apps": []},
+            id="wrong-users-type",
+        ),
+        pytest.param(
+            {"users": [], "teams": "none", "apps": []},
+            id="wrong-teams-type",
+        ),
+        pytest.param(
+            {"users": [], "teams": [], "apps": None},
+            id="wrong-apps-type",
+        ),
+        pytest.param(
+            {"users": [{"login": "bypass-user"}], "teams": [], "apps": []},
+            id="nonempty-users",
+        ),
+        pytest.param(
+            {"users": [], "teams": [{"slug": "bypass-team"}], "apps": []},
+            id="nonempty-teams",
+        ),
+        pytest.param(
+            {"users": [], "teams": [], "apps": [{"slug": "bypass-app"}]},
+            id="nonempty-apps",
+        ),
+        pytest.param(
+            {"users": [None], "teams": [], "apps": []},
+            id="malformed-member",
+        ),
+    ],
+)
+def test_protected_action_rejects_malformed_or_nonempty_bypass_shapes(
+    tmp_path: Path,
+    allowances: object,
+) -> None:
+    base = action_transport()
+
+    def transport(path: str):
+        if path.endswith("/branches/main/protection"):
+            protection = production_branch_protection()
+            protection["required_pull_request_reviews"][
+                "bypass_pull_request_allowances"
+            ] = allowances
+            return protection
+        return base(path)
+
+    cfg = service_config()
+    service = DedicatedSigner(
+        cfg,
+        GitHub(cfg, token="protected", transport=transport),
+        b"c" * 48,
+        None,
+        tmp_path / "invalid-bypass.sqlite3",
+        now=lambda: NOW,
+    )
+
+    with pytest.raises(SystemAttestationError, match="branch protection"):
+        service.action(action_request())
+
+
+@pytest.mark.parametrize(
+    ("section", "field", "value"),
+    [
+        pytest.param("root", "required_pull_request_reviews", None, id="reviews-null"),
+        pytest.param("review", "dismiss_stale_reviews", False, id="stale-reviews"),
+        pytest.param(
+            "review", "dismiss_stale_reviews", "__missing__", id="stale-missing"
+        ),
+        pytest.param("review", "required_approving_review_count", 0, id="zero-approvals"),
+        pytest.param("review", "required_approving_review_count", True, id="bool-approvals"),
+        pytest.param(
+            "review", "required_approving_review_count", "1", id="string-approvals"
+        ),
+        pytest.param("root", "enforce_admins", "__missing__", id="admins-missing"),
+        pytest.param("admin", "enabled", False, id="admins-disabled"),
+        pytest.param(
+            "root", "required_status_checks", "__missing__", id="statuses-missing"
+        ),
+        pytest.param("status", "strict", False, id="statuses-not-strict"),
+        pytest.param("status", "strict", "__missing__", id="strict-missing"),
+        pytest.param("status", "contexts", [], id="required-context-missing"),
+    ],
+)
+def test_protected_action_rejects_strict_policy_failures(
+    tmp_path: Path,
+    section: str,
+    field: str,
+    value: object,
+) -> None:
+    base = action_transport()
+
+    def transport(path: str):
+        if path.endswith("/branches/main/protection"):
+            protection = production_branch_protection()
+            targets = {
+                "root": protection,
+                "review": protection["required_pull_request_reviews"],
+                "admin": protection["enforce_admins"],
+                "status": protection["required_status_checks"],
+            }
+            if value == "__missing__":
+                targets[section].pop(field, None)
+            else:
+                targets[section][field] = value
+            if field == "contexts":
+                targets[section]["checks"] = []
+            return protection
+        return base(path)
+
+    cfg = service_config()
+    service = DedicatedSigner(
+        cfg,
+        GitHub(cfg, token="protected", transport=transport),
+        b"c" * 48,
+        None,
+        tmp_path / "strict-policy.sqlite3",
+        now=lambda: NOW,
+    )
+
+    with pytest.raises(SystemAttestationError, match="branch protection"):
+        service.action(action_request())
+
+
+@pytest.mark.parametrize(
+    "failure",
+    ["protection-api", "review-pagination", "check-pagination"],
+)
+def test_protected_action_fails_closed_on_github_lookup_errors(
+    tmp_path: Path,
+    failure: str,
+) -> None:
+    base = action_transport()
+
+    def transport(path: str):
+        if failure == "protection-api" and path.endswith(
+            "/branches/main/protection"
+        ):
+            raise SystemAttestationError("GitHub protection API failed")
+        if failure == "review-pagination" and "/reviews?" in path:
+            return {"not": "a page"}
+        if failure == "check-pagination" and "/check-runs?" in path:
+            return {
+                "total_count": 2,
+                "check_runs": [{
+                    "id": 501,
+                    "name": "test",
+                    "status": "completed",
+                    "conclusion": "success",
+                }],
+            }
+        return base(path)
+
+    cfg = service_config()
+    service = DedicatedSigner(
+        cfg,
+        GitHub(cfg, token="protected", transport=transport),
+        b"c" * 48,
+        None,
+        tmp_path / f"{failure}.sqlite3",
+        now=lambda: NOW,
+    )
+
+    with pytest.raises(SystemAttestationError):
         service.action(action_request())
 
 
