@@ -14,6 +14,7 @@ LoadCredentialEncrypted=current.key:/etc/saturnin-attestation/current.key.cred
 LoadCredentialEncrypted=previous.key:/etc/saturnin-attestation/previous.key.cred
 LoadCredentialEncrypted=archive.keys:/etc/saturnin-attestation/archive.keys.cred
 LoadCredentialEncrypted=github.token:/etc/saturnin-attestation/github.token.cred
+LoadCredentialEncrypted=github.publisher:/etc/saturnin-attestation/github.publisher.cred
 StateDirectory=saturnin-attestation
 StateDirectoryMode=0700
 UMask=0077

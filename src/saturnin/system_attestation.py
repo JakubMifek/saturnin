@@ -25,6 +25,7 @@ import socket
 import sqlite3
 import stat
 import struct
+import subprocess
 import sys
 import threading
 import time
@@ -370,6 +371,7 @@ class ServiceConfig:
     required_check_runs: tuple[str, ...] = ("test",)
     action_ttl_seconds: int = 60
     protected_actor_login: str = "saturnin-merge-bot"
+    publisher_actor_login: str = "saturnin-issue-publisher[bot]"
 
     @classmethod
     def load(cls, path: Path = CONFIG_PATH) -> "ServiceConfig":
@@ -383,6 +385,7 @@ class ServiceConfig:
             "authorization_limit", "authorization_window_seconds",
             "pr_base_refs", "required_check_runs", "action_ttl_seconds",
             "protected_actor_login",
+            "publisher_actor_login",
             "issue_destinations",
         }:
             raise SystemAttestationError("service configuration schema is invalid")
@@ -427,6 +430,9 @@ class ServiceConfig:
         protected_actor = str(
             raw.get("protected_actor_login", "saturnin-merge-bot")
         ).casefold()
+        publisher_actor = str(
+            raw.get("publisher_actor_login", "saturnin-issue-publisher[bot]")
+        ).casefold()
         if (
             not isinstance(base_refs, list)
             or not isinstance(check_runs, list)
@@ -441,6 +447,12 @@ class ServiceConfig:
             or len(set(check_runs)) != len(check_runs)
             or not re.fullmatch(r"[A-Za-z0-9](?:[A-Za-z0-9-]{0,37})", protected_actor)
             or protected_actor in pr_reviewers
+            or not re.fullmatch(
+                r"[A-Za-z0-9](?:[A-Za-z0-9-]{0,37})\[bot\]",
+                publisher_actor,
+            )
+            or publisher_actor in pr_reviewers
+            or publisher_actor in issue_reviewers
         ):
             raise SystemAttestationError("protected action policy is invalid")
         return cls(
@@ -454,6 +466,7 @@ class ServiceConfig:
             required_check_runs=tuple(check_runs),
             action_ttl_seconds=action_ttl,
             protected_actor_login=protected_actor,
+            publisher_actor_login=publisher_actor,
         )
 
 
@@ -685,6 +698,262 @@ class GitHub:
             raise SystemAttestationError("GitHub response is malformed")
         return value
 
+    def create_installation_token(
+        self, installation_id: int, repository_name: str,
+    ) -> Any:
+        if (
+            type(installation_id) is not int
+            or installation_id < 1
+            or not re.fullmatch(r"[A-Za-z0-9_.-]+", repository_name)
+        ):
+            raise SystemAttestationError("publisher installation scope is invalid")
+        path = f"/app/installations/{installation_id}/access_tokens"
+        payload = {
+            "repositories": [repository_name],
+            "permissions": {"issues": "write", "metadata": "read"},
+        }
+        if self.mutation_transport:
+            return self.mutation_transport("POST", path, payload)
+        if not self.token:
+            raise SystemAttestationError("publisher App JWT is unavailable")
+        request = urllib.request.Request(
+            self.config.github_api + path,
+            data=_canonical(payload),
+            method="POST",
+            headers={
+                "Accept": "application/vnd.github+json",
+                "Content-Type": "application/json",
+                "X-GitHub-Api-Version": "2022-11-28",
+                "User-Agent": "saturnin-issue-publisher/1",
+                "Authorization": f"Bearer {self.token}",
+            },
+        )
+        try:
+            with self.request_transport(
+                request, self.config.request_timeout_seconds
+            ) as response:
+                if response.geturl() != self.config.github_api + path:
+                    raise SystemAttestationError("GitHub redirect was refused")
+                body = response.read(MAX_RESPONSE + 1)
+        except (OSError, urllib.error.URLError):
+            raise SystemAttestationError(
+                "publisher installation token request failed"
+            ) from None
+        if len(body) > MAX_RESPONSE:
+            raise SystemAttestationError("GitHub response is oversized")
+        try:
+            value = json.loads(body)
+        except json.JSONDecodeError as exc:
+            raise SystemAttestationError("GitHub response is malformed") from exc
+        if not isinstance(value, dict):
+            raise SystemAttestationError("GitHub response is malformed")
+        return value
+
+    def close_issue(self, repo: str, number: int) -> Any:
+        path = f"/repos/{repo}/issues/{number}"
+        payload = {"state": "closed", "state_reason": "not_planned"}
+        if self.mutation_transport:
+            return self.mutation_transport("PATCH", path, payload)
+        if not self.token:
+            raise SystemAttestationError("publisher installation token is unavailable")
+        request = urllib.request.Request(
+            self.config.github_api + path,
+            data=_canonical(payload),
+            method="PATCH",
+            headers={
+                "Accept": "application/vnd.github+json",
+                "Content-Type": "application/json",
+                "X-GitHub-Api-Version": "2022-11-28",
+                "User-Agent": "saturnin-issue-publisher/1",
+                "Authorization": f"Bearer {self.token}",
+            },
+        )
+        try:
+            with self.request_transport(
+                request, self.config.request_timeout_seconds
+            ) as response:
+                if response.geturl() != self.config.github_api + path:
+                    raise SystemAttestationError("GitHub redirect was refused")
+                body = response.read(MAX_RESPONSE + 1)
+        except (OSError, urllib.error.URLError):
+            raise SystemAttestationError("publisher containment failed") from None
+        if len(body) > MAX_RESPONSE:
+            raise SystemAttestationError("GitHub response is oversized")
+        try:
+            value = json.loads(body)
+        except json.JSONDecodeError as exc:
+            raise SystemAttestationError("GitHub response is malformed") from exc
+        if not isinstance(value, dict):
+            raise SystemAttestationError("GitHub response is malformed")
+        return value
+
+
+@dataclass(frozen=True)
+class PublisherCredential:
+    app_id: int
+    private_key: bytes
+
+    @classmethod
+    def load(cls, value: bytes) -> "PublisherCredential":
+        try:
+            raw = json.loads(value)
+            app_id = raw["app_id"]
+            private_key = raw["private_key"].encode("ascii")
+        except (KeyError, TypeError, UnicodeEncodeError, json.JSONDecodeError) as exc:
+            raise SystemAttestationError(
+                "publisher App credential is malformed"
+            ) from exc
+        if (
+            set(raw) != {"app_id", "private_key"}
+            or type(app_id) is not int
+            or app_id < 1
+            or len(private_key) > 32 * 1024
+            or not re.fullmatch(
+                rb"-----BEGIN (?:RSA )?PRIVATE KEY-----\n"
+                rb"[A-Za-z0-9+/=\r\n]+"
+                rb"-----END (?:RSA )?PRIVATE KEY-----\n?",
+                private_key,
+            )
+        ):
+            raise SystemAttestationError("publisher App credential is malformed")
+        return cls(app_id, private_key)
+
+
+class GitHubAppPublisher:
+    def __init__(
+        self,
+        config: ServiceConfig,
+        credential: PublisherCredential,
+        *,
+        now: Callable[[], datetime] | None = None,
+        jwt_signer: Callable[[bytes, bytes], bytes] | None = None,
+        transport: Callable[[str], Any] | None = None,
+        mutation_transport: Callable[[str, str, dict[str, Any]], Any] | None = None,
+        request_transport: Callable[[urllib.request.Request, float], Any] | None = None,
+    ) -> None:
+        self.config = config
+        self.credential = credential
+        self.now = now or (lambda: datetime.now(timezone.utc))
+        self.jwt_signer = jwt_signer or self._openssl_sign
+        self.transport = transport
+        self.mutation_transport = mutation_transport
+        self.request_transport = request_transport
+
+    @staticmethod
+    def _b64url(value: bytes) -> str:
+        return base64.urlsafe_b64encode(value).decode().rstrip("=")
+
+    @staticmethod
+    def _openssl_sign(private_key: bytes, message: bytes) -> bytes:
+        if not hasattr(os, "memfd_create"):
+            raise SystemAttestationError("memory-only App signing is unavailable")
+        descriptor = os.memfd_create("saturnin-publisher-key", os.MFD_CLOEXEC)
+        try:
+            os.write(descriptor, private_key)
+            os.lseek(descriptor, 0, os.SEEK_SET)
+            result = subprocess.run(
+                [
+                    "/usr/bin/openssl",
+                    "dgst",
+                    "-sha256",
+                    "-sign",
+                    f"/proc/self/fd/{descriptor}",
+                ],
+                input=message,
+                capture_output=True,
+                check=False,
+                close_fds=True,
+                pass_fds=(descriptor,),
+                timeout=10,
+            )
+        except (OSError, subprocess.SubprocessError):
+            raise SystemAttestationError("publisher App signing failed") from None
+        finally:
+            os.close(descriptor)
+        if result.returncode != 0 or not result.stdout:
+            raise SystemAttestationError("publisher App signing failed")
+        return result.stdout
+
+    def _jwt(self) -> str:
+        current = int(self.now().timestamp())
+        header = self._b64url(_canonical({"alg": "RS256", "typ": "JWT"}))
+        payload = self._b64url(_canonical({
+            "iat": current - 30,
+            "exp": current + 540,
+            "iss": str(self.credential.app_id),
+        }))
+        unsigned = f"{header}.{payload}".encode()
+        return f"{unsigned.decode()}.{self._b64url(self.jwt_signer(self.credential.private_key, unsigned))}"
+
+    def client(self, destination: str) -> GitHub:
+        repo = _repo(destination)
+        if repo not in self.config.issue_destinations:
+            raise SystemAttestationError("publisher destination is not allowlisted")
+        app = GitHub(
+            self.config,
+            self._jwt(),
+            transport=self.transport,
+            request_transport=self.request_transport,
+            mutation_transport=self.mutation_transport,
+        )
+        installation = app.get(f"/repos/{repo}/installation")
+        permissions = (
+            installation.get("permissions")
+            if isinstance(installation, dict) else None
+        )
+        installation_id = (
+            installation.get("id") if isinstance(installation, dict) else None
+        )
+        if (
+            type(installation_id) is not int
+            or installation.get("app_id") != self.credential.app_id
+            or str(installation.get("app_slug", "")).casefold() + "[bot]"
+            != self.config.publisher_actor_login
+            or installation.get("repository_selection") != "selected"
+            or permissions != {"issues": "write", "metadata": "read"}
+        ):
+            raise SystemAttestationError(
+                "publisher App installation scope is invalid"
+            )
+        repository_name = repo.split("/", 1)[1]
+        response = app.create_installation_token(installation_id, repository_name)
+        token = response.get("token") if isinstance(response, dict) else None
+        repositories = (
+            response.get("repositories") if isinstance(response, dict) else None
+        )
+        expiry = _iso(response.get("expires_at")) if isinstance(response, dict) else None
+        if (
+            not isinstance(token, str)
+            or not token
+            or response.get("repository_selection") != "selected"
+            or response.get("permissions")
+            != {"issues": "write", "metadata": "read"}
+            or not isinstance(repositories, list)
+            or len(repositories) != 1
+            or not isinstance(repositories[0], dict)
+            or str(repositories[0].get("full_name", "")).casefold() != repo
+            or expiry is None
+            or expiry <= self.now() + timedelta(seconds=30)
+            or expiry > self.now() + timedelta(minutes=61)
+        ):
+            raise SystemAttestationError(
+                "publisher installation token scope is invalid"
+            )
+        client = GitHub(
+            self.config,
+            token,
+            transport=self.transport,
+            request_transport=self.request_transport,
+            mutation_transport=self.mutation_transport,
+        )
+        repository = client.get(f"/repos/{repo}")
+        if (
+            not isinstance(repository, dict)
+            or str(repository.get("full_name", "")).casefold() != repo
+        ):
+            raise SystemAttestationError("publisher destination lookup is invalid")
+        return client
+
 
 class _RejectRedirects(urllib.request.HTTPRedirectHandler):
     def redirect_request(self, request, fp, code, msg, headers, newurl):
@@ -707,6 +976,7 @@ class DedicatedSigner:
         state_path: Path = STATE_PATH,
         now: Callable[[], datetime] | None = None,
         archive_keys: tuple[bytes, ...] = (),
+        publisher_client: Callable[[str], GitHub] | None = None,
     ) -> None:
         if len(current_key) < 32:
             raise SystemAttestationError("current signing credential is invalid")
@@ -727,6 +997,7 @@ class DedicatedSigner:
         self.config, self.github = config, github
         self.current_key, self.previous_key = current_key, previous_key
         self.archive_keys = archive_keys
+        self.publisher_client = publisher_client
         self.state_path = state_path
         self.now = now or (lambda: datetime.now(timezone.utc))
         self.lock = threading.Lock()
@@ -741,6 +1012,11 @@ class DedicatedSigner:
                 "CREATE TABLE IF NOT EXISTS actions ("
                 "nonce TEXT PRIMARY KEY, scope_hash TEXT NOT NULL, "
                 "result TEXT NOT NULL, created_at TEXT NOT NULL)"
+            )
+            db.execute(
+                "CREATE TABLE IF NOT EXISTS issue_claims ("
+                "claim_hash TEXT PRIMARY KEY, nonce TEXT UNIQUE NOT NULL, "
+                "created_at TEXT NOT NULL)"
             )
 
     def _db(self) -> sqlite3.Connection:
@@ -966,6 +1242,27 @@ class DedicatedSigner:
             db.execute("COMMIT")
             return signed
 
+    def _current_issue_authorization(
+        self, repo: str, number: int, subject: str, destination: str,
+    ) -> tuple[dict[str, Any], list[str]]:
+        evidence = self._issue(repo, number, subject, destination)
+        if not evidence.pop("_authorization_current", False):
+            raise SystemAttestationError(
+                "issue has no current matching authorization"
+            )
+        labels = sorted(evidence.pop("_approved_labels"))
+        return evidence, labels
+
+    def _publisher(self, destination: str) -> GitHub:
+        if self.publisher_client is None:
+            raise SystemAttestationError(
+                "protected issue publisher is not provisioned"
+            )
+        publisher = self.publisher_client(destination)
+        if not isinstance(publisher, GitHub):
+            raise SystemAttestationError("protected issue publisher is invalid")
+        return publisher
+
     def issue_action(self, request: dict[str, Any]) -> dict[str, Any]:
         required = {
             "action", "operation", "repository", "number", "destination_repo",
@@ -1036,9 +1333,13 @@ class DedicatedSigner:
                     prior.get("operation") == "issue_submit"
                     and not prior.get("submitted")
                 ):
-                    self._protected_actor(destination)
+                    if prior.get("contained") or prior.get("containment_failed"):
+                        raise SystemAttestationError(
+                            "protected issue publication was revoked after creation"
+                        )
+                    publisher = self._publisher(destination)
                     found = self._find_issue_submission(
-                        destination, prior["title"], prior["body"],
+                        publisher, destination, prior["title"], prior["body"],
                         prior["labels"], prior["nonce"],
                     )
                     if found is None:
@@ -1056,23 +1357,24 @@ class DedicatedSigner:
                         "protected action decision is expired"
                     )
                 return prior
-            self._protected_actor(destination)
-            evidence = self._issue(repo, number, subject, destination)
-            if (
-                not evidence.pop("_authorization_current", False)
-                or evidence["issue_digest"] != request["issue_digest"]
-            ):
+            publisher = (
+                self._publisher(destination)
+                if request["operation"] == "issue_submit" else None
+            )
+            evidence, approved_labels = self._current_issue_authorization(
+                repo, number, subject, destination
+            )
+            if evidence["issue_digest"] != request["issue_digest"]:
                 raise SystemAttestationError(
                     "issue has no current matching authorization"
                 )
-            repeated = self._issue(repo, number, subject, destination)
-            if not repeated.pop("_authorization_current", False) or repeated != evidence:
+            repeated, repeated_labels = self._current_issue_authorization(
+                repo, number, subject, destination
+            )
+            if repeated != evidence or repeated_labels != approved_labels:
                 raise SystemAttestationError(
                     "GitHub state changed during protected issue authorization"
                 )
-            self._protected_actor(destination)
-            approved_labels = sorted(evidence.pop("_approved_labels"))
-            repeated.pop("_approved_labels")
             if (
                 request["operation"] == "issue_submit"
                 and sorted(request["labels"]) != approved_labels
@@ -1101,10 +1403,26 @@ class DedicatedSigner:
             serialized = json.dumps(signed, sort_keys=True, separators=(",", ":"))
             found = None
             if request["operation"] == "issue_submit":
+                assert publisher is not None
                 found = self._find_issue_submission(
-                    destination, request["title"], request["body"],
+                    publisher, destination, request["title"], request["body"],
                     request["labels"], request["nonce"],
                 )
+                claim_hash = hashlib.sha256(_canonical({
+                    "repository": repo,
+                    "number": number,
+                    "destination_repo": destination,
+                    "issue_digest": request["issue_digest"],
+                })).hexdigest()
+                try:
+                    db.execute(
+                        "INSERT INTO issue_claims VALUES (?, ?, ?)",
+                        (claim_hash, request["nonce"], self.now().isoformat()),
+                    )
+                except sqlite3.IntegrityError:
+                    raise SystemAttestationError(
+                        "protected issue publication is already claimed"
+                    ) from None
             db.execute(
                 "INSERT INTO actions VALUES (?, ?, ?, ?)",
                 (request["nonce"], scope_hash, serialized, self.now().isoformat()),
@@ -1113,12 +1431,38 @@ class DedicatedSigner:
             if request["operation"] == "issue_gate":
                 return signed
 
+            assert publisher is not None
+            try:
+                final_evidence, final_labels = self._current_issue_authorization(
+                    repo, number, subject, destination
+                )
+                final_current = (
+                    final_evidence == evidence
+                    and final_labels == approved_labels
+                    and _iso(decision["expires_at"]) > self.now()
+                )
+            except SystemAttestationError:
+                final_current = False
+            if not final_current:
+                db.execute("BEGIN IMMEDIATE")
+                db.execute(
+                    "DELETE FROM actions WHERE nonce=? AND scope_hash=?",
+                    (request["nonce"], scope_hash),
+                )
+                db.execute(
+                    "DELETE FROM issue_claims WHERE nonce=?",
+                    (request["nonce"],),
+                )
+                db.execute("COMMIT")
+                raise SystemAttestationError(
+                    "source authorization changed before issue publication"
+                )
             if found is None:
                 submission_body = self._issue_submission_body(
                     request["body"], request["nonce"]
                 )
                 try:
-                    response = self.github.post_issue(
+                    response = publisher.post_issue(
                         destination, request["title"], submission_body,
                         request["labels"],
                     )
@@ -1129,6 +1473,10 @@ class DedicatedSigner:
                             "DELETE FROM actions WHERE nonce=? AND scope_hash=?",
                             (request["nonce"], scope_hash),
                         )
+                        db.execute(
+                            "DELETE FROM issue_claims WHERE nonce=?",
+                            (request["nonce"],),
+                        )
                         db.execute("COMMIT")
                     raise
                 found = self._matching_issue_submission(
@@ -1138,6 +1486,24 @@ class DedicatedSigner:
             if found is None:
                 raise SystemAttestationError(
                     "GitHub protected issue response is invalid"
+                )
+            try:
+                post_evidence, post_labels = self._current_issue_authorization(
+                    repo, number, subject, destination
+                )
+                post_current = (
+                    post_evidence == evidence
+                    and post_labels == approved_labels
+                    and _iso(decision["expires_at"]) > self.now()
+                )
+            except SystemAttestationError:
+                post_current = False
+            if not post_current:
+                self._contain_issue_submission(
+                    db, publisher, decision, found, scope_hash
+                )
+                raise SystemAttestationError(
+                    "source authorization was revoked after issue publication"
                 )
             return self._complete_issue_submission(db, decision, found, scope_hash)
 
@@ -1158,9 +1524,10 @@ class DedicatedSigner:
             type(value.get("number")) is not int
             or value.get("title") != title
             or value.get("body") != body
+            or value.get("state") != "open"
             or str(issue_user.get("login", "")).casefold()
-            != self.config.protected_actor_login
-            or issue_user.get("type") != "User"
+            != self.config.publisher_actor_login
+            or issue_user.get("type") != "Bot"
             or value.get("created_at") != value.get("updated_at")
             or not isinstance(value.get("created_at"), str)
             or _iso(value["created_at"]) > self.now()
@@ -1179,13 +1546,13 @@ class DedicatedSigner:
         return {"number": value["number"], "url": issue_url}
 
     def _find_issue_submission(
-        self, destination: str, title: str, body: str, labels: list[str],
-        nonce: str,
+        self, github: GitHub, destination: str, title: str, body: str,
+        labels: list[str], nonce: str,
     ) -> dict[str, Any] | None:
         marked_body = self._issue_submission_body(body, nonce)
         matches = [
             match
-            for value in self.github.pages(
+            for value in github.pages(
                 f"/repos/{destination}/issues?state=all"
             )
             if (
@@ -1203,6 +1570,83 @@ class DedicatedSigner:
                 "multiple protected issue submissions require reconciliation"
             )
         return matches[0] if matches else None
+
+    def _contain_issue_submission(
+        self,
+        db: sqlite3.Connection,
+        publisher: GitHub,
+        decision: dict[str, Any],
+        submission: dict[str, Any],
+        scope_hash: str,
+    ) -> None:
+        contained = False
+        try:
+            response = publisher.close_issue(
+                decision["destination_repo"], submission["number"]
+            )
+            user = response.get("user") if isinstance(response, dict) else None
+            contained = (
+                isinstance(response, dict)
+                and response.get("number") == submission["number"]
+                and response.get("state") == "closed"
+                and response.get("state_reason") == "not_planned"
+                and response.get("title") == decision["title"]
+                and response.get("body") == self._issue_submission_body(
+                    decision["body"], decision["nonce"]
+                )
+                and isinstance(user, dict)
+                and str(user.get("login", "")).casefold()
+                == self.config.publisher_actor_login
+                and user.get("type") == "Bot"
+                and _github_issue_url(
+                    response.get("html_url"),
+                    decision["destination_repo"],
+                    submission["number"],
+                )
+                and ISSUE_SUBMISSION_MARKER.format(decision["nonce"])
+                in str(response.get("body") or "")
+                and isinstance(response.get("labels"), list)
+                and all(
+                    isinstance(label, dict)
+                    and isinstance(label.get("name"), str)
+                    for label in response["labels"]
+                )
+                and sorted(label["name"] for label in response["labels"])
+                == sorted(decision["labels"])
+            )
+        except SystemAttestationError:
+            contained = False
+        terminal = {
+            **decision,
+            "submitted": False,
+            "issue_number": submission["number"],
+            "url": submission["url"],
+            "contained": contained,
+            "containment_failed": not contained,
+        }
+        signed = dict(terminal)
+        signed["signature"] = hmac.new(
+            self.current_key, _canonical(terminal), hashlib.sha256
+        ).hexdigest()
+        db.execute("BEGIN IMMEDIATE")
+        changed = db.execute(
+            "UPDATE actions SET result=? WHERE nonce=? AND scope_hash=?",
+            (
+                json.dumps(signed, sort_keys=True, separators=(",", ":")),
+                decision["nonce"],
+                scope_hash,
+            ),
+        ).rowcount
+        db.execute("COMMIT")
+        if changed != 1:
+            raise SystemAttestationError("protected issue reservation was lost")
+        _audit(
+            "contained" if contained else "containment-failed",
+            hashlib.sha256(
+                f"{decision['destination_repo']}#{submission['number']}".encode()
+            ).hexdigest(),
+            scope_hash,
+        )
 
     def _complete_issue_submission(
         self, db: sqlite3.Connection, decision: dict[str, Any],
@@ -1402,6 +1846,8 @@ class DedicatedSigner:
                         "branch protection response is malformed"
                     )
                 self.github.check_runs(repo, base_ref)
+        for destination in sorted(self.config.issue_destinations):
+            self._publisher(destination)
 
     @staticmethod
     def _v2_unsigned(payload: dict[str, Any]) -> dict[str, Any]:
@@ -2072,14 +2518,23 @@ def serve() -> None:
     previous = _credential("previous.key", optional=True) or None
     archive = _archive_credential(_credential("archive.keys"))
     token = _credential("github.token").decode()
+    publisher_credential = PublisherCredential.load(
+        _credential("github.publisher")
+    )
     if (
         not 20 <= len(token) <= 512
         or not token.isascii()
         or any(character.isspace() for character in token)
     ):
         raise SystemAttestationError("protected GitHub credential is invalid")
+    publisher = GitHubAppPublisher(config, publisher_credential)
     signer = DedicatedSigner(
-        config, GitHub(config, token), current, previous, archive_keys=archive
+        config,
+        GitHub(config, token),
+        current,
+        previous,
+        archive_keys=archive,
+        publisher_client=publisher.client,
     )
     signer._verify_protected_access()
     listener = _create_listener()

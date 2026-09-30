@@ -12,5 +12,6 @@
   "pr_base_refs": ["main"],
   "required_check_runs": ["test"],
   "action_ttl_seconds": 60,
-  "protected_actor_login": "saturnin-merge-bot"
+  "protected_actor_login": "saturnin-merge-bot",
+  "publisher_actor_login": "saturnin-issue-publisher[bot]"
 }

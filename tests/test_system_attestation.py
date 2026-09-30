@@ -8,6 +8,7 @@ import os
 import secrets
 import socket
 import struct
+import subprocess
 import threading
 import urllib.error
 import urllib.request
@@ -21,8 +22,11 @@ import saturnin.system_attestation as system_attestation
 from saturnin.system_attestation import (
     DedicatedSigner,
     GitHub,
+    GitHubAppPublisher,
     GitHubMutationError,
     ISSUE_MARKER,
+    ISSUE_SUBMISSION_MARKER,
+    PublisherCredential,
     AuthorizationLimiter,
     ARCHIVE_MAX_KEYS,
     ServiceConfig,
@@ -223,6 +227,30 @@ def issue_action_fixture(*, expiry: datetime | None = None):
             }]
         raise AssertionError(path)
     return title, body, digest, marker, transport
+
+
+def issue_submit_request(
+    title: str, body: str, digest: str, *, nonce: str = "f" * 64,
+) -> dict:
+    return {
+        "action": "decide_issue", "operation": "issue_submit",
+        "repository": "acme/widget", "number": 9,
+        "destination_repo": "acme/issues", "issue_digest": digest,
+        "title": title, "body": body, "labels": ["incident"], "nonce": nonce,
+    }
+
+
+def published_issue(
+    title: str, body: str, number: int = 77, *, state: str = "open",
+) -> dict:
+    return {
+        "number": number, "title": title, "body": body, "state": state,
+        "state_reason": "not_planned" if state == "closed" else None,
+        "labels": [{"name": "incident"}],
+        "user": {"login": "saturnin-issue-publisher[bot]", "type": "Bot"},
+        "created_at": NOW.isoformat(), "updated_at": NOW.isoformat(),
+        "html_url": f"https://github.com/acme/issues/issues/{number}",
+    }
 
 
 def signer(tmp_path: Path, transport=pr_transport()) -> DedicatedSigner:
@@ -1116,8 +1144,8 @@ def test_fresh_issue_gate_and_protected_submission_are_digest_bound(
         mutations.append((method, path, payload))
         return {
             "number": 77, "title": title, "body": payload["body"],
-            "labels": [{"name": "incident"}],
-            "user": {"login": "saturnin-merge-bot", "type": "User"},
+            "labels": [{"name": "incident"}], "state": "open",
+            "user": {"login": "saturnin-issue-publisher[bot]", "type": "Bot"},
             "created_at": NOW.isoformat(), "updated_at": NOW.isoformat(),
             "html_url": "https://github.com/Acme/Issues/issues/77",
         }
@@ -1131,6 +1159,7 @@ def test_fresh_issue_gate_and_protected_submission_are_digest_bound(
         b"k" * 48, None, tmp_path / "issue-actions.sqlite3",
         now=lambda: NOW,
     )
+    service.publisher_client = lambda _destination: service.github
     gate_request = {
         "action": "decide_issue", "operation": "issue_gate",
         "repository": "acme/widget", "number": 9,
@@ -1219,8 +1248,10 @@ def test_ambiguous_issue_submission_is_reserved_and_never_retried(
             return [{
                 "number": 77, "title": title,
                 "body": created_payload[0]["body"],
-                "labels": [{"name": "incident"}],
-                "user": {"login": "saturnin-merge-bot", "type": "User"},
+                "labels": [{"name": "incident"}], "state": "open",
+                "user": {
+                    "login": "saturnin-issue-publisher[bot]", "type": "Bot"
+                },
                 "created_at": NOW.isoformat(),
                 "updated_at": (NOW + timedelta(seconds=1)).isoformat(),
                 "html_url": "https://github.com/acme/issues/issues/77",
@@ -1240,6 +1271,7 @@ def test_ambiguous_issue_submission_is_reserved_and_never_retried(
         ),
         b"k" * 48, None, tmp_path / "ambiguous.sqlite3", now=lambda: NOW,
     )
+    service.publisher_client = lambda _destination: service.github
     request_value = {
         "action": "decide_issue", "operation": "issue_submit",
         "repository": "acme/widget", "number": 9,
@@ -1276,8 +1308,8 @@ def test_issue_submission_recovers_safe_failure_and_reconciles_ambiguous_success
             raise GitHubMutationError("connection refused", safe_to_retry=True)
         return {
             "number": 77, "title": title, "body": payload["body"],
-            "labels": [{"name": "incident"}],
-            "user": {"login": "saturnin-merge-bot", "type": "User"},
+            "labels": [{"name": "incident"}], "state": "open",
+            "user": {"login": "saturnin-issue-publisher[bot]", "type": "Bot"},
             "created_at": NOW.isoformat(), "updated_at": NOW.isoformat(),
             "html_url": "https://github.com/acme/issues/issues/77",
         }
@@ -1290,6 +1322,7 @@ def test_issue_submission_recovers_safe_failure_and_reconciles_ambiguous_success
         ),
         b"k" * 48, None, tmp_path / "safe-retry.sqlite3", now=lambda: NOW,
     )
+    safe_service.publisher_client = lambda _destination: safe_service.github
     with pytest.raises(GitHubMutationError, match="connection refused"):
         safe_service.issue_action(request_value)
     assert safe_service.issue_action(request_value)["submitted"] is True
@@ -1310,13 +1343,18 @@ def test_issue_submission_recovers_safe_failure_and_reconciles_ambiguous_success
             cfg, token="protected", transport=failed_preflight,
             mutation_transport=lambda method, path, payload: {
                 "number": 79, "title": title, "body": payload["body"],
-                "labels": [{"name": "incident"}],
-                "user": {"login": "saturnin-merge-bot", "type": "User"},
+                "labels": [{"name": "incident"}], "state": "open",
+                "user": {
+                    "login": "saturnin-issue-publisher[bot]", "type": "Bot"
+                },
                 "created_at": NOW.isoformat(), "updated_at": NOW.isoformat(),
                 "html_url": "https://github.com/acme/issues/issues/79",
             },
         ),
         b"p" * 48, None, tmp_path / "preflight.sqlite3", now=lambda: NOW,
+    )
+    preflight_service.publisher_client = (
+        lambda _destination: preflight_service.github
     )
     with pytest.raises(SystemAttestationError, match="lookup failed"):
         preflight_service.issue_action(request_value)
@@ -1329,8 +1367,10 @@ def test_issue_submission_recovers_safe_failure_and_reconciles_ambiguous_success
         if path.startswith("/repos/acme/issues/issues?") and created[0]:
             return [{
                 "number": 78, "title": title, "body": marked_body,
-                "labels": [{"name": "incident"}],
-                "user": {"login": "saturnin-merge-bot", "type": "User"},
+                "labels": [{"name": "incident"}], "state": "open",
+                "user": {
+                    "login": "saturnin-issue-publisher[bot]", "type": "Bot"
+                },
                 "created_at": NOW.isoformat(), "updated_at": NOW.isoformat(),
                 "html_url": "https://github.com/acme/issues/issues/78",
             }]
@@ -1348,11 +1388,343 @@ def test_issue_submission_recovers_safe_failure_and_reconciles_ambiguous_success
         ),
         b"m" * 48, None, tmp_path / "reconcile.sqlite3", now=lambda: NOW,
     )
+    ambiguous_service.publisher_client = (
+        lambda _destination: ambiguous_service.github
+    )
     with pytest.raises(GitHubMutationError, match="response lost"):
         ambiguous_service.issue_action(request_value)
     reconciled = ambiguous_service.issue_action(request_value)
     assert reconciled["submitted"] is True
     assert reconciled["issue_number"] == 78
+
+
+def test_issue_publication_revalidates_before_create_and_releases_claim(
+    tmp_path: Path,
+) -> None:
+    title, body, digest, _marker, base_transport = issue_action_fixture()
+    source_reads = [0]
+    revoked = [True]
+    mutations: list[str] = []
+
+    def transport(path: str):
+        value = base_transport(path)
+        if path == "/repos/acme/widget/issues/9":
+            source_reads[0] += 1
+            if revoked[0] and source_reads[0] >= 3:
+                return {**value, "state": "closed"}
+        return value
+
+    def mutate(method: str, _path: str, payload: dict):
+        mutations.append(method)
+        return published_issue(title, payload["body"])
+
+    cfg = ServiceConfig(
+        frozenset({"acme/widget"}), frozenset({"review-bot"}),
+        frozenset({"review-bot"}), frozenset({"approved"}),
+        issue_destinations=frozenset({"acme/issues"}),
+    )
+    service = DedicatedSigner(
+        cfg, GitHub(cfg, transport=transport, mutation_transport=mutate),
+        b"k" * 48, None, tmp_path / "pre-create.sqlite3", now=lambda: NOW,
+    )
+    service.publisher_client = lambda _destination: service.github
+    request_value = issue_submit_request(title, body, digest)
+    with pytest.raises(SystemAttestationError, match="changed before"):
+        service.issue_action(request_value)
+    assert mutations == []
+
+    revoked[0] = False
+    source_reads[0] = 0
+    assert service.issue_action(request_value)["submitted"] is True
+    assert mutations == ["POST"]
+
+
+@pytest.mark.parametrize("containment_mode", ["success", "mismatch", "failure"])
+def test_post_create_revocation_is_contained_or_escalated(
+    tmp_path: Path, containment_mode: str,
+) -> None:
+    title, body, digest, _marker, base_transport = issue_action_fixture()
+    source_reads = [0]
+    mutations: list[str] = []
+
+    def transport(path: str):
+        value = base_transport(path)
+        if path == "/repos/acme/widget/issues/9":
+            source_reads[0] += 1
+            if source_reads[0] >= 4:
+                return {**value, "state": "closed"}
+        return value
+
+    def mutate(method: str, _path: str, payload: dict):
+        mutations.append(method)
+        if method == "POST":
+            return published_issue(title, payload["body"])
+        if containment_mode == "failure":
+            raise SystemAttestationError("close API failed")
+        response = published_issue(
+            title, body + "\n\n" + ISSUE_SUBMISSION_MARKER.format("f" * 64),
+            state="closed",
+        )
+        if containment_mode == "mismatch":
+            response["title"] = "edited by another actor"
+        return response
+
+    cfg = ServiceConfig(
+        frozenset({"acme/widget"}), frozenset({"review-bot"}),
+        frozenset({"review-bot"}), frozenset({"approved"}),
+        issue_destinations=frozenset({"acme/issues"}),
+    )
+    service = DedicatedSigner(
+        cfg, GitHub(cfg, transport=transport, mutation_transport=mutate),
+        b"k" * 48, None, tmp_path / f"contain-{containment_mode}.sqlite3",
+        now=lambda: NOW,
+    )
+    service.publisher_client = lambda _destination: service.github
+    request_value = issue_submit_request(title, body, digest)
+    with pytest.raises(SystemAttestationError, match="revoked after"):
+        service.issue_action(request_value)
+    assert mutations == ["POST", "PATCH"]
+    with pytest.raises(SystemAttestationError, match="revoked after creation"):
+        service.issue_action(request_value)
+    db = service._db()
+    try:
+        result = json.loads(
+            db.execute(
+                "SELECT result FROM actions WHERE nonce=?", ("f" * 64,)
+            ).fetchone()[0]
+        )
+    finally:
+        db.close()
+    assert result["contained"] is (containment_mode == "success")
+    assert result["containment_failed"] is (containment_mode != "success")
+
+
+def test_issue_claim_blocks_different_nonce_and_shared_db_concurrency(
+    tmp_path: Path,
+) -> None:
+    title, body, digest, _marker, transport = issue_action_fixture()
+    cfg = ServiceConfig(
+        frozenset({"acme/widget"}), frozenset({"review-bot"}),
+        frozenset({"review-bot"}), frozenset({"approved"}),
+        issue_destinations=frozenset({"acme/issues"}),
+    )
+    mutation_lock = threading.Lock()
+    creates = [0]
+
+    def mutate(_method: str, _path: str, payload: dict):
+        with mutation_lock:
+            creates[0] += 1
+        return published_issue(title, payload["body"])
+
+    state = tmp_path / "shared-publication.sqlite3"
+    services = [
+        DedicatedSigner(
+            cfg, GitHub(cfg, transport=transport, mutation_transport=mutate),
+            b"k" * 48, None, state, now=lambda: NOW,
+        )
+        for _ in range(2)
+    ]
+    for service in services:
+        service.publisher_client = lambda _destination, item=service: item.github
+    request_value = issue_submit_request(title, body, digest)
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        results = list(pool.map(lambda item: item.issue_action(request_value), services))
+    assert all(result["submitted"] for result in results)
+    assert creates == [1]
+    with pytest.raises(SystemAttestationError, match="already claimed"):
+        services[0].issue_action({
+            **request_value, "nonce": "a" * 64,
+        })
+    assert creates == [1]
+
+
+@pytest.mark.parametrize(
+    ("field", "value"),
+    [
+        ("title", "collision"),
+        ("body", "collision"),
+        ("labels", [{"name": "other"}]),
+        ("state", "closed"),
+        ("user", {"login": "ordinary-worker", "type": "User"}),
+    ],
+)
+def test_destination_reconciliation_rejects_marker_collision(
+    tmp_path: Path, field: str, value: object,
+) -> None:
+    title, body, _digest, _marker, _transport = issue_action_fixture()
+    cfg = ServiceConfig(
+        frozenset({"acme/widget"}), frozenset({"review-bot"}),
+        frozenset({"review-bot"}), frozenset({"approved"}),
+        issue_destinations=frozenset({"acme/issues"}),
+    )
+    marked = body + "\n\n" + ISSUE_SUBMISSION_MARKER.format("f" * 64)
+    candidate = published_issue(title, marked)
+    candidate[field] = value
+    github = GitHub(
+        cfg,
+        transport=lambda path: [candidate]
+        if path.startswith("/repos/acme/issues/issues?") else None,
+    )
+    service = DedicatedSigner(
+        cfg, github, b"k" * 48, None, tmp_path / f"collision-{field}.sqlite3",
+        now=lambda: NOW,
+    )
+    assert service._find_issue_submission(
+        github, "acme/issues", title, body, ["incident"], "f" * 64
+    ) is None
+
+
+def test_publisher_app_uses_exact_selected_repository_scope() -> None:
+    cfg = ServiceConfig(
+        frozenset({"acme/widget"}), frozenset({"review-bot"}),
+        frozenset({"review-bot"}), frozenset({"approved"}),
+        issue_destinations=frozenset({"acme/issues"}),
+    )
+    mutations: list[tuple[str, str, dict]] = []
+
+    def transport(path: str):
+        if path == "/repos/acme/issues/installation":
+            return {
+                "id": 42, "app_id": 7,
+                "app_slug": "saturnin-issue-publisher",
+                "repository_selection": "selected",
+                "permissions": {"issues": "write", "metadata": "read"},
+            }
+        if path == "/repos/acme/issues":
+            return {"full_name": "Acme/Issues"}
+        raise AssertionError(path)
+
+    def mutate(method: str, path: str, payload: dict):
+        mutations.append((method, path, payload))
+        return {
+            "token": "installation-token",
+            "expires_at": (NOW + timedelta(hours=1)).isoformat(),
+            "repository_selection": "selected",
+            "permissions": {"issues": "write", "metadata": "read"},
+            "repositories": [{"full_name": "acme/issues"}],
+        }
+
+    publisher = GitHubAppPublisher(
+        cfg,
+        PublisherCredential(7, b"private-key-material"),
+        now=lambda: NOW,
+        jwt_signer=lambda key, message: hashlib.sha256(key + message).digest(),
+        transport=transport,
+        mutation_transport=mutate,
+    )
+    client = publisher.client("ACME/ISSUES")
+    assert client.token == "installation-token"
+    assert mutations == [(
+        "POST", "/app/installations/42/access_tokens",
+        {
+            "repositories": ["issues"],
+            "permissions": {"issues": "write", "metadata": "read"},
+        },
+    )]
+
+
+def test_publisher_app_signs_with_memory_only_test_key() -> None:
+    key = subprocess.run(
+        [
+            "/usr/bin/openssl", "genpkey", "-algorithm", "RSA",
+            "-pkeyopt", "rsa_keygen_bits:2048",
+        ],
+        check=True,
+        capture_output=True,
+        timeout=15,
+    ).stdout
+    signature = GitHubAppPublisher._openssl_sign(key, b"production-shape-input")
+    assert len(signature) == 256
+    assert b"PRIVATE KEY" not in signature
+
+
+@pytest.mark.parametrize(
+    "change",
+    [
+        {"app_id": 8},
+        {"app_slug": "ordinary-worker-app"},
+        {"repository_selection": "all"},
+        {"permissions": {"issues": "write"}},
+        {"permissions": {"issues": "write", "metadata": "read", "contents": "read"}},
+    ],
+)
+def test_publisher_app_rejects_wrong_installation_scope(change: dict) -> None:
+    cfg = ServiceConfig(
+        frozenset({"acme/widget"}), frozenset({"review-bot"}),
+        frozenset({"review-bot"}), frozenset({"approved"}),
+        issue_destinations=frozenset({"acme/issues"}),
+    )
+    installation = {
+        "id": 42, "app_id": 7, "app_slug": "saturnin-issue-publisher",
+        "repository_selection": "selected",
+        "permissions": {"issues": "write", "metadata": "read"},
+        **change,
+    }
+    publisher = GitHubAppPublisher(
+        cfg, PublisherCredential(7, b"secret-private-key"),
+        now=lambda: NOW,
+        jwt_signer=lambda _key, _message: b"signature",
+        transport=lambda _path: installation,
+    )
+    with pytest.raises(
+        SystemAttestationError, match="installation scope is invalid"
+    ) as failure:
+        publisher.client("acme/issues")
+    assert "secret-private-key" not in str(failure.value)
+
+
+@pytest.mark.parametrize(
+    "change",
+    [
+        {"repository_selection": "all"},
+        {"permissions": {"issues": "write"}},
+        {"permissions": {
+            "issues": "write", "metadata": "read", "contents": "read",
+        }},
+        {"repositories": [{"full_name": "acme/other"}]},
+        {"repositories": [
+            {"full_name": "acme/issues"}, {"full_name": "acme/other"},
+        ]},
+        {"expires_at": (NOW + timedelta(seconds=20)).isoformat()},
+        {"expires_at": (NOW + timedelta(hours=2)).isoformat()},
+    ],
+)
+def test_publisher_app_rejects_wrong_token_scope(change: dict) -> None:
+    cfg = ServiceConfig(
+        frozenset({"acme/widget"}), frozenset({"review-bot"}),
+        frozenset({"review-bot"}), frozenset({"approved"}),
+        issue_destinations=frozenset({"acme/issues"}),
+    )
+    token = {
+        "token": "publisher-token",
+        "expires_at": (NOW + timedelta(hours=1)).isoformat(),
+        "repository_selection": "selected",
+        "permissions": {"issues": "write", "metadata": "read"},
+        "repositories": [{"full_name": "acme/issues"}],
+        **change,
+    }
+
+    def transport(path: str):
+        return {
+            "id": 42, "app_id": 7,
+            "app_slug": "saturnin-issue-publisher",
+            "repository_selection": "selected",
+            "permissions": {"issues": "write", "metadata": "read"},
+        }
+
+    publisher = GitHubAppPublisher(
+        cfg, PublisherCredential(7, b"secret-private-key"),
+        now=lambda: NOW,
+        jwt_signer=lambda _key, _message: b"signature",
+        transport=transport,
+        mutation_transport=lambda _method, _path, _payload: token,
+    )
+    with pytest.raises(
+        SystemAttestationError, match="token scope is invalid"
+    ) as failure:
+        publisher.client("acme/issues")
+    assert "publisher-token" not in str(failure.value)
+    assert "secret-private-key" not in str(failure.value)
 
 
 def test_issue_action_rejects_multiple_markers_and_snapshot_change(
@@ -2101,6 +2473,76 @@ def test_github_authorization_header_uses_token_without_disclosure(
     assert caught.value.__cause__ is None
     _audit("denied", hashlib.sha256(b"evidence").hexdigest(), "")
     assert token not in capsys.readouterr().err
+
+
+def test_publisher_http_mutations_and_credential_parser() -> None:
+    credential = PublisherCredential.load(json.dumps({
+        "app_id": 7,
+        "private_key": (
+            "-----BEGIN PRIVATE KEY-----\n"
+            "QUJDRA==\n"
+            "-----END PRIVATE KEY-----\n"
+        ),
+    }).encode())
+    assert credential.app_id == 7
+    with pytest.raises(SystemAttestationError, match="malformed"):
+        PublisherCredential.load(b'{"app_id":7,"private_key":"token"}')
+
+    seen: list[tuple[str, str, dict, str | None]] = []
+
+    class Response:
+        def __init__(self, url: str, value: dict) -> None:
+            self.url, self.value = url, value
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *args):
+            return None
+
+        def geturl(self):
+            return self.url
+
+        def read(self, _size):
+            return json.dumps(self.value).encode()
+
+    def open_request(request, _timeout):
+        payload = json.loads(request.data)
+        seen.append((
+            request.method, request.full_url, payload,
+            request.get_header("Authorization"),
+        ))
+        if request.method == "POST":
+            return Response(request.full_url, {
+                "token": "installation-token",
+                "repositories": [{"full_name": "acme/issues"}],
+            })
+        return Response(request.full_url, {
+            "number": 77, "state": "closed", "state_reason": "not_planned",
+        })
+
+    client = GitHub(
+        service_config(), token="publisher-secret",
+        request_transport=open_request,
+    )
+    assert client.create_installation_token(42, "issues")["token"] == (
+        "installation-token"
+    )
+    assert client.close_issue("acme/issues", 77)["state"] == "closed"
+    assert [item[0] for item in seen] == ["POST", "PATCH"]
+    assert seen[0][2] == {
+        "repositories": ["issues"],
+        "permissions": {"issues": "write", "metadata": "read"},
+    }
+    assert seen[1][2] == {"state": "closed", "state_reason": "not_planned"}
+    assert all(item[3] is not None for item in seen)
+
+    with pytest.raises(SystemAttestationError, match="scope"):
+        client.create_installation_token(0, "issues")
+    with pytest.raises(SystemAttestationError, match="unavailable"):
+        GitHub(service_config()).create_installation_token(42, "issues")
+    with pytest.raises(SystemAttestationError, match="unavailable"):
+        GitHub(service_config()).close_issue("acme/issues", 77)
 
 
 def test_github_issue_post_and_issue_client_validate_exact_response(

@@ -11,6 +11,7 @@ import hashlib
 import json
 import os
 import pwd
+import re
 import secrets
 import shutil
 import stat
@@ -61,11 +62,11 @@ FILES = {
 OBSOLETE_FILES = ("usr/lib/systemd/system/saturnin-attestation.socket",)
 EXPECTED_SHA256 = {
     "src/saturnin/system_attestation.py":
-        "a6b0c61c6f9a1889e532cd50d77d3f070e3e81135a9ba16c23e5e20cb38cc974",
+        "5ed84fdcf8376388953dc3b51fdde8a92bcaf0af30ffc4de1191a927164b3526",
     "config/attestation.json":
-        "dd046cc1b95a988564215bf80201802a9f8438afc7d1d168adaf56eb99d93fe1",
+        "a56a1aa897016322a1f00aa82d10953b5cbf6d69219329a783f3f9ea1146f06a",
     "systemd/system/saturnin-attestation.service":
-        "01c2e033f54a655ef2d3a2c7048ce3af606b19e2d46128471372bc434b5bb43a",
+        "5f7a29fec192a90f752606250cd9f0433872d4ac38d8bd4ae819431cb65972c7",
     "systemd/system/saturnin-attestation.sysusers":
         "0059e8a1ead80a9b47399f04a1430a1cecf7b70479b224dc8efe084e27fa2187",
     "systemd/system/saturnin-attestation.tmpfiles":
@@ -303,6 +304,10 @@ def _github_token_path(root: Path) -> Path:
     return _credential_paths(root)[0].with_name("github.token.cred")
 
 
+def _publisher_credential_path(root: Path) -> Path:
+    return _credential_paths(root)[0].with_name("github.publisher.cred")
+
+
 def _validate_github_token(value: bytes) -> None:
     if (
         not 20 <= len(value) <= 512
@@ -310,6 +315,28 @@ def _validate_github_token(value: bytes) -> None:
         or any(character in b" \t\r\n\v\f" for character in value)
     ):
         raise InstallError("protected GitHub credential is invalid")
+
+
+def _validate_publisher_credential(value: bytes) -> None:
+    try:
+        payload = json.loads(value)
+        app_id = payload["app_id"]
+        private_key = payload["private_key"].encode("ascii")
+    except (KeyError, TypeError, UnicodeEncodeError, json.JSONDecodeError) as exc:
+        raise InstallError("publisher App credential is invalid") from exc
+    if (
+        set(payload) != {"app_id", "private_key"}
+        or type(app_id) is not int
+        or app_id < 1
+        or len(private_key) > 32 * 1024
+        or not re.fullmatch(
+            rb"-----BEGIN (?:RSA )?PRIVATE KEY-----\n"
+            rb"[A-Za-z0-9+/=\r\n]+"
+            rb"-----END (?:RSA )?PRIVATE KEY-----\n?",
+            private_key,
+        )
+    ):
+        raise InstallError("publisher App credential is invalid")
 
 
 def _rollback_path(root: Path) -> Path:
@@ -610,6 +637,7 @@ def _migrate_or_provision(root: Path, runner: Runner) -> list[Path]:
     current, previous = _credential_paths(root)
     archive = _archive_path(root)
     github_token = _github_token_path(root)
+    publisher_credential = _publisher_credential_path(root)
     created: list[Path] = []
     if root != Path("/") and not github_token.exists():
         github_token.parent.mkdir(parents=True, exist_ok=True)
@@ -624,6 +652,27 @@ def _migrate_or_provision(root: Path, runner: Runner) -> list[Path]:
             restart=False,
         )
         created.append(github_token)
+    if root != Path("/") and not publisher_credential.exists():
+        _atomic_credentials(
+            root,
+            {
+                publisher_credential: _encode_blob_checked(
+                    runner,
+                    json.dumps({
+                        "app_id": 1,
+                        "private_key": (
+                            "-----BEGIN PRIVATE KEY-----\n"
+                            "QUJDRA==\n"
+                            "-----END PRIVATE KEY-----\n"
+                        ),
+                    }).encode(),
+                    "github.publisher",
+                )
+            },
+            runner,
+            restart=False,
+        )
+        created.append(publisher_credential)
     if not github_token.is_file() or github_token.is_symlink():
         raise InstallError(
             "root-provisioned protected GitHub credential is required"
@@ -638,6 +687,23 @@ def _migrate_or_provision(root: Path, runner: Runner) -> list[Path]:
         raise InstallError("protected GitHub credential file is unsafe")
     _validate_github_token(
         runner.decrypt(github_token.read_bytes(), "github.token")
+    )
+    if not publisher_credential.is_file() or publisher_credential.is_symlink():
+        raise InstallError(
+            "root-provisioned publisher App credential is required"
+        )
+    publisher_metadata = publisher_credential.lstat()
+    if (
+        not stat.S_ISREG(publisher_metadata.st_mode)
+        or publisher_metadata.st_nlink != 1
+        or stat.S_IMODE(publisher_metadata.st_mode) != 0o600
+        or (root == Path("/") and publisher_metadata.st_uid != 0)
+    ):
+        raise InstallError("publisher App credential file is unsafe")
+    _validate_publisher_credential(
+        runner.decrypt(
+            publisher_credential.read_bytes(), "github.publisher"
+        )
     )
     existing = (current.exists(), previous.exists())
     if any(existing):
@@ -722,6 +788,12 @@ def status(root: Path, runner: Runner | None = None) -> None:
     _validate_github_token(
         codec.decrypt(
             _read_credential(root, _github_token_path(root)), "github.token"
+        )
+    )
+    _validate_publisher_credential(
+        codec.decrypt(
+            _read_credential(root, _publisher_credential_path(root)),
+            "github.publisher",
         )
     )
     current_plain = codec.decrypt(_read_credential(root, current), "current.key")

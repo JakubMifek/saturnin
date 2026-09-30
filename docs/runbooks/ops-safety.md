@@ -24,8 +24,8 @@ checkout, use this fixed bootstrap sequence:
 Before that sequence, a human must create the dedicated
 `saturnin-merge-bot` GitHub account and a fine-grained token limited to
 `saturnin` (Contents and Pull requests write, Administration read, and Checks
-read) and `saturnin-ops` (Issues write). Grant no Administration **write**
-permission on either repository. Add that account with Write, not Admin,
+read). It must have no destination Issues permission. Grant no Administration
+**write** permission. Add that account with Write, not Admin,
 repository access. At a
 trusted root console—not an ordinary-UID shell, environment, file, pipe, or
 clipboard—encrypt the token under its fixed credential name:
@@ -36,6 +36,23 @@ clipboard—encrypt the token under its fixed credential name:
 /usr/bin/chown root:root /etc/saturnin-attestation/github.token.cred
 /usr/bin/chmod 0600 /etc/saturnin-attestation/github.token.cred
 ```
+
+Separately create the destination publisher App described below and encrypt
+its numeric App ID and private key at the trusted root console. Do not expose
+either value through an ordinary-UID shell:
+
+```bash
+sudo /usr/bin/systemd-creds encrypt --name=github.publisher - /etc/saturnin-attestation/github.publisher.cred
+sudo /usr/bin/chown root:root /etc/saturnin-attestation/github.publisher.cred
+sudo /usr/bin/chmod 0600 /etc/saturnin-attestation/github.publisher.cred
+```
+
+At the command's protected interactive input, enter exactly this JSON and then
+end input:
+`{"app_id":<numeric-id>,"private_key":"<complete PEM including newlines>"}`.
+The PEM newlines must be JSON escapes (`\n`). Never place the JSON, App key, or
+installation token in a command argument, environment variable, checkout,
+report, clipboard shared with the ordinary UID, or ordinary-user file.
 
 Configure `main` branch protection to apply to administrators, dismiss stale
 approvals, require one approving review, require the strict `test` check, and
@@ -97,9 +114,9 @@ group to resolve bidirectionally to UID 1000 and GID 1000; a missing or reused
 identity fails closed before the administration lock or any other mutation.
 
 <!-- generated:attestation-boundary -->
-The system `saturnin-attestation.service` runs as the non-login `saturnin-signer` identity from root-controlled runtime and configuration. The system manager decrypts current, previous, and bounded retired HMAC credentials into its private credential tmpfs; ordinary workers never receive key material. The service, not PID 1, creates the canonical listener. Clients authenticate its kernel-reported UID plus the stable signer-owned socket directory and endpoint identity; this deliberately avoids cross-UID ptrace-gated `/proc` inspection. Systemd readiness is reported only after protected identity, repository role, branch-protection access, check-run access, credential validation, and listener creation.
+The system `saturnin-attestation.service` runs as the non-login `saturnin-signer` identity from root-controlled runtime and configuration. The system manager decrypts current, previous, and bounded retired HMAC credentials plus the separate destination-publisher App credential into its private credential tmpfs; ordinary workers never receive key material. The service, not PID 1, creates the canonical listener. Clients authenticate its kernel-reported UID plus the stable signer-owned socket directory and endpoint identity; this deliberately avoids cross-UID ptrace-gated `/proc` inspection. Systemd readiness is reported only after protected identity, repository role, branch-protection access, check-run access, credential validation, and listener creation.
 
-For pull requests the service obtains the live head, author, and exact commit-bound latest review state directly from GitHub over TLS. For issues it recomputes title/body digest and accepts one exact, expiring, nonce-bound machine marker in an allowlisted dedicated GitHub App bot comment. A default-branch-only protected environment holds that App key and requires an independent human approver; ordinary workers cannot publish as the bot. The marker also binds approved labels. Every issue gate is fresh; submission repeats authorization and the signer creates exact reviewed content in an independently allowlisted destination with a deterministic hidden idempotency marker. Ambiguous submission outcomes reconcile only against one exact marker-bearing issue authored by the protected identity. Evidence expiry limits new authorization, not later audit verification of a durable record. Socket filesystem access permits transport only: independent GitHub authorization remains required. Repository and API origins are fixed allowlists; caller claims and socket credentials are not authority.
+For pull requests the service obtains the live head, author, and exact commit-bound latest review state directly from GitHub over TLS. For issues it recomputes title/body digest and accepts one exact, expiring, nonce-bound machine marker in an allowlisted dedicated GitHub App bot comment. A default-branch-only protected environment holds that App key and requires an independent human approver; ordinary workers cannot publish as the bot. The marker also binds approved labels. Every issue gate is fresh; submission repeats authorization and the signer creates exact reviewed content through a separate selected-repository publisher App restricted to Metadata read and Issues write in an independently allowlisted destination with a deterministic hidden idempotency marker. It rechecks source authorization immediately before and after creation. GitHub has no atomic cross-repository conditional create, so this narrow residual race is accepted only for issue publication: post-create revocation triggers automatic closure of the exact attributable destination issue, a signed terminal result, and audit escalation, never success. Ambiguous submission outcomes reconcile only against one exact marker-bearing issue authored by the protected identity. Evidence expiry limits new authorization, not later audit verification of a durable record. Socket filesystem access permits transport only: independent GitHub authorization remains required. Repository and API origins are fixed allowlists; caller claims and socket credentials are not authority.
 
 Consumed evidence and its exact idempotent attestation are serialized in dedicated state for audit only. Altered reuse fails. Every PR gate obtains a fresh, expiring, one-time protected decision over the live head, base, review ID/state/identity and required checks. Merge repeats that lookup immediately before the signer uses GitHub's expected-head atomic merge API. The signer also requires strict branch protection with stale-review dismissal, required reviews/checks, administrator enforcement and no bypass identities. Its fixed non-admin merge identity and root-provisioned credential never enter the ordinary UID; workers receive neither signing sessions nor credentials.
 
@@ -137,11 +154,35 @@ requests a repository- and permission-scoped token, and publishes one
 short-lived digest-bound marker. A duplicate or ambiguous publication blocks;
 never create a replacement marker manually.
 
+### Protected destination-publisher App
+
+This is a separate GitHub administration ceremony. Create an App whose bot
+login exactly matches `publisher_actor_login` in
+`config/attestation.json` (`saturnin-issue-publisher[bot]`). Grant exactly
+**Metadata: read** and **Issues: read/write**, disable webhooks, and install it
+with **selected repositories only** on every explicitly configured destination
+repository and nowhere else. Do not reuse the merge identity or the
+issue-review marker App. The mandatory root-encrypted `github.publisher`
+credential contains only its numeric `app_id` and complete PEM `private_key`;
+installation IDs are discovered and validated live.
+
+At startup and for each publication, the signer verifies the exact App ID,
+selected-repository installation, exact permission set, one-repository token
+scope, token expiry, and destination identity. It reconciles the immutable
+nonce marker, reserves one source/destination/digest claim, and re-fetches the
+source authorization immediately before creation. It rechecks immediately
+after creation. If authorization was revoked, expired, closed, changed, or
+unavailable, it closes the exact destination issue as not planned when safely
+attributable and emits a terminal audit/escalation result; it never reports
+success. Containment failure is terminal and requires human reconciliation.
+GitHub's lack of atomic cross-repository conditional creation is the only
+accepted race, and it does not apply to PR gates or merges.
+
 ### Provisioning and rotation
 
 The system manager decrypts `current.key.cred`, `previous.key.cred`,
-`archive.keys.cred`, and the mandatory `github.token` credential-store entry
-into its credential tmpfs. The administrator interface
+`archive.keys.cred`, and the mandatory `github.token` and `github.publisher`
+credential-store entries into its credential tmpfs. The administrator interface
 generates key bytes in process and streams them directly to `systemd-creds`;
 it never accepts or prints a key.
 

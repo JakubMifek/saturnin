@@ -56,6 +56,12 @@ def test_fake_root_transaction_install_status_rotate_rollback_uninstall(
     archive = current.parent / "archive.keys.cred"
     original_archive = archive.read_bytes()
     codec = admin.FakeRunner()
+    publisher = current.parent / "github.publisher.cred"
+    publisher_payload = json.loads(
+        codec.decrypt(publisher.read_bytes(), "github.publisher")
+    )
+    assert set(publisher_payload) == {"app_id", "private_key"}
+    assert publisher.stat().st_mode & 0o777 == 0o600
     original_plain = codec.decrypt(original, "current.key")
     original_previous_plain = codec.decrypt(original_previous, "previous.key")
     run(root, "rotate")
@@ -72,6 +78,29 @@ def test_fake_root_transaction_install_status_rotate_rollback_uninstall(
     assert not (root / "usr/lib/saturnin-attestation/system_attestation.py").exists()
     assert not (root / "usr/sbin/saturnin-attestation-admin").exists()
     assert current.exists()
+    assert publisher.exists()
+
+
+@pytest.mark.parametrize(
+    "payload",
+    [
+        b"{}",
+        b'{"app_id":0,"private_key":"secret"}',
+        b'{"app_id":1,"private_key":"secret","token":"leak"}',
+    ],
+)
+def test_status_rejects_malformed_publisher_credential(
+    tmp_path: Path, payload: bytes,
+) -> None:
+    root = tmp_path / "root"
+    root.mkdir()
+    run(root, "install")
+    path = root / "etc/saturnin-attestation/github.publisher.cred"
+    path.write_bytes(
+        admin.FakeRunner().encrypt(payload, "github.publisher")
+    )
+    with pytest.raises(admin.InstallError, match="publisher App credential"):
+        run(root, "status")
 
 
 def test_installer_rejects_target_alias_and_cleans_transaction(tmp_path: Path) -> None:
@@ -435,6 +464,7 @@ def test_system_units_sysusers_and_tmpfiles_are_consistent() -> None:
     assert "Group=saturnin-signer" in service
     assert "LoadCredentialEncrypted=archive.keys:" in service
     assert "LoadCredentialEncrypted=github.token" in service
+    assert "LoadCredentialEncrypted=github.publisher" in service
     assert "RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6" in service
     assert "SocketBindDeny=any" in service
     assert "WantedBy=multi-user.target" in service

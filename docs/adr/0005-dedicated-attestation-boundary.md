@@ -40,11 +40,20 @@ repeats the source issue/comment lookup, and the signer itself creates the
 digest-bound title and body with the marker-approved labels in an explicitly
 allowlisted destination. It appends a deterministic, nonce-bound hidden marker.
 Before mutation and after any ambiguous result, the signer paginates the
-destination and accepts only one exact marker-bearing issue authored by its
-protected GitHub identity with unchanged creation/update timestamps. The
-ordinary credential has no destination Issues-write permission. Definite
-pre-send failures release the reservation; ambiguous outcomes remain pending
-unless that protected issue is found.
+destination and accepts only one exact open marker-bearing issue authored by a
+dedicated publisher App with unchanged creation/update timestamps. It obtains
+a fresh source authorization immediately before creation and checks the source
+again immediately afterward. GitHub provides no atomic cross-repository
+"create only if source authorization is still current" operation; this narrow
+residual race is accepted only for issue publication. If the post-create check
+finds revocation, expiry, closure, an API failure, or changed evidence, the
+signer closes the exact safely attributable destination issue as not planned,
+records a signed terminal containment result, emits hash-only audit evidence,
+and never reports success. A failed or ambiguous close is recorded and
+escalated as containment failure. Definite pre-send failures release the
+reservation; ambiguous, successful, and containment outcomes retain the
+source/destination/digest claim so another nonce cannot duplicate publication.
+This exception does not weaken PR review, check, head, or merge freshness.
 The signer requires strict destination-branch protection with stale-review
 dismissal, the configured review and check requirements, and empty bypass
 allowances. Its fixed merge account must have write but not administration
@@ -72,6 +81,18 @@ The workflow checks out and executes only the default branch. The App response
 must prove the configured bot identity, exact immutable marker body, and
 current creation timestamp. Workers and the system merge credential do not
 receive the App key or token.
+
+Destination issues are published by a third, independent GitHub App identity.
+Its root-encrypted credential is distinct from both the merge account and the
+source review-marker App. The publisher App is installed only on explicitly
+configured destination repositories using selected-repository access and
+exactly Metadata read plus Issues write. For each action the signer discovers
+the destination installation using an App JWT, verifies the App ID, selection,
+and exact permissions, then requests and revalidates a short-lived token
+narrowed to that single repository. The private key is signed through an
+anonymous memory file and is never placed in argv, environment, ordinary-worker
+state, or persistent plaintext. Startup fails before readiness if any
+destination installation or token scope is wrong.
 
 The daemon itself creates, verifies, listens on, and removes the canonical
 AF_UNIX socket. Socket activation is forbidden. Clients authenticate the
@@ -120,11 +141,11 @@ credential in the root-owned configuration directory. It is not accepted from
 the operator environment or ordinary `gh` storage. Production installation
 refuses to start without that credential; provisioning it and removing merge
 authority from the ordinary account are human GitHub administration steps.
-The fine-grained token has Contents and Pull requests write plus
-Administration and Checks read on the fixed PR repository, and Issues write
-only on the fixed issue destination. The account remains a Write collaborator,
-not an administrator. Readiness probes both protected read endpoints before
-the listener becomes available.
+The fine-grained merge token has Contents and Pull requests write plus
+Administration and Checks read on the fixed PR repository and no destination
+Issues permission. The account remains a Write collaborator, not an
+administrator. Readiness probes both protected read endpoints and every
+publisher installation before the listener becomes available.
 The allowlisted reviewer is a distinct GitHub-controlled bot identity; GitHub,
 not the ordinary caller, assigns that identity and review state.
 New v2 review records must also match a byte-identical signer-issued row in the
