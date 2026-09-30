@@ -1010,7 +1010,8 @@ def _install_review_gate_runtime(root: Path) -> Path:
         "#!/bin/sh\n"
         "test \"${PYTHONHOME+x}\" != x || exit 90\n"
         "test \"${PYTHONPATH+x}\" != x || exit 91\n"
-        "test \"$GITHUB_TOKEN\" = review-gate-secret || exit 92\n"
+        "test \"${SATURNIN_CONFIG+x}\" != x || exit 92\n"
+        "test \"$GITHUB_TOKEN\" = review-gate-secret || exit 93\n"
         "printf '%s\\n' \"$@\" > \"$ARGS_LOG\"\n"
         "printf '%s\\n' \"$SATURNIN_HOME\" > \"$HOME_LOG\"\n",
         encoding="utf-8",

@@ -30,7 +30,7 @@ config="$SATURNIN_HOME/config/attestation.json"
 }
 
 (
-  unset PYTHONHOME PYTHONPATH
+  unset PYTHONHOME PYTHONPATH SATURNIN_CONFIG
   saturnin --home "$SATURNIN_HOME" review ci-gate "$subject" \
     --head-sha "$expected_head"
 )
