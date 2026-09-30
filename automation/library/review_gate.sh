@@ -1,4 +1,4 @@
-#!/usr/bin/env bash
+#!/bin/bash
 # Trusted-base CI gate over current exact-head GitHub review state.
 set -Eeuo pipefail
 SCRIPT_NAME=review-gate

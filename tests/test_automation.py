@@ -1039,7 +1039,7 @@ def test_ci_review_gate_executes_only_trusted_runtime_from_any_invocation(
     hostile = tmp_path / "hostile"
     (hostile / ".venv" / "bin").mkdir(parents=True)
     hostile_marker = tmp_path / "hostile-ran"
-    for name in ("saturnin", "readlink"):
+    for name in ("bash", "saturnin", "readlink"):
         executable = hostile / ".venv" / "bin" / name
         executable.write_text(
             f"#!/bin/sh\nprintf ran > '{hostile_marker}'\nexit 99\n",
@@ -1072,7 +1072,7 @@ def test_ci_review_gate_executes_only_trusted_runtime_from_any_invocation(
     }
 
     result = subprocess.run(
-        ["bash", str(command), "pr", subject, head],
+        [str(command), "pr", subject, head],
         cwd=cwd,
         check=True,
         capture_output=True,
@@ -1116,7 +1116,7 @@ def test_ci_review_gate_rejects_invalid_arguments_before_execution(
     marker = tmp_path / "args"
 
     result = subprocess.run(
-        ["bash", str(script), *arguments],
+        [str(script), *arguments],
         capture_output=True,
         text=True,
         env={**os.environ, "ARGS_LOG": str(marker), "HOME_LOG": str(marker)},
@@ -1140,7 +1140,7 @@ def test_ci_review_gate_fails_closed_without_trusted_runtime_or_config(
     }
 
     missing_runtime = subprocess.run(
-        ["bash", str(script), "pr", "Acme/Widget#42", "0" * 40],
+        [str(script), "pr", "Acme/Widget#42", "0" * 40],
         capture_output=True,
         text=True,
         env=env,
@@ -1152,7 +1152,7 @@ def test_ci_review_gate_fails_closed_without_trusted_runtime_or_config(
     executable.chmod(0o755)
     (trusted / "config" / "attestation.json").unlink()
     missing_config = subprocess.run(
-        ["bash", str(script), "pr", "Acme/Widget#42", "0" * 40],
+        [str(script), "pr", "Acme/Widget#42", "0" * 40],
         capture_output=True,
         text=True,
         env=env,
