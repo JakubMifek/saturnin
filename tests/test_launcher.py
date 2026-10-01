@@ -1217,6 +1217,70 @@ def test_trusted_cli_callback_records_review_as_assigned_reviewer(
     assert records[0].reviewer == "pr-reviewer"
 
 
+def test_trusted_cli_callback_runs_gate_only_for_exact_review_scope(
+    config: Config,
+    board: Board,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    subject = "JakubMifek/saturnin#11"
+    head_sha = "c" * 40
+    task = board.create(
+        "Gate the reviewed pull request",
+        kind="pr-review",
+        review_subject=subject,
+        review_author="code-worker",
+        review_head_sha=head_sha,
+    )
+    with board.edit(task.id) as stored:
+        stored.role = "pr-reviewer"
+        stored.state = "in_progress"
+    callback_dir = AgentLauncher(config, board)._isolated_home(
+        task.id
+    ) / ".saturnin-callbacks"
+    callback_dir.mkdir(parents=True)
+    callback = {
+        "type": "trusted_cli",
+        "task_id": task.id,
+        "operation": "review_gate",
+        "argv": [
+            "review",
+            "gate",
+            subject,
+            "--kind",
+            "pr",
+            "--repo",
+            "JakubMifek/saturnin",
+            "--author",
+            "code-worker",
+            "--head-sha",
+            head_sha,
+        ],
+    }
+    (callback_dir / CALLBACKS_FILE).write_text(
+        json.dumps(callback) + "\n",
+        encoding="utf-8",
+    )
+    decisions: list[dict] = []
+
+    def decide(**kwargs):
+        decisions.append(kwargs)
+        return {
+            "allowed": True,
+            "head_sha": head_sha,
+            "review_id": 91,
+            "reviewer_identity": "review-bot",
+            "nonce": "d" * 64,
+        }
+
+    monkeypatch.setattr("saturnin.cli.request_action", decide)
+
+    apply_queued(config, board, task_id=task.id, callback_dir=str(callback_dir))
+
+    assert len(decisions) == 1
+    assert decisions[0]["repository"] == "JakubMifek/saturnin"
+    assert decisions[0]["expected_head"] == head_sha
+
+
 def test_trusted_cli_review_record_requires_exact_task_scope(
     config: Config,
     board: Board,
@@ -1338,6 +1402,7 @@ def test_trusted_cli_issue_submission_requires_originating_task_subject(
     with board.edit(task.id) as stored:
         stored.role = "code-worker"
         stored.state = "in_progress"
+        stored.review_subject = "JakubMifek/saturnin#9"
     callback_dir = AgentLauncher(config, board)._isolated_home(
         task.id
     ) / ".saturnin-callbacks"
@@ -1365,7 +1430,7 @@ def test_trusted_cli_issue_submission_requires_originating_task_subject(
         encoding="utf-8",
     )
 
-    with pytest.raises(WorkerCallbackError, match="originating task id"):
+    with pytest.raises(WorkerCallbackError, match="trusted review_subject"):
         apply_queued(config, board, task_id=task.id, callback_dir=str(callback_dir))
 
 
@@ -4111,7 +4176,7 @@ def test_launcher_rejects_approved_config_destination_collisions(
         AgentLauncher(config, board)._isolated_home("duplicate-destination")
 
 
-def test_launcher_injects_only_scoped_signing_session_for_reviewers(
+def test_launcher_never_injects_signing_capability_for_reviewers(
     config: Config, board: Board, git_repo: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     monkeypatch.setenv("SATURNIN_REVIEW_ATTESTATION_PREVIOUS_KEY", "old-master-key")
@@ -4164,13 +4229,11 @@ def test_launcher_injects_only_scoped_signing_session_for_reviewers(
     assert "SATURNIN_REVIEW_ATTESTATION_KEY_SCOPE" not in environment
     assert environment["SATURNIN_AGENT_ROLE"] == "pr-reviewer"
     assert "SATURNIN_REVIEW_ATTESTATION_PREVIOUS_KEY" not in environment
-    assert environment["SATURNIN_REVIEW_SIGNING_NONCE"] == "public-session-nonce"
-    assert environment["SATURNIN_REVIEW_SIGNING_SOCKET"].endswith(
-        "signing-session.sock"
-    )
+    assert "SATURNIN_REVIEW_SIGNING_NONCE" not in environment
+    assert "SATURNIN_REVIEW_SIGNING_SOCKET" not in environment
 
 
-def test_launcher_refuses_reviewer_without_signing_session(
+def test_launcher_allows_reviewer_without_signing_session(
     config: Config, board: Board, git_repo: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     head_sha = "d" * 40
@@ -4209,14 +4272,15 @@ def test_launcher_refuses_reviewer_without_signing_session(
         verified_review_input,
     )
 
-    with pytest.raises(LauncherError, match="requires a signing session"):
-        launcher._worker_environment(
-            worker_config,
-            contract,
-            task=board.get(task.id),
-            workdir=worktree.path,
-            review_input=review_input,
-        )
+    environment = launcher._worker_environment(
+        worker_config,
+        contract,
+        task=board.get(task.id),
+        workdir=worktree.path,
+        review_input=review_input,
+    )
+    assert "SATURNIN_REVIEW_SIGNING_NONCE" not in environment
+    assert "SATURNIN_REVIEW_SIGNING_SOCKET" not in environment
 
 
 def test_launcher_stages_pr_diff_for_exact_review_head_before_signing(
@@ -4289,7 +4353,7 @@ def test_launcher_stages_pr_diff_for_exact_review_head_before_signing(
     assert "diff --git a/app.py b/app.py" not in prompt
     assert review_input.path.stat().st_mode & 0o777 == 0o600
     assert "SATURNIN_REVIEW_ATTESTATION_KEY" not in environment
-    assert "SATURNIN_REVIEW_SIGNING_SOCKET" in environment
+    assert "SATURNIN_REVIEW_SIGNING_SOCKET" not in environment
 
 
 def test_launcher_keeps_large_verified_pr_diff_out_of_command_arguments(
@@ -4369,7 +4433,7 @@ def test_launcher_keeps_large_verified_pr_diff_out_of_command_arguments(
     )
 
 
-def test_launcher_verifies_issue_draft_before_exposing_signing_key(
+def test_launcher_verifies_issue_draft_without_exposing_signing_capability(
     config: Config,
     board: Board,
     git_repo: Path,
@@ -4404,13 +4468,14 @@ def test_launcher_verifies_issue_draft_before_exposing_signing_key(
     assert '"issue_digest": "' + digest + '"' in staged_payload
     assert '"title": "' + title + '"' in staged_payload
     assert '"body": "' + body + '"' in staged_payload
-    with pytest.raises(LauncherError, match="requires verified review input"):
-        launcher._worker_environment(
-            config,
-            contract,
-            task=task,
-            workdir=git_repo,
-        )
+    environment = launcher._worker_environment(
+        config,
+        contract,
+        task=task,
+        workdir=git_repo,
+    )
+    assert "SATURNIN_REVIEW_SIGNING_SOCKET" not in environment
+    assert "SATURNIN_REVIEW_ATTESTATION_KEY" not in environment
 
     task.body = "A changed issue body."
     with pytest.raises(LauncherError, match="does not match task review_issue_digest"):

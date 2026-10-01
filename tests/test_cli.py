@@ -26,6 +26,7 @@ from saturnin.review import (
     sign_review_attestation,
 )
 from saturnin.routing import Router
+from saturnin.system_attestation import SystemAttestationError
 from saturnin.worktrees import CleanupPlan, WorktreeManager
 from saturnin.worker_callbacks import (
     CALLBACKS_FILE,
@@ -37,6 +38,21 @@ from saturnin.worker_callbacks import (
 def run(capsys: pytest.CaptureFixture[str], *argv: str) -> tuple[int, str]:
     code = main(list(argv))
     return code, capsys.readouterr().out
+
+
+def write_service_config(home: Path) -> None:
+    path = home / "config" / "attestation.json"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(
+        json.dumps({
+            "repositories": ["JakubMifek/saturnin"],
+            "issue_destinations": ["JakubMifek/saturnin-ops"],
+            "pr_reviewers": ["copilot-pull-request-reviewer[bot]"],
+            "issue_reviewers": ["saturnin-issue-reviewer[bot]"],
+            "allowed_verdicts": ["approved"],
+        }),
+        encoding="utf-8",
+    )
 
 
 def review_attestation_args(**kwargs: str) -> tuple[str, str]:
@@ -1245,9 +1261,87 @@ def test_sandboxed_worker_fails_closed_for_unsupported_stateful_command(
     assert not (callback_dir / CALLBACKS_FILE).exists()
 
 
-def test_review_gate_flow(home: Path, capsys: pytest.CaptureFixture[str]) -> None:
+def test_sandboxed_reviewer_queues_gate_without_local_signer_access(
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    callback_dir = tmp_path / "callbacks"
+    monkeypatch.setenv(ENV_CALLBACK_DIR, str(callback_dir))
+    monkeypatch.setenv(ENV_CALLBACK_TASK_ID, "T-review")
+
+    code, out = run(
+        capsys,
+        "review",
+        "gate",
+        "JakubMifek/saturnin#11",
+        "--kind",
+        "pr",
+        "--repo",
+        "JakubMifek/saturnin",
+        "--author",
+        "code-worker",
+        "--head-sha",
+        "a" * 40,
+    )
+
+    assert code == 0
+    assert "queued worker callback" in out
+    record = json.loads(
+        (callback_dir / CALLBACKS_FILE).read_text(encoding="utf-8")
+    )
+    assert record["type"] == "trusted_cli"
+    assert record["operation"] == "review_gate"
+    assert record["task_id"] == "T-review"
+
+
+def test_sandboxed_reviewer_cannot_attest_locally(
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    callback_dir = tmp_path / "callbacks"
+    monkeypatch.setenv(ENV_CALLBACK_DIR, str(callback_dir))
+    monkeypatch.setenv(ENV_CALLBACK_TASK_ID, "T-review")
+
+    code = main([
+        "review",
+        "attest",
+        "JakubMifek/saturnin#11",
+        "--kind",
+        "pr",
+        "--author",
+        "code-worker",
+        "--reviewer",
+        "pr-reviewer",
+        "--verdict",
+        "approved",
+        "--head-sha",
+        "a" * 40,
+    ])
+
+    assert code == 1
+    assert "no trusted callback is defined" in capsys.readouterr().err
+    assert not (callback_dir / CALLBACKS_FILE).exists()
+
+
+def test_review_gate_flow(
+    home: Path, capsys: pytest.CaptureFixture[str],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     subject = "JakubMifek/saturnin#42"
     head_sha = "a" * 40
+    live = [False]
+
+    def protected_decision(**_kwargs):
+        if not live[0]:
+            raise SystemAttestationError("no current allowed approval")
+        return {
+            "allowed": True, "head_sha": head_sha, "review_id": 91,
+            "reviewer_identity": "review-bot", "nonce": "d" * 64,
+        }
+
+    monkeypatch.setattr("saturnin.cli.request_action", protected_decision)
     assert (
         run(
             capsys,
@@ -1265,6 +1359,7 @@ def test_review_gate_flow(home: Path, capsys: pytest.CaptureFixture[str]) -> Non
         )[0]
         == 2
     )
+    live[0] = True
     run(
         capsys,
         "review",
@@ -1307,6 +1402,160 @@ def test_review_gate_flow(home: Path, capsys: pytest.CaptureFixture[str]) -> Non
     assert "ALLOWED" in out
 
 
+def test_ci_review_gate_uses_read_only_live_decision(
+    home: Path,
+    capsys: pytest.CaptureFixture[str],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    head_sha = "a" * 40
+    seen: dict[str, object] = {}
+    write_service_config(home)
+    monkeypatch.setenv("GITHUB_TOKEN", "read-only-token")
+
+    def decide(service_config, github, repo, number, expected_head):
+        seen.update(
+            repo=repo,
+            number=number,
+            expected_head=expected_head,
+            token=github.token,
+        )
+        return {
+            "repository": repo,
+            "number": number,
+            "head_sha": expected_head,
+            "review_id": 91,
+            "reviewer_identity": "copilot-pull-request-reviewer[bot]",
+        }
+
+    monkeypatch.setattr("saturnin.cli.read_only_pr_gate", decide)
+
+    code, out = run(
+        capsys,
+        "review",
+        "ci-gate",
+        "JakubMifek/saturnin#11",
+        "--head-sha",
+        head_sha,
+    )
+
+    assert code == 0
+    assert "ALLOWED" in out
+    assert seen == {
+        "repo": "JakubMifek/saturnin",
+        "number": 11,
+        "expected_head": head_sha,
+        "token": "read-only-token",
+    }
+
+
+def test_ci_review_gate_fails_without_token(
+    home: Path,
+    capsys: pytest.CaptureFixture[str],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    write_service_config(home)
+    monkeypatch.delenv("GITHUB_TOKEN", raising=False)
+
+    code, out = run(
+        capsys,
+        "review",
+        "ci-gate",
+        "JakubMifek/saturnin#11",
+        "--head-sha",
+        "a" * 40,
+    )
+
+    assert code == 2
+    assert "read-only GitHub token is unavailable" in out
+
+
+def test_issue_review_publisher_uses_protected_app_token(
+    home: Path,
+    capsys: pytest.CaptureFixture[str],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    seen: dict[str, object] = {}
+    write_service_config(home)
+    monkeypatch.setenv(
+        "SATURNIN_ISSUE_REVIEWER_TOKEN",
+        "installation-token",
+    )
+
+    def publish(
+        service_config,
+        github,
+        repository,
+        number,
+        destination_repo,
+        labels,
+        expected_digest,
+        *,
+        ttl_seconds,
+    ):
+        seen.update(
+            repository=repository,
+            number=number,
+            destination_repo=destination_repo,
+            labels=labels,
+            expected_digest=expected_digest,
+            ttl_seconds=ttl_seconds,
+            token=github.token,
+        )
+        return {"comment_id": 55, "reviewer_identity": "reviewer[bot]"}
+
+    monkeypatch.setattr("saturnin.cli.publish_issue_review", publish)
+
+    code, out = run(
+        capsys,
+        "review",
+        "publish-issue-review",
+        "JakubMifek/saturnin#9",
+        "--repo",
+        "JakubMifek/saturnin-ops",
+        "--label",
+        "incident",
+        "--issue-digest",
+        "d" * 64,
+        "--ttl-seconds",
+        "600",
+    )
+
+    assert code == 0
+    assert "comment 55" in out
+    assert seen == {
+        "repository": "JakubMifek/saturnin",
+        "number": 9,
+        "destination_repo": "JakubMifek/saturnin-ops",
+        "labels": ["incident"],
+        "expected_digest": "d" * 64,
+        "ttl_seconds": 600,
+        "token": "installation-token",
+    }
+
+
+def test_issue_review_publisher_fails_without_app_token(
+    home: Path,
+    capsys: pytest.CaptureFixture[str],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    write_service_config(home)
+    monkeypatch.delenv("SATURNIN_ISSUE_REVIEWER_TOKEN", raising=False)
+
+    code, out = run(
+        capsys,
+        "review",
+        "publish-issue-review",
+        "JakubMifek/saturnin#9",
+        "--repo",
+        "JakubMifek/saturnin-ops",
+        "--issue-digest",
+        "d" * 64,
+    )
+
+    assert code == 2
+    assert "protected issue reviewer App token is unavailable" in out
+
+
 def test_review_cli_resolves_omitted_pr_head(
     home: Path, capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -1315,6 +1564,13 @@ def test_review_cli_resolves_omitted_pr_head(
     monkeypatch.setattr(
         "saturnin.cli.run_gh",
         lambda args: json.dumps({"head": {"sha": head_sha}}),
+    )
+    monkeypatch.setattr(
+        "saturnin.cli.request_action",
+        lambda **_kwargs: {
+            "allowed": True, "head_sha": head_sha, "review_id": 91,
+            "reviewer_identity": "review-bot", "nonce": "d" * 64,
+        },
     )
 
     assert run(
@@ -1594,10 +1850,18 @@ def test_checkpoint_sweep_fails_closed_without_live_launch_or_pause_marker(
 
 
 def test_issue_review_gate_requires_matching_digest(
-    home: Path, capsys: pytest.CaptureFixture[str]
+    home: Path, capsys: pytest.CaptureFixture[str],
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    subject = "draft-for-managed-repo"
+    subject = "JakubMifek/saturnin#42"
     digest = "b" * 64
+    monkeypatch.setattr(
+        "saturnin.cli.request_issue_action",
+        lambda **kwargs: {
+            "allowed": True, "comment_id": 55,
+            "nonce": "d" * 64, "issue_digest": kwargs["issue_digest"],
+        },
+    )
     run(
         capsys,
         "review",
@@ -1684,6 +1948,12 @@ def test_review_merge_blocks_when_pr_head_changed_after_approval(
         raise AssertionError(f"unexpected gh call: {args}")
 
     monkeypatch.setattr("saturnin.cli.run_gh", fake_run_gh)
+    monkeypatch.setattr(
+        "saturnin.cli.request_action",
+        lambda **_kwargs: (_ for _ in ()).throw(
+            SystemAttestationError("exact head has no current allowed approval")
+        ),
+    )
 
     code, out = run(
         capsys,
@@ -1697,7 +1967,7 @@ def test_review_merge_blocks_when_pr_head_changed_after_approval(
     )
 
     assert code == 2
-    assert "no review records match the current head SHA" in out
+    assert "exact head has no current allowed approval" in out
     assert calls == [["api", "repos/JakubMifek/saturnin/pulls/7"]]
 
 
@@ -1743,6 +2013,18 @@ def test_review_merge_uses_expected_head_precondition(
 
     monkeypatch.setattr("saturnin.cli.run_gh", fake_run_gh)
 
+    def protected_merge(**kwargs):
+        assert kwargs["expected_head"] == head_sha
+        assert kwargs["merge_method"] == "squash"
+        return {
+            "allowed": True, "head_sha": head_sha, "review_id": 91,
+            "reviewer_identity": "review-bot", "nonce": "d" * 64,
+            "merged": True, "message": "Pull Request successfully merged",
+            "sha": "d" * 40,
+        }
+
+    monkeypatch.setattr("saturnin.cli.request_action", protected_merge)
+
     code, out = run(
         capsys,
         "review",
@@ -1758,13 +2040,13 @@ def test_review_merge_uses_expected_head_precondition(
 
     assert code == 0
     assert "successfully merged" in out
-    assert calls[1][:4] == ["api", "--method", "PUT", "repos/JakubMifek/saturnin/pulls/8/merge"]
+    assert calls == [["api", "repos/JakubMifek/saturnin/pulls/8"]]
 
 
 def test_review_submit_issue_uses_reviewed_title_and_body_digest(
     home: Path, capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    subject = "managed-issue-draft"
+    subject = "JakubMifek/saturnin#42"
     title = "Need safer rollout guardrails"
     body = "Gate deployments on verified backup snapshots."
     digest = issue_content_digest(title, body)
@@ -1795,18 +2077,16 @@ def test_review_submit_issue_uses_reviewed_title_and_body_digest(
             repo="JakubMifek/saturnin-ops",
         ),
     )
-    calls: list[list[str]] = []
+    calls: list[dict] = []
 
-    def fake_run_gh(args: list[str]) -> str:
-        calls.append(args)
-        if args[:2] == ["issue", "create"]:
-            assert args[args.index("--title") + 1] == title
-            created_body = args[args.index("--body") + 1]
-            assert created_body == body
-            return "https://github.com/JakubMifek/saturnin-ops/issues/77\n"
-        raise AssertionError(f"unexpected gh call: {args}")
+    def protected_issue(**kwargs):
+        calls.append(kwargs)
+        return {
+            "allowed": True, "url": "https://github.com/JakubMifek/saturnin-ops/issues/77",
+            "comment_id": 55, "nonce": kwargs["nonce"],
+        }
 
-    monkeypatch.setattr("saturnin.cli.run_gh", fake_run_gh)
+    monkeypatch.setattr("saturnin.cli.request_issue_action", protected_issue)
 
     code, out = run(
         capsys,
@@ -1827,21 +2107,16 @@ def test_review_submit_issue_uses_reviewed_title_and_body_digest(
 
     assert code == 0
     assert out.strip().endswith("/issues/77")
-    assert calls[0][:5] == [
-        "issue",
-        "create",
-        "--repo",
-        "JakubMifek/saturnin-ops",
-        "--title",
-    ]
-    assert calls[0][5] == title
-    assert calls[0][-2:] == ["--label", "incident"]
+    assert calls[0]["title"] == title
+    assert calls[0]["body"] == body
+    assert calls[0]["labels"] == ["incident"]
+    assert calls[0]["issue_digest"] == digest
 
 
 def test_review_submit_issue_reuses_existing_exact_payload(
     home: Path, capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    subject = "managed-issue-draft"
+    subject = "JakubMifek/saturnin#42"
     title = "Need safer rollout guardrails"
     body = "Gate deployments on verified backup snapshots."
     repo = "JakubMifek/saturnin-ops"
@@ -1873,15 +2148,16 @@ def test_review_submit_issue_reuses_existing_exact_payload(
             repo=repo,
         ),
     )
-    calls: list[list[str]] = []
+    calls: list[dict] = []
 
-    def fake_run_gh(args: list[str]) -> str:
-        calls.append(args)
-        if args[:2] == ["issue", "create"]:
-            return "https://github.com/JakubMifek/saturnin-ops/issues/77\n"
-        raise AssertionError(f"unexpected gh call: {args}")
+    def protected_issue(**kwargs):
+        calls.append(kwargs)
+        return {
+            "allowed": True, "url": "https://github.com/JakubMifek/saturnin-ops/issues/77",
+            "comment_id": 55, "nonce": kwargs["nonce"],
+        }
 
-    monkeypatch.setattr("saturnin.cli.run_gh", fake_run_gh)
+    monkeypatch.setattr("saturnin.cli.request_issue_action", protected_issue)
 
     code, out = run(
         capsys,
@@ -1916,13 +2192,14 @@ def test_review_submit_issue_reuses_existing_exact_payload(
     )
     assert code == 0
     assert out.strip().endswith("/issues/77")
-    assert len(calls) == 1
+    assert len(calls) == 2
+    assert calls[0]["nonce"] == calls[1]["nonce"]
 
 
 def test_review_submit_issue_identity_is_scoped_to_subject(
     home: Path, capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    subjects = ("first-draft", "second-draft")
+    subjects = ("JakubMifek/saturnin#41", "JakubMifek/saturnin#42")
     repo = "JakubMifek/saturnin-ops"
     title = "Shared title"
     body = "Shared reviewed body"
@@ -1955,13 +2232,17 @@ def test_review_submit_issue_identity_is_scoped_to_subject(
                 repo=repo,
             ),
         )
-    calls: list[list[str]] = []
+    calls: list[dict] = []
 
-    def fake_run_gh(args: list[str]) -> str:
-        calls.append(args)
-        return f"https://github.com/JakubMifek/saturnin-ops/issues/{len(calls)}\n"
+    def protected_issue(**kwargs):
+        calls.append(kwargs)
+        return {
+            "allowed": True,
+            "url": f"https://github.com/JakubMifek/saturnin-ops/issues/{len(calls)}",
+            "comment_id": 55, "nonce": kwargs["nonce"],
+        }
 
-    monkeypatch.setattr("saturnin.cli.run_gh", fake_run_gh)
+    monkeypatch.setattr("saturnin.cli.request_issue_action", protected_issue)
 
     for subject in subjects:
         code, _ = run(
@@ -1981,14 +2262,13 @@ def test_review_submit_issue_identity_is_scoped_to_subject(
         assert code == 0
 
     assert len(calls) == 2
-    submissions = list((home / "var" / "issue-submissions").glob("*.json"))
-    assert len(submissions) == 2
+    assert calls[0]["nonce"] != calls[1]["nonce"]
 
 
 def test_review_submit_issue_binds_exact_whitespace(
     home: Path, capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    subject = "exact-issue-draft"
+    subject = "JakubMifek/saturnin#42"
     repo = "JakubMifek/saturnin-ops"
     title = "  Exact title  "
     body = "\nExact body\n"
@@ -2020,13 +2300,16 @@ def test_review_submit_issue_binds_exact_whitespace(
             repo=repo,
         ),
     )
-    calls: list[list[str]] = []
+    calls: list[dict] = []
 
-    def fake_run_gh(args: list[str]) -> str:
-        calls.append(args)
-        return "https://github.com/JakubMifek/saturnin-ops/issues/78\n"
+    def protected_issue(**kwargs):
+        calls.append(kwargs)
+        return {
+            "allowed": True, "url": "https://github.com/JakubMifek/saturnin-ops/issues/78",
+            "comment_id": 55, "nonce": kwargs["nonce"],
+        }
 
-    monkeypatch.setattr("saturnin.cli.run_gh", fake_run_gh)
+    monkeypatch.setattr("saturnin.cli.request_issue_action", protected_issue)
 
     code, _ = run(
         capsys,
@@ -2044,15 +2327,15 @@ def test_review_submit_issue_binds_exact_whitespace(
     )
 
     assert code == 0
-    assert calls[0][calls[0].index("--title") + 1] == title
-    assert calls[0][calls[0].index("--body") + 1] == body
+    assert calls[0]["title"] == title
+    assert calls[0]["body"] == body
     assert issue_content_digest(title.strip(), body.strip()) != digest
 
 
 def test_review_submit_issue_blocks_when_reviewed_content_differs(
     home: Path, capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    subject = "content-mismatch-draft"
+    subject = "JakubMifek/saturnin#42"
     reviewed_digest = "e" * 64
     run(
         capsys,
@@ -2081,7 +2364,12 @@ def test_review_submit_issue_blocks_when_reviewed_content_differs(
             repo="JakubMifek/saturnin-ops",
         ),
     )
-    monkeypatch.setattr("saturnin.cli.run_gh", lambda args: (_ for _ in ()).throw(AssertionError(args)))
+    monkeypatch.setattr(
+        "saturnin.cli.request_issue_action",
+        lambda **_kwargs: (_ for _ in ()).throw(
+            SystemAttestationError("issue has no current matching authorization")
+        ),
+    )
 
     code, out = run(
         capsys,
@@ -2099,7 +2387,7 @@ def test_review_submit_issue_blocks_when_reviewed_content_differs(
     )
 
     assert code == 2
-    assert "no issue review records match the current issue-content digest" in out
+    assert "no current matching authorization" in out
 
 
 def test_checkpoint_sweep_does_not_mutate_when_launcher_is_disabled(

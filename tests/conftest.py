@@ -22,6 +22,14 @@ def home(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
     for pattern in ("*.yaml", "*.toml"):
         for policy in (REPO_ROOT / "policies").glob(pattern):
             shutil.copy(policy, root / "policies" / policy.name)
+    governance_path = root / "policies" / "governance.yaml"
+    governance_path.write_text(
+        governance_path.read_text(encoding="utf-8").replace(
+            "authorization_source: github-api",
+            "authorization_source: test-local",
+        ),
+        encoding="utf-8",
+    )
     mcp_path = root / "policies" / "mcp.yaml"
     mcp_policy = yaml.safe_load(mcp_path.read_text(encoding="utf-8"))
     mcp_policy["launcher"]["enabled"] = False

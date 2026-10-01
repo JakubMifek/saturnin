@@ -2,7 +2,9 @@ from __future__ import annotations
 
 import hashlib
 import fcntl
+import json
 import os
+import shutil
 import subprocess
 import sys
 from pathlib import Path
@@ -995,142 +997,272 @@ def test_common_sets_private_umask_for_runtime_files(
     assert marker.stat().st_mode & 0o777 == 0o600
 
 
-def test_review_gate_rejects_pr_subject_for_another_repo(config: Config) -> None:
+def _install_review_gate_runtime(root: Path) -> Path:
+    library = root / "automation" / "library"
+    library.mkdir(parents=True)
+    for name in ("_common.sh", "review_gate.sh"):
+        shutil.copy(REPO_ROOT / "automation" / "library" / name, library / name)
+    (root / "config").mkdir()
+    (root / "config" / "attestation.json").write_text("{}\n", encoding="utf-8")
+    executable = root / ".venv" / "bin" / "saturnin"
+    executable.parent.mkdir(parents=True)
+    executable.write_text(
+        "#!/bin/sh\n"
+        "test \"${PYTHONHOME+x}\" != x || exit 90\n"
+        "test \"${PYTHONPATH+x}\" != x || exit 91\n"
+        "test \"${SATURNIN_CONFIG+x}\" != x || exit 92\n"
+        "test \"$GITHUB_TOKEN\" = review-gate-secret || exit 93\n"
+        "printf '%s\\n' \"$@\" > \"$ARGS_LOG\"\n"
+        "printf '%s\\n' \"$SATURNIN_HOME\" > \"$HOME_LOG\"\n",
+        encoding="utf-8",
+    )
+    executable.chmod(0o755)
+    return library / "review_gate.sh"
+
+
+@pytest.mark.parametrize(
+    ("invocation", "home_override"),
+    [
+        ("repo-root", ""),
+        ("unrelated-cwd", "hostile"),
+        ("symlink", "hostile"),
+    ],
+)
+def test_ci_review_gate_executes_only_trusted_runtime_from_any_invocation(
+    tmp_path: Path,
+    invocation: str,
+    home_override: str,
+) -> None:
+    trusted = tmp_path / "trusted checkout with spaces"
+    script = _install_review_gate_runtime(trusted)
+    unrelated = tmp_path / "unrelated cwd"
+    unrelated.mkdir()
+    hostile = tmp_path / "hostile"
+    (hostile / ".venv" / "bin").mkdir(parents=True)
+    hostile_marker = tmp_path / "hostile-ran"
+    for name in ("bash", "saturnin", "readlink"):
+        executable = hostile / ".venv" / "bin" / name
+        executable.write_text(
+            f"#!/bin/sh\nprintf ran > '{hostile_marker}'\nexit 99\n",
+            encoding="utf-8",
+        )
+        executable.chmod(0o755)
+    link = tmp_path / "link to review gate"
+    link.symlink_to(script)
+    args_log = tmp_path / f"{invocation}-args"
+    home_log = tmp_path / f"{invocation}-home"
+    subject = "Acme/Widget#42"
+    head = "0123456789abcdef0123456789abcdef01234567"
+    command = script
+    cwd = trusted
+    if invocation == "unrelated-cwd":
+        cwd = unrelated
+    elif invocation == "symlink":
+        command = link
+        cwd = unrelated
+    env = {
+        **os.environ,
+        "ARGS_LOG": str(args_log),
+        "HOME_LOG": str(home_log),
+        "PATH": f"{hostile / '.venv' / 'bin'}:{os.environ['PATH']}",
+        "PYTHONHOME": str(hostile),
+        "PYTHONPATH": str(hostile),
+        "GITHUB_TOKEN": "review-gate-secret",
+        "SATURNIN_CONFIG": str(hostile / "attestation.json"),
+        "SATURNIN_HOME": str(hostile) if home_override else "",
+    }
+
     result = subprocess.run(
-        [
-            "bash",
-            str(config.root / "automation/library/review_gate.sh"),
-            "pr",
-            "other/repo#42",
-            "owner/repo",
-            "code-worker",
-        ],
+        [str(command), "pr", subject, head],
+        cwd=cwd,
+        check=True,
         capture_output=True,
         text=True,
-        env={**os.environ, "SATURNIN_HOME": str(config.root)},
+        env=env,
+    )
+
+    assert args_log.read_text(encoding="utf-8").splitlines() == [
+        "--home",
+        str(trusted),
+        "review",
+        "ci-gate",
+        subject,
+        "--head-sha",
+        head,
+    ]
+    assert home_log.read_text(encoding="utf-8").strip() == str(trusted)
+    assert not hostile_marker.exists()
+    assert "review-gate-secret" not in result.stdout
+    assert "review-gate-secret" not in result.stderr
+    assert "review-gate-secret" not in args_log.read_text(encoding="utf-8")
+    assert "review-gate-secret" not in home_log.read_text(encoding="utf-8")
+
+
+@pytest.mark.parametrize(
+    "arguments",
+    [
+        [],
+        ["issue", "Acme/Widget#42", "0" * 40],
+        ["pr", "not-a-subject", "0" * 40],
+        ["pr", "Acme/Widget#42", "ABC"],
+        ["pr", "Acme/Widget#42", "0" * 40, "extra"],
+    ],
+)
+def test_ci_review_gate_rejects_invalid_arguments_before_execution(
+    tmp_path: Path,
+    arguments: list[str],
+) -> None:
+    trusted = tmp_path / "trusted"
+    script = _install_review_gate_runtime(trusted)
+    marker = tmp_path / "args"
+
+    result = subprocess.run(
+        [str(script), *arguments],
+        capture_output=True,
+        text=True,
+        env={**os.environ, "ARGS_LOG": str(marker), "HOME_LOG": str(marker)},
     )
 
     assert result.returncode == 2
-    assert "expected owner/repo#number" in result.stderr
+    assert not marker.exists()
 
 
-def test_review_gate_passes_issue_digest_to_gate(config: Config) -> None:
-    args_log = config.root / "saturnin-args"
-    saturnin = config.root / ".venv" / "bin" / "saturnin"
-    saturnin.parent.mkdir(parents=True)
-    saturnin.write_text(
-        f"#!/bin/sh\nprintf '%s\\n' \"$@\" > {args_log}\n",
-        encoding="utf-8",
-    )
-    saturnin.chmod(0o755)
+def test_ci_review_gate_fails_closed_without_trusted_runtime_or_config(
+    tmp_path: Path,
+) -> None:
+    trusted = tmp_path / "trusted"
+    script = _install_review_gate_runtime(trusted)
+    executable = trusted / ".venv" / "bin" / "saturnin"
+    executable.unlink()
+    env = {
+        **os.environ,
+        "ARGS_LOG": str(tmp_path / "args"),
+        "HOME_LOG": str(tmp_path / "home"),
+    }
 
-    subprocess.run(
-        [
-            "bash",
-            str(config.root / "automation/library/review_gate.sh"),
-            "issue",
-            "draft-42",
-            "owner/repo",
-            "researcher",
-            "reviewed-digest",
-        ],
-        check=True,
+    missing_runtime = subprocess.run(
+        [str(script), "pr", "Acme/Widget#42", "0" * 40],
         capture_output=True,
         text=True,
-        env={**os.environ, "SATURNIN_HOME": str(config.root)},
+        env=env,
     )
+    assert missing_runtime.returncode == 127
+    assert "trusted saturnin executable missing" in missing_runtime.stdout
 
-    args = args_log.read_text(encoding="utf-8").splitlines()
-    assert args[:2] == ["review", "gate"]
-    assert args[-2:] == ["--issue-digest", "reviewed-digest"]
-
-
-def test_review_gate_imports_only_the_designated_reviewer(config: Config) -> None:
-    script = (config.root / "automation/library/review_gate.sh").read_text(
-        encoding="utf-8"
+    executable.write_text("#!/bin/sh\nexit 99\n", encoding="utf-8")
+    executable.chmod(0o755)
+    (trusted / "config" / "attestation.json").unlink()
+    missing_config = subprocess.run(
+        [str(script), "pr", "Acme/Widget#42", "0" * 40],
+        capture_output=True,
+        text=True,
+        env=env,
     )
-
-    assert config.governance["review"]["pr"]["github_reviewer_logins"] == [
-        "copilot-pull-request-reviewer[bot]"
-    ]
-    assert 'review_user.get("type") != "Bot"' in script
-    assert "user.casefold() not in reviewer_logins" in script
-    assert '"changes_requested", "rejected", "dismissed"' in script
-    assert "state not in" in script
-    assert "Imported from GitHub reviewer ${github_reviewer}" in script
-    assert 'author="github:${pr_author}"' in script
-    assert "saturnin_python -c '" in script
-    assert "import json, sys, yaml" in script
+    assert missing_config.returncode == 2
+    assert "trusted attestation config missing" in missing_config.stderr
 
 
-def test_review_gate_reads_pages_until_empty_before_aggregating(config: Config) -> None:
-    pages_log = config.root / "review-pages"
-    args_log = config.root / "saturnin-args"
-    (config.root / "sitecustomize.py").write_text(
-        "import io\n"
-        "import json\n"
-        "import urllib.parse\n"
-        "import urllib.request\n"
-        f"_pages_log = {str(pages_log)!r}\n"
-        "def _urlopen(request, timeout=None):\n"
-        "    page = int(urllib.parse.parse_qs("
-        "urllib.parse.urlparse(request.full_url).query)['page'][0])\n"
-        "    with open(_pages_log, 'a', encoding='utf-8') as stream:\n"
-        "        stream.write(f'{page}\\n')\n"
-        "    if page <= 11:\n"
-        "        state = 'CHANGES_REQUESTED' if page == 11 else 'APPROVED'\n"
-        "        reviews = [{'commit_id': 'head-sha', 'state': state, "
-        "'user': {'login': 'copilot-pull-request-reviewer[bot]', "
-        "'type': 'Bot'}}]\n"
-        "    else:\n"
-        "        reviews = []\n"
-        "    return io.BytesIO(json.dumps(reviews).encode())\n"
-        "urllib.request.urlopen = _urlopen\n",
-        encoding="utf-8",
-    )
-    fake_bin = config.root / "fake-bin"
+def test_issue_review_publisher_uses_exact_installation_and_scoped_token(
+    tmp_path: Path,
+) -> None:
+    fake_bin = tmp_path / "bin"
     fake_bin.mkdir()
-    curl = fake_bin / "curl"
-    curl.write_text(
-        "#!/bin/sh\n"
-        "printf '%s\\n' "
-        '\'{"head":{"sha":"head-sha"},"user":{"login":"author"}}\'\n',
+    calls = tmp_path / "calls.jsonl"
+    result = tmp_path / "result.json"
+    fake_curl = fake_bin / "curl"
+    fake_curl.write_text(
+        "#!/usr/bin/env python3\n"
+        "import json, os, sys\n"
+        "args = sys.argv[1:]\n"
+        "with open(os.environ['CALLS'], 'a', encoding='utf-8') as stream:\n"
+        "    stream.write(json.dumps(args) + '\\n')\n"
+        "url = args[-1]\n"
+        "if url.endswith('/installation'):\n"
+        "    print(json.dumps({'id': 42, 'app_id': 12345, "
+        "'repository_selection': 'selected', "
+        "'permissions': {'issues': 'write', 'metadata': 'read'}}))\n"
+        "elif url.endswith('/access_tokens'):\n"
+        "    print(json.dumps({'token': 'installation-token', "
+        "'repository_selection': 'selected', "
+        "'permissions': {'issues': 'write', 'metadata': 'read'}, "
+        "'repositories': [{'full_name': 'acme/widget'}]}))\n"
+        "else:\n"
+        "    raise SystemExit(3)\n",
         encoding="utf-8",
     )
-    curl.chmod(0o755)
-    saturnin = config.root / ".venv" / "bin" / "saturnin"
-    saturnin.parent.mkdir(parents=True)
-    saturnin.write_text(
-        "#!/bin/sh\n"
-        f"printf '%s\\n' \"$*\" >> {args_log}\n"
-        "case \"$*\" in\n"
-        "  *\"review attest \"*) printf attestation ;;\n"
-        "esac\n",
+    fake_curl.chmod(0o755)
+    fake_saturnin = fake_bin / "saturnin"
+    fake_saturnin.write_text(
+        "#!/usr/bin/env python3\n"
+        "import json, os, sys\n"
+        "with open(os.environ['RESULT'], 'w', encoding='utf-8') as stream:\n"
+        "    json.dump({'argv': sys.argv[1:], "
+        "'token': os.environ.get('SATURNIN_ISSUE_REVIEWER_TOKEN')}, stream)\n",
         encoding="utf-8",
     )
-    saturnin.chmod(0o755)
+    fake_saturnin.chmod(0o755)
+    private_key = tmp_path / "app.pem"
+    subprocess.run(
+        [
+            "openssl",
+            "genpkey",
+            "-quiet",
+            "-algorithm",
+            "RSA",
+            "-pkeyopt",
+            "rsa_keygen_bits:2048",
+            "-out",
+            str(private_key),
+        ],
+        check=True,
+    )
 
     subprocess.run(
         [
-            "bash",
-            str(config.root / "automation/library/review_gate.sh"),
-            "pr",
-            "owner/repo#42",
-            "owner/repo",
+            str(REPO_ROOT / "automation/library/publish_issue_review.sh"),
+            "acme/widget#9",
+            "acme/issues",
+            '["incident"]',
+            "600",
+            "d" * 64,
         ],
         check=True,
-        capture_output=True,
-        text=True,
         env={
             **os.environ,
+            "CALLS": str(calls),
+            "RESULT": str(result),
             "PATH": f"{fake_bin}:{os.environ['PATH']}",
-            "PYTHONPATH": str(config.root),
-            "SATURNIN_HOME": str(config.root),
+            "SATURNIN_ISSUE_REVIEWER_APP_ID": "12345",
+            "SATURNIN_ISSUE_REVIEWER_PRIVATE_KEY_FILE": str(private_key),
         },
     )
 
-    assert pages_log.read_text(encoding="utf-8").splitlines() == [
-        str(page) for page in range(1, 13)
+    curl_calls = [
+        json.loads(line) for line in calls.read_text(encoding="utf-8").splitlines()
     ]
-    assert "review record owner/repo#42" in args_log.read_text(encoding="utf-8")
-    assert "--verdict changes_requested" in args_log.read_text(encoding="utf-8")
+    assert curl_calls[0][-1] == (
+        "https://api.github.com/repos/acme/widget/installation"
+    )
+    assert curl_calls[1][-1] == (
+        "https://api.github.com/app/installations/42/access_tokens"
+    )
+    scope = json.loads(curl_calls[1][curl_calls[1].index("--data") + 1])
+    assert scope == {
+        "repositories": ["widget"],
+        "permissions": {"issues": "write", "metadata": "read"},
+    }
+    published = json.loads(result.read_text(encoding="utf-8"))
+    assert published["token"] == "installation-token"
+    assert published["argv"] == [
+        "review",
+        "publish-issue-review",
+        "acme/widget#9",
+        "--repo",
+        "acme/issues",
+        "--issue-digest",
+        "d" * 64,
+        "--ttl-seconds",
+        "600",
+        "--label",
+        "incident",
+    ]

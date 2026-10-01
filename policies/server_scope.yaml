@@ -46,18 +46,30 @@ services:
     - saturnin-poller.timer
     - saturnin-resume.service
     - saturnin-resume.timer
-    - saturnin-attestation.service
   # Timers live in the Saturnin user scope only.
   scheduling_scope: user
   allowed_schedulers: [systemd-user-timer]
-  governed_units: [saturnin-attestation.service]
+  governed_units: []
+
+dedicated_attestation_service:
+  account: saturnin-signer
+  login: false
+  scope: system
+  ordinary_runtime_allowed: false
+  socket: /run/saturnin-attestation/sign.sock
+  listener_creator: service-process
+  runtime: /usr/lib/saturnin-attestation/system_attestation.py
+  configuration: /etc/saturnin-attestation/config.json
+  state: /var/lib/saturnin-attestation
 
 # Canonical compound operations are checked as exact executable/action pairs.
 # They may internally perform only the bounded user-unit lifecycle named here.
 operations:
+  # Compatibility recognizer for the retired interface. The checked-in
+  # executable is a fail-closed stub and cannot install a user signer.
   signer_user_unit:
     executable: scripts/install_attestation_unit.sh
-    sha256: dadd1164c99d5992279b23b0f3e387b74fa56296d5612c7507e12fcd3f78323a
+    sha256: 1884a1f30532cfdc52efe271c3ef4822fdbc65c92ae108e50912695c3cf0cca5
     dependencies:
       - .venv/bin/saturnin
       - systemd/saturnin-attestation.service
@@ -89,6 +101,7 @@ operations:
           - mcp.py
           - review.py
           - routing.py
+          - system_attestation.py
           - telemetry.py
           - worker_callbacks.py
           - worktrees.py
@@ -117,45 +130,36 @@ operations:
     runtime_files:
       - source: policies/governance.yaml
         archive: saturnin/governance.runtime.yaml
-    runtime_manifest_sha256: fc31b83aec632b8286989d3230590e33e40b1624a7cabc5a94714a4fb17f40f9
-    trusted_tools:
-      - /usr/bin/bash
-      - /usr/bin/chmod
-      - /usr/bin/cp
-      - /usr/bin/flock
-      - /usr/bin/id
-      - /usr/bin/mkdir
-      - /usr/bin/mv
-      - /usr/bin/python3
-      - /usr/bin/realpath
-      - /usr/bin/rm
-      - /usr/bin/rmdir
-      - /usr/bin/sleep
-      - /usr/bin/stat
-      - /usr/bin/systemctl
-      - /usr/bin/systemd-analyze
-      - /usr/bin/systemd-creds
-      - /usr/bin/timeout
+    runtime_manifest_sha256: retired
+    trusted_tools: [/usr/bin/bash, /usr/bin/python3, /usr/bin/systemctl]
     allowed_actions: [install, status, uninstall]
     unit: saturnin-attestation.service
     runtime_snapshot: "%h/.config/systemd/user/saturnin-attestation-runtime.pyz"
     scope: user
+  signer_system_service:
+    executable: scripts/manage_system_attestation.py
+    dependencies:
+      - src/saturnin/system_attestation.py
+      - systemd/system/saturnin-attestation.service
+      - systemd/system/saturnin-attestation.sysusers
+      - systemd/system/saturnin-attestation.tmpfiles
+      - config/attestation.json
+    allowed_actions: [install, status, uninstall, rotate, rollback]
+    unit: saturnin-attestation.service
+    runtime_snapshot: /usr/lib/saturnin-attestation/system_attestation.py
+    scope: system
+    actor: human-administrator
 
 filesystem:
   governed_write_paths:
     - policies/server_scope.yaml
     - policies/governance.yaml
     - scripts/install_attestation_unit.sh
-    - systemd/saturnin-attestation.service
+    - systemd/system
     - .venv/bin/saturnin
     - src/saturnin
     - ".venv/lib/{python_version}/site-packages/yaml"
     - "%h/.config/systemd/user"
-    - "%h/.config/systemd/user/saturnin-attestation.service"
-    - "%h/.config/systemd/user/saturnin-attestation.service.d"
-    - "%h/.config/systemd/user/saturnin-attestation-runtime.pyz"
-    - "%h/.config/systemd/user/default.target.wants/saturnin-attestation.service"
-    - "%h/.config/systemd/user/saturnin-credentials"
   # Basename-specific command rules only apply to executables resolved from
   # administrator-controlled system locations.
   trusted_executable_roots:

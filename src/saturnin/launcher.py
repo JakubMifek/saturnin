@@ -1717,13 +1717,9 @@ class AgentLauncher:
 
     @staticmethod
     def _review_attestation_roles(config: Config) -> set[str]:
-        review = config.governance.get("review", {})
-        roles: set[str] = set()
-        for kind in ("pr", "issue"):
-            configured = review.get(kind, {}).get("allowed_reviewer_roles", [])
-            if isinstance(configured, list):
-                roles.update(str(role).strip().lower() for role in configured if str(role).strip())
-        return roles
+        # Review workers never receive signing material or a signing capability.
+        # The dedicated system service independently authorizes GitHub evidence.
+        return set()
 
     def _isolated_home(self, task_id: str) -> Path:
         root = self.dir / f"{task_id}.home"
