@@ -45,6 +45,7 @@ CONFIG_PATH = Path("/etc/saturnin-attestation/config.json")
 STATE_PATH = Path("/var/lib/saturnin-attestation/authorizations.sqlite3")
 ISSUE_MARKER = "saturnin-attestation:v1 "
 ISSUE_SUBMISSION_MARKER = "<!-- saturnin-protected-submission:v1 {} -->"
+NOTES_REVIEW_MARKER = "saturnin-notes-review:v1 "
 _REPO = re.compile(r"[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+")
 _SHA = re.compile(r"[0-9a-f]{40}")
 _DIGEST = re.compile(r"[0-9a-f]{64}")
@@ -58,6 +59,7 @@ _ATTESTATION_FIELDS = {
     "reviewer", "reviewer_identity", "verdict", "zero_context", "head_sha",
     "issue_digest", "destination_repo", "authorization_evidence_id", "nonce",
     "expires_at", "review_profile", "review_method", "review_checks",
+    "writer_evidence_id",
     "attestation_id", "key_id", "signature",
 }
 _LEGACY_ATTESTED_FIELDS = {
@@ -188,6 +190,22 @@ def current_pr_review(
     reviewer = str((review.get("user") or {}).get("login", "")).casefold()
     if author.casefold() == reviewer:
         raise SystemAttestationError("reviewer is not independent")
+    if repo == config.notes_repository:
+        expected_marker = NOTES_REVIEW_MARKER + json.dumps(
+            {
+                "repository": repo,
+                "head_sha": head.casefold(),
+                "profile": config.notes_review_profile,
+                "method": config.notes_review_method,
+                "checks": list(config.notes_review_checks),
+            },
+            sort_keys=True,
+            separators=(",", ":"),
+        )
+        if review.get("body") != expected_marker:
+            raise SystemAttestationError(
+                "notes approval lacks exact head-bound review evidence"
+            )
     return {
         "repository": repo,
         "number": number,
@@ -397,6 +415,8 @@ class ServiceConfig:
     notes_review_method: str = ""
     notes_review_checks: tuple[str, ...] = ()
     notes_writer_logins: frozenset[str] = frozenset()
+    notes_delivery_check_run: str = ""
+    notes_delivery_app_slug: str = ""
 
     @classmethod
     def load(cls, path: Path = CONFIG_PATH) -> "ServiceConfig":
@@ -417,6 +437,8 @@ class ServiceConfig:
             "notes_review_method",
             "notes_review_checks",
             "notes_writer_logins",
+            "notes_delivery_check_run",
+            "notes_delivery_app_slug",
         }:
             raise SystemAttestationError("service configuration schema is invalid")
         api = raw.get("github_api", "https://api.github.com")
@@ -470,6 +492,8 @@ class ServiceConfig:
         notes_method = str(raw.get("notes_review_method", ""))
         notes_checks = raw.get("notes_review_checks", [])
         notes_writers = raw.get("notes_writer_logins", [])
+        notes_delivery_check = str(raw.get("notes_delivery_check_run", ""))
+        notes_delivery_app = str(raw.get("notes_delivery_app_slug", "")).casefold()
         notes_values = (notes_repository, notes_profile, notes_method)
         if (
             not isinstance(base_refs, list)
@@ -509,6 +533,12 @@ class ServiceConfig:
             )
             or len({login.casefold() for login in notes_writers})
             != len(notes_writers)
+            or bool(notes_delivery_check) != bool(notes_delivery_app)
+            or bool(notes_delivery_check)
+            and (
+                not re.fullmatch(r"[A-Za-z0-9_.-]{1,128}", notes_delivery_check)
+                or not re.fullmatch(r"[A-Za-z0-9-]{1,100}", notes_delivery_app)
+            )
             or (any(notes_values) or notes_checks)
             and (
                 not all(notes_values)
@@ -536,6 +566,8 @@ class ServiceConfig:
             notes_writer_logins=frozenset(
                 login.casefold() for login in notes_writers
             ),
+            notes_delivery_check_run=notes_delivery_check,
+            notes_delivery_app_slug=notes_delivery_app,
         )
 
 
@@ -1132,6 +1164,15 @@ class DedicatedSigner:
             raise SystemAttestationError(
                 "notes author is not an authorized scribe identity"
             )
+        writer_evidence_id = (
+            self._notes_delivery_evidence(
+                repository,
+                evidence["head_sha"],
+                evidence["author"].removeprefix("github:").casefold(),
+            )
+            if is_notes_review
+            else ""
+        )
         evidence.update(
             review_profile=(
                 self.config.notes_review_profile if is_notes_review else ""
@@ -1142,6 +1183,7 @@ class DedicatedSigner:
             review_checks=(
                 list(self.config.notes_review_checks) if is_notes_review else []
             ),
+            writer_evidence_id=writer_evidence_id,
         )
         authorization_current = bool(evidence.pop("_authorization_current", True))
         evidence.pop("_approved_labels", None)
@@ -1860,6 +1902,15 @@ class DedicatedSigner:
             raise SystemAttestationError(
                 "notes author is not an authorized scribe identity"
             )
+        writer_evidence_id = (
+            self._notes_delivery_evidence(
+                repo,
+                evidence["head_sha"],
+                evidence["author"].removeprefix("github:").casefold(),
+            )
+            if is_notes_review
+            else ""
+        )
         pull = self.github.get(f"/repos/{repo}/pulls/{number}")
         snapshot = self._pull_snapshot(
             pull, repo, number, destination, expected_head
@@ -1963,9 +2014,41 @@ class DedicatedSigner:
             "review_checks": (
                 list(self.config.notes_review_checks) if is_notes_review else []
             ),
+            "writer_evidence_id": writer_evidence_id,
             "protected_actor": actor,
             "protection_hash": hashlib.sha256(_canonical(protection)).hexdigest(),
         }
+
+    def _notes_delivery_evidence(
+        self, repo: str, head_sha: str, writer: str,
+    ) -> str:
+        if (
+            not self.config.notes_delivery_check_run
+            or not self.config.notes_delivery_app_slug
+        ):
+            raise SystemAttestationError(
+                "trusted notes delivery evidence is not provisioned"
+            )
+        expected_external_id = (
+            f"saturnin-notes-delivery:v1:{repo}:{head_sha}:{writer}"
+        )
+        matches = [
+            check
+            for check in self.github.check_runs(repo, head_sha)
+            if (
+                check.get("name") == self.config.notes_delivery_check_run
+                and str((check.get("app") or {}).get("slug", "")).casefold()
+                == self.config.notes_delivery_app_slug
+                and check.get("external_id") == expected_external_id
+                and check.get("status") == "completed"
+                and check.get("conclusion") == "success"
+            )
+        ]
+        if len(matches) != 1 or type(matches[0].get("id")) is not int:
+            raise SystemAttestationError(
+                "exact head has no trusted scribe delivery evidence"
+            )
+        return f"github:check-run:{matches[0]['id']}"
 
     def _pull_snapshot(
         self, pull: Any, repo: str, number: int, destination: str,
@@ -2105,6 +2188,13 @@ class DedicatedSigner:
             payload["review_profile"] != expected_profile
             or payload["review_method"] != expected_method
             or payload["review_checks"] != expected_checks
+            or is_notes_review
+            and not re.fullmatch(
+                r"github:check-run:[1-9][0-9]*",
+                payload["writer_evidence_id"],
+            )
+            or not is_notes_review
+            and payload["writer_evidence_id"]
         ):
             raise SystemAttestationError("attestation review profile is invalid")
         return {key: value for key, value in payload.items() if key != "signature"}
@@ -2404,6 +2494,7 @@ def request_action(
         "base_sha",
         "reviewer_identity", "review_id", "review_state", "check_runs",
         "review_profile", "review_method", "review_checks",
+        "writer_evidence_id",
         "expires_at", "signature",
     }
     if not isinstance(response, dict) or not required <= set(response):
@@ -2421,6 +2512,7 @@ def request_action(
         or not isinstance(response["review_profile"], str)
         or not isinstance(response["review_method"], str)
         or not isinstance(response["review_checks"], list)
+        or not isinstance(response["writer_evidence_id"], str)
         or any(
             not isinstance(check, str) or not check.strip()
             for check in response["review_checks"]

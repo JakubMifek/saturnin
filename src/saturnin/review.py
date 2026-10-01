@@ -485,6 +485,7 @@ def _verify_review_attestation(
                 "author_role",
                 "reviewer_identity",
                 "authorization_evidence_id",
+                "writer_evidence_id",
                 "nonce",
                 "expires_at",
             }

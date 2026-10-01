@@ -2114,6 +2114,7 @@ def _run_review(args: argparse.Namespace, config: Config, as_json: bool) -> int:
                 "review_profile": live.get("review_profile", ""),
                 "review_method": live.get("review_method", ""),
                 "review_checks": live.get("review_checks", []),
+                "writer_evidence_id": live.get("writer_evidence_id", ""),
             },
             as_json,
             "ALLOWED: fresh protected-signer decision",

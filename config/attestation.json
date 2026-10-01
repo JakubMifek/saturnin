@@ -24,5 +24,7 @@
     "links",
     "retrievability"
   ],
-  "notes_writer_logins": []
+  "notes_writer_logins": [],
+  "notes_delivery_check_run": "",
+  "notes_delivery_app_slug": ""
 }

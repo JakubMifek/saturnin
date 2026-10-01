@@ -27,6 +27,7 @@ from saturnin.system_attestation import (
     GitHubMutationError,
     ISSUE_MARKER,
     ISSUE_SUBMISSION_MARKER,
+    NOTES_REVIEW_MARKER,
     PublisherCredential,
     AuthorizationLimiter,
     ARCHIVE_MAX_KEYS,
@@ -108,6 +109,28 @@ def notes_service_config() -> ServiceConfig:
             "retrievability",
         ),
         notes_writer_logins=frozenset({"author"}),
+        notes_delivery_check_run="saturnin-notes-delivery",
+        notes_delivery_app_slug="saturnin-notes-writer",
+    )
+
+
+def notes_review_body(head: str = HEAD) -> str:
+    return NOTES_REVIEW_MARKER + json.dumps(
+        {
+            "repository": "acme/widget",
+            "head_sha": head,
+            "profile": "notes-review",
+            "method": "rubber-duck",
+            "checks": [
+                "canonical_structure",
+                "duplication",
+                "factual_integrity",
+                "links",
+                "retrievability",
+            ],
+        },
+        sort_keys=True,
+        separators=(",", ":"),
     )
 
 
@@ -137,8 +160,24 @@ def pr_transport(*, state: str = "APPROVED", head: str = HEAD):
             return [] if "page=2" in path else [{
                 "id": 91, "commit_id": head, "state": state,
                 "submitted_at": "2026-09-27T16:00:00Z",
+                "body": notes_review_body(head),
                 "user": {"login": "review-bot", "type": "Bot"},
             }]
+        if "/check-runs?" in path:
+            return {
+                "total_count": 1,
+                "check_runs": [{
+                    "id": 601,
+                    "name": "saturnin-notes-delivery",
+                    "status": "completed",
+                    "conclusion": "success",
+                    "external_id": (
+                        "saturnin-notes-delivery:v1:"
+                        f"acme/widget:{head}:author"
+                    ),
+                    "app": {"slug": "saturnin-notes-writer"},
+                }],
+            }
         raise AssertionError(path)
     return get
 
@@ -176,15 +215,29 @@ def action_transport(
             return [] if "page=2" in path else [{
                 "id": 91, "commit_id": head, "state": state,
                 "submitted_at": "2026-09-27T16:00:00Z",
+                "body": notes_review_body(head),
                 "user": {"login": reviewer, "type": reviewer_type},
             }]
         if "/check-runs?" in path:
             return {
-                "total_count": 1,
-                "check_runs": [{
-                    "id": 501, "name": "test", "status": "completed",
-                    "conclusion": check_conclusion,
-                }],
+                "total_count": 2,
+                "check_runs": [
+                    {
+                        "id": 501, "name": "test", "status": "completed",
+                        "conclusion": check_conclusion,
+                    },
+                    {
+                        "id": 601,
+                        "name": "saturnin-notes-delivery",
+                        "status": "completed",
+                        "conclusion": "success",
+                        "external_id": (
+                            "saturnin-notes-delivery:v1:"
+                            f"acme/widget:{head}:author"
+                        ),
+                        "app": {"slug": "saturnin-notes-writer"},
+                    },
+                ],
             }
         raise AssertionError(path)
     return get
@@ -327,6 +380,7 @@ def test_notes_review_contract_is_derived_and_signed_by_protected_service(
         "links",
         "retrievability",
     ]
+    assert payload["writer_evidence_id"] == "github:check-run:601"
     assert service.verify(attestation) == {
         "status": "verified",
         "key_state": "current",
@@ -375,6 +429,41 @@ def test_notes_authorization_fails_without_provisioned_scribe_identity(
 
     with pytest.raises(SystemAttestationError, match="scribe identity"):
         service.authorize(request())
+
+
+def test_notes_authorization_requires_head_bound_review_and_delivery_evidence(
+    tmp_path: Path,
+) -> None:
+    cfg = notes_service_config()
+
+    def generic_review(path: str):
+        value = pr_transport()(path)
+        if "/reviews?" in path and value:
+            value[0]["body"] = "ordinary approval"
+        return value
+
+    with pytest.raises(SystemAttestationError, match="review evidence"):
+        DedicatedSigner(
+            cfg,
+            GitHub(cfg, transport=generic_review),
+            b"c" * 48,
+            None,
+            tmp_path / "review.sqlite3",
+            now=lambda: NOW,
+        ).authorize(request())
+
+    without_delivery = replace(
+        cfg, notes_delivery_check_run="", notes_delivery_app_slug="",
+    )
+    with pytest.raises(SystemAttestationError, match="not provisioned"):
+        DedicatedSigner(
+            without_delivery,
+            GitHub(without_delivery, transport=pr_transport()),
+            b"c" * 48,
+            None,
+            tmp_path / "delivery.sqlite3",
+            now=lambda: NOW,
+        ).authorize(request())
 
 
 @pytest.mark.parametrize("change", [
@@ -494,6 +583,7 @@ def test_fresh_gate_decision_binds_live_review_head_base_checks_and_nonce(
     assert result["review_profile"] == ""
     assert result["review_method"] == ""
     assert result["review_checks"] == []
+    assert result["writer_evidence_id"] == ""
     assert result["nonce"] == "d" * 64
     assert result["expires_at"] == "2026-09-28T00:01:00+00:00"
     assert len(result["signature"]) == 64
@@ -522,6 +612,7 @@ def test_notes_gate_binds_contract_and_requires_provisioned_scribe(
         "links",
         "retrievability",
     ]
+    assert result["writer_evidence_id"] == "github:check-run:601"
 
     blocked = DedicatedSigner(
         replace(cfg, notes_writer_logins=frozenset()),
@@ -2770,6 +2861,7 @@ def test_socket_client_checks_peer_and_response_schema(
         "review_profile": "",
         "review_method": "",
         "review_checks": [],
+        "writer_evidence_id": "",
         "protected_actor": "saturnin-merge-bot",
         "protection_hash": "e" * 64,
         "expires_at": "2099-01-01T00:00:00+00:00",
