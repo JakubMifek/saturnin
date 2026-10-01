@@ -31,7 +31,7 @@ def test_keyword_routing_uses_word_boundaries(config: Config, board: Board) -> N
 
 def test_kind_routing(config: Config, board: Board) -> None:
     task = board.create("Review PR 12", kind="pr-review")
-    route = Router(config).resolve(task)
+    route = Router(config).resolve(task, lead_role="scribe")
     assert route.role == "pr-reviewer"
     assert route.priority == "P1"
 
@@ -242,7 +242,7 @@ def test_notes_repository_preserves_governance_route_precedence(
         repo=config.policy("repos")["repos"]["notes"]["slug"],
     )
 
-    route = Router(config).resolve(task)
+    route = Router(config).resolve(task, lead_role="scribe")
 
     assert route.role == role
     assert route.rule == rule

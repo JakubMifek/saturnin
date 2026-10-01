@@ -97,7 +97,6 @@ class Router:
                 precedent.get("route", {}),
                 precedent.get("id", "?"),
                 additional_roles=additional_roles,
-                lead_role=lead_role,
             )
             return self._with_required_collaborators(
                 task, route, additional_roles=additional_roles

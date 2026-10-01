@@ -1174,6 +1174,7 @@ class DedicatedSigner:
             else ""
         )
         evidence.update(
+            author_role="scribe" if is_notes_review else "github-user",
             review_profile=(
                 self.config.notes_review_profile if is_notes_review else ""
             ),
@@ -2141,7 +2142,7 @@ class DedicatedSigner:
             or not payload["author"].startswith("github:")
             or payload["author"] == "github:"
             or not payload["reviewer_identity"]
-            or payload["author_role"] != "github-user"
+            or payload["author_role"] not in {"github-user", "scribe"}
             or payload["verdict"] not in {
                 "approved", "changes_requested", "rejected"
             }
@@ -2177,6 +2178,8 @@ class DedicatedSigner:
         else:
             raise SystemAttestationError("attestation scope is invalid")
         is_notes_review = repository == self.config.notes_repository
+        if (payload["author_role"] == "scribe") != is_notes_review:
+            raise SystemAttestationError("attestation author role is invalid")
         expected_profile = (
             self.config.notes_review_profile if is_notes_review else ""
         )

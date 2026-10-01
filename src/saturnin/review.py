@@ -898,7 +898,14 @@ class ReviewLedger:
                 "review_checks": checks,
             }
             for field_name, supplied_value in supplied.items():
-                if payload[field_name] != supplied_value:
+                attested_value = (
+                    payload["author_role"]
+                    if field_name == "author"
+                    and payload.get("schema") == "saturnin-attestation-v2"
+                    and payload.get("author_role") == "scribe"
+                    else payload[field_name]
+                )
+                if attested_value != supplied_value:
                     raise ReviewError(
                         f"review attestation {field_name} does not match the record"
                     )
@@ -1201,7 +1208,14 @@ class ReviewLedger:
                 ),
             )
             for field_name in ATTESTED_FIELDS:
-                if verified_payload[field_name] != getattr(record, field_name):
+                attested_value = (
+                    verified_payload["author_role"]
+                    if field_name == "author"
+                    and verified_payload.get("schema") == "saturnin-attestation-v2"
+                    and verified_payload.get("author_role") == "scribe"
+                    else verified_payload[field_name]
+                )
+                if attested_value != getattr(record, field_name):
                     raise ReviewError(
                         f"review attestation {field_name} does not match the record"
                     )

@@ -53,6 +53,7 @@ from saturnin.review import (
     execution_scoped_review_attestation_key,
     role_scoped_review_attestation_key,
     sign_review_attestation,
+    notes_review_settings,
 )
 
 
@@ -464,6 +465,45 @@ def test_notes_authorization_requires_head_bound_review_and_delivery_evidence(
             tmp_path / "delivery.sqlite3",
             now=lambda: NOW,
         ).authorize(request())
+
+
+def test_protected_notes_attestation_records_scribe_role_and_identity(
+    tmp_path: Path, config, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    cfg = notes_service_config()
+    service = DedicatedSigner(
+        cfg,
+        GitHub(cfg, transport=pr_transport()),
+        b"c" * 48,
+        None,
+        tmp_path / "notes.sqlite3",
+        now=lambda: NOW,
+    )
+    attestation = service.authorize(request())
+    monkeypatch.setattr(
+        "saturnin.system_attestation.verify_attestation",
+        lambda value, **kwargs: service.verify(value, **kwargs),
+    )
+    config.policy("repos")["repos"]["notes"]["slug"] = "acme/widget"
+    settings = notes_review_settings(config)
+
+    record = ReviewLedger(config).record(
+        subject="acme/widget#7",
+        kind="pr",
+        author="scribe",
+        reviewer="pr-reviewer",
+        verdict="approved",
+        head_sha=HEAD,
+        destination_repo="acme/widget",
+        review_profile=settings["profile"],
+        review_method=settings["method"],
+        review_checks=settings["required_checks"],
+        attestation=attestation,
+    )
+
+    assert record.author == "scribe"
+    assert json.loads(record.attestation_payload)["author"] == "github:author"
+    assert ReviewLedger(config).for_subject("acme/widget#7", "pr") == [record]
 
 
 @pytest.mark.parametrize("change", [
