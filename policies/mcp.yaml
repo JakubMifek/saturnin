@@ -64,9 +64,14 @@ launcher:
       args:
         - --quiet
         - --foreground
+        - --config-net
         - --no-map-gw
         - --tcp-ports=none
         - --udp-ports=none
+        - --dns-forward
+        - 169.254.1.1
+        - --dns-host
+        - 127.0.0.53
     # The sandbox starts from an empty root. These host paths are the minimum
     # system runtime needed for executables, TLS, DNS and user lookup.
     read_only_paths:
@@ -74,6 +79,7 @@ launcher:
       - /lib
       - /lib64
       - /usr
+      - /opt/pipx/venvs/uv
       - /etc/alternatives
       - /etc/ssl/certs
       - /etc/ca-certificates
@@ -108,6 +114,6 @@ launcher:
     - --autopilot
     - --no-ask-user
     - --additional-mcp-config
-    - "{mcp_config}"
+    - "@{mcp_config}"
     - -p
     - "{prompt}"

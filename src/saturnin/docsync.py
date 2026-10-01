@@ -166,6 +166,40 @@ def _runtime_summary(config: Config) -> str:
     return _governance_documentation(config, "runtime_summary")
 
 
+def _server_prerequisites(config: Config) -> str:
+    filesystem = config.server_scope.get("filesystem", {})
+    requirements = filesystem.get("trusted_path_requirements", {})
+    checks = config.server_scope.get("prerequisite_checks", {})
+    lines = [
+        "| Executable | Additional resolved target roots | Target names | Script interpreters |",
+        "| --- | --- | --- | --- |",
+    ]
+    for name, definition in checks.items():
+        if definition.get("type") != "system-executable":
+            continue
+        roots = definition.get("target_roots", [])
+        targets = definition.get("target_names", [])
+        interpreters = definition.get("script_interpreters", [])
+        lines.append(
+            f"| `{name}` | {', '.join(f'`{root}`' for root in roots) or 'none'} | "
+            f"{', '.join(f'`{value}`' for value in targets) or 'none'} | "
+            f"{', '.join(f'`{value}`' for value in interpreters) or 'none'} |"
+        )
+    lines.extend(
+        [
+            "",
+            "Selected executables, resolved targets, and script interpreters must be "
+            f"owned by **{requirements.get('owner')}**; "
+            f"group-writable paths are **{'forbidden' if requirements.get('forbid_group_writable') else 'allowed'}** "
+            f"and world-writable paths are **{'forbidden' if requirements.get('forbid_world_writable') else 'allowed'}**.",
+            "Script interpreters are resolved from the fixed system path: "
+            + ", ".join(
+                f"`{path}`" for path in filesystem.get("trusted_system_path", [])
+            )
+            + ".",
+        ]
+    )
+    return "\n".join(lines)
 def _credential_admin(config: Config) -> dict[str, Any]:
     value = config.policy("server_scope").get("administrator_credential_recovery")
     if not isinstance(value, dict) or value.get("runtime_allowed") is not False:
@@ -400,6 +434,7 @@ GENERATORS: dict[str, Callable[[Config], str]] = {
     "rules-list": _rules_list,
     "capabilities": _capabilities_table,
     "runtime-summary": _runtime_summary,
+    "server-prerequisites": _server_prerequisites,
     "pr-review-flow": _pr_review_flow,
     "issue-review-flow": _issue_review_flow,
     "credential-admin-setup": _credential_admin_setup,

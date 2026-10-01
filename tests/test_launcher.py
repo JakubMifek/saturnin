@@ -4,6 +4,8 @@ import fcntl
 import hashlib
 import json
 import os
+import re
+import shutil
 import subprocess
 import sys
 import sysconfig
@@ -24,6 +26,10 @@ from saturnin.board import Board, utcnow
 from saturnin.checkpoints import Checkpoint, CheckpointStore
 from saturnin.cli import main
 from saturnin.config import Config
+from saturnin.launcher import AgentLauncher, LauncherError
+from saturnin.launcher_host import prerequisite_invocation
+from saturnin.governance import resolve_trusted_executable
+from saturnin.mcp import MCPError, StagedGithubBinary
 from saturnin.launcher import AgentLauncher, LauncherError, _SigningSession
 from saturnin.review import (
     ReviewLedger,
@@ -50,14 +56,44 @@ _REAL_PROCESS_START_TIME = AgentLauncher._process_start_time
 
 @pytest.fixture(autouse=True)
 def verified_github_mcp(monkeypatch: pytest.MonkeyPatch) -> None:
+    def fake_stage(config: Config, destination: Path) -> StagedGithubBinary:
+        destination.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+        destination.parent.chmod(0o700)
+        destination.write_text("synthetic MCP binary\n", encoding="utf-8")
+        destination.chmod(0o500)
+        descriptor = os.open(destination, os.O_RDONLY | os.O_CLOEXEC)
+        file_metadata = os.fstat(descriptor)
+        runtime_metadata = destination.parent.stat()
+        return StagedGithubBinary(
+            path=destination,
+            descriptor=descriptor,
+            device=file_metadata.st_dev,
+            inode=file_metadata.st_ino,
+            runtime_device=runtime_metadata.st_dev,
+            runtime_inode=runtime_metadata.st_ino,
+        )
+
     monkeypatch.setattr(
-        "saturnin.launcher.verify_github_binary",
-        lambda config: config.var_dir / "bin" / "github-mcp-server",
+        "saturnin.launcher.stage_github_binary",
+        fake_stage,
     )
     monkeypatch.setattr(
         AgentLauncher,
         "_process_start_time",
         staticmethod(lambda pid: 123456),
+    )
+    monkeypatch.setattr(
+        "saturnin.launcher.resolve_trusted_executable",
+        lambda config, path, **kwargs: (
+            Path(path) if "/" in path else Path("/usr/bin") / path
+        ),
+    )
+    monkeypatch.setattr(
+        "saturnin.launcher.prerequisite_invocation",
+        lambda _config, executable, arguments, _definition: (
+            [str(executable), *arguments],
+            "/usr/bin:/bin",
+        ),
     )
 
 
@@ -123,6 +159,125 @@ def test_launcher_starts_routed_role_with_filtered_mcp(
         (config.var_dir / "launches" / f"{task.id}.json").read_text()
     )
     assert metadata["process_start_time_ticks"] == 123456
+
+
+def test_mcp_scripts_launch_through_verified_interpreter(
+    config: Config,
+    board: Board,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    task = board.create("Implement MCP launch hardening")
+    Router(config).dispatch(board, task)
+    launcher = AgentLauncher(config, board)
+    contract = launcher._contract(board.get(task.id), config)
+    contract.front_matter["mcp"] = ["filesystem", "fetch"]
+    trusted_bin = tmp_path / "trusted-system"
+    trusted_bin.mkdir()
+    trusted_node = trusted_bin / "node"
+    trusted_node.write_text("#!/bin/sh\n", encoding="utf-8")
+    trusted_node.chmod(0o755)
+    wrapper = tmp_path / "npx-cli.js"
+    wrapper.write_text("#!/usr/bin/env node\n", encoding="utf-8")
+    wrapper.chmod(0o755)
+    ordinary = tmp_path / "uvx"
+    ordinary.write_bytes(b"\x7fELF")
+    ordinary.chmod(0o755)
+    shadow = tmp_path / "ambient"
+    shadow.mkdir()
+    attacker_node = shadow / "node"
+    attacker_node.write_text("#!/bin/sh\nexit 99\n", encoding="utf-8")
+    attacker_node.chmod(0o755)
+    monkeypatch.setenv("PATH", str(shadow))
+    monkeypatch.setattr(
+        "saturnin.launcher.resolve_trusted_executable",
+        lambda _config, _command, *, expected_binary: (
+            wrapper if expected_binary == "npx" else ordinary
+        ),
+    )
+    monkeypatch.setattr(
+        "saturnin.launcher.prerequisite_invocation",
+        prerequisite_invocation,
+    )
+    monkeypatch.setattr(
+        "saturnin.launcher_host._trusted_system_path",
+        lambda _filesystem: [trusted_bin],
+    )
+    monkeypatch.setattr(
+        "saturnin.launcher_host.shutil.which",
+        lambda _name, *, path: str(trusted_node),
+    )
+    monkeypatch.setattr(
+        "saturnin.launcher_host._trusted_system_path_problem",
+        lambda *_args: None,
+    )
+    monkeypatch.setattr(launcher, "_sandbox_visible_executable", lambda *_args: True)
+
+    mcp_launch = launcher._write_mcp_config(board.get(task.id), contract)
+    generated = json.loads(mcp_launch.path.read_text(encoding="utf-8"))["mcpServers"]
+
+    filesystem = generated["filesystem"]
+    assert filesystem["command"] == str(trusted_node)
+    assert filesystem["args"][0] == str(wrapper)
+    assert str(attacker_node) not in (filesystem["command"], *filesystem["args"])
+    fetch = generated["fetch"]
+    assert fetch["command"] == str(ordinary)
+    assert fetch["args"] == ["mcp-server-fetch@2026.8.18"]
+
+
+
+
+def test_launcher_rejects_required_executables_from_worktree_path(
+    config: Config,
+    board: Board,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    worktree_bin = tmp_path / "worktree" / "bin"
+    worktree_bin.mkdir(parents=True)
+    for name in ("bwrap", "pasta", "copilot"):
+        path = worktree_bin / name
+        path.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+        path.chmod(0o755)
+    system_executable = shutil.which("true", path="/usr/bin:/bin")
+    assert system_executable is not None
+    monkeypatch.setattr(
+        "saturnin.launcher.shutil.which",
+        lambda name: str(worktree_bin / name),
+    )
+    monkeypatch.setattr(
+        "saturnin.launcher.resolve_trusted_executable",
+        resolve_trusted_executable,
+    )
+    launcher = AgentLauncher(config, board)
+
+    with pytest.raises(LauncherError, match="untrusted copilot executable"):
+        launcher._launcher_executable()
+    with pytest.raises(LauncherError, match="untrusted bwrap executable"):
+        launcher._sandbox_executable()
+    with pytest.raises(LauncherError, match="untrusted pasta executable"):
+        launcher._network_sandbox_executable()
+
+    config.server_scope["filesystem"]["trusted_executable_roots"].append(
+        str(worktree_bin)
+    )
+    with pytest.raises(LauncherError, match="must be owned by root"):
+        launcher._launcher_executable()
+
+    monkeypatch.setattr(
+        "saturnin.launcher.shutil.which",
+        lambda name: system_executable,
+    )
+    with pytest.raises(LauncherError, match="basename 'true'.*'copilot'"):
+        launcher._launcher_executable()
+    with pytest.raises(LauncherError, match="basename 'true'.*'bwrap'"):
+        launcher._sandbox_executable()
+    with pytest.raises(LauncherError, match="basename 'true'.*'pasta'"):
+        launcher._network_sandbox_executable()
+    assert launcher._sandbox_visible_executable(Path("/usr/bin/npx"), config)
+    assert launcher._sandbox_visible_executable(
+        Path("/opt/pipx/venvs/uv/bin/uvx"), config
+    )
 
 
 def test_launcher_relaunches_only_deferred_in_progress_task(
@@ -292,17 +447,22 @@ def test_worker_command_uses_mandatory_os_sandbox(
         mcp_config=mcp_config,
     )
 
-    assert command[:8] == [
+    assert command[:13] == [
         "/usr/bin/pasta",
         "--quiet",
         "--foreground",
+        "--config-net",
         "--no-map-gw",
         "--tcp-ports=none",
         "--udp-ports=none",
+        "--dns-forward",
+        "169.254.1.1",
+        "--dns-host",
+        "127.0.0.53",
         "--",
         "/usr/bin/bwrap",
     ]
-    assert command[8:11] == ["--unshare-all", "--share-net", "--new-session"]
+    assert command[13:16] == ["--unshare-all", "--share-net", "--new-session"]
     assert ["--tmpfs", "/"] == command[
         command.index("--tmpfs"):command.index("--tmpfs") + 2
     ]
@@ -2878,6 +3038,74 @@ def test_launcher_terminates_and_rolls_back_when_metadata_persistence_fails(
     assert not (config.var_dir / "launches" / f"{task.id}.json").exists()
 
 
+def test_launcher_blocks_relaunch_when_failed_worker_cannot_be_terminated(
+    config: Config, board: Board, git_repo: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    config.policy("mcp")["launcher"]["enabled"] = True
+    task = board.create("Retain an unreaped launch claim")
+    Router(config).dispatch(board, task)
+    worktree = WorktreeManager(config, repo=git_repo, board=board).create(
+        "feature/unreaped-launch"
+    )
+    with board.edit(task.id) as stored:
+        stored.branch = "feature/unreaped-launch"
+        stored.worktree = str(worktree.path)
+    monkeypatch.setattr("saturnin.launcher.shutil.which", lambda _: "/usr/bin/copilot")
+    real_popen = subprocess.Popen
+
+    class UnreapedProcess:
+        pid = 4242
+
+        def wait(self, timeout=None):
+            raise subprocess.TimeoutExpired("copilot", timeout)
+
+        def terminate(self):
+            return None
+
+        def kill(self):
+            raise OSError("kill denied")
+
+    process = UnreapedProcess()
+    monkeypatch.setattr(
+        "saturnin.launcher.subprocess.Popen",
+        lambda command, **kwargs: (
+            real_popen(command, **kwargs) if command[0] == "git" else process
+        ),
+    )
+    failed_once = False
+
+    def fail_metadata_once(
+        path: Path,
+        text: str,
+        *,
+        mode: int | None = None,
+    ) -> None:
+        nonlocal failed_once
+        path.write_text(text, encoding="utf-8")
+        if mode is not None:
+            path.chmod(mode)
+        if path.name == f"{task.id}.json" and not failed_once:
+            failed_once = True
+            raise OSError("metadata fsync failed")
+
+    monkeypatch.setattr("saturnin.launcher.atomic_replace_text", fail_metadata_once)
+
+    with pytest.raises(LauncherError, match="kill denied"):
+        AgentLauncher(config, board).launch(task.id)
+
+    metadata_path = config.var_dir / "launches" / f"{task.id}.json"
+    metadata = json.loads(metadata_path.read_text(encoding="utf-8"))
+    assert metadata["recovery_pending"] is True
+    assert metadata["pid"] == process.pid
+    assert board.get(task.id).state == "in_progress"
+    assert (config.var_dir / "launches" / f"{task.id}.mcp.json").exists()
+
+    with pytest.raises(
+        LauncherError, match="already has an active or unrecoverable launch"
+    ):
+        AgentLauncher(config, board).launch(task.id)
+
+
 def test_launcher_terminates_without_illegal_partial_board_rollback(
     config: Config, board: Board, git_repo: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -3550,6 +3778,13 @@ def test_reconcile_exited_launch_keeps_legal_task_state(
     board.transition(board.get(task.id), "in_progress")
     launch_file = config.var_dir / "launches" / f"{task.id}.json"
     launch_file.parent.mkdir(parents=True, exist_ok=True)
+    runtime = launch_file.parent / f"{task.id}.runtime-{'a' * 32}"
+    runtime.mkdir(mode=0o700)
+    staged = runtime / "github-mcp-server"
+    staged.write_text("verified\n", encoding="utf-8")
+    staged.chmod(0o500)
+    runtime_metadata = runtime.stat()
+    staged_metadata = staged.stat()
     mcp_file = config.var_dir / "launches" / f"{task.id}.mcp.json"
     mcp_file.write_text(
         '{"mcpServers":{"github":{"env":{"GITHUB_PERSONAL_ACCESS_TOKEN":"runtime"}}}}',
@@ -3567,6 +3802,14 @@ def test_reconcile_exited_launch_keeps_legal_task_state(
                 "cwd": str(config.root),
                 "mcp_config": str(mcp_file),
                 "log": str(config.var_dir / "launches" / f"{task.id}.log"),
+                "github_runtime": {
+                    "directory": str(runtime),
+                    "directory_device": runtime_metadata.st_dev,
+                    "directory_inode": runtime_metadata.st_ino,
+                    "file": staged.name,
+                    "file_device": staged_metadata.st_dev,
+                    "file_inode": staged_metadata.st_ino,
+                },
             }
         ),
         encoding="utf-8",
@@ -3588,6 +3831,7 @@ def test_reconcile_exited_launch_keeps_legal_task_state(
     )
     assert restored.history[-1]["event"] == "agent:launch_failed"
     assert not launch_file.exists()
+    assert not runtime.exists()
     assert not mcp_file.exists()
 
 
@@ -3874,7 +4118,7 @@ def test_launcher_worker_environment_never_exposes_github_token(
         contract,
         config=worker_config,
         worktree_scope=worktree.path,
-    )
+    ).path
     mcp = json.loads(mcp_path.read_text(encoding="utf-8"))
     assert mcp_path.stat().st_mode & 0o777 == 0o600
     assert "github" not in mcp["mcpServers"]
@@ -3921,7 +4165,7 @@ def test_launcher_reads_systemd_credentials_without_exposing_master_to_worker(
         contract,
         config=worker_config,
         worktree_scope=worktree.path,
-    )
+    ).path
     mcp = json.loads(mcp_path.read_text(encoding="utf-8"))
 
     assert "SATURNIN_REVIEW_ATTESTATION_KEY" not in environment
@@ -4341,6 +4585,8 @@ def test_launcher_keeps_large_verified_issue_body_out_of_prompt(
     assert staged_payload["body"] == body
 
 
+
+
 def test_launcher_rejects_branch_local_github_replacement(
     config: Config, board: Board, git_repo: Path
 ) -> None:
@@ -4433,3 +4679,20 @@ def test_launcher_policy_always_comes_from_canonical_checkout(
 def test_root_mcp_config_has_no_blanket_grants() -> None:
     config = json.loads((Path(__file__).parents[1] / ".mcp.json").read_text())
     assert config["mcpServers"] == {}
+
+
+def test_copilot_mcp_config_is_passed_as_a_file_reference(
+    config: Config,
+    board: Board,
+) -> None:
+    launcher = AgentLauncher(config, board)
+    mcp_config = config.var_dir / "launches" / "task.mcp.json"
+
+    args = launcher._agent_args(
+        prompt="Inspect the repository",
+        mcp_config=mcp_config,
+        task_id="T-1",
+    )
+
+    option = args.index("--additional-mcp-config")
+    assert args[option + 1] == f"@{mcp_config}"
