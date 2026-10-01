@@ -13,6 +13,7 @@ import threading
 import urllib.error
 import urllib.request
 from concurrent.futures import ThreadPoolExecutor
+from dataclasses import replace
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
@@ -104,7 +105,9 @@ def notes_service_config() -> ServiceConfig:
             "duplication",
             "factual_integrity",
             "links",
+            "retrievability",
         ),
+        notes_writer_logins=frozenset({"author"}),
     )
 
 
@@ -322,6 +325,7 @@ def test_notes_review_contract_is_derived_and_signed_by_protected_service(
         "duplication",
         "factual_integrity",
         "links",
+        "retrievability",
     ]
     assert service.verify(attestation) == {
         "status": "verified",
@@ -354,6 +358,23 @@ def test_notes_review_contract_tampering_is_rejected(
 
     with pytest.raises(SystemAttestationError):
         service.verify(json.dumps(payload))
+
+
+def test_notes_authorization_fails_without_provisioned_scribe_identity(
+    tmp_path: Path,
+) -> None:
+    cfg = replace(notes_service_config(), notes_writer_logins=frozenset())
+    service = DedicatedSigner(
+        cfg,
+        GitHub(cfg, transport=pr_transport()),
+        b"c" * 48,
+        None,
+        tmp_path / "notes.sqlite3",
+        now=lambda: NOW,
+    )
+
+    with pytest.raises(SystemAttestationError, match="scribe identity"):
+        service.authorize(request())
 
 
 @pytest.mark.parametrize("change", [
@@ -470,9 +491,48 @@ def test_fresh_gate_decision_binds_live_review_head_base_checks_and_nonce(
     assert result["review_id"] == 91
     assert result["review_state"] == "approved"
     assert result["check_runs"] == ["test:501"]
+    assert result["review_profile"] == ""
+    assert result["review_method"] == ""
+    assert result["review_checks"] == []
     assert result["nonce"] == "d" * 64
     assert result["expires_at"] == "2026-09-28T00:01:00+00:00"
     assert len(result["signature"]) == 64
+
+
+def test_notes_gate_binds_contract_and_requires_provisioned_scribe(
+    tmp_path: Path,
+) -> None:
+    cfg = notes_service_config()
+    service = DedicatedSigner(
+        cfg,
+        GitHub(cfg, token="protected", transport=action_transport()),
+        b"c" * 48,
+        None,
+        tmp_path / "notes-action.sqlite3",
+        now=lambda: NOW,
+    )
+
+    result = service.action(action_request())
+    assert result["review_profile"] == "notes-review"
+    assert result["review_method"] == "rubber-duck"
+    assert result["review_checks"] == [
+        "canonical_structure",
+        "duplication",
+        "factual_integrity",
+        "links",
+        "retrievability",
+    ]
+
+    blocked = DedicatedSigner(
+        replace(cfg, notes_writer_logins=frozenset()),
+        GitHub(cfg, token="protected", transport=action_transport()),
+        b"c" * 48,
+        None,
+        tmp_path / "notes-blocked.sqlite3",
+        now=lambda: NOW,
+    )
+    with pytest.raises(SystemAttestationError, match="scribe identity"):
+        blocked.action(action_request(nonce="e" * 64))
 
 
 @pytest.mark.parametrize(
@@ -2707,6 +2767,9 @@ def test_socket_client_checks_peer_and_response_schema(
         "review_id": 91,
         "review_state": "approved",
         "check_runs": ["test:501"],
+        "review_profile": "",
+        "review_method": "",
+        "review_checks": [],
         "protected_actor": "saturnin-merge-bot",
         "protection_hash": "e" * 64,
         "expires_at": "2099-01-01T00:00:00+00:00",

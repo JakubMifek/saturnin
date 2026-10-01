@@ -34,6 +34,7 @@ from saturnin.review import (
 SELF_REPO = "JakubMifek/saturnin"
 OTHER_REPO = "JakubMifek/some-project"
 TEST_HEAD_SHA = "a" * 40
+REPO_ROOT = Path(__file__).resolve().parents[1]
 
 
 def execution_attestation(config: Config, **kwargs) -> str:
@@ -134,6 +135,28 @@ def test_private_notes_review_reference_must_resolve(config: Config) -> None:
 
     assert any(
         "policy reference is invalid" in problem
+        for problem in Governance(config).audit()
+    )
+
+
+def test_protected_signer_notes_contract_must_match_policy(
+    config: Config,
+) -> None:
+    target = config.root / "config" / "attestation.json"
+    target.parent.mkdir()
+    shutil.copy(REPO_ROOT / "config" / "attestation.json", target)
+
+    assert not any(
+        "protected signer notes policy" in problem
+        for problem in Governance(config).audit()
+    )
+
+    data = json.loads(target.read_text(encoding="utf-8"))
+    data["notes_review_checks"].remove("retrievability")
+    target.write_text(json.dumps(data), encoding="utf-8")
+
+    assert any(
+        "protected signer notes policy differs" in problem
         for problem in Governance(config).audit()
     )
 

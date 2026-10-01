@@ -24,7 +24,12 @@ from typing import Any, Iterable, Sequence
 from urllib.parse import urlsplit
 
 from .config import Config, ConfigError, default_config
-from .review import ReviewError, ReviewRecord, notes_review_settings
+from .review import (
+    ReviewError,
+    ReviewRecord,
+    normalize_repository_slug,
+    notes_review_settings,
+)
 
 _MAX_COMMAND_DEPTH = 8
 _WRAPPERS = {"env", "nice", "ionice", "stdbuf", "timeout", "exec", "command"}
@@ -918,6 +923,39 @@ class Governance:
             isinstance(check, str) and check.strip() for check in required_checks
         ):
             problems.append("private notes review requires non-empty integrity checks")
+        signer_config = self.config.root / "config" / "attestation.json"
+        if signer_config.is_file():
+            from .system_attestation import ServiceConfig, SystemAttestationError
+
+            try:
+                protected = ServiceConfig.load(signer_config)
+                notes_slug = normalize_repository_slug(
+                    str(
+                        self.config.policy("repos")
+                        .get("repos", {})
+                        .get("notes", {})
+                        .get("slug", "")
+                    )
+                )
+            except (SystemAttestationError, ValueError) as exc:
+                problems.append(
+                    f"protected signer notes policy is invalid: {exc}"
+                )
+            else:
+                if (
+                    protected.notes_repository != notes_slug
+                    or notes_slug not in protected.repositories
+                    or protected.notes_review_profile
+                    != str(notes_review.get("profile", ""))
+                    or protected.notes_review_method
+                    != str(notes_review.get("method", ""))
+                    or protected.notes_review_checks
+                    != tuple(sorted(str(check) for check in required_checks))
+                ):
+                    problems.append(
+                        "protected signer notes policy differs from the canonical "
+                        "repository review contract"
+                    )
         notes_reviewers = notes_review.get("allowed_reviewer_roles", [])
         if not isinstance(notes_reviewers, list) or not notes_reviewers or not all(
             isinstance(role, str) and role.strip() for role in notes_reviewers

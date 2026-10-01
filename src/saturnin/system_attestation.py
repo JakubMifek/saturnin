@@ -396,6 +396,7 @@ class ServiceConfig:
     notes_review_profile: str = ""
     notes_review_method: str = ""
     notes_review_checks: tuple[str, ...] = ()
+    notes_writer_logins: frozenset[str] = frozenset()
 
     @classmethod
     def load(cls, path: Path = CONFIG_PATH) -> "ServiceConfig":
@@ -415,6 +416,7 @@ class ServiceConfig:
             "notes_review_profile",
             "notes_review_method",
             "notes_review_checks",
+            "notes_writer_logins",
         }:
             raise SystemAttestationError("service configuration schema is invalid")
         api = raw.get("github_api", "https://api.github.com")
@@ -467,6 +469,7 @@ class ServiceConfig:
         notes_profile = str(raw.get("notes_review_profile", ""))
         notes_method = str(raw.get("notes_review_method", ""))
         notes_checks = raw.get("notes_review_checks", [])
+        notes_writers = raw.get("notes_writer_logins", [])
         notes_values = (notes_repository, notes_profile, notes_method)
         if (
             not isinstance(base_refs, list)
@@ -489,6 +492,7 @@ class ServiceConfig:
             or publisher_actor in pr_reviewers
             or publisher_actor in issue_reviewers
             or not isinstance(notes_checks, list)
+            or not isinstance(notes_writers, list)
             or any(
                 not isinstance(value, str)
                 or not re.fullmatch(r"[A-Za-z0-9_-]{1,64}", value)
@@ -496,6 +500,15 @@ class ServiceConfig:
                 if value
             )
             or len(notes_checks) != len(set(notes_checks))
+            or any(
+                not isinstance(login, str)
+                or not re.fullmatch(
+                    r"[A-Za-z0-9](?:[A-Za-z0-9-]{0,37})", login,
+                )
+                for login in notes_writers
+            )
+            or len({login.casefold() for login in notes_writers})
+            != len(notes_writers)
             or (any(notes_values) or notes_checks)
             and (
                 not all(notes_values)
@@ -520,6 +533,9 @@ class ServiceConfig:
             notes_review_profile=notes_profile,
             notes_review_method=notes_method,
             notes_review_checks=tuple(sorted(notes_checks)),
+            notes_writer_logins=frozenset(
+                login.casefold() for login in notes_writers
+            ),
         )
 
 
@@ -1110,6 +1126,12 @@ class DedicatedSigner:
             request["kind"] == "pr"
             and repository == self.config.notes_repository
         )
+        if is_notes_review and evidence["author"].removeprefix(
+            "github:"
+        ).casefold() not in self.config.notes_writer_logins:
+            raise SystemAttestationError(
+                "notes author is not an authorized scribe identity"
+            )
         evidence.update(
             review_profile=(
                 self.config.notes_review_profile if is_notes_review else ""
@@ -1831,6 +1853,13 @@ class DedicatedSigner:
         evidence = self._pr(repo, number, _subject(repo, number), destination)
         if evidence["head_sha"] != expected_head:
             raise SystemAttestationError("pull request head changed")
+        is_notes_review = repo == self.config.notes_repository
+        if is_notes_review and evidence["author"].removeprefix(
+            "github:"
+        ).casefold() not in self.config.notes_writer_logins:
+            raise SystemAttestationError(
+                "notes author is not an authorized scribe identity"
+            )
         pull = self.github.get(f"/repos/{repo}/pulls/{number}")
         snapshot = self._pull_snapshot(
             pull, repo, number, destination, expected_head
@@ -1924,6 +1953,15 @@ class DedicatedSigner:
             "review_state": evidence["verdict"],
             "check_runs": sorted(
                 f"{value['name']}:{value['id']}" for value in accepted
+            ),
+            "review_profile": (
+                self.config.notes_review_profile if is_notes_review else ""
+            ),
+            "review_method": (
+                self.config.notes_review_method if is_notes_review else ""
+            ),
+            "review_checks": (
+                list(self.config.notes_review_checks) if is_notes_review else []
             ),
             "protected_actor": actor,
             "protection_hash": hashlib.sha256(_canonical(protection)).hexdigest(),
@@ -2365,6 +2403,7 @@ def request_action(
         "expected_head", "merge_method", "nonce", "head_sha", "base_ref",
         "base_sha",
         "reviewer_identity", "review_id", "review_state", "check_runs",
+        "review_profile", "review_method", "review_checks",
         "expires_at", "signature",
     }
     if not isinstance(response, dict) or not required <= set(response):
@@ -2379,6 +2418,13 @@ def request_action(
         or response["head_sha"] != expected_head.casefold()
         or response["merge_method"] != merge_method
         or response["nonce"] != action_nonce
+        or not isinstance(response["review_profile"], str)
+        or not isinstance(response["review_method"], str)
+        or not isinstance(response["review_checks"], list)
+        or any(
+            not isinstance(check, str) or not check.strip()
+            for check in response["review_checks"]
+        )
         or _iso(response["expires_at"]) <= datetime.now(timezone.utc)
     ):
         raise SystemAttestationError("protected signer denied the action")

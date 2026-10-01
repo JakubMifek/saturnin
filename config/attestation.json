@@ -21,6 +21,8 @@
     "canonical_structure",
     "duplication",
     "factual_integrity",
-    "links"
-  ]
+    "links",
+    "retrievability"
+  ],
+  "notes_writer_logins": []
 }

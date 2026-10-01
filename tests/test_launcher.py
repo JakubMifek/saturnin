@@ -2400,6 +2400,12 @@ def test_trusted_push_callback_delivers_exact_isolated_commit(
             if entry.get("callback_id") != queued["callback_id"]
         ]
 
+    config.policy("repos")["repos"]["notes"]["slug"] = "JakubMifek/saturnin"
+    with pytest.raises(WorkerCallbackError, match="may not deliver commits"):
+        apply_queued(config, board, task_id=task.id, callback_dir=str(callback_dir))
+    with board.edit(task.id) as stored:
+        stored.role = "scribe"
+
     apply_queued(config, board, task_id=task.id, callback_dir=str(callback_dir))
 
     remote_head = subprocess.run(
