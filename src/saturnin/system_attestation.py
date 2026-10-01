@@ -57,7 +57,8 @@ _ATTESTATION_FIELDS = {
     "schema", "kind", "repository", "subject", "author", "author_role",
     "reviewer", "reviewer_identity", "verdict", "zero_context", "head_sha",
     "issue_digest", "destination_repo", "authorization_evidence_id", "nonce",
-    "expires_at", "attestation_id", "key_id", "signature",
+    "expires_at", "review_profile", "review_method", "review_checks",
+    "attestation_id", "key_id", "signature",
 }
 _LEGACY_ATTESTED_FIELDS = {
     "subject", "kind", "author", "reviewer", "verdict", "zero_context",
@@ -391,6 +392,10 @@ class ServiceConfig:
     action_ttl_seconds: int = 60
     protected_actor_login: str = "saturnin-merge-bot"
     publisher_actor_login: str = "saturnin-issue-publisher[bot]"
+    notes_repository: str = ""
+    notes_review_profile: str = ""
+    notes_review_method: str = ""
+    notes_review_checks: tuple[str, ...] = ()
 
     @classmethod
     def load(cls, path: Path = CONFIG_PATH) -> "ServiceConfig":
@@ -406,6 +411,10 @@ class ServiceConfig:
             "protected_actor_login",
             "publisher_actor_login",
             "issue_destinations",
+            "notes_repository",
+            "notes_review_profile",
+            "notes_review_method",
+            "notes_review_checks",
         }:
             raise SystemAttestationError("service configuration schema is invalid")
         api = raw.get("github_api", "https://api.github.com")
@@ -452,6 +461,13 @@ class ServiceConfig:
         publisher_actor = str(
             raw.get("publisher_actor_login", "saturnin-issue-publisher[bot]")
         ).casefold()
+        notes_repository = (
+            _repo(raw["notes_repository"]) if raw.get("notes_repository") else ""
+        )
+        notes_profile = str(raw.get("notes_review_profile", ""))
+        notes_method = str(raw.get("notes_review_method", ""))
+        notes_checks = raw.get("notes_review_checks", [])
+        notes_values = (notes_repository, notes_profile, notes_method)
         if (
             not isinstance(base_refs, list)
             or not isinstance(check_runs, list)
@@ -472,6 +488,20 @@ class ServiceConfig:
             )
             or publisher_actor in pr_reviewers
             or publisher_actor in issue_reviewers
+            or not isinstance(notes_checks, list)
+            or any(
+                not isinstance(value, str)
+                or not re.fullmatch(r"[A-Za-z0-9_-]{1,64}", value)
+                for value in [notes_profile, notes_method, *notes_checks]
+                if value
+            )
+            or len(notes_checks) != len(set(notes_checks))
+            or (any(notes_values) or notes_checks)
+            and (
+                not all(notes_values)
+                or not notes_checks
+                or notes_repository not in repositories
+            )
         ):
             raise SystemAttestationError("protected action policy is invalid")
         return cls(
@@ -486,6 +516,10 @@ class ServiceConfig:
             action_ttl_seconds=action_ttl,
             protected_actor_login=protected_actor,
             publisher_actor_login=publisher_actor,
+            notes_repository=notes_repository,
+            notes_review_profile=notes_profile,
+            notes_review_method=notes_method,
+            notes_review_checks=tuple(sorted(notes_checks)),
         )
 
 
@@ -1072,6 +1106,21 @@ class DedicatedSigner:
             evidence = self._issue(repository, number, subject, destination)
         else:
             raise SystemAttestationError("review kind is invalid")
+        is_notes_review = (
+            request["kind"] == "pr"
+            and repository == self.config.notes_repository
+        )
+        evidence.update(
+            review_profile=(
+                self.config.notes_review_profile if is_notes_review else ""
+            ),
+            review_method=(
+                self.config.notes_review_method if is_notes_review else ""
+            ),
+            review_checks=(
+                list(self.config.notes_review_checks) if is_notes_review else []
+            ),
+        )
         authorization_current = bool(evidence.pop("_authorization_current", True))
         evidence.pop("_approved_labels", None)
         scope_hash = hashlib.sha256(_canonical(evidence)).hexdigest()
@@ -1948,12 +1997,19 @@ class DedicatedSigner:
         for destination in sorted(self.config.issue_destinations):
             self._publisher(destination)
 
-    @staticmethod
-    def _v2_unsigned(payload: dict[str, Any]) -> dict[str, Any]:
-        string_fields = _ATTESTATION_FIELDS - {"zero_context"}
+    def _v2_unsigned(self, payload: dict[str, Any]) -> dict[str, Any]:
+        string_fields = _ATTESTATION_FIELDS - {
+            "zero_context", "review_checks",
+        }
         if (
             type(payload["zero_context"]) is not bool
             or any(not isinstance(payload[field], str) for field in string_fields)
+            or not isinstance(payload["review_checks"], list)
+            or any(
+                not isinstance(check, str) or not check.strip()
+                for check in payload["review_checks"]
+            )
+            or len(payload["review_checks"]) != len(set(payload["review_checks"]))
             or payload["schema"] != "saturnin-attestation-v2"
         ):
             raise SystemAttestationError("attestation types are invalid")
@@ -1999,6 +2055,20 @@ class DedicatedSigner:
                 raise SystemAttestationError("attestation scope is invalid")
         else:
             raise SystemAttestationError("attestation scope is invalid")
+        is_notes_review = repository == self.config.notes_repository
+        expected_profile = (
+            self.config.notes_review_profile if is_notes_review else ""
+        )
+        expected_method = self.config.notes_review_method if is_notes_review else ""
+        expected_checks = (
+            list(self.config.notes_review_checks) if is_notes_review else []
+        )
+        if (
+            payload["review_profile"] != expected_profile
+            or payload["review_method"] != expected_method
+            or payload["review_checks"] != expected_checks
+        ):
+            raise SystemAttestationError("attestation review profile is invalid")
         return {key: value for key, value in payload.items() if key != "signature"}
 
     @staticmethod

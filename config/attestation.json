@@ -1,5 +1,5 @@
 {
-  "repositories": ["jakubmifek/saturnin"],
+  "repositories": ["jakubmifek/saturnin", "jakubmifek/saturnin-notes"],
   "issue_destinations": ["jakubmifek/saturnin-ops"],
   "pr_reviewers": ["copilot-pull-request-reviewer[bot]"],
   "issue_reviewers": ["saturnin-issue-reviewer[bot]"],
@@ -13,5 +13,14 @@
   "required_check_runs": ["test"],
   "action_ttl_seconds": 60,
   "protected_actor_login": "saturnin-merge-bot",
-  "publisher_actor_login": "saturnin-issue-publisher[bot]"
+  "publisher_actor_login": "saturnin-issue-publisher[bot]",
+  "notes_repository": "jakubmifek/saturnin-notes",
+  "notes_review_profile": "notes-review",
+  "notes_review_method": "rubber-duck",
+  "notes_review_checks": [
+    "canonical_structure",
+    "duplication",
+    "factual_integrity",
+    "links"
+  ]
 }

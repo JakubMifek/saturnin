@@ -473,7 +473,7 @@ def _verify_review_attestation(
     legacy_shape = not any(field in payload for field in OPTIONAL_PROFILE_FIELDS)
     signed_fields = (
         LEGACY_ATTESTED_FIELDS
-        if is_v2 or legacy_shape
+        if legacy_shape
         else ATTESTED_FIELDS
     )
     required = {*signed_fields, "attestation_id", "signature"}
@@ -897,11 +897,7 @@ class ReviewLedger:
                 "review_checks": checks,
             }
             for field_name, supplied_value in supplied.items():
-                payload_value = payload.get(
-                    field_name,
-                    supplied_value if field_name in OPTIONAL_PROFILE_FIELDS else None,
-                )
-                if payload_value != supplied_value:
+                if payload[field_name] != supplied_value:
                     raise ReviewError(
                         f"review attestation {field_name} does not match the record"
                     )
@@ -1204,15 +1200,7 @@ class ReviewLedger:
                 ),
             )
             for field_name in ATTESTED_FIELDS:
-                verified_value = verified_payload.get(
-                    field_name,
-                    (
-                        getattr(record, field_name)
-                        if field_name in OPTIONAL_PROFILE_FIELDS
-                        else None
-                    ),
-                )
-                if verified_value != getattr(record, field_name):
+                if verified_payload[field_name] != getattr(record, field_name):
                     raise ReviewError(
                         f"review attestation {field_name} does not match the record"
                     )

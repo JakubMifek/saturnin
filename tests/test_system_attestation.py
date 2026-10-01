@@ -90,6 +90,24 @@ def service_config() -> ServiceConfig:
     )
 
 
+def notes_service_config() -> ServiceConfig:
+    return ServiceConfig(
+        frozenset({"acme/widget"}),
+        frozenset({"review-bot"}),
+        frozenset({"review-bot"}),
+        frozenset({"approved"}),
+        notes_repository="acme/widget",
+        notes_review_profile="notes-review",
+        notes_review_method="rubber-duck",
+        notes_review_checks=(
+            "canonical_structure",
+            "duplication",
+            "factual_integrity",
+            "links",
+        ),
+    )
+
+
 def pr_transport(*, state: str = "APPROVED", head: str = HEAD):
     def get(path: str):
         if path == "/user":
@@ -279,6 +297,63 @@ def test_same_uid_direct_request_only_signs_live_github_approval(tmp_path: Path)
         signer(tmp_path / "unapproved", pr_transport(state="CHANGES_REQUESTED")).authorize(
             request()
         )
+
+
+def test_notes_review_contract_is_derived_and_signed_by_protected_service(
+    tmp_path: Path,
+) -> None:
+    cfg = notes_service_config()
+    service = DedicatedSigner(
+        cfg,
+        GitHub(cfg, transport=pr_transport()),
+        b"c" * 48,
+        b"p" * 48,
+        tmp_path / "notes.sqlite3",
+        now=lambda: NOW,
+    )
+
+    attestation = service.authorize(request())
+    payload = json.loads(attestation)
+
+    assert payload["review_profile"] == "notes-review"
+    assert payload["review_method"] == "rubber-duck"
+    assert payload["review_checks"] == [
+        "canonical_structure",
+        "duplication",
+        "factual_integrity",
+        "links",
+    ]
+    assert service.verify(attestation) == {
+        "status": "verified",
+        "key_state": "current",
+    }
+
+
+@pytest.mark.parametrize(
+    ("field", "value"),
+    [
+        ("review_profile", ""),
+        ("review_method", "ordinary"),
+        ("review_checks", ["factual_integrity"]),
+    ],
+)
+def test_notes_review_contract_tampering_is_rejected(
+    tmp_path: Path, field: str, value: object,
+) -> None:
+    cfg = notes_service_config()
+    service = DedicatedSigner(
+        cfg,
+        GitHub(cfg, transport=pr_transport()),
+        b"c" * 48,
+        b"p" * 48,
+        tmp_path / "notes.sqlite3",
+        now=lambda: NOW,
+    )
+    payload = json.loads(service.authorize(request()))
+    payload[field] = value
+
+    with pytest.raises(SystemAttestationError):
+        service.verify(json.dumps(payload))
 
 
 @pytest.mark.parametrize("change", [
