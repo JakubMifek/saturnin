@@ -349,6 +349,21 @@ class AgentLauncher:
                             actor="launcher",
                             reason=reason,
                         )
+                    elif failure_cleanup_problem and metadata is not None:
+                        reason = f"{reason}; {failure_cleanup_problem}"
+                        metadata["recovery_pending"] = True
+                        metadata["recovery_reason"] = reason
+                        atomic_replace_text(
+                            metadata_path, json.dumps(metadata, indent=2) + "\n"
+                        )
+                        stored.log(
+                            "agent:launch_recovery_pending",
+                            actor="launcher",
+                            reason=reason,
+                        )
+                        launch_error = LauncherError(
+                            f"agent launcher failed for task {task.id}: {reason}"
+                        )
                     else:
                         cleanup_problem = self._cleanup_mcp_launch(mcp_launch, claimed.id)
                         if cleanup_problem:
@@ -389,11 +404,26 @@ class AgentLauncher:
             if completed_during_grace:
                 completed_persistence_problem = reason
             else:
+                if termination_problem:
+                    reason = f"{reason}; {termination_problem}"
+                    if metadata is not None:
+                        metadata["recovery_pending"] = True
+                        metadata["recovery_reason"] = reason
+                        try:
+                            atomic_replace_text(
+                                metadata_path, json.dumps(metadata, indent=2) + "\n"
+                            )
+                        except OSError as recovery_exc:
+                            reason = (
+                                f"{reason}; could not persist recovery metadata: "
+                                f"{recovery_exc}"
+                            )
+                    raise LauncherError(
+                        f"agent launcher failed for task {task.id}: {reason}"
+                    ) from exc
                 cleanup_problem = self._cleanup_mcp_launch(mcp_launch, task.id)
                 if cleanup_problem:
                     reason = f"{reason}; {cleanup_problem}"
-                if termination_problem:
-                    reason = f"{reason}; {termination_problem}"
                 restored = self._restore_launch_claim(
                     task.id,
                     previous_state=previous_state,
@@ -416,12 +446,13 @@ class AgentLauncher:
                     f"agent launcher failed for task {task.id}: {reason}"
                 ) from exc
         if launch_error is not None:
-            self._cancel_signing_session(signing_session)
-            mcp_removal_problem = self._remove_mcp_config(mcp_path)
-            if mcp_removal_problem:
-                raise LauncherError(
-                    f"{launch_error}; {mcp_removal_problem}"
-                ) from launch_error
+            if not failure_cleanup_problem:
+                self._cancel_signing_session(signing_session)
+                mcp_removal_problem = self._remove_mcp_config(mcp_path)
+                if mcp_removal_problem:
+                    raise LauncherError(
+                        f"{launch_error}; {mcp_removal_problem}"
+                    ) from launch_error
             if not failure_cleanup_problem and metadata_attempted:
                 removal_problem = self._remove_launch_metadata(metadata_path)
                 if removal_problem:

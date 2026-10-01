@@ -3038,6 +3038,74 @@ def test_launcher_terminates_and_rolls_back_when_metadata_persistence_fails(
     assert not (config.var_dir / "launches" / f"{task.id}.json").exists()
 
 
+def test_launcher_blocks_relaunch_when_failed_worker_cannot_be_terminated(
+    config: Config, board: Board, git_repo: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    config.policy("mcp")["launcher"]["enabled"] = True
+    task = board.create("Retain an unreaped launch claim")
+    Router(config).dispatch(board, task)
+    worktree = WorktreeManager(config, repo=git_repo, board=board).create(
+        "feature/unreaped-launch"
+    )
+    with board.edit(task.id) as stored:
+        stored.branch = "feature/unreaped-launch"
+        stored.worktree = str(worktree.path)
+    monkeypatch.setattr("saturnin.launcher.shutil.which", lambda _: "/usr/bin/copilot")
+    real_popen = subprocess.Popen
+
+    class UnreapedProcess:
+        pid = 4242
+
+        def wait(self, timeout=None):
+            raise subprocess.TimeoutExpired("copilot", timeout)
+
+        def terminate(self):
+            return None
+
+        def kill(self):
+            raise OSError("kill denied")
+
+    process = UnreapedProcess()
+    monkeypatch.setattr(
+        "saturnin.launcher.subprocess.Popen",
+        lambda command, **kwargs: (
+            real_popen(command, **kwargs) if command[0] == "git" else process
+        ),
+    )
+    failed_once = False
+
+    def fail_metadata_once(
+        path: Path,
+        text: str,
+        *,
+        mode: int | None = None,
+    ) -> None:
+        nonlocal failed_once
+        path.write_text(text, encoding="utf-8")
+        if mode is not None:
+            path.chmod(mode)
+        if path.name == f"{task.id}.json" and not failed_once:
+            failed_once = True
+            raise OSError("metadata fsync failed")
+
+    monkeypatch.setattr("saturnin.launcher.atomic_replace_text", fail_metadata_once)
+
+    with pytest.raises(LauncherError, match="kill denied"):
+        AgentLauncher(config, board).launch(task.id)
+
+    metadata_path = config.var_dir / "launches" / f"{task.id}.json"
+    metadata = json.loads(metadata_path.read_text(encoding="utf-8"))
+    assert metadata["recovery_pending"] is True
+    assert metadata["pid"] == process.pid
+    assert board.get(task.id).state == "in_progress"
+    assert (config.var_dir / "launches" / f"{task.id}.mcp.json").exists()
+
+    with pytest.raises(
+        LauncherError, match="already has an active or unrecoverable launch"
+    ):
+        AgentLauncher(config, board).launch(task.id)
+
+
 def test_launcher_terminates_without_illegal_partial_board_rollback(
     config: Config, board: Board, git_repo: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
