@@ -1,0 +1,74 @@
+name: protected issue review marker
+
+on:
+  workflow_dispatch:
+    inputs:
+      source:
+        description: Source issue as owner/repository#number
+        required: true
+        type: string
+      destination:
+        description: Governed destination owner/repository
+        required: true
+        type: string
+      labels:
+        description: Exact approved labels as a JSON string array
+        required: true
+        default: "[]"
+        type: string
+      issue_digest:
+        description: SHA-256 of the independently reviewed source title and body
+        required: true
+        type: string
+      ttl_seconds:
+        description: Marker lifetime (60-3600 seconds)
+        required: true
+        default: "600"
+        type: string
+
+permissions:
+  contents: read
+
+jobs:
+  publish:
+    environment: issue-review-approval
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5
+        with:
+          ref: ${{ github.event.repository.default_branch }}
+          persist-credentials: false
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065
+        with:
+          python-version: "3.12"
+      - name: Install locked reviewer runtime
+        run: |
+          python -m venv .venv
+          .venv/bin/python -m pip install \
+            --disable-pip-version-check --require-hashes \
+            -r requirements-governance.txt
+          .venv/bin/python -m pip install \
+            --disable-pip-version-check --no-deps --no-build-isolation -e .
+      - name: Materialize ephemeral App key
+        id: app-key
+        env:
+          PRIVATE_KEY: ${{ secrets.SATURNIN_ISSUE_REVIEWER_PRIVATE_KEY }}
+        run: |
+          umask 077
+          key="$RUNNER_TEMP/issue-reviewer.pem"
+          printf '%s\n' "$PRIVATE_KEY" >"$key"
+          echo "path=$key" >>"$GITHUB_OUTPUT"
+      - name: Publish identity-bound review marker
+        env:
+          SATURNIN_ISSUE_REVIEWER_APP_ID: ${{ vars.SATURNIN_ISSUE_REVIEWER_APP_ID }}
+          SATURNIN_ISSUE_REVIEWER_PRIVATE_KEY_FILE: ${{ steps.app-key.outputs.path }}
+          SOURCE_ISSUE: ${{ inputs.source }}
+          DESTINATION_REPO: ${{ inputs.destination }}
+          APPROVED_LABELS: ${{ inputs.labels }}
+          MARKER_TTL: ${{ inputs.ttl_seconds }}
+          APPROVED_ISSUE_DIGEST: ${{ inputs.issue_digest }}
+        run: |
+          .venv/bin/saturnin doctor
+          PATH="$PWD/.venv/bin:$PATH" automation/library/publish_issue_review.sh \
+            "$SOURCE_ISSUE" "$DESTINATION_REPO" "$APPROVED_LABELS" \
+            "$MARKER_TTL" "$APPROVED_ISSUE_DIGEST"

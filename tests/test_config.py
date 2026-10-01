@@ -154,6 +154,27 @@ def test_privileged_workflow_uses_only_trusted_saturnin_runtime() -> None:
         )
 
 
+def test_issue_review_workflow_uses_default_branch_and_protected_app_identity() -> None:
+    workflow_path = REPO_ROOT / ".github/workflows/issue-review-marker.yml"
+    text = workflow_path.read_text(encoding="utf-8")
+    workflow = yaml.safe_load(text)
+    job = workflow["jobs"]["publish"]
+
+    assert workflow["permissions"] == {"contents": "read"}
+    assert job["environment"] == "issue-review-approval"
+    assert "ref: ${{ github.event.repository.default_branch }}" in text
+    assert "persist-credentials: false" in text
+    assert "secrets.SATURNIN_ISSUE_REVIEWER_PRIVATE_KEY" in text
+    assert "vars.SATURNIN_ISSUE_REVIEWER_APP_ID" in text
+    assert "SATURNIN_ISSUE_REVIEWER_TOKEN" not in text
+    assert "automation/library/publish_issue_review.sh" in text
+    assert all(
+        "@" in step["uses"] and len(step["uses"].rsplit("@", 1)[1]) == 40
+        for step in job["steps"]
+        if "uses" in step
+    )
+
+
 def test_runtime_summary_is_policy_generated() -> None:
     readme = (REPO_ROOT / "README.md").read_text(encoding="utf-8")
 

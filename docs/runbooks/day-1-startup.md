@@ -15,11 +15,10 @@ source .venv/bin/activate
 `bootstrap.sh` is idempotent: run it again after every pull.
 It now prints companion repositories from `policies/repos.yaml` and, when `gh`
 is available, tells you which ones still need `gh repo create`.
-Provision `SATURNIN_REVIEW_ATTESTATION_KEY` only in the trusted supervisor
-environment (for example CI secrets or a dedicated supervisor shell profile),
-never in the repository checkout or worker-authored scripts. The launcher
-derives role-scoped signing keys from it and injects them only into
-`pr-reviewer` and `issue-reviewer` workers.
+Do not provision review-attestation keys to this account, CI, launchers, or
+review workers. Current authorization belongs only to the dedicated system
+signer described in the operations safety runbook; workers receive no signing
+material.
 
 ## 2. Verify the installation
 
@@ -58,18 +57,11 @@ saturnin checkpoint save <task-id> --role code-worker \
 <!-- generated:pr-review-flow -->
 ```bash
 HEAD_SHA="$(gh pr view <N> --repo JakubMifek/saturnin --json headRefOid --jq .headRefOid)"
-VERDICT=approved
-attestation="$(saturnin review attest JakubMifek/saturnin#<N> --kind pr \
-  --author <author-role> --reviewer pr-reviewer --verdict "$VERDICT" \
-  --head-sha "$HEAD_SHA")"
-saturnin review record JakubMifek/saturnin#<N> --kind pr \
-  --author <author-role> --reviewer pr-reviewer --verdict "$VERDICT" \
-  --head-sha "$HEAD_SHA" --attestation "$attestation"
 saturnin review gate JakubMifek/saturnin#<N> --kind pr \
   --repo JakubMifek/saturnin --author <author-role> --head-sha "$HEAD_SHA"
 ```
 
-Resolve the PR head once and pass that identical SHA through attest, record and gate.
+The review worker's prose verdict is advisory. The configured GitHub reviewer bot must submit the current exact-head approval. This command is queued as a scope-checked trusted callback and the host signer independently re-fetches GitHub before deciding.
 <!-- /generated:pr-review-flow -->
 
 For another repository: draft the issue, `--kind issue`, and let the

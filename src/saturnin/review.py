@@ -63,6 +63,7 @@ class ReviewRecord:
     notes: str = ""
     attestation_id: str = ""
     attestation_signature: str = ""
+    attestation_payload: str = ""
     created_at: str = field(default_factory=utcnow)
 
     def to_dict(self) -> dict[str, Any]:
@@ -82,7 +83,12 @@ class ReviewRecord:
     @classmethod
     def validate_dict(cls, data: dict[str, Any]) -> None:
         known = set(cls.__dataclass_fields__)  # noqa: SLF001 - dataclass API
-        optional = {"review_profile", "review_method", "review_checks"}
+        optional = {
+            "review_profile",
+            "review_method",
+            "review_checks",
+            "attestation_payload",
+        }
         missing = sorted(known - optional - set(data))
         if missing:
             raise TypeError(f"review record is missing field(s): {', '.join(missing)}")
@@ -103,6 +109,7 @@ class ReviewRecord:
             "notes",
             "attestation_id",
             "attestation_signature",
+            "attestation_payload",
             "created_at",
         ):
             value = data.get(name, "") if name in optional else data[name]
@@ -150,6 +157,8 @@ class ReviewRecord:
             data["attestation_signature"]
         ):
             raise ValueError("review record attestation signature has the wrong format")
+        if len(data.get("attestation_payload", "")) > 128 * 1024:
+            raise ValueError("review record attestation payload is oversized")
         try:
             created_at = datetime.fromisoformat(data["created_at"])
         except ValueError as exc:
@@ -162,7 +171,7 @@ OPTIONAL_PROFILE_FIELDS = ("review_profile", "review_method", "review_checks")
 REQUIRED_FIELDS = tuple(
     field
     for field in ReviewRecord.__dataclass_fields__  # noqa: SLF001 - dataclass API
-    if field not in OPTIONAL_PROFILE_FIELDS
+    if field not in (*OPTIONAL_PROFILE_FIELDS, "attestation_payload")
 )
 LEGACY_ATTESTED_FIELDS = (
     "subject",
@@ -229,6 +238,12 @@ def notes_review_settings(config: Config) -> dict[str, Any]:
 def _canonical_attestation_payload(
     payload: dict[str, Any], fields: tuple[str, ...] = ATTESTED_FIELDS
 ) -> bytes:
+    if payload.get("schema") == "saturnin-attestation-v2":
+        return json.dumps(
+            {key: value for key, value in payload.items() if key != "signature"},
+            sort_keys=True,
+            separators=(",", ":"),
+        ).encode("utf-8")
     covered = {field: payload[field] for field in fields}
     covered["attestation_id"] = payload["attestation_id"]
     if "key_id" in payload:
@@ -454,9 +469,26 @@ def _verify_review_attestation(
         raise ReviewError(f"invalid review attestation JSON: {exc}") from exc
     if not isinstance(payload, dict):
         raise ReviewError("review attestation must be a JSON object")
+    is_v2 = payload.get("schema") == "saturnin-attestation-v2"
     legacy_shape = not any(field in payload for field in OPTIONAL_PROFILE_FIELDS)
-    signed_fields = LEGACY_ATTESTED_FIELDS if legacy_shape else ATTESTED_FIELDS
+    signed_fields = (
+        LEGACY_ATTESTED_FIELDS
+        if is_v2 or legacy_shape
+        else ATTESTED_FIELDS
+    )
     required = {*signed_fields, "attestation_id", "signature"}
+    if is_v2:
+        required.update(
+            {
+                "schema",
+                "repository",
+                "author_role",
+                "reviewer_identity",
+                "authorization_evidence_id",
+                "nonce",
+                "expires_at",
+            }
+        )
     if historical_identity is None:
         required.add("key_id")
     missing = sorted(required - set(payload))
@@ -482,14 +514,50 @@ def _verify_review_attestation(
         ):
             raise ReviewError("review attestation review_checks must contain strings")
     execution_scoped = _is_execution_attestation_id(payload["attestation_id"])
+    settings = config.governance.get("review", {}).get("attestation", {})
+    dedicated_authority = settings.get("authorization_source") == "github-api"
     if not execution_scoped:
         if historical_identity is None:
             raise ReviewError(
                 "new review records require an execution-scoped attestation id"
             )
-        _require_sealed_previous_attestation(config, historical_identity)
+        if not dedicated_authority:
+            _require_sealed_previous_attestation(config, historical_identity)
+    if payload.get("schema") == "saturnin-attestation-v2":
+        from .system_attestation import SystemAttestationError, verify_attestation
+
+        try:
+            verified = verify_attestation(
+                attestation, historical=historical_identity is not None
+            )
+        except (SystemAttestationError, OSError) as exc:
+            raise ReviewError(str(exc)) from exc
+        if (
+            historical_identity is None
+            and verified.get("key_state") != "current"
+        ):
+            raise ReviewError(
+                "noncurrent-key attestation cannot authorize a new review record"
+            )
+        return payload
+    if dedicated_authority:
+        from .system_attestation import SystemAttestationError, verify_attestation
+
+        try:
+            verified = verify_attestation(
+                attestation, historical=historical_identity is not None
+            )
+        except (SystemAttestationError, OSError) as exc:
+            raise ReviewError(str(exc)) from exc
+        if (
+            historical_identity is None
+            and verified.get("key_state") != "current"
+        ):
+            raise ReviewError(
+                "noncurrent-key attestation cannot authorize a new review record"
+            )
+        return payload
     include_previous = historical_identity is not None
-    settings = config.governance.get("review", {}).get("attestation", {})
     scope_env = str(
         settings.get(
             "key_scope_env", "SATURNIN_REVIEW_ATTESTATION_KEY_SCOPE"
@@ -520,17 +588,25 @@ def _verify_review_attestation(
                 _execution_key_for_payload(master, payload) for master in masters
             ]
         except (ReviewError, CredentialError):
-            from .attestation_service import AttestationServiceError, verify_with_service
+            from .system_attestation import SystemAttestationError, verify_attestation
 
             try:
-                verified = verify_with_service(config, attestation)
-            except (AttestationServiceError, OSError) as exc:
-                raise ReviewError(str(exc)) from exc
-            if historical_identity is None and verified.get("previous") is True:
-                raise ReviewError(
-                    "previous-key attestation cannot authorize a new review record"
+                verified = verify_attestation(
+                    attestation, historical=historical_identity is not None
                 )
-            if historical_identity is not None and verified.get("previous") is True:
+            except (SystemAttestationError, OSError) as exc:
+                raise ReviewError(str(exc)) from exc
+            if (
+                historical_identity is None
+                and verified.get("key_state") != "current"
+            ):
+                raise ReviewError(
+                    "noncurrent-key attestation cannot authorize a new review record"
+                )
+            if (
+                historical_identity is not None
+                and verified.get("key_state") != "current"
+            ):
                 _require_sealed_previous_attestation(config, historical_identity)
             return payload
     key_id = payload.get("key_id")
@@ -755,6 +831,7 @@ class ReviewLedger:
     ) -> ReviewRecord:
         attestation_id = ""
         attestation_signature = ""
+        attestation_payload = ""
         if kind not in KINDS:
             raise ReviewError(f"unknown review kind: {kind}")
         if verdict not in VERDICTS:
@@ -820,7 +897,11 @@ class ReviewLedger:
                 "review_checks": checks,
             }
             for field_name, supplied_value in supplied.items():
-                if payload[field_name] != supplied_value:
+                payload_value = payload.get(
+                    field_name,
+                    supplied_value if field_name in OPTIONAL_PROFILE_FIELDS else None,
+                )
+                if payload_value != supplied_value:
                     raise ReviewError(
                         f"review attestation {field_name} does not match the record"
                     )
@@ -828,6 +909,8 @@ class ReviewLedger:
             attestation_signature = (
                 f"{payload['key_id']}:{payload['signature']}"
             )
+            if payload.get("schema") == "saturnin-attestation-v2":
+                attestation_payload = attestation
         entry = ReviewRecord(
             subject=subject,
             kind=kind,
@@ -844,6 +927,7 @@ class ReviewLedger:
             notes=notes,
             attestation_id=attestation_id,
             attestation_signature=attestation_signature,
+            attestation_payload=attestation_payload,
         )
         try:
             ReviewRecord.validate_dict(entry.to_dict())
@@ -1094,20 +1178,24 @@ class ReviewLedger:
             raise ReviewError(
                 f"corrupt review ledger: unauthenticated review record for {record.subject}"
             )
-        payload = {
-            field: getattr(record, field)
-            for field in ATTESTED_FIELDS
-        }
-        payload["attestation_id"] = record.attestation_id
-        if ":" in record.attestation_signature:
-            key_id, signature = record.attestation_signature.split(":", 1)
-            payload["key_id"] = key_id
-            payload["signature"] = signature
+        if record.attestation_payload:
+            encoded = record.attestation_payload
         else:
-            payload["signature"] = record.attestation_signature
+            payload = {
+                field: getattr(record, field)
+                for field in ATTESTED_FIELDS
+            }
+            payload["attestation_id"] = record.attestation_id
+            if ":" in record.attestation_signature:
+                key_id, signature = record.attestation_signature.split(":", 1)
+                payload["key_id"] = key_id
+                payload["signature"] = signature
+            else:
+                payload["signature"] = record.attestation_signature
+            encoded = json.dumps(payload, sort_keys=True, separators=(",", ":"))
         try:
-            _verify_review_attestation(
-                json.dumps(payload, sort_keys=True, separators=(",", ":")),
+            verified_payload = _verify_review_attestation(
+                encoded,
                 self.config,
                 historical_identity=(
                     record.reviewer,
@@ -1115,6 +1203,19 @@ class ReviewLedger:
                     record.attestation_signature,
                 ),
             )
+            for field_name in ATTESTED_FIELDS:
+                verified_value = verified_payload.get(
+                    field_name,
+                    (
+                        getattr(record, field_name)
+                        if field_name in OPTIONAL_PROFILE_FIELDS
+                        else None
+                    ),
+                )
+                if verified_value != getattr(record, field_name):
+                    raise ReviewError(
+                        f"review attestation {field_name} does not match the record"
+                    )
         except ReviewError as exc:
             raise ReviewError(
                 f"corrupt review ledger: invalid review attestation for {record.subject}: {exc}"
