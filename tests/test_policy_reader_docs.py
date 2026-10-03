@@ -17,6 +17,7 @@ def policy_config(tmp_path: Path) -> Config:
     root = tmp_path / "root"
     shutil.copytree(ROOT / "policies", root / "policies")
     shutil.copytree(ROOT / "config", root / "config")
+    shutil.copytree(ROOT / "systemd", root / "systemd")
     return Config.load(root)
 
 
@@ -58,5 +59,24 @@ def test_policy_reader_credential_path_drift_fails_generation(
     with pytest.raises(
         docsync.GeneratedBlockError,
         match="credential paths disagree",
+    ):
+        docsync._policy_reader_provisioning(config)
+
+
+def test_matching_policy_path_drift_still_fails_systemd_cross_check(
+    tmp_path: Path,
+) -> None:
+    config = policy_config(tmp_path)
+    alternate = "/etc/saturnin-attestation/alternate.cred"
+    config.governance["review"]["attestation"]["policy_reader"]["credential"] = (
+        alternate
+    )
+    config.policy("server_scope")["dedicated_attestation_service"][
+        "policy_credential"
+    ] = alternate
+
+    with pytest.raises(
+        docsync.GeneratedBlockError,
+        match="systemd credential disagrees",
     ):
         docsync._policy_reader_provisioning(config)

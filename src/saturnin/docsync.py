@@ -360,7 +360,8 @@ def _policy_reader_provisioning(config: Config) -> str:
     attestation = config.governance.get("review", {}).get("attestation", {})
     reader = attestation.get("policy_reader")
     expected_keys = {
-        "credential", "login", "resource_owner", "repository_access",
+        "credential_name", "credential", "login", "resource_owner",
+        "repository_access",
         "repositories", "permissions", "mutation_permissions",
         "mutation_interface",
     }
@@ -384,6 +385,22 @@ def _policy_reader_provisioning(config: Config) -> str:
     )
     if server_reader != reader["credential"]:
         raise GeneratedBlockError("policy reader credential paths disagree")
+    unit_path = (
+        config.root / "systemd" / "system" / "saturnin-attestation.service"
+    )
+    try:
+        credential_lines = [
+            line for line in unit_path.read_text(encoding="utf-8").splitlines()
+            if line.startswith("LoadCredentialEncrypted=github.policy:")
+        ]
+    except OSError as exc:
+        raise GeneratedBlockError("attestation systemd unit is unavailable") from exc
+    expected_line = (
+        f"LoadCredentialEncrypted={reader['credential_name']}:"
+        f"{reader['credential']}"
+    )
+    if credential_lines != [expected_line]:
+        raise GeneratedBlockError("policy reader systemd credential disagrees")
     try:
         runtime = json.loads(
             (config.root / "config" / "attestation.json").read_text(encoding="utf-8")
