@@ -18,6 +18,7 @@ def policy_config(tmp_path: Path) -> Config:
     shutil.copytree(ROOT / "policies", root / "policies")
     shutil.copytree(ROOT / "config", root / "config")
     shutil.copytree(ROOT / "systemd", root / "systemd")
+    shutil.copy(ROOT / "pyproject.toml", root / "pyproject.toml")
     return Config.load(root)
 
 
@@ -78,5 +79,25 @@ def test_matching_policy_path_drift_still_fails_systemd_cross_check(
     with pytest.raises(
         docsync.GeneratedBlockError,
         match="systemd credential disagrees",
+    ):
+        docsync._policy_reader_provisioning(config)
+
+
+@pytest.mark.parametrize(
+    "relative",
+    [
+        "config/attestation.json",
+        "systemd/system/saturnin-attestation.service",
+    ],
+)
+def test_source_home_requires_policy_reader_deployment_sources(
+    tmp_path: Path, relative: str,
+) -> None:
+    config = policy_config(tmp_path)
+    (config.root / relative).unlink()
+
+    with pytest.raises(
+        docsync.GeneratedBlockError,
+        match="deployment sources are missing",
     ):
         docsync._policy_reader_provisioning(config)

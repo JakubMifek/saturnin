@@ -388,7 +388,13 @@ def _policy_reader_provisioning(config: Config) -> str:
     unit_path = (
         config.root / "systemd" / "system" / "saturnin-attestation.service"
     )
-    if unit_path.exists():
+    runtime_path = config.root / "config" / "attestation.json"
+    source_home = (config.root / "pyproject.toml").is_file()
+    if source_home and (not unit_path.is_file() or not runtime_path.is_file()):
+        raise GeneratedBlockError(
+            "attestation deployment sources are missing from source home"
+        )
+    if source_home:
         try:
             credential_lines = [
                 line for line in unit_path.read_text(encoding="utf-8").splitlines()
@@ -404,8 +410,6 @@ def _policy_reader_provisioning(config: Config) -> str:
         )
         if credential_lines != [expected_line]:
             raise GeneratedBlockError("policy reader systemd credential disagrees")
-    runtime_path = config.root / "config" / "attestation.json"
-    if runtime_path.exists():
         try:
             runtime = json.loads(runtime_path.read_text(encoding="utf-8"))
         except (OSError, json.JSONDecodeError) as exc:
