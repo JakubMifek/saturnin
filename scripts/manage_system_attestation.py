@@ -62,11 +62,11 @@ FILES = {
 OBSOLETE_FILES = ("usr/lib/systemd/system/saturnin-attestation.socket",)
 EXPECTED_SHA256 = {
     "src/saturnin/system_attestation.py":
-        "ebb8df85dc55547cfd491ae0799cbe6e6a35a0cd8b5a5b191c0adac259a6fbae",
+        "3646e2588dd0e49cf6a811f84b29f1614e432565818de6d1c0879acab30c84be",
     "config/attestation.json":
-        "a56a1aa897016322a1f00aa82d10953b5cbf6d69219329a783f3f9ea1146f06a",
+        "abce4e29a1c5e20f7bf76381356129e0ee09d178a50f0c05764f61b92d1176d6",
     "systemd/system/saturnin-attestation.service":
-        "5f7a29fec192a90f752606250cd9f0433872d4ac38d8bd4ae819431cb65972c7",
+        "6b009c048a031b4e3047e8a55ab1848b5d97e051f6608f58b3d2b1f6ef68903c",
     "systemd/system/saturnin-attestation.sysusers":
         "0059e8a1ead80a9b47399f04a1430a1cecf7b70479b224dc8efe084e27fa2187",
     "systemd/system/saturnin-attestation.tmpfiles":
@@ -304,6 +304,10 @@ def _github_token_path(root: Path) -> Path:
     return _credential_paths(root)[0].with_name("github.token.cred")
 
 
+def _policy_credential_path(root: Path) -> Path:
+    return _credential_paths(root)[0].with_name("github.policy.cred")
+
+
 def _publisher_credential_path(root: Path) -> Path:
     return _credential_paths(root)[0].with_name("github.publisher.cred")
 
@@ -344,11 +348,14 @@ def _rollback_path(root: Path) -> Path:
 
 
 def _read_credential(root: Path, path: Path) -> bytes:
-    source = _open_source(
-        _safe_target(root, str(path.relative_to(root))),
-        0 if root == Path("/") else os.getuid(),
-        mode=0o600,
-    )
+    try:
+        source = _open_source(
+            _safe_target(root, str(path.relative_to(root))),
+            0 if root == Path("/") else os.getuid(),
+            mode=0o600,
+        )
+    except FileNotFoundError as exc:
+        raise InstallError(f"required credential is unavailable: {path.name}") from exc
     try:
         return source.content
     finally:
@@ -637,6 +644,7 @@ def _migrate_or_provision(root: Path, runner: Runner) -> list[Path]:
     current, previous = _credential_paths(root)
     archive = _archive_path(root)
     github_token = _github_token_path(root)
+    policy_credential = _policy_credential_path(root)
     publisher_credential = _publisher_credential_path(root)
     created: list[Path] = []
     if root != Path("/") and not github_token.exists():
@@ -652,6 +660,18 @@ def _migrate_or_provision(root: Path, runner: Runner) -> list[Path]:
             restart=False,
         )
         created.append(github_token)
+    if root != Path("/") and not policy_credential.exists():
+        _atomic_credentials(
+            root,
+            {
+                policy_credential: _encode_blob_checked(
+                    runner, b"production-shape-test-policy-token", "github.policy"
+                )
+            },
+            runner,
+            restart=False,
+        )
+        created.append(policy_credential)
     if root != Path("/") and not publisher_credential.exists():
         _atomic_credentials(
             root,
@@ -685,9 +705,28 @@ def _migrate_or_provision(root: Path, runner: Runner) -> list[Path]:
         or (root == Path("/") and token_metadata.st_uid != 0)
     ):
         raise InstallError("protected GitHub credential file is unsafe")
-    _validate_github_token(
-        runner.decrypt(github_token.read_bytes(), "github.token")
+    merge_plaintext = runner.decrypt(
+        _read_credential(root, github_token), "github.token"
     )
+    _validate_github_token(merge_plaintext)
+    if not policy_credential.is_file() or policy_credential.is_symlink():
+        raise InstallError(
+            "root-provisioned policy GitHub credential is required"
+        )
+    policy_metadata = policy_credential.lstat()
+    if (
+        not stat.S_ISREG(policy_metadata.st_mode)
+        or policy_metadata.st_nlink != 1
+        or stat.S_IMODE(policy_metadata.st_mode) != 0o600
+        or (root == Path("/") and policy_metadata.st_uid != 0)
+    ):
+        raise InstallError("policy GitHub credential file is unsafe")
+    policy_plaintext = runner.decrypt(
+        _read_credential(root, policy_credential), "github.policy"
+    )
+    _validate_github_token(policy_plaintext)
+    if secrets.compare_digest(merge_plaintext, policy_plaintext):
+        raise InstallError("merge and policy GitHub credentials must differ")
     if not publisher_credential.is_file() or publisher_credential.is_symlink():
         raise InstallError(
             "root-provisioned publisher App credential is required"
@@ -702,7 +741,7 @@ def _migrate_or_provision(root: Path, runner: Runner) -> list[Path]:
         raise InstallError("publisher App credential file is unsafe")
     _validate_publisher_credential(
         runner.decrypt(
-            publisher_credential.read_bytes(), "github.publisher"
+            _read_credential(root, publisher_credential), "github.publisher"
         )
     )
     existing = (current.exists(), previous.exists())
@@ -785,11 +824,16 @@ def status(root: Path, runner: Runner | None = None) -> None:
     current, previous = _credential_paths(root)
     archive = _archive_path(root)
     codec = runner or (SystemRunner() if root == Path("/") else FakeRunner())
-    _validate_github_token(
-        codec.decrypt(
-            _read_credential(root, _github_token_path(root)), "github.token"
-        )
+    merge_plaintext = codec.decrypt(
+        _read_credential(root, _github_token_path(root)), "github.token"
     )
+    _validate_github_token(merge_plaintext)
+    policy_plaintext = codec.decrypt(
+        _read_credential(root, _policy_credential_path(root)), "github.policy"
+    )
+    _validate_github_token(policy_plaintext)
+    if secrets.compare_digest(merge_plaintext, policy_plaintext):
+        raise InstallError("merge and policy GitHub credentials must differ")
     _validate_publisher_credential(
         codec.decrypt(
             _read_credential(root, _publisher_credential_path(root)),

@@ -61,6 +61,8 @@ dedicated_attestation_service:
   runtime: /usr/lib/saturnin-attestation/system_attestation.py
   configuration: /etc/saturnin-attestation/config.json
   state: /var/lib/saturnin-attestation
+  merge_credential: /etc/saturnin-attestation/github.token.cred
+  policy_credential: /etc/saturnin-attestation/github.policy.cred
 
 # Canonical compound operations are checked as exact executable/action pairs.
 # They may internally perform only the bounded user-unit lifecycle named here.

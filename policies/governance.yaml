@@ -95,6 +95,9 @@ review:
     issue_destinations: [JakubMifek/saturnin-ops]
     protected_issue_submission: true
     protected_merge_credential: /etc/saturnin-attestation/github.token.cred
+    policy_read_credential: /etc/saturnin-attestation/github.policy.cred
+    policy_reader_login: JakubMifek
+    policy_reader_mutation_interface: absent
     protected_merge_expected_head: true
     branch_protection_enforce_admins: true
     role_scoped: true

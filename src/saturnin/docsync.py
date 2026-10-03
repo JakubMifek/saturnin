@@ -293,7 +293,8 @@ def _attestation_boundary(config: Config) -> str:
             "The system `saturnin-attestation.service` runs as the non-login "
             "`saturnin-signer` identity from root-controlled runtime and configuration. "
             "The system manager decrypts current, previous, and bounded retired HMAC "
-            "credentials plus the separate destination-publisher App credential into "
+            "credentials, distinct merge and policy-reader credentials, plus the "
+            "separate destination-publisher App credential into "
             "its private credential tmpfs; ordinary workers never receive key "
             "material. The service, not PID 1, creates the canonical "
             "listener. Clients authenticate its kernel-reported UID plus the stable "
@@ -338,9 +339,12 @@ def _attestation_boundary(config: Config) -> str:
             "immediately before the signer uses GitHub's expected-head atomic merge "
             "API. The signer also requires strict branch protection with stale-review "
             "dismissal, required reviews/checks, administrator enforcement and no "
-            "bypass identities. Its fixed "
-            "non-admin merge identity and root-provisioned credential never enter the "
-            "ordinary UID; workers receive neither signing sessions nor credentials.",
+            "bypass identities. A structurally read-only client, bound to the configured "
+            "policy-reader login, performs every protection read; it has no mutation "
+            "method. The fixed non-admin merge identity performs ordinary PR/check "
+            "reads and expected-head merges but cannot substitute for policy reads. "
+            "Neither root-provisioned credential enters the ordinary UID; workers "
+            "receive neither signing sessions nor credentials.",
             "",
             "GitHub-hosted governance cannot access the host signer. Its "
             "`pull_request_target` job executes only default-branch code with a "

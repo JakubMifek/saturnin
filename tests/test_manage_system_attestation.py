@@ -57,6 +57,12 @@ def test_fake_root_transaction_install_status_rotate_rollback_uninstall(
     original_archive = archive.read_bytes()
     codec = admin.FakeRunner()
     publisher = current.parent / "github.publisher.cred"
+    policy = current.parent / "github.policy.cred"
+    original_policy = policy.read_bytes()
+    assert codec.decrypt(policy.read_bytes(), "github.policy") != codec.decrypt(
+        (current.parent / "github.token.cred").read_bytes(), "github.token"
+    )
+    assert policy.stat().st_mode & 0o777 == 0o600
     publisher_payload = json.loads(
         codec.decrypt(publisher.read_bytes(), "github.publisher")
     )
@@ -65,10 +71,12 @@ def test_fake_root_transaction_install_status_rotate_rollback_uninstall(
     original_plain = codec.decrypt(original, "current.key")
     original_previous_plain = codec.decrypt(original_previous, "previous.key")
     run(root, "rotate")
+    assert policy.read_bytes() == original_policy
     assert codec.decrypt(
         (current.parent / "previous.key.cred").read_bytes(), "previous.key"
     ) == original_plain
     run(root, "rollback")
+    assert policy.read_bytes() == original_policy
     assert codec.decrypt(current.read_bytes(), "current.key") == original_plain
     assert codec.decrypt(
         (current.parent / "previous.key.cred").read_bytes(), "previous.key"
@@ -78,6 +86,7 @@ def test_fake_root_transaction_install_status_rotate_rollback_uninstall(
     assert not (root / "usr/lib/saturnin-attestation/system_attestation.py").exists()
     assert not (root / "usr/sbin/saturnin-attestation-admin").exists()
     assert current.exists()
+    assert policy.exists()
     assert publisher.exists()
 
 
@@ -100,6 +109,48 @@ def test_status_rejects_malformed_publisher_credential(
         admin.FakeRunner().encrypt(payload, "github.publisher")
     )
     with pytest.raises(admin.InstallError, match="publisher App credential"):
+        run(root, "status")
+
+
+@pytest.mark.parametrize("payload", [b"", b"short", b"token with spaces"])
+def test_status_rejects_malformed_policy_credential(
+    tmp_path: Path, payload: bytes,
+) -> None:
+    root = tmp_path / "root"
+    root.mkdir()
+    run(root, "install")
+    path = root / "etc/saturnin-attestation/github.policy.cred"
+    path.write_bytes(admin.FakeRunner().encrypt(payload, "github.policy"))
+    with pytest.raises(admin.InstallError, match="GitHub credential"):
+        run(root, "status")
+
+
+def test_status_rejects_credential_substitution(tmp_path: Path) -> None:
+    root = tmp_path / "root"
+    root.mkdir()
+    run(root, "install")
+    directory = root / "etc/saturnin-attestation"
+    codec = admin.FakeRunner()
+    merge = codec.decrypt(
+        (directory / "github.token.cred").read_bytes(), "github.token"
+    )
+    (directory / "github.policy.cred").write_bytes(
+        codec.encrypt(merge, "github.policy")
+    )
+
+    with pytest.raises(admin.InstallError, match="must differ"):
+        run(root, "status")
+
+
+def test_install_requires_root_provisioned_policy_credential(
+    tmp_path: Path,
+) -> None:
+    root = tmp_path / "root"
+    root.mkdir()
+    run(root, "install")
+    policy = root / "etc/saturnin-attestation/github.policy.cred"
+    policy.unlink()
+    with pytest.raises(admin.InstallError, match="github.policy.cred"):
         run(root, "status")
 
 
@@ -462,8 +513,10 @@ def test_system_units_sysusers_and_tmpfiles_are_consistent() -> None:
     tmpfiles = (unit_root / "saturnin-attestation.tmpfiles").read_text()
     assert "User=saturnin-signer" in service
     assert "Group=saturnin-signer" in service
+    assert "system_attestation.py preflight" in service
     assert "LoadCredentialEncrypted=archive.keys:" in service
     assert "LoadCredentialEncrypted=github.token" in service
+    assert "LoadCredentialEncrypted=github.policy" in service
     assert "LoadCredentialEncrypted=github.publisher" in service
     assert "RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6" in service
     assert "SocketBindDeny=any" in service
