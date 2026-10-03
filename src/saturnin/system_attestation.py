@@ -45,6 +45,7 @@ CONFIG_PATH = Path("/etc/saturnin-attestation/config.json")
 STATE_PATH = Path("/var/lib/saturnin-attestation/authorizations.sqlite3")
 ISSUE_MARKER = "saturnin-attestation:v1 "
 ISSUE_SUBMISSION_MARKER = "<!-- saturnin-protected-submission:v1 {} -->"
+NOTES_REVIEW_MARKER = "saturnin-notes-review:v1 "
 _REPO = re.compile(r"[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+")
 _SHA = re.compile(r"[0-9a-f]{40}")
 _DIGEST = re.compile(r"[0-9a-f]{64}")
@@ -57,11 +58,16 @@ _ATTESTATION_FIELDS = {
     "schema", "kind", "repository", "subject", "author", "author_role",
     "reviewer", "reviewer_identity", "verdict", "zero_context", "head_sha",
     "issue_digest", "destination_repo", "authorization_evidence_id", "nonce",
-    "expires_at", "attestation_id", "key_id", "signature",
+    "expires_at", "review_profile", "review_method", "review_checks",
+    "writer_evidence_id",
+    "attestation_id", "key_id", "signature",
 }
 _LEGACY_ATTESTED_FIELDS = {
     "subject", "kind", "author", "reviewer", "verdict", "zero_context",
     "head_sha", "issue_digest", "destination_repo",
+}
+_LEGACY_PROFILE_FIELDS = {
+    "review_profile", "review_method", "review_checks",
 }
 _LEGACY_REQUIRED_FIELDS = _LEGACY_ATTESTED_FIELDS | {
     "attestation_id", "signature",
@@ -184,6 +190,22 @@ def current_pr_review(
     reviewer = str((review.get("user") or {}).get("login", "")).casefold()
     if author.casefold() == reviewer:
         raise SystemAttestationError("reviewer is not independent")
+    if repo == config.notes_repository:
+        expected_marker = NOTES_REVIEW_MARKER + json.dumps(
+            {
+                "repository": repo,
+                "head_sha": head.casefold(),
+                "profile": config.notes_review_profile,
+                "method": config.notes_review_method,
+                "checks": list(config.notes_review_checks),
+            },
+            sort_keys=True,
+            separators=(",", ":"),
+        )
+        if review.get("body") != expected_marker:
+            raise SystemAttestationError(
+                "notes approval lacks exact head-bound review evidence"
+            )
     return {
         "repository": repo,
         "number": number,
@@ -388,6 +410,13 @@ class ServiceConfig:
     action_ttl_seconds: int = 60
     protected_actor_login: str = "saturnin-merge-bot"
     publisher_actor_login: str = "saturnin-issue-publisher[bot]"
+    notes_repository: str = ""
+    notes_review_profile: str = ""
+    notes_review_method: str = ""
+    notes_review_checks: tuple[str, ...] = ()
+    notes_writer_logins: frozenset[str] = frozenset()
+    notes_delivery_check_run: str = ""
+    notes_delivery_app_slug: str = ""
 
     @classmethod
     def load(cls, path: Path = CONFIG_PATH) -> "ServiceConfig":
@@ -403,6 +432,13 @@ class ServiceConfig:
             "protected_actor_login",
             "publisher_actor_login",
             "issue_destinations",
+            "notes_repository",
+            "notes_review_profile",
+            "notes_review_method",
+            "notes_review_checks",
+            "notes_writer_logins",
+            "notes_delivery_check_run",
+            "notes_delivery_app_slug",
         }:
             raise SystemAttestationError("service configuration schema is invalid")
         api = raw.get("github_api", "https://api.github.com")
@@ -449,6 +485,16 @@ class ServiceConfig:
         publisher_actor = str(
             raw.get("publisher_actor_login", "saturnin-issue-publisher[bot]")
         ).casefold()
+        notes_repository = (
+            _repo(raw["notes_repository"]) if raw.get("notes_repository") else ""
+        )
+        notes_profile = str(raw.get("notes_review_profile", ""))
+        notes_method = str(raw.get("notes_review_method", ""))
+        notes_checks = raw.get("notes_review_checks", [])
+        notes_writers = raw.get("notes_writer_logins", [])
+        notes_delivery_check = str(raw.get("notes_delivery_check_run", ""))
+        notes_delivery_app = str(raw.get("notes_delivery_app_slug", "")).casefold()
+        notes_values = (notes_repository, notes_profile, notes_method)
         if (
             not isinstance(base_refs, list)
             or not isinstance(check_runs, list)
@@ -469,6 +515,36 @@ class ServiceConfig:
             )
             or publisher_actor in pr_reviewers
             or publisher_actor in issue_reviewers
+            or not isinstance(notes_checks, list)
+            or not isinstance(notes_writers, list)
+            or any(
+                not isinstance(value, str)
+                or not re.fullmatch(r"[A-Za-z0-9_-]{1,64}", value)
+                for value in [notes_profile, notes_method, *notes_checks]
+                if value
+            )
+            or len(notes_checks) != len(set(notes_checks))
+            or any(
+                not isinstance(login, str)
+                or not re.fullmatch(
+                    r"[A-Za-z0-9](?:[A-Za-z0-9-]{0,37})", login,
+                )
+                for login in notes_writers
+            )
+            or len({login.casefold() for login in notes_writers})
+            != len(notes_writers)
+            or bool(notes_delivery_check) != bool(notes_delivery_app)
+            or bool(notes_delivery_check)
+            and (
+                not re.fullmatch(r"[A-Za-z0-9_.-]{1,128}", notes_delivery_check)
+                or not re.fullmatch(r"[A-Za-z0-9-]{1,100}", notes_delivery_app)
+            )
+            or (any(notes_values) or notes_checks)
+            and (
+                not all(notes_values)
+                or not notes_checks
+                or notes_repository not in repositories
+            )
         ):
             raise SystemAttestationError("protected action policy is invalid")
         return cls(
@@ -483,6 +559,15 @@ class ServiceConfig:
             action_ttl_seconds=action_ttl,
             protected_actor_login=protected_actor,
             publisher_actor_login=publisher_actor,
+            notes_repository=notes_repository,
+            notes_review_profile=notes_profile,
+            notes_review_method=notes_method,
+            notes_review_checks=tuple(sorted(notes_checks)),
+            notes_writer_logins=frozenset(
+                login.casefold() for login in notes_writers
+            ),
+            notes_delivery_check_run=notes_delivery_check,
+            notes_delivery_app_slug=notes_delivery_app,
         )
 
 
@@ -1069,6 +1154,38 @@ class DedicatedSigner:
             evidence = self._issue(repository, number, subject, destination)
         else:
             raise SystemAttestationError("review kind is invalid")
+        is_notes_review = (
+            request["kind"] == "pr"
+            and repository == self.config.notes_repository
+        )
+        if is_notes_review and evidence["author"].removeprefix(
+            "github:"
+        ).casefold() not in self.config.notes_writer_logins:
+            raise SystemAttestationError(
+                "notes author is not an authorized scribe identity"
+            )
+        writer_evidence_id = (
+            self._notes_delivery_evidence(
+                repository,
+                evidence["head_sha"],
+                evidence["author"].removeprefix("github:").casefold(),
+            )
+            if is_notes_review
+            else ""
+        )
+        evidence.update(
+            author_role="scribe" if is_notes_review else "github-user",
+            review_profile=(
+                self.config.notes_review_profile if is_notes_review else ""
+            ),
+            review_method=(
+                self.config.notes_review_method if is_notes_review else ""
+            ),
+            review_checks=(
+                list(self.config.notes_review_checks) if is_notes_review else []
+            ),
+            writer_evidence_id=writer_evidence_id,
+        )
         authorization_current = bool(evidence.pop("_authorization_current", True))
         evidence.pop("_approved_labels", None)
         scope_hash = hashlib.sha256(_canonical(evidence)).hexdigest()
@@ -1186,6 +1303,10 @@ class DedicatedSigner:
         _subject(repo, number)
         if repo not in self.config.repositories or destination != repo:
             raise SystemAttestationError("protected action repository is not allowed")
+        if request["operation"] == "merge" and repo == self.config.notes_repository:
+            raise SystemAttestationError(
+                "notes repository changes may not be merged by the protected signer"
+            )
         expected_head = str(request["expected_head"]).casefold()
         if not _SHA.fullmatch(expected_head):
             raise SystemAttestationError("protected action head is invalid")
@@ -1779,6 +1900,22 @@ class DedicatedSigner:
         evidence = self._pr(repo, number, _subject(repo, number), destination)
         if evidence["head_sha"] != expected_head:
             raise SystemAttestationError("pull request head changed")
+        is_notes_review = repo == self.config.notes_repository
+        if is_notes_review and evidence["author"].removeprefix(
+            "github:"
+        ).casefold() not in self.config.notes_writer_logins:
+            raise SystemAttestationError(
+                "notes author is not an authorized scribe identity"
+            )
+        writer_evidence_id = (
+            self._notes_delivery_evidence(
+                repo,
+                evidence["head_sha"],
+                evidence["author"].removeprefix("github:").casefold(),
+            )
+            if is_notes_review
+            else ""
+        )
         pull = self.github.get(f"/repos/{repo}/pulls/{number}")
         snapshot = self._pull_snapshot(
             pull, repo, number, destination, expected_head
@@ -1873,9 +2010,50 @@ class DedicatedSigner:
             "check_runs": sorted(
                 f"{value['name']}:{value['id']}" for value in accepted
             ),
+            "review_profile": (
+                self.config.notes_review_profile if is_notes_review else ""
+            ),
+            "review_method": (
+                self.config.notes_review_method if is_notes_review else ""
+            ),
+            "review_checks": (
+                list(self.config.notes_review_checks) if is_notes_review else []
+            ),
+            "writer_evidence_id": writer_evidence_id,
             "protected_actor": actor,
             "protection_hash": hashlib.sha256(_canonical(protection)).hexdigest(),
         }
+
+    def _notes_delivery_evidence(
+        self, repo: str, head_sha: str, writer: str,
+    ) -> str:
+        if (
+            not self.config.notes_delivery_check_run
+            or not self.config.notes_delivery_app_slug
+        ):
+            raise SystemAttestationError(
+                "trusted notes delivery evidence is not provisioned"
+            )
+        expected_external_id = (
+            f"saturnin-notes-delivery:v1:{repo}:{head_sha}:{writer}"
+        )
+        matches = [
+            check
+            for check in self.github.check_runs(repo, head_sha)
+            if (
+                check.get("name") == self.config.notes_delivery_check_run
+                and str((check.get("app") or {}).get("slug", "")).casefold()
+                == self.config.notes_delivery_app_slug
+                and check.get("external_id") == expected_external_id
+                and check.get("status") == "completed"
+                and check.get("conclusion") == "success"
+            )
+        ]
+        if len(matches) != 1 or type(matches[0].get("id")) is not int:
+            raise SystemAttestationError(
+                "exact head has no trusted scribe delivery evidence"
+            )
+        return f"github:check-run:{matches[0]['id']}"
 
     def _pull_snapshot(
         self, pull: Any, repo: str, number: int, destination: str,
@@ -1945,12 +2123,19 @@ class DedicatedSigner:
         for destination in sorted(self.config.issue_destinations):
             self._publisher(destination)
 
-    @staticmethod
-    def _v2_unsigned(payload: dict[str, Any]) -> dict[str, Any]:
-        string_fields = _ATTESTATION_FIELDS - {"zero_context"}
+    def _v2_unsigned(self, payload: dict[str, Any]) -> dict[str, Any]:
+        string_fields = _ATTESTATION_FIELDS - {
+            "zero_context", "review_checks",
+        }
         if (
             type(payload["zero_context"]) is not bool
             or any(not isinstance(payload[field], str) for field in string_fields)
+            or not isinstance(payload["review_checks"], list)
+            or any(
+                not isinstance(check, str) or not check.strip()
+                for check in payload["review_checks"]
+            )
+            or len(payload["review_checks"]) != len(set(payload["review_checks"]))
             or payload["schema"] != "saturnin-attestation-v2"
         ):
             raise SystemAttestationError("attestation types are invalid")
@@ -1961,7 +2146,7 @@ class DedicatedSigner:
             or not payload["author"].startswith("github:")
             or payload["author"] == "github:"
             or not payload["reviewer_identity"]
-            or payload["author_role"] != "github-user"
+            or payload["author_role"] not in {"github-user", "scribe"}
             or payload["verdict"] not in {
                 "approved", "changes_requested", "rejected"
             }
@@ -1996,21 +2181,61 @@ class DedicatedSigner:
                 raise SystemAttestationError("attestation scope is invalid")
         else:
             raise SystemAttestationError("attestation scope is invalid")
+        is_notes_review = repository == self.config.notes_repository
+        if (payload["author_role"] == "scribe") != is_notes_review:
+            raise SystemAttestationError("attestation author role is invalid")
+        expected_profile = (
+            self.config.notes_review_profile if is_notes_review else ""
+        )
+        expected_method = self.config.notes_review_method if is_notes_review else ""
+        expected_checks = (
+            list(self.config.notes_review_checks) if is_notes_review else []
+        )
+        if (
+            payload["review_profile"] != expected_profile
+            or payload["review_method"] != expected_method
+            or payload["review_checks"] != expected_checks
+            or is_notes_review
+            and not re.fullmatch(
+                r"github:check-run:[1-9][0-9]*",
+                payload["writer_evidence_id"],
+            )
+            or not is_notes_review
+            and payload["writer_evidence_id"]
+        ):
+            raise SystemAttestationError("attestation review profile is invalid")
         return {key: value for key, value in payload.items() if key != "signature"}
 
     @staticmethod
     def _legacy_unsigned(payload: dict[str, Any]) -> dict[str, Any]:
         fields = set(payload)
-        if fields not in (
+        allowed_shapes = (
             _LEGACY_REQUIRED_FIELDS,
             _LEGACY_REQUIRED_FIELDS | {"key_id"},
-        ):
+            _LEGACY_REQUIRED_FIELDS | _LEGACY_PROFILE_FIELDS,
+            _LEGACY_REQUIRED_FIELDS | _LEGACY_PROFILE_FIELDS | {"key_id"},
+        )
+        if fields not in allowed_shapes:
             raise SystemAttestationError("legacy attestation schema is invalid")
         if any(
-            type(payload[field]) is not (bool if field == "zero_context" else str)
+            type(payload[field]) is not (
+                bool
+                if field == "zero_context"
+                else list
+                if field == "review_checks"
+                else str
+            )
             for field in fields
         ):
             raise SystemAttestationError("legacy attestation types are invalid")
+        if "review_checks" in payload and (
+            any(
+                not isinstance(check, str) or not check.strip()
+                for check in payload["review_checks"]
+            )
+            or len(payload["review_checks"]) != len(set(payload["review_checks"]))
+        ):
+            raise SystemAttestationError("legacy attestation checks are invalid")
         if payload["kind"] not in {"pr", "issue"}:
             raise SystemAttestationError("legacy attestation kind is invalid")
         if (
@@ -2051,6 +2276,11 @@ class DedicatedSigner:
             key: payload[key]
             for key in (
                 *sorted(_LEGACY_ATTESTED_FIELDS),
+                *(
+                    sorted(_LEGACY_PROFILE_FIELDS)
+                    if _LEGACY_PROFILE_FIELDS <= fields
+                    else ()
+                ),
                 "attestation_id",
                 *(("key_id",) if "key_id" in payload else ()),
             )
@@ -2270,6 +2500,8 @@ def request_action(
         "expected_head", "merge_method", "nonce", "head_sha", "base_ref",
         "base_sha",
         "reviewer_identity", "review_id", "review_state", "check_runs",
+        "review_profile", "review_method", "review_checks",
+        "writer_evidence_id",
         "expires_at", "signature",
     }
     if not isinstance(response, dict) or not required <= set(response):
@@ -2284,6 +2516,14 @@ def request_action(
         or response["head_sha"] != expected_head.casefold()
         or response["merge_method"] != merge_method
         or response["nonce"] != action_nonce
+        or not isinstance(response["review_profile"], str)
+        or not isinstance(response["review_method"], str)
+        or not isinstance(response["review_checks"], list)
+        or not isinstance(response["writer_evidence_id"], str)
+        or any(
+            not isinstance(check, str) or not check.strip()
+            for check in response["review_checks"]
+        )
         or _iso(response["expires_at"]) <= datetime.now(timezone.utc)
     ):
         raise SystemAttestationError("protected signer denied the action")

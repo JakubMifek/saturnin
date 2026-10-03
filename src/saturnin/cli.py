@@ -252,6 +252,24 @@ def build_parser() -> argparse.ArgumentParser:
         default="",
         help="reviewed title/body digest for issue reviews",
     )
+    record.add_argument(
+        "--profile",
+        default="",
+        help="policy review profile bound into the signed ledger record",
+    )
+    record.add_argument(
+        "--method",
+        default="",
+        dest="review_method",
+        help="review method bound into the signed ledger record",
+    )
+    record.add_argument(
+        "--check",
+        action="append",
+        default=[],
+        dest="review_checks",
+        help="completed profile check (repeatable)",
+    )
     attest = review.add_parser("attest", help="sign a review verdict as the reviewer")
     attest.add_argument("subject", help="e.g. owner/repo#12 or issue draft id")
     attest.add_argument("--kind", choices=["pr", "issue"], required=True)
@@ -273,6 +291,24 @@ def build_parser() -> argparse.ArgumentParser:
         "--issue-digest",
         default="",
         help="reviewed title/body digest for issue reviews",
+    )
+    attest.add_argument(
+        "--profile",
+        default="",
+        help="policy review profile to bind into the attestation",
+    )
+    attest.add_argument(
+        "--method",
+        default="",
+        dest="review_method",
+        help="review method to bind into the attestation",
+    )
+    attest.add_argument(
+        "--check",
+        action="append",
+        default=[],
+        dest="review_checks",
+        help="completed profile check (repeatable)",
     )
     review.add_parser(
         "seal-rotation",
@@ -649,6 +685,11 @@ def _prepare_project_route(
     squad = list(squad_override or project_squad or route.squad)
     if squad_override is None and lead and lead not in squad:
         squad.insert(0, lead)
+    squad.extend(
+        role
+        for role in router._required_collaborators(task)
+        if role not in squad
+    )
     router.validate_dispatch_squad(squad, local_roles)
     with board.edit(task_id) as stored:
         if stored.state != "routed":
@@ -1610,9 +1651,12 @@ def _run_dispatch(args: argparse.Namespace, config: Config, board: Board, as_jso
                         lead_role=project_lead,
                     )
                 )
+            effective_squad = router.effective_squad(
+                task, squad or None, route.squad
+            )
             results.append({"task": task.id, "role": route.role, "rule": route.rule,
                             "priority": route.priority, "escalate": route.escalate,
-                            "squad": list(squad or route.squad),
+                            "squad": effective_squad,
                             "result_contract": route.result_contract})
             if not args.dry_run and not args.no_launch:
                 launched = _provision_and_launch(
@@ -1954,6 +1998,9 @@ def _run_review(args: argparse.Namespace, config: Config, as_json: bool) -> int:
             head_sha=head_sha,
             issue_digest=getattr(args, "issue_digest", ""),
             destination_repo=getattr(args, "repo", ""),
+            review_profile=args.profile,
+            review_method=args.review_method,
+            review_checks=args.review_checks,
             notes=args.notes,
             attestation=attestation,
         )
@@ -2067,6 +2114,10 @@ def _run_review(args: argparse.Namespace, config: Config, as_json: bool) -> int:
                 "review_id": live["review_id"],
                 "reviewer_identity": live["reviewer_identity"],
                 "decision_nonce": live["nonce"],
+                "review_profile": live.get("review_profile", ""),
+                "review_method": live.get("review_method", ""),
+                "review_checks": live.get("review_checks", []),
+                "writer_evidence_id": live.get("writer_evidence_id", ""),
             },
             as_json,
             "ALLOWED: fresh protected-signer decision",

@@ -476,6 +476,116 @@ def test_worker_command_remounts_worktree_git_control_file_read_only(
     assert protected_index > writable_index
 
 
+def test_notes_non_writer_gets_read_only_worktree_mount(
+    config: Config,
+    board: Board,
+    git_repo: Path,
+) -> None:
+    task = board.create(
+        "Review notes",
+        kind="pr-review",
+        repo=config.policy("repos")["repos"]["notes"]["slug"],
+    )
+    worktree = WorktreeManager(config, repo=git_repo, board=board).create(
+        "feature/review-notes-read-only"
+    )
+    subprocess.run(
+        [
+            "git",
+            "-C",
+            str(git_repo),
+            "remote",
+            "set-url",
+            "origin",
+            "https://github.com/JakubMifek/saturnin-notes.git",
+        ],
+        check=True,
+    )
+    launcher = AgentLauncher(config, board)
+    home = launcher._isolated_home(task.id)
+    mcp_config = config.var_dir / "launches" / f"{task.id}.mcp.json"
+    mcp_config.write_text('{"mcpServers": {}}\n', encoding="utf-8")
+
+    read_only = launcher._notes_worktree_read_only(
+        task, SimpleNamespace(role="pr-reviewer"), config, worktree.path
+    )
+    command = launcher._sandbox_command(
+        "/usr/bin/bwrap",
+        "/usr/bin/pasta",
+        "/usr/bin/copilot",
+        ["--autopilot"],
+        workdir=worktree.path,
+        isolated_home=home,
+        trusted_config=config,
+        git_objects=git_repo / ".git" / "objects",
+        mcp_config=mcp_config,
+        worktree_read_only=read_only,
+    )
+
+    protected = ["--ro-bind", str(worktree.path), str(worktree.path)]
+    writable = ["--bind", str(worktree.path), str(worktree.path)]
+    assert any(
+        command[index:index + 3] == protected
+        for index in range(len(command) - 2)
+    )
+    assert not any(
+        command[index:index + 3] == writable
+        for index in range(len(command) - 2)
+    )
+
+
+def test_notes_scribe_retains_writable_worktree(
+    config: Config, board: Board, git_repo: Path
+) -> None:
+    task = board.create(
+        "Curate notes",
+        repo=config.policy("repos")["repos"]["notes"]["slug"],
+    )
+    subprocess.run(
+        [
+            "git",
+            "-C",
+            str(git_repo),
+            "remote",
+            "set-url",
+            "origin",
+            "git@github.com:JakubMifek/saturnin-notes.git",
+        ],
+        check=True,
+    )
+
+    assert not AgentLauncher(config, board)._notes_worktree_read_only(
+        task, SimpleNamespace(role="scribe"), config, git_repo
+    )
+
+
+def test_notes_worktree_rejects_repository_alias_mismatch(
+    config: Config, board: Board, git_repo: Path
+) -> None:
+    task = board.create(
+        "Review notes",
+        kind="pr-review",
+        repo=config.policy("repos")["repos"]["notes"]["slug"],
+    )
+    subprocess.run(
+        [
+            "git",
+            "-C",
+            str(git_repo),
+            "remote",
+            "set-url",
+            "origin",
+            "https://github.com/JakubMifek/saturnin.git",
+        ],
+        check=True,
+    )
+
+    with pytest.raises(LauncherError, match="canonical origin"):
+        AgentLauncher(config, board)._notes_worktree_read_only(
+            task, SimpleNamespace(role="pr-reviewer"), config, git_repo
+        )
+
+
 def test_reconcile_applies_worker_callbacks_before_requeue(
     config: Config,
     board: Board,
@@ -2289,6 +2399,14 @@ def test_trusted_push_callback_delivers_exact_isolated_commit(
             for entry in stored.history
             if entry.get("callback_id") != queued["callback_id"]
         ]
+
+    config.policy("repos")["repos"]["notes"]["slug"] = "JakubMifek/saturnin"
+    with board.edit(task.id) as stored:
+        stored.repo = " JAKUBMIFEK/SATURNIN "
+    with pytest.raises(WorkerCallbackError, match="may not deliver commits"):
+        apply_queued(config, board, task_id=task.id, callback_dir=str(callback_dir))
+    with board.edit(task.id) as stored:
+        stored.role = "scribe"
 
     apply_queued(config, board, task_id=task.id, callback_dir=str(callback_dir))
 

@@ -13,6 +13,7 @@ import threading
 import urllib.error
 import urllib.request
 from concurrent.futures import ThreadPoolExecutor
+from dataclasses import replace
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
@@ -26,6 +27,7 @@ from saturnin.system_attestation import (
     GitHubMutationError,
     ISSUE_MARKER,
     ISSUE_SUBMISSION_MARKER,
+    NOTES_REVIEW_MARKER,
     PublisherCredential,
     AuthorizationLimiter,
     ARCHIVE_MAX_KEYS,
@@ -51,6 +53,7 @@ from saturnin.review import (
     execution_scoped_review_attestation_key,
     role_scoped_review_attestation_key,
     sign_review_attestation,
+    notes_review_settings,
 )
 
 
@@ -90,6 +93,48 @@ def service_config() -> ServiceConfig:
     )
 
 
+def notes_service_config() -> ServiceConfig:
+    return ServiceConfig(
+        frozenset({"acme/widget"}),
+        frozenset({"review-bot"}),
+        frozenset({"review-bot"}),
+        frozenset({"approved"}),
+        notes_repository="acme/widget",
+        notes_review_profile="notes-review",
+        notes_review_method="rubber-duck",
+        notes_review_checks=(
+            "canonical_structure",
+            "duplication",
+            "factual_integrity",
+            "links",
+            "retrievability",
+        ),
+        notes_writer_logins=frozenset({"author"}),
+        notes_delivery_check_run="saturnin-notes-delivery",
+        notes_delivery_app_slug="saturnin-notes-writer",
+    )
+
+
+def notes_review_body(head: str = HEAD) -> str:
+    return NOTES_REVIEW_MARKER + json.dumps(
+        {
+            "repository": "acme/widget",
+            "head_sha": head,
+            "profile": "notes-review",
+            "method": "rubber-duck",
+            "checks": [
+                "canonical_structure",
+                "duplication",
+                "factual_integrity",
+                "links",
+                "retrievability",
+            ],
+        },
+        sort_keys=True,
+        separators=(",", ":"),
+    )
+
+
 def pr_transport(*, state: str = "APPROVED", head: str = HEAD):
     def get(path: str):
         if path == "/user":
@@ -116,8 +161,24 @@ def pr_transport(*, state: str = "APPROVED", head: str = HEAD):
             return [] if "page=2" in path else [{
                 "id": 91, "commit_id": head, "state": state,
                 "submitted_at": "2026-09-27T16:00:00Z",
+                "body": notes_review_body(head),
                 "user": {"login": "review-bot", "type": "Bot"},
             }]
+        if "/check-runs?" in path:
+            return {
+                "total_count": 1,
+                "check_runs": [{
+                    "id": 601,
+                    "name": "saturnin-notes-delivery",
+                    "status": "completed",
+                    "conclusion": "success",
+                    "external_id": (
+                        "saturnin-notes-delivery:v1:"
+                        f"acme/widget:{head}:author"
+                    ),
+                    "app": {"slug": "saturnin-notes-writer"},
+                }],
+            }
         raise AssertionError(path)
     return get
 
@@ -155,15 +216,29 @@ def action_transport(
             return [] if "page=2" in path else [{
                 "id": 91, "commit_id": head, "state": state,
                 "submitted_at": "2026-09-27T16:00:00Z",
+                "body": notes_review_body(head),
                 "user": {"login": reviewer, "type": reviewer_type},
             }]
         if "/check-runs?" in path:
             return {
-                "total_count": 1,
-                "check_runs": [{
-                    "id": 501, "name": "test", "status": "completed",
-                    "conclusion": check_conclusion,
-                }],
+                "total_count": 2,
+                "check_runs": [
+                    {
+                        "id": 501, "name": "test", "status": "completed",
+                        "conclusion": check_conclusion,
+                    },
+                    {
+                        "id": 601,
+                        "name": "saturnin-notes-delivery",
+                        "status": "completed",
+                        "conclusion": "success",
+                        "external_id": (
+                            "saturnin-notes-delivery:v1:"
+                            f"acme/widget:{head}:author"
+                        ),
+                        "app": {"slug": "saturnin-notes-writer"},
+                    },
+                ],
             }
         raise AssertionError(path)
     return get
@@ -281,6 +356,156 @@ def test_same_uid_direct_request_only_signs_live_github_approval(tmp_path: Path)
         )
 
 
+def test_notes_review_contract_is_derived_and_signed_by_protected_service(
+    tmp_path: Path,
+) -> None:
+    cfg = notes_service_config()
+    service = DedicatedSigner(
+        cfg,
+        GitHub(cfg, transport=pr_transport()),
+        b"c" * 48,
+        b"p" * 48,
+        tmp_path / "notes.sqlite3",
+        now=lambda: NOW,
+    )
+
+    attestation = service.authorize(request())
+    payload = json.loads(attestation)
+
+    assert payload["review_profile"] == "notes-review"
+    assert payload["review_method"] == "rubber-duck"
+    assert payload["review_checks"] == [
+        "canonical_structure",
+        "duplication",
+        "factual_integrity",
+        "links",
+        "retrievability",
+    ]
+    assert payload["writer_evidence_id"] == "github:check-run:601"
+    assert service.verify(attestation) == {
+        "status": "verified",
+        "key_state": "current",
+    }
+
+
+@pytest.mark.parametrize(
+    ("field", "value"),
+    [
+        ("review_profile", ""),
+        ("review_method", "ordinary"),
+        ("review_checks", ["factual_integrity"]),
+    ],
+)
+def test_notes_review_contract_tampering_is_rejected(
+    tmp_path: Path, field: str, value: object,
+) -> None:
+    cfg = notes_service_config()
+    service = DedicatedSigner(
+        cfg,
+        GitHub(cfg, transport=pr_transport()),
+        b"c" * 48,
+        b"p" * 48,
+        tmp_path / "notes.sqlite3",
+        now=lambda: NOW,
+    )
+    payload = json.loads(service.authorize(request()))
+    payload[field] = value
+
+    with pytest.raises(SystemAttestationError):
+        service.verify(json.dumps(payload))
+
+
+def test_notes_authorization_fails_without_provisioned_scribe_identity(
+    tmp_path: Path,
+) -> None:
+    cfg = replace(notes_service_config(), notes_writer_logins=frozenset())
+    service = DedicatedSigner(
+        cfg,
+        GitHub(cfg, transport=pr_transport()),
+        b"c" * 48,
+        None,
+        tmp_path / "notes.sqlite3",
+        now=lambda: NOW,
+    )
+
+    with pytest.raises(SystemAttestationError, match="scribe identity"):
+        service.authorize(request())
+
+
+def test_notes_authorization_requires_head_bound_review_and_delivery_evidence(
+    tmp_path: Path,
+) -> None:
+    cfg = notes_service_config()
+
+    def generic_review(path: str):
+        value = pr_transport()(path)
+        if "/reviews?" in path and value:
+            value[0]["body"] = "ordinary approval"
+        return value
+
+    with pytest.raises(SystemAttestationError, match="review evidence"):
+        DedicatedSigner(
+            cfg,
+            GitHub(cfg, transport=generic_review),
+            b"c" * 48,
+            None,
+            tmp_path / "review.sqlite3",
+            now=lambda: NOW,
+        ).authorize(request())
+
+    without_delivery = replace(
+        cfg, notes_delivery_check_run="", notes_delivery_app_slug="",
+    )
+    with pytest.raises(SystemAttestationError, match="not provisioned"):
+        DedicatedSigner(
+            without_delivery,
+            GitHub(without_delivery, transport=pr_transport()),
+            b"c" * 48,
+            None,
+            tmp_path / "delivery.sqlite3",
+            now=lambda: NOW,
+        ).authorize(request())
+
+
+def test_protected_notes_attestation_records_scribe_role_and_identity(
+    tmp_path: Path, config, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    cfg = notes_service_config()
+    service = DedicatedSigner(
+        cfg,
+        GitHub(cfg, transport=pr_transport()),
+        b"c" * 48,
+        None,
+        tmp_path / "notes.sqlite3",
+        now=lambda: NOW,
+    )
+    attestation = service.authorize(request())
+    monkeypatch.setattr(
+        "saturnin.system_attestation.verify_attestation",
+        lambda value, **kwargs: service.verify(value, **kwargs),
+    )
+    config.policy("repos")["repos"]["notes"]["slug"] = "acme/widget"
+    settings = notes_review_settings(config)
+
+    record = ReviewLedger(config).record(
+        subject="acme/widget#7",
+        kind="pr",
+        author="scribe",
+        reviewer="pr-reviewer",
+        verdict="approved",
+        head_sha=HEAD,
+        destination_repo="acme/widget",
+        review_profile=settings["profile"],
+        review_method=settings["method"],
+        review_checks=settings["required_checks"],
+        attestation=attestation,
+    )
+
+    assert record.author == "scribe"
+    assert json.loads(record.attestation_payload)["author"] == "github:author"
+    assert ReviewLedger(config).for_subject("acme/widget#7", "pr") == [record]
+
+
 @pytest.mark.parametrize("change", [
     {"repository": "evil/widget"}, {"destination_repo": "evil/widget"},
     {"number": "../7"}, {"kind": "unknown"}, {"extra": "claim"},
@@ -395,9 +620,52 @@ def test_fresh_gate_decision_binds_live_review_head_base_checks_and_nonce(
     assert result["review_id"] == 91
     assert result["review_state"] == "approved"
     assert result["check_runs"] == ["test:501"]
+    assert result["review_profile"] == ""
+    assert result["review_method"] == ""
+    assert result["review_checks"] == []
+    assert result["writer_evidence_id"] == ""
     assert result["nonce"] == "d" * 64
     assert result["expires_at"] == "2026-09-28T00:01:00+00:00"
     assert len(result["signature"]) == 64
+
+
+def test_notes_gate_binds_contract_and_requires_provisioned_scribe(
+    tmp_path: Path,
+) -> None:
+    cfg = notes_service_config()
+    service = DedicatedSigner(
+        cfg,
+        GitHub(cfg, token="protected", transport=action_transport()),
+        b"c" * 48,
+        None,
+        tmp_path / "notes-action.sqlite3",
+        now=lambda: NOW,
+    )
+
+    result = service.action(action_request())
+    assert result["review_profile"] == "notes-review"
+    assert result["review_method"] == "rubber-duck"
+    assert result["review_checks"] == [
+        "canonical_structure",
+        "duplication",
+        "factual_integrity",
+        "links",
+        "retrievability",
+    ]
+    assert result["writer_evidence_id"] == "github:check-run:601"
+    with pytest.raises(SystemAttestationError, match="may not be merged"):
+        service.action(action_request(operation="merge", nonce="f" * 64))
+
+    blocked = DedicatedSigner(
+        replace(cfg, notes_writer_logins=frozenset()),
+        GitHub(cfg, token="protected", transport=action_transport()),
+        b"c" * 48,
+        None,
+        tmp_path / "notes-blocked.sqlite3",
+        now=lambda: NOW,
+    )
+    with pytest.raises(SystemAttestationError, match="scribe identity"):
+        blocked.action(action_request(nonce="e" * 64))
 
 
 @pytest.mark.parametrize(
@@ -2632,6 +2900,10 @@ def test_socket_client_checks_peer_and_response_schema(
         "review_id": 91,
         "review_state": "approved",
         "check_runs": ["test:501"],
+        "review_profile": "",
+        "review_method": "",
+        "review_checks": [],
+        "writer_evidence_id": "",
         "protected_actor": "saturnin-merge-bot",
         "protection_hash": "e" * 64,
         "expires_at": "2099-01-01T00:00:00+00:00",

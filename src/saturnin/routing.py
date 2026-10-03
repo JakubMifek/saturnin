@@ -8,7 +8,7 @@ in the system.
 from __future__ import annotations
 
 import re
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from typing import Any, Mapping, Sequence
 
 from .board import CONTAINER_KINDS, PRIORITIES, Board, BoardError, Task
@@ -46,6 +46,7 @@ class Router:
             "default_result_contract",
             delegation.get("default_result_contract", "board-callback"),
         )
+        self.repos: dict[str, Any] = self.config.policy("repos").get("repos", {})
 
     # -- matching ------------------------------------------------------
     @staticmethod
@@ -87,23 +88,151 @@ class Router:
         lead_role: str | None = None,
     ) -> Route:
         """Pick a route for ``task`` without mutating it."""
+        private_notes = self.policy.get("knowledge", {}).get(
+            "private_notes_changes", {}
+        )
+        precedent = self._private_notes_precedent(task)
+        if precedent is not None:
+            route = self._build(
+                precedent.get("route", {}),
+                precedent.get("id", "?"),
+                additional_roles=additional_roles,
+            )
+            return self._with_required_collaborators(
+                task, route, additional_roles=additional_roles
+            )
+        if self._is_private_notes_change(task):
+            writer = private_notes.get("writer_role")
+            if lead_role is not None and lead_role != writer:
+                raise RoutingError(
+                    "private notes changes may only be led by the configured scribe"
+                )
+            route = self._build(
+                {
+                    "role": writer,
+                    "priority": "P2",
+                    "squad": [
+                        writer,
+                        self._private_notes_reviewer(),
+                    ],
+                    "result_contract": private_notes.get(
+                        "result_contract", "pr-gate"
+                    ),
+                },
+                "private-notes-change",
+                additional_roles=additional_roles,
+            )
+            return self._with_required_collaborators(
+                task, route, additional_roles=additional_roles
+            )
         for rule in self.rules:
             if self._matches(rule.get("when", {}), task):
-                return self._build(
+                route = self._build(
                     rule.get("route", {}),
                     rule.get("id", "?"),
                     additional_roles=additional_roles,
                     lead_role=lead_role,
                 )
+                return self._with_required_collaborators(
+                    task, route, additional_roles=additional_roles
+                )
         default = dict(self.policy.get("default_route", {}))
         if not default.get("role"):
             raise RoutingError("routing policy has no usable default_route")
-        return self._build(
+        route = self._build(
             default,
             "default",
             additional_roles=additional_roles,
             lead_role=lead_role,
         )
+        return self._with_required_collaborators(
+            task, route, additional_roles=additional_roles
+        )
+
+    def _with_required_collaborators(
+        self,
+        task: Task,
+        route: Route,
+        *,
+        additional_roles: Mapping[str, dict[str, Any]] | None = None,
+    ) -> Route:
+        required = self._required_collaborators(task)
+        squad = tuple(dict.fromkeys([*route.squad, *required]))
+        self._validate_squad(
+            squad, "knowledge collaboration", additional_roles or {}
+        )
+        return replace(route, squad=squad)
+
+    def _required_collaborators(self, task: Task) -> list[str]:
+        knowledge = self.policy.get("knowledge", {})
+        durable = knowledge.get("durable_information_triggers", {})
+        labels = {label.lower() for label in task.labels}
+        triggered = bool(
+            labels & {str(value).lower() for value in durable.get("labels", [])}
+        )
+        text = self._haystack(task)
+        triggered = triggered or any(
+            self._has_keyword(text, keyword)
+            for keyword in durable.get("keywords", [])
+        )
+        required = [knowledge.get("scribe_role")] if triggered else []
+        private_notes = knowledge.get("private_notes_changes", {})
+        if self._is_private_notes_change(task):
+            required.extend(
+                [
+                    private_notes.get("writer_role"),
+                    self._private_notes_reviewer(),
+                ]
+            )
+        return list(dict.fromkeys(r for r in required if r))
+
+    def effective_squad(
+        self, task: Task, requested: Sequence[str] | None, fallback: Sequence[str]
+    ) -> list[str]:
+        squad = list(requested if requested is not None else fallback)
+        return list(dict.fromkeys([*squad, *self._required_collaborators(task)]))
+
+    def _is_private_notes_change(self, task: Task) -> bool:
+        if self._private_notes_precedent(task) is not None:
+            return False
+        private_notes = self.policy.get("knowledge", {}).get(
+            "private_notes_changes", {}
+        )
+        repository_policy = private_notes.get("repository_policy")
+        repository = self.repos.get(repository_policy, {})
+        notes_slug = str(repository.get("slug", "")).strip().casefold()
+        task_repo = str(task.repo or "").strip().casefold()
+        if notes_slug and task_repo == notes_slug:
+            return True
+        labels = {label.lower() for label in task.labels}
+        return bool(
+            labels
+            & {str(value).lower() for value in private_notes.get("labels", [])}
+        )
+
+    def _private_notes_precedent(self, task: Task) -> dict[str, Any] | None:
+        private_notes = self.policy.get("knowledge", {}).get(
+            "private_notes_changes", {}
+        )
+        preserved = private_notes.get("preserve_rule_precedence", [])
+        if not isinstance(preserved, list):
+            return None
+        by_id = {rule.get("id"): rule for rule in self.rules}
+        for rule_id in preserved:
+            rule = by_id.get(rule_id)
+            if rule is not None and self._matches(rule.get("when", {}), task):
+                return rule
+        return None
+
+    def _private_notes_reviewer(self) -> str | None:
+        private_notes = self.policy.get("knowledge", {}).get(
+            "private_notes_changes", {}
+        )
+        repository = self.repos.get(private_notes.get("repository_policy"), {})
+        reviewers = repository.get("change_review", {}).get(
+            "allowed_reviewer_roles", []
+        )
+        return reviewers[0] if isinstance(reviewers, list) and reviewers else None
 
     def _build(
         self,
@@ -199,9 +328,15 @@ class Router:
                 additional_roles=additional_roles,
                 lead_role=lead_role,
             )
+            if self._is_private_notes_change(current) and route.role != self.policy[
+                "knowledge"
+            ]["private_notes_changes"]["writer_role"]:
+                raise RoutingError(
+                    "private notes changes may only be led by the configured scribe"
+                )
             current.role = route.role
             current.unit = route.unit
-            current.squad = list(squad or route.squad)
+            current.squad = self.effective_squad(current, squad, route.squad)
             # A pre-set priority (P0 incidents, discovery's own priority mapping)
             # reflects urgency already known at intake; a rule must never
             # silently downgrade it, only raise it.
@@ -225,7 +360,7 @@ class Router:
             current.state = "routed"
             current.log("state:routed", actor=effective_actor, note=f"rule={route.rule}")
         task.__dict__.update(current.__dict__)
-        return route
+        return replace(route, squad=tuple(current.squad))
 
     def relabel_and_reroute(
         self,
@@ -292,4 +427,36 @@ class Router:
             problems.append(f"CEO role {self.ceo_role!r} missing from role catalog")
         elif self.roles[self.ceo_role].get("executes", False):
             problems.append("CEO role is marked as executing; delegation-first is violated")
+        knowledge = self.policy.get("knowledge", {})
+        scribe = knowledge.get("scribe_role")
+        private_notes = knowledge.get("private_notes_changes", {})
+        if scribe not in self.roles:
+            problems.append("knowledge policy names an unknown scribe role")
+        if private_notes.get("writer_role") != scribe:
+            problems.append("private notes writer must be the configured scribe role")
+        reviewer = self._private_notes_reviewer()
+        if reviewer not in self.roles or reviewer == scribe:
+            problems.append("private notes require a known independent reviewer role")
+        if not private_notes.get("labels"):
+            problems.append("private notes changes require routing labels")
+        preserved = private_notes.get("preserve_rule_precedence", [])
+        rule_ids = {rule.get("id") for rule in self.rules}
+        if (
+            not isinstance(preserved, list)
+            or not preserved
+            or any(rule_id not in rule_ids for rule_id in preserved)
+        ):
+            problems.append(
+                "private notes changes require valid preserved routing rules"
+            )
+        repository_policy = private_notes.get("repository_policy")
+        repository = self.repos.get(repository_policy, {})
+        if not repository.get("slug"):
+            problems.append(
+                "private notes changes require a canonical repository policy slug"
+            )
+        elif repository.get("access", {}).get("writer_roles") != [scribe]:
+            problems.append(
+                "private notes routing writer must agree with repository access policy"
+            )
         return problems

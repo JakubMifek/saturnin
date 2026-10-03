@@ -31,7 +31,7 @@ def test_keyword_routing_uses_word_boundaries(config: Config, board: Board) -> N
 
 def test_kind_routing(config: Config, board: Board) -> None:
     task = board.create("Review PR 12", kind="pr-review")
-    route = Router(config).resolve(task)
+    route = Router(config).resolve(task, lead_role="scribe")
     assert route.role == "pr-reviewer"
     assert route.priority == "P1"
 
@@ -140,6 +140,127 @@ def test_squad_is_assembled_per_task(config: Config, board: Board) -> None:
     route = Router(config).dispatch(board, task, squad=["code-worker", "scribe"])
     assert route.squad  # the rule's suggestion is still reported
     assert board.get(task.id).squad == ["code-worker", "scribe"]
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        "Implement cache ownership and record the decision",
+        "Implement publication of the investigation result",
+        "Implement export of this durable information",
+    ],
+)
+def test_durable_information_automatically_includes_scribe(
+    config: Config, board: Board, text: str
+) -> None:
+    task = board.create(text)
+
+    route = Router(config).dispatch(board, task, squad=["code-worker"])
+
+    assert route.role == "code-worker"
+    assert board.get(task.id).squad == ["code-worker", "scribe"]
+
+
+def test_private_notes_changes_route_only_to_scribe_with_reviewer(
+    config: Config, board: Board
+) -> None:
+    task = board.create("Apply synthetic vault bootstrap", labels=["vault-change"])
+
+    route = Router(config).dispatch(board, task)
+
+    assert route.role == "scribe"
+    assert route.result_contract == "pr-gate"
+    assert board.get(task.id).squad == ["scribe", "pr-reviewer"]
+
+
+def test_private_notes_change_rejects_non_scribe_lead(
+    config: Config, board: Board
+) -> None:
+    task = board.create("Apply public bootstrap", labels=["notes-write"])
+
+    with pytest.raises(RoutingError, match="only be led"):
+        Router(config).resolve(task, lead_role="code-worker")
+
+
+def test_unlabelled_notes_repository_task_routes_only_to_scribe(
+    config: Config, board: Board
+) -> None:
+    task = board.create(
+        "Apply repository bootstrap",
+        repo=config.policy("repos")["repos"]["notes"]["slug"],
+    )
+
+    route = Router(config).dispatch(board, task)
+
+    assert route.role == "scribe"
+    assert route.rule == "private-notes-change"
+    assert board.get(task.id).squad == ["scribe", "pr-reviewer"]
+
+
+@pytest.mark.parametrize("lead_role", ["code-worker", "bootstrap-worker"])
+def test_notes_repository_rejects_lead_overrides(
+    config: Config, board: Board, lead_role: str
+) -> None:
+    task = board.create(
+        "Apply managed repository manifest",
+        repo=config.policy("repos")["repos"]["notes"]["slug"].upper(),
+    )
+    additional_roles = (
+        {"bootstrap-worker": {"unit": "engineering", "executes": True}}
+        if lead_role == "bootstrap-worker"
+        else None
+    )
+
+    with pytest.raises(RoutingError, match="only be led"):
+        Router(config).resolve(
+            task,
+            lead_role=lead_role,
+            additional_roles=additional_roles,
+        )
+
+
+@pytest.mark.parametrize(
+    ("kind", "labels", "role", "rule"),
+    [
+        ("task", ["blocked"], "chief-of-staff", "escalation"),
+        ("pr-review", [], "pr-reviewer", "review-pr"),
+        ("issue-review", [], "issue-reviewer", "review-issue"),
+    ],
+)
+def test_notes_repository_preserves_governance_route_precedence(
+    config: Config,
+    board: Board,
+    kind: str,
+    labels: list[str],
+    role: str,
+    rule: str,
+) -> None:
+    task = board.create(
+        "Govern notes repository",
+        kind=kind,
+        labels=labels,
+        repo=config.policy("repos")["repos"]["notes"]["slug"],
+    )
+
+    route = Router(config).resolve(task, lead_role="scribe")
+
+    assert route.role == role
+    assert route.rule == rule
+
+
+def test_notes_repository_squad_override_cannot_remove_scribe_lead(
+    config: Config, board: Board
+) -> None:
+    task = board.create(
+        "Apply generic bootstrap",
+        repo=config.policy("repos")["repos"]["notes"]["slug"],
+    )
+
+    route = Router(config).dispatch(board, task, squad=["code-worker"])
+
+    assert route.role == "scribe"
+    assert board.get(task.id).role == "scribe"
+    assert board.get(task.id).squad == ["code-worker", "scribe", "pr-reviewer"]
 
 
 @pytest.mark.parametrize(

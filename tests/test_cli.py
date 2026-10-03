@@ -24,6 +24,7 @@ from saturnin.review import (
     execution_scoped_review_attestation_key,
     issue_content_digest,
     sign_review_attestation,
+    notes_review_settings,
 )
 from saturnin.routing import Router
 from saturnin.system_attestation import SystemAttestationError
@@ -55,29 +56,32 @@ def write_service_config(home: Path) -> None:
     )
 
 
-def review_attestation_args(**kwargs: str) -> tuple[str, str]:
+def review_attestation_args(**kwargs: object) -> tuple[str, str]:
     task_id = "T-20260924-cli"
     nonce = secrets.token_hex(32)
     attestation_id = f"{task_id}:{nonce}"
     attestation = sign_review_attestation(
         key=execution_scoped_review_attestation_key(
             os.environ["SATURNIN_REVIEW_ATTESTATION_KEY"],
-            kwargs["reviewer"],
+            str(kwargs["reviewer"]),
             task_id,
             nonce,
-            kwargs["subject"],
-            kwargs.get("head_sha", ""),
-            kwargs.get("issue_digest", ""),
+            str(kwargs["subject"]),
+            str(kwargs.get("head_sha", "")),
+            str(kwargs.get("issue_digest", "")),
         ),
-        subject=kwargs["subject"],
-        kind=kwargs["kind"],
-        author=kwargs["author"],
-        reviewer=kwargs["reviewer"],
-        verdict=kwargs["verdict"],
-        head_sha=kwargs.get("head_sha", ""),
-        issue_digest=kwargs.get("issue_digest", ""),
-        destination_repo=kwargs.get("repo", ""),
+        subject=str(kwargs["subject"]),
+        kind=str(kwargs["kind"]),
+        author=str(kwargs["author"]),
+        reviewer=str(kwargs["reviewer"]),
+        verdict=str(kwargs["verdict"]),
+        head_sha=str(kwargs.get("head_sha", "")),
+        issue_digest=str(kwargs.get("issue_digest", "")),
+        destination_repo=str(kwargs.get("repo", "")),
         attestation_id=attestation_id,
+        review_profile=str(kwargs.get("profile", "")),
+        review_method=str(kwargs.get("method", "")),
+        review_checks=list(kwargs.get("checks", [])),
     )
     return ("--attestation", attestation)
 
@@ -759,6 +763,100 @@ def test_dispatch_squad_override_survives_project_preparation(
     assert Board().get(task["id"]).squad == ["pr-reviewer"]
 
 
+def test_notes_project_squad_cannot_discard_mandatory_collaborators(
+    home: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    config = Config.load()
+    repo = config.policy("repos")["repos"]["notes"]["slug"]
+    worktree = home / "var" / "worktrees" / "notes-squad"
+    (worktree / ".saturnin").mkdir(parents=True)
+    (worktree / ".saturnin" / "repo.yaml").write_text(
+        "project: Notes\nsquad: [code-worker]\n",
+        encoding="utf-8",
+    )
+    task = json.loads(
+        run(
+            capsys,
+            "--json",
+            "task",
+            "add",
+            "Provision notes structure",
+            "--repo",
+            repo,
+            "--dispatch",
+        )[1]
+    )
+    with Board().edit(task["id"]) as stored:
+        stored.worktree = str(worktree)
+
+    code, out = run(
+        capsys,
+        "--json",
+        "dispatch",
+        task["id"],
+        "--no-launch",
+    )
+
+    assert code == 0
+    result = json.loads(out)[0]
+    assert result["role"] == "scribe"
+    assert result["squad"] == ["code-worker", "scribe", "pr-reviewer"]
+    assert Board().get(task["id"]).squad == [
+        "code-worker",
+        "scribe",
+        "pr-reviewer",
+    ]
+
+    with Board().edit(task["id"]) as stored:
+        stored.state = "intake"
+        stored.role = None
+        stored.squad = []
+    code, out = run(
+        capsys,
+        "--json",
+        "dispatch",
+        task["id"],
+        "--dry-run",
+    )
+    assert code == 0
+    assert json.loads(out)[0]["squad"] == [
+        "code-worker",
+        "scribe",
+        "pr-reviewer",
+    ]
+
+
+def test_notes_project_manifest_cannot_select_non_scribe_lead(
+    home: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    config = Config.load()
+    repo = config.policy("repos")["repos"]["notes"]["slug"]
+    worktree = home / "var" / "worktrees" / "notes-lead"
+    (worktree / ".saturnin").mkdir(parents=True)
+    (worktree / ".saturnin" / "repo.yaml").write_text(
+        "project: Notes\nlead: code-worker\nsquad: [code-worker]\n",
+        encoding="utf-8",
+    )
+    task = json.loads(
+        run(
+            capsys,
+            "--json",
+            "task",
+            "add",
+            "Provision notes structure",
+            "--repo",
+            repo,
+            "--dispatch",
+        )[1]
+    )
+    with Board().edit(task["id"]) as stored:
+        stored.worktree = str(worktree)
+
+    assert main(["dispatch", task["id"], "--no-launch"]) == 1
+    assert "only be led by the configured scribe" in capsys.readouterr().err
+    assert Board().get(task["id"]).role == "scribe"
+
+
 def test_task_reroute_adds_labels_and_routes_current_task(
     home: Path, capsys: pytest.CaptureFixture[str]
 ) -> None:
@@ -1400,6 +1498,58 @@ def test_review_gate_flow(
     )
     assert code == 0
     assert "ALLOWED" in out
+
+
+def test_notes_review_cli_binds_profile_method_and_checks(
+    home: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    config = Config.load()
+    repo = config.policy("repos")["repos"]["notes"]["slug"]
+    settings = notes_review_settings(config)
+    subject = f"{repo}#42"
+    head_sha = "b" * 40
+    profile_args = [
+        "--repo",
+        repo,
+        "--profile",
+        settings["profile"],
+        "--method",
+        settings["method"],
+        *[
+            item
+            for check in settings["required_checks"]
+            for item in ("--check", check)
+        ],
+    ]
+    assert run(
+        capsys,
+        "review",
+        "record",
+        subject,
+        "--kind",
+        "pr",
+        "--author",
+        "scribe",
+        "--reviewer",
+        "pr-reviewer",
+        "--verdict",
+        "approved",
+        "--head-sha",
+        head_sha,
+        *profile_args,
+        *review_attestation_args(
+            subject=subject,
+            kind="pr",
+            author="scribe",
+            reviewer="pr-reviewer",
+            verdict="approved",
+            head_sha=head_sha,
+            repo=repo,
+            profile=settings["profile"],
+            method=settings["method"],
+            checks=settings["required_checks"],
+        ),
+    )[0] == 0
 
 
 def test_ci_review_gate_uses_read_only_live_decision(

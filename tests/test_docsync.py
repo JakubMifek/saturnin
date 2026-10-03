@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import os
 import shutil
 from pathlib import Path
 
@@ -8,6 +9,11 @@ import pytest
 from saturnin import docsync
 from saturnin.cli import main
 from saturnin.config import Config
+from saturnin.review import (
+    ReviewLedger,
+    execution_scoped_review_attestation_key,
+    sign_review_attestation,
+)
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 
@@ -48,6 +54,11 @@ def test_checked_in_docs_match_policy() -> None:
     )
     assert ".github/workflows/governance.yml" in runtime_block.group("body")
     assert "independently enforces the review gate" in runtime_block.group("body")
+    topology = (REPO_ROOT / "docs" / "adr" / "0002-repository-topology.md").read_text(
+        encoding="utf-8"
+    )
+    assert "Status: **Accepted**" in topology
+    assert "<!-- generated:notes-governance -->" in topology
 
 
 def test_cleanup_guidance_references_policy_without_copying_configurable_facts() -> None:
@@ -128,6 +139,62 @@ def test_review_flow_blocks_are_policy_rendered(docs_home: Config) -> None:
     docsync.render(docs_home)
     rendered = (docs_home.root / "skills" / "review-ledger.md").read_text(encoding="utf-8")
     assert "--repo example/other" in rendered
+
+
+def test_generated_notes_review_flow_matches_ledger_contract(config: Config) -> None:
+    notes = config.policy("repos")["repos"]["notes"]
+    review = notes["change_review"]
+    repo = notes["slug"]
+    flow = docsync._notes_review_flow(config)
+    for option in (
+        f"--repo {repo}",
+        f"--profile {review['profile']}",
+        f"--method {review['method']}",
+        *(f"--check {check}" for check in review["required_checks"]),
+    ):
+        assert flow.count(option) >= 2
+
+    subject = f"{repo}#42"
+    head_sha = "d" * 40
+    task_id = "T-20260929-notes"
+    nonce = "0123456789abcdef" * 4
+    attestation = sign_review_attestation(
+        key=execution_scoped_review_attestation_key(
+            os.environ["SATURNIN_REVIEW_ATTESTATION_KEY"],
+            "pr-reviewer",
+            task_id,
+            nonce,
+            subject,
+            head_sha,
+            "",
+        ),
+        subject=subject,
+        kind="pr",
+        author="scribe",
+        reviewer="pr-reviewer",
+        verdict="approved",
+        head_sha=head_sha,
+        destination_repo=repo,
+        review_profile=review["profile"],
+        review_method=review["method"],
+        review_checks=review["required_checks"],
+        attestation_id=f"{task_id}:{nonce}",
+    )
+    record = ReviewLedger(config).record(
+        subject=subject,
+        kind="pr",
+        author="scribe",
+        reviewer="pr-reviewer",
+        verdict="approved",
+        head_sha=head_sha,
+        destination_repo=repo,
+        review_profile=review["profile"],
+        review_method=review["method"],
+        review_checks=review["required_checks"],
+        attestation=attestation,
+    )
+
+    assert record.review_profile == review["profile"]
 
 
 def test_audit_checks_generated_blocks_in_skills(docs_home: Config) -> None:

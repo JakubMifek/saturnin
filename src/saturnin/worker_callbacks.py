@@ -858,6 +858,24 @@ def _validate_worktree_repository(config: Config, task: Task, worktree: Path) ->
         _require_task_repository(config, task, repo)
 
 
+def _require_repository_writer(
+    config: Config, task: Task, trusted_role: str,
+) -> None:
+    notes = config.policy("repos").get("repos", {}).get("notes", {})
+    notes_slug = normalize_repository_slug(str(notes.get("slug", "")))
+    task_slug = normalize_repository_slug(task.repo) if task.repo else ""
+    if task_slug != notes_slug:
+        return
+    writers = {
+        str(role).strip().casefold()
+        for role in notes.get("access", {}).get("writer_roles", [])
+    }
+    if trusted_role not in writers:
+        raise WorkerCallbackError(
+            f"role {trusted_role!r} may not deliver commits to the notes repository"
+        )
+
+
 def _deliver_isolated_commit(
     config: Config,
     board: Board,
@@ -891,6 +909,7 @@ def _deliver_isolated_commit(
         try:
             worktree = validated_task_worktree(task)
             _validate_worktree_repository(config, task, worktree)
+            _require_repository_writer(config, task, trusted_role)
             isolated_git_dir = callback_dir.parent / ".saturnin-git"
             if not isolated_git_dir.is_dir() or isolated_git_dir.is_symlink():
                 raise WorkerCallbackError(

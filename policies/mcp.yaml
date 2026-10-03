@@ -48,6 +48,20 @@ rules:
     issue-reviewer: [fetch]
   # A role that does not execute may not hold any MCP server at all.
   non_executing_roles_get_none: true
+  repository_worktrees:
+    notes:
+      writer_roles: [scribe]
+      non_writer_mount: read-only
+      require_canonical_origin: true
+
+# The notes lookup integration is only a declared future boundary. It is not a
+# server entry, cannot be launched, and grants no write path in this change.
+future_integrations:
+  notes:
+    enabled: false
+    repository: notes
+    non_scribe_access: read-only
+    write_roles: []
 
 launcher:
   # Repository default is safety-first: routing/dispatch works everywhere,

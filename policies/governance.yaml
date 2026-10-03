@@ -79,6 +79,9 @@ review:
     independent: true
     author_may_review: false
     allowed_reviewer_roles: [issue-reviewer]
+  # Private notes changes are ordinary PRs, plus this stricter content contract.
+  notes:
+    policy_ref: repos.repos.notes.change_review
   attestation:
     # A root-installed service derives authorization independently from GitHub.
     # Caller identity and caller-supplied review fields are never authority.
