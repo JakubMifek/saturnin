@@ -1651,9 +1651,12 @@ def _run_dispatch(args: argparse.Namespace, config: Config, board: Board, as_jso
                         lead_role=project_lead,
                     )
                 )
+            effective_squad = router.effective_squad(
+                task, squad or None, route.squad
+            )
             results.append({"task": task.id, "role": route.role, "rule": route.rule,
                             "priority": route.priority, "escalate": route.escalate,
-                            "squad": list(squad or route.squad),
+                            "squad": effective_squad,
                             "result_contract": route.result_contract})
             if not args.dry_run and not args.no_launch:
                 launched = _provision_and_launch(

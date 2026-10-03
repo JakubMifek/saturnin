@@ -798,8 +798,28 @@ def test_notes_project_squad_cannot_discard_mandatory_collaborators(
     )
 
     assert code == 0
-    assert json.loads(out)[0]["role"] == "scribe"
+    result = json.loads(out)[0]
+    assert result["role"] == "scribe"
+    assert result["squad"] == ["code-worker", "scribe", "pr-reviewer"]
     assert Board().get(task["id"]).squad == [
+        "code-worker",
+        "scribe",
+        "pr-reviewer",
+    ]
+
+    with Board().edit(task["id"]) as stored:
+        stored.state = "intake"
+        stored.role = None
+        stored.squad = []
+    code, out = run(
+        capsys,
+        "--json",
+        "dispatch",
+        task["id"],
+        "--dry-run",
+    )
+    assert code == 0
+    assert json.loads(out)[0]["squad"] == [
         "code-worker",
         "scribe",
         "pr-reviewer",

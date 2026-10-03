@@ -186,6 +186,12 @@ class Router:
             )
         return list(dict.fromkeys(r for r in required if r))
 
+    def effective_squad(
+        self, task: Task, requested: Sequence[str] | None, fallback: Sequence[str]
+    ) -> list[str]:
+        squad = list(requested if requested is not None else fallback)
+        return list(dict.fromkeys([*squad, *self._required_collaborators(task)]))
+
     def _is_private_notes_change(self, task: Task) -> bool:
         if self._private_notes_precedent(task) is not None:
             return False
@@ -330,13 +336,7 @@ class Router:
                 )
             current.role = route.role
             current.unit = route.unit
-            requested_squad = list(squad or route.squad)
-            required = [
-                member
-                for member in self._required_collaborators(current)
-                if member not in requested_squad
-            ]
-            current.squad = [*requested_squad, *required]
+            current.squad = self.effective_squad(current, squad, route.squad)
             # A pre-set priority (P0 incidents, discovery's own priority mapping)
             # reflects urgency already known at intake; a rule must never
             # silently downgrade it, only raise it.
