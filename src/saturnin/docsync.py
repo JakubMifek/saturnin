@@ -388,32 +388,37 @@ def _policy_reader_provisioning(config: Config) -> str:
     unit_path = (
         config.root / "systemd" / "system" / "saturnin-attestation.service"
     )
-    try:
-        credential_lines = [
-            line for line in unit_path.read_text(encoding="utf-8").splitlines()
-            if line.startswith("LoadCredentialEncrypted=github.policy:")
-        ]
-    except OSError as exc:
-        raise GeneratedBlockError("attestation systemd unit is unavailable") from exc
-    expected_line = (
-        f"LoadCredentialEncrypted={reader['credential_name']}:"
-        f"{reader['credential']}"
-    )
-    if credential_lines != [expected_line]:
-        raise GeneratedBlockError("policy reader systemd credential disagrees")
-    try:
-        runtime = json.loads(
-            (config.root / "config" / "attestation.json").read_text(encoding="utf-8")
+    if unit_path.exists():
+        try:
+            credential_lines = [
+                line for line in unit_path.read_text(encoding="utf-8").splitlines()
+                if line.startswith("LoadCredentialEncrypted=github.policy:")
+            ]
+        except OSError as exc:
+            raise GeneratedBlockError(
+                "attestation systemd unit is unavailable"
+            ) from exc
+        expected_line = (
+            f"LoadCredentialEncrypted={reader['credential_name']}:"
+            f"{reader['credential']}"
         )
-    except (OSError, json.JSONDecodeError) as exc:
-        raise GeneratedBlockError("attestation runtime configuration is invalid") from exc
-    if (
-        str(runtime.get("policy_actor_login", "")).casefold()
-        != str(reader["login"]).casefold()
-        or [str(item).casefold() for item in runtime.get("repositories", [])]
-        != [str(item).casefold() for item in reader["repositories"]]
-    ):
-        raise GeneratedBlockError("policy reader runtime configuration disagrees")
+        if credential_lines != [expected_line]:
+            raise GeneratedBlockError("policy reader systemd credential disagrees")
+    runtime_path = config.root / "config" / "attestation.json"
+    if runtime_path.exists():
+        try:
+            runtime = json.loads(runtime_path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError) as exc:
+            raise GeneratedBlockError(
+                "attestation runtime configuration is invalid"
+            ) from exc
+        if (
+            str(runtime.get("policy_actor_login", "")).casefold()
+            != str(reader["login"]).casefold()
+            or [str(item).casefold() for item in runtime.get("repositories", [])]
+            != [str(item).casefold() for item in reader["repositories"]]
+        ):
+            raise GeneratedBlockError("policy reader runtime configuration disagrees")
     login = reader["login"]
     repository = reader["repositories"][0]
     credential = reader["credential"]
