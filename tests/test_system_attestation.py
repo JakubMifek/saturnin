@@ -15,6 +15,7 @@ import urllib.request
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
@@ -303,6 +304,32 @@ def test_preflight_is_read_only_and_does_not_claim_external_mutation_denial(
         "branch_protection_authorized": True,
         "policy_mutation_interface": "absent",
     }
+
+
+def test_serve_builds_limiter_from_loaded_signer_config(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    cfg = service_config()
+    signer = SimpleNamespace(config=cfg, _verify_protected_access=lambda: None)
+    monkeypatch.setattr(system_attestation, "_load_signer", lambda: signer)
+    monkeypatch.setattr(system_attestation, "_create_listener", lambda: object())
+    monkeypatch.setattr(system_attestation, "_notify_ready", lambda: None)
+    observed: list[tuple[int, int]] = []
+
+    class StopAfterLimiter(Exception):
+        pass
+
+    def limiter(limit: int, window: int):
+        observed.append((limit, window))
+        raise StopAfterLimiter
+
+    monkeypatch.setattr(system_attestation, "AuthorizationLimiter", limiter)
+
+    with pytest.raises(StopAfterLimiter):
+        system_attestation.serve()
+    assert observed == [
+        (cfg.authorization_limit, cfg.authorization_window_seconds)
+    ]
 
 
 def issue_action_fixture(*, expiry: datetime | None = None):

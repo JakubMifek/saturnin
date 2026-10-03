@@ -36,18 +36,12 @@ clipboard—encrypt the token under its fixed credential name:
 /usr/bin/chmod 0600 /etc/saturnin-attestation/github.token.cred
 ```
 
-In a separate browser session authenticated as the exact configured
-`JakubMifek` policy-reader login, create an owner-issued fine-grained personal
-access token:
+<!-- generated:policy-reader-provisioning -->
+In a separate browser session authenticated as the exact `JakubMifek` policy-reader login, create an owner-issued fine-grained personal access token:
 
-1. Select resource owner `JakubMifek`, repository access **Only select
-   repositories**, and select only `JakubMifek/saturnin`.
-2. Grant repository **Administration: Read-only** and the implicit Metadata
-   read permission. Grant no other repository or organization permission.
-3. Set the shortest operationally practical expiry and record its rotation
-   date outside the repository. Copy it once into the trusted root console;
-   never place it in chat, a shell argument, environment, clipboard shared
-   with the ordinary UID, repository, report, log, fixture, or process list.
+1. Select resource owner `JakubMifek`, repository access **Only select repositories**, and select only `JakubMifek/saturnin`.
+2. Grant repository **Administration: Read-only** and the implicit **Metadata: Read-only** permission. Grant no other repository or organization permission.
+3. Set the shortest operationally practical expiry and record its rotation date outside the repository. Copy it once into the trusted root console; never place it in chat, a shell argument, environment, clipboard shared with the ordinary UID, repository, report, log, fixture, or process list.
 4. Encrypt it independently:
 
 ```bash
@@ -55,6 +49,7 @@ access token:
 /usr/bin/chown root:root /etc/saturnin-attestation/github.policy.cred
 /usr/bin/chmod 0600 /etc/saturnin-attestation/github.policy.cred
 ```
+<!-- /generated:policy-reader-provisioning -->
 
 The installer rejects absent, malformed, linked, non-root-owned, duplicate,
 or swapped credentials. Startup separately verifies the merge login,

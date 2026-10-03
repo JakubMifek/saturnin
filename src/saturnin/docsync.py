@@ -14,6 +14,7 @@ Markers::
 
 from __future__ import annotations
 
+import json
 import re
 from pathlib import Path
 from typing import Any, Callable
@@ -355,6 +356,77 @@ def _attestation_boundary(config: Config) -> str:
     )
 
 
+def _policy_reader_provisioning(config: Config) -> str:
+    attestation = config.governance.get("review", {}).get("attestation", {})
+    reader = attestation.get("policy_reader")
+    expected_keys = {
+        "credential", "login", "resource_owner", "repository_access",
+        "repositories", "permissions", "mutation_permissions",
+        "mutation_interface",
+    }
+    if not isinstance(reader, dict) or set(reader) != expected_keys:
+        raise GeneratedBlockError("policy reader governance schema is invalid")
+    if (
+        reader["repository_access"] != "selected"
+        or reader["permissions"]
+        != {"administration": "read", "metadata": "read"}
+        or reader["mutation_permissions"] != []
+        or reader["mutation_interface"] != "absent"
+        or reader["resource_owner"] != reader["login"]
+        or not isinstance(reader["repositories"], list)
+        or len(reader["repositories"]) != 1
+    ):
+        raise GeneratedBlockError("policy reader least-privilege contract is invalid")
+    server_reader = (
+        config.policy("server_scope")
+        .get("dedicated_attestation_service", {})
+        .get("policy_credential")
+    )
+    if server_reader != reader["credential"]:
+        raise GeneratedBlockError("policy reader credential paths disagree")
+    try:
+        runtime = json.loads(
+            (config.root / "config" / "attestation.json").read_text(encoding="utf-8")
+        )
+    except (OSError, json.JSONDecodeError) as exc:
+        raise GeneratedBlockError("attestation runtime configuration is invalid") from exc
+    if (
+        str(runtime.get("policy_actor_login", "")).casefold()
+        != str(reader["login"]).casefold()
+        or [str(item).casefold() for item in runtime.get("repositories", [])]
+        != [str(item).casefold() for item in reader["repositories"]]
+    ):
+        raise GeneratedBlockError("policy reader runtime configuration disagrees")
+    login = reader["login"]
+    repository = reader["repositories"][0]
+    credential = reader["credential"]
+    return "\n".join([
+        f"In a separate browser session authenticated as the exact `{login}` "
+        "policy-reader login, create an owner-issued fine-grained personal "
+        "access token:",
+        "",
+        f"1. Select resource owner `{reader['resource_owner']}`, repository access "
+        f"**Only select repositories**, and select only `{repository}`.",
+        "2. Grant repository **Administration: Read-only** and the implicit "
+        "**Metadata: Read-only** permission. Grant no other repository or "
+        "organization permission.",
+        "3. Set the shortest operationally practical expiry and record its "
+        "rotation date outside the repository. Copy it once into the trusted "
+        "root console; never place it in chat, a shell argument, environment, "
+        "clipboard shared with the ordinary UID, repository, report, log, "
+        "fixture, or process list.",
+        "4. Encrypt it independently:",
+        "",
+        "```bash",
+        "/bin/bash -c 'umask 077; IFS= read -r -s token; printf %s "
+        f"\"$token\" | /usr/bin/systemd-creds encrypt --name=github.policy - "
+        f"{credential}; unset token'",
+        f"/usr/bin/chown root:root {credential}",
+        f"/usr/bin/chmod 0600 {credential}",
+        "```",
+    ])
+
+
 def _roles_table(config: Config) -> str:
     roles: dict[str, dict[str, Any]] = config.routing.get("roles", {})
     lines = ["| Role | Unit | Executes | Purpose |", "| --- | --- | --- | --- |"]
@@ -410,6 +482,7 @@ GENERATORS: dict[str, Callable[[Config], str]] = {
     "credential-admin-recovery": _credential_admin_recovery,
     "signer-unit-interface": _signer_unit_interface,
     "attestation-boundary": _attestation_boundary,
+    "policy-reader-provisioning": _policy_reader_provisioning,
     "roles": _roles_table,
     "routing": _routing_table,
     "backlog": _backlog_table,

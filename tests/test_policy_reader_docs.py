@@ -1,0 +1,62 @@
+from __future__ import annotations
+
+import json
+import shutil
+from pathlib import Path
+
+import pytest
+
+from saturnin import docsync
+from saturnin.config import Config
+
+
+ROOT = Path(__file__).resolve().parents[1]
+
+
+def policy_config(tmp_path: Path) -> Config:
+    root = tmp_path / "root"
+    shutil.copytree(ROOT / "policies", root / "policies")
+    shutil.copytree(ROOT / "config", root / "config")
+    return Config.load(root)
+
+
+def test_policy_reader_provisioning_is_generated_from_structured_policy(
+    tmp_path: Path,
+) -> None:
+    rendered = docsync._policy_reader_provisioning(policy_config(tmp_path))
+
+    assert "resource owner `JakubMifek`" in rendered
+    assert "only `JakubMifek/saturnin`" in rendered
+    assert "**Administration: Read-only**" in rendered
+    assert "--name=github.policy" in rendered
+
+
+def test_policy_reader_runtime_identity_drift_fails_docs_and_doctor_contract(
+    tmp_path: Path,
+) -> None:
+    config = policy_config(tmp_path)
+    path = config.root / "config" / "attestation.json"
+    runtime = json.loads(path.read_text(encoding="utf-8"))
+    runtime["policy_actor_login"] = "saturnin-merge-bot"
+    path.write_text(json.dumps(runtime), encoding="utf-8")
+
+    with pytest.raises(
+        docsync.GeneratedBlockError,
+        match="runtime configuration disagrees",
+    ):
+        docsync._policy_reader_provisioning(config)
+
+
+def test_policy_reader_credential_path_drift_fails_generation(
+    tmp_path: Path,
+) -> None:
+    config = policy_config(tmp_path)
+    config.governance["review"]["attestation"]["policy_reader"]["credential"] = (
+        "/etc/saturnin-attestation/swapped.cred"
+    )
+
+    with pytest.raises(
+        docsync.GeneratedBlockError,
+        match="credential paths disagree",
+    ):
+        docsync._policy_reader_provisioning(config)

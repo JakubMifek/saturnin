@@ -2756,7 +2756,8 @@ def serve() -> None:
     _notify_ready()
     stopping = threading.Event()
     limiter = AuthorizationLimiter(
-        config.authorization_limit, config.authorization_window_seconds
+        signer.config.authorization_limit,
+        signer.config.authorization_window_seconds,
     )
     old_handlers = {
         signum: signal.signal(signum, lambda _signum, _frame: stopping.set())
