@@ -20,8 +20,9 @@ import pytest
 
 import saturnin.system_attestation as system_attestation
 from saturnin.system_attestation import (
-    DedicatedSigner,
+    DedicatedSigner as _DedicatedSigner,
     GitHub,
+    PolicyGitHub,
     GitHubAppPublisher,
     GitHubMutationError,
     ISSUE_MARKER,
@@ -88,6 +89,23 @@ def service_config() -> ServiceConfig:
         frozenset({"review-bot"}),
         frozenset({"approved"}),
     )
+
+
+def DedicatedSigner(*args, **kwargs):
+    config = args[0]
+    github = args[1]
+    if "policy_client" not in kwargs:
+        def policy_transport(path: str):
+            if path == "/user":
+                return {"login": config.policy_actor_login, "type": "User"}
+            if github.transport is None:
+                raise AssertionError(path)
+            return github.transport(path)
+
+        kwargs["policy_client"] = PolicyGitHub(
+            config, "independent-policy-test-token", transport=policy_transport
+        )
+    return _DedicatedSigner(*args, **kwargs)
 
 
 def pr_transport(*, state: str = "APPROVED", head: str = HEAD):
@@ -178,6 +196,113 @@ def action_request(**changes):
     }
     value.update(changes)
     return value
+
+
+def test_policy_client_has_no_mutation_or_ordinary_read_surface() -> None:
+    client = PolicyGitHub(
+        service_config(), "independent-policy-test-token", transport=lambda _path: {}
+    )
+    for name in ("put", "post_issue", "close_issue", "check_runs", "pages", "get"):
+        assert not hasattr(client, name)
+
+
+def test_live_action_uses_only_independent_policy_client_for_protection(
+    tmp_path: Path,
+) -> None:
+    cfg = service_config()
+    ordinary = action_transport()
+
+    def merge_transport(path: str):
+        assert "/protection" not in path
+        return ordinary(path)
+
+    def policy_transport(path: str):
+        if path == "/user":
+            return {"login": "JakubMifek", "type": "User"}
+        if path == "/repos/acme/widget":
+            return {"full_name": "acme/widget", "permissions": {"admin": True}}
+        if path == "/repos/acme/widget/branches/main/protection":
+            return production_branch_protection()
+        raise AssertionError(path)
+
+    service = _DedicatedSigner(
+        cfg,
+        GitHub(cfg, token="merge-token", transport=merge_transport),
+        b"c" * 48,
+        b"p" * 48,
+        tmp_path / "split.sqlite3",
+        now=lambda: NOW,
+        policy_client=PolicyGitHub(
+            cfg, "policy-token", transport=policy_transport
+        ),
+    )
+
+    result = service.action(action_request())
+
+    assert result["protected_actor"] == "saturnin-merge-bot"
+    assert result["policy_actor"] == "jakubmifek"
+
+
+def test_action_fails_closed_without_independent_policy_client(
+    tmp_path: Path,
+) -> None:
+    cfg = service_config()
+    service = _DedicatedSigner(
+        cfg,
+        GitHub(cfg, token="merge-token", transport=action_transport()),
+        b"c" * 48,
+        b"p" * 48,
+        tmp_path / "missing-policy.sqlite3",
+        now=lambda: NOW,
+    )
+
+    with pytest.raises(
+        SystemAttestationError,
+        match="independent policy GitHub credential is unavailable",
+    ):
+        service.action(action_request())
+
+
+def test_policy_reader_rejects_wrong_owner_and_out_of_scope_reads() -> None:
+    cfg = service_config()
+    client = PolicyGitHub(
+        cfg,
+        "policy-token",
+        transport=lambda path: (
+            {"login": "saturnin-merge-bot", "type": "User"}
+            if path == "/user"
+            else {"full_name": "acme/widget"}
+        ),
+    )
+    with pytest.raises(SystemAttestationError, match="identity"):
+        client.verify_identity("acme/widget")
+    with pytest.raises(SystemAttestationError, match="scope"):
+        client.branch_protection("acme/widget", "release")
+
+
+def test_preflight_is_read_only_and_does_not_claim_external_mutation_denial(
+    tmp_path: Path,
+) -> None:
+    cfg = service_config()
+    service = DedicatedSigner(
+        cfg,
+        GitHub(cfg, token="merge-token", transport=action_transport()),
+        b"c" * 48,
+        b"p" * 48,
+        tmp_path / "preflight.sqlite3",
+        now=lambda: NOW,
+    )
+
+    result = service.preflight()
+
+    assert result["external_mutation_scope"] == "unverified"
+    assert result["repositories"]["acme/widget"] == {
+        "merge_identity": "saturnin-merge-bot",
+        "repository_reachable": True,
+        "policy_identity": "jakubmifek",
+        "branch_protection_authorized": True,
+        "policy_mutation_interface": "absent",
+    }
 
 
 def issue_action_fixture(*, expiry: datetime | None = None):
@@ -2810,6 +2935,45 @@ def test_github_authorization_header_uses_token_without_disclosure(
     assert caught.value.__cause__ is None
     _audit("denied", hashlib.sha256(b"evidence").hexdigest(), "")
     assert token not in capsys.readouterr().err
+
+
+def test_policy_authorization_header_uses_only_policy_token() -> None:
+    seen: list[str] = []
+
+    class Response:
+        def __init__(self, request, body):
+            self.request = request
+            self.body = body
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *args):
+            return None
+
+        def geturl(self):
+            return self.request.full_url
+
+        def read(self, _size):
+            return json.dumps(self.body).encode()
+
+    def open_request(request, _timeout):
+        seen.append(request.get_header("Authorization"))
+        body = (
+            {"login": "JakubMifek", "type": "User"}
+            if request.full_url.endswith("/user")
+            else {"full_name": "acme/widget"}
+        )
+        return Response(request, body)
+
+    policy_token = "policy-token-for-test"
+    client = PolicyGitHub(
+        service_config(), policy_token, request_transport=open_request
+    )
+
+    assert client.verify_identity("acme/widget") == "jakubmifek"
+    assert len(seen) == 2
+    assert all(value.split(" ", 1) == ["Bearer", policy_token] for value in seen)
 
 
 def test_publisher_http_mutations_and_credential_parser() -> None:

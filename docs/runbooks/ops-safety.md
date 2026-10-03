@@ -23,10 +23,9 @@ checkout, use this fixed bootstrap sequence:
 
 Before that sequence, a human must create the dedicated
 `saturnin-merge-bot` GitHub account and a fine-grained token limited to
-`saturnin` (Contents and Pull requests write, Administration read, and Checks
-read). It must have no destination Issues permission. Grant no Administration
-**write** permission. Add that account with Write, not Admin,
-repository access. At a
+`saturnin` (Contents and Pull requests write and Checks read). It must have no
+Administration or destination Issues permission. Add that account with Write,
+never Admin, repository access. At a
 trusted root console—not an ordinary-UID shell, environment, file, pipe, or
 clipboard—encrypt the token under its fixed credential name:
 
@@ -36,6 +35,38 @@ clipboard—encrypt the token under its fixed credential name:
 /usr/bin/chown root:root /etc/saturnin-attestation/github.token.cred
 /usr/bin/chmod 0600 /etc/saturnin-attestation/github.token.cred
 ```
+
+In a separate browser session authenticated as the exact configured
+`JakubMifek` policy-reader login, create an owner-issued fine-grained personal
+access token:
+
+1. Select resource owner `JakubMifek`, repository access **Only select
+   repositories**, and select only `JakubMifek/saturnin`.
+2. Grant repository **Administration: Read-only** and the implicit Metadata
+   read permission. Grant no other repository or organization permission.
+3. Set the shortest operationally practical expiry and record its rotation
+   date outside the repository. Copy it once into the trusted root console;
+   never place it in chat, a shell argument, environment, clipboard shared
+   with the ordinary UID, repository, report, log, fixture, or process list.
+4. Encrypt it independently:
+
+```bash
+/bin/bash -c 'umask 077; IFS= read -r -s token; printf %s "$token" | /usr/bin/systemd-creds encrypt --name=github.policy - /etc/saturnin-attestation/github.policy.cred; unset token'
+/usr/bin/chown root:root /etc/saturnin-attestation/github.policy.cred
+/usr/bin/chmod 0600 /etc/saturnin-attestation/github.policy.cred
+```
+
+The installer rejects absent, malformed, linked, non-root-owned, duplicate,
+or swapped credentials. Startup separately verifies the merge login,
+repository push/non-admin role, policy login, repository reachability, and
+branch-protection authorization. The policy client exposes no mutation API.
+GitHub does not expose fine-grained PAT permission metadata sufficient to
+prove that a token lacks mutation permissions, and repository `permissions`
+describes the account rather than token narrowing. The preflight therefore
+reports external mutation scope as **unverified** instead of claiming denial;
+the administrator must review the browser permission form. Revocation,
+expiry, owner changes, or lost branch-protection access fail startup and every
+fresh protected action closed.
 
 Separately create the destination publisher App described below and encrypt
 its numeric App ID and private key at the trusted root console. Do not expose
@@ -114,11 +145,11 @@ group to resolve bidirectionally to UID 1000 and GID 1000; a missing or reused
 identity fails closed before the administration lock or any other mutation.
 
 <!-- generated:attestation-boundary -->
-The system `saturnin-attestation.service` runs as the non-login `saturnin-signer` identity from root-controlled runtime and configuration. The system manager decrypts current, previous, and bounded retired HMAC credentials plus the separate destination-publisher App credential into its private credential tmpfs; ordinary workers never receive key material. The service, not PID 1, creates the canonical listener. Clients authenticate its kernel-reported UID plus the stable signer-owned socket directory and endpoint identity; this deliberately avoids cross-UID ptrace-gated `/proc` inspection. Systemd readiness is reported only after protected identity, repository role, branch-protection access, check-run access, credential validation, and listener creation.
+The system `saturnin-attestation.service` runs as the non-login `saturnin-signer` identity from root-controlled runtime and configuration. The system manager decrypts current, previous, and bounded retired HMAC credentials, distinct merge and policy-reader credentials, plus the separate destination-publisher App credential into its private credential tmpfs; ordinary workers never receive key material. The service, not PID 1, creates the canonical listener. Clients authenticate its kernel-reported UID plus the stable signer-owned socket directory and endpoint identity; this deliberately avoids cross-UID ptrace-gated `/proc` inspection. Systemd readiness is reported only after protected identity, repository role, branch-protection access, check-run access, credential validation, and listener creation.
 
 For pull requests the service obtains the live head, author, and exact commit-bound latest review state directly from GitHub over TLS. For issues it recomputes title/body digest and accepts one exact, expiring, nonce-bound machine marker in an allowlisted dedicated GitHub App bot comment. A default-branch-only protected environment holds that App key and requires an independent human approver; ordinary workers cannot publish as the bot. The marker also binds approved labels. Every issue gate is fresh; submission repeats authorization and the signer creates exact reviewed content through a separate selected-repository publisher App restricted to Metadata read and Issues write in an independently allowlisted destination with a deterministic hidden idempotency marker. The marker is authenticated by the signer so an ordinary worker cannot forge attribution onto another publisher-authored issue. It rechecks source authorization immediately before and after creation. GitHub has no atomic cross-repository conditional create, so this narrow residual race is accepted only for issue publication: post-create revocation triggers automatic closure of the exact attributable destination issue, a signed terminal result, and audit escalation, never success. Ambiguous submission outcomes reconcile only against one exact marker-bearing issue authored by the protected identity. Delayed reconciliation revalidates the source first; if a revoked publication was edited, became ambiguous, or cannot be fetched, the signer records terminal containment failure instead of permitting a later success. Evidence expiry limits new authorization, not later audit verification of a durable record. Socket filesystem access permits transport only: independent GitHub authorization remains required. Repository and API origins are fixed allowlists; caller claims and socket credentials are not authority.
 
-Consumed evidence and its exact idempotent attestation are serialized in dedicated state for audit only. Altered reuse fails. Every PR gate obtains a fresh, expiring, one-time protected decision over the live head, base, review ID/state/identity and required checks. Merge repeats that lookup immediately before the signer uses GitHub's expected-head atomic merge API. The signer also requires strict branch protection with stale-review dismissal, required reviews/checks, administrator enforcement and no bypass identities. Its fixed non-admin merge identity and root-provisioned credential never enter the ordinary UID; workers receive neither signing sessions nor credentials.
+Consumed evidence and its exact idempotent attestation are serialized in dedicated state for audit only. Altered reuse fails. Every PR gate obtains a fresh, expiring, one-time protected decision over the live head, base, review ID/state/identity and required checks. Merge repeats that lookup immediately before the signer uses GitHub's expected-head atomic merge API. The signer also requires strict branch protection with stale-review dismissal, required reviews/checks, administrator enforcement and no bypass identities. A structurally read-only client, bound to the configured policy-reader login, performs every protection read; it has no mutation method. The fixed non-admin merge identity performs ordinary PR/check reads and expected-head merges but cannot substitute for policy reads. Neither root-provisioned credential enters the ordinary UID; workers receive neither signing sessions nor credentials.
 
 GitHub-hosted governance cannot access the host signer. Its `pull_request_target` job executes only default-branch code with a read-only token and repeats a live exact-head review lookup; it signs nothing and cannot merge. Sandboxed reviewers queue scope-bound gate callbacks for host execution instead of receiving signer socket access.
 <!-- /generated:attestation-boundary -->
@@ -184,8 +215,9 @@ accepted race, and it does not apply to PR gates or merges.
 ### Provisioning and rotation
 
 The system manager decrypts `current.key.cred`, `previous.key.cred`,
-`archive.keys.cred`, and the mandatory `github.token` and `github.publisher`
-credential-store entries into its credential tmpfs. The administrator interface
+`archive.keys.cred`, and the mandatory `github.token`, `github.policy`, and
+`github.publisher` credential-store entries into its credential tmpfs. The
+administrator interface
 generates key bytes in process and streams them directly to `systemd-creds`;
 it never accepts or prints a key.
 

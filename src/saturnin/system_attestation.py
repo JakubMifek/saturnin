@@ -387,6 +387,7 @@ class ServiceConfig:
     required_check_runs: tuple[str, ...] = ("test",)
     action_ttl_seconds: int = 60
     protected_actor_login: str = "saturnin-merge-bot"
+    policy_actor_login: str = "jakubmifek"
     publisher_actor_login: str = "saturnin-issue-publisher[bot]"
 
     @classmethod
@@ -401,6 +402,7 @@ class ServiceConfig:
             "authorization_limit", "authorization_window_seconds",
             "pr_base_refs", "required_check_runs", "action_ttl_seconds",
             "protected_actor_login",
+            "policy_actor_login",
             "publisher_actor_login",
             "issue_destinations",
         }:
@@ -446,6 +448,7 @@ class ServiceConfig:
         protected_actor = str(
             raw.get("protected_actor_login", "saturnin-merge-bot")
         ).casefold()
+        policy_actor = str(raw.get("policy_actor_login", "jakubmifek")).casefold()
         publisher_actor = str(
             raw.get("publisher_actor_login", "saturnin-issue-publisher[bot]")
         ).casefold()
@@ -462,7 +465,10 @@ class ServiceConfig:
             or len(set(base_refs)) != len(base_refs)
             or len(set(check_runs)) != len(check_runs)
             or not re.fullmatch(r"[A-Za-z0-9](?:[A-Za-z0-9-]{0,37})", protected_actor)
+            or not re.fullmatch(r"[A-Za-z0-9](?:[A-Za-z0-9-]{0,37})", policy_actor)
+            or policy_actor == protected_actor
             or protected_actor in pr_reviewers
+            or policy_actor in pr_reviewers
             or not re.fullmatch(
                 r"[A-Za-z0-9](?:[A-Za-z0-9-]{0,37})\[bot\]",
                 publisher_actor,
@@ -482,6 +488,7 @@ class ServiceConfig:
             required_check_runs=tuple(check_runs),
             action_ttl_seconds=action_ttl,
             protected_actor_login=protected_actor,
+            policy_actor_login=policy_actor,
             publisher_actor_login=publisher_actor,
         )
 
@@ -804,6 +811,88 @@ class GitHub:
         return value
 
 
+class PolicyGitHub:
+    """GitHub client whose interface exposes only policy authorization reads."""
+
+    def __init__(
+        self,
+        config: ServiceConfig,
+        token: str,
+        transport: Callable[[str], Any] | None = None,
+        request_transport: Callable[[urllib.request.Request, float], Any] | None = None,
+    ) -> None:
+        if not token:
+            raise SystemAttestationError("policy GitHub credential is unavailable")
+        self._config = config
+        self._token = token
+        self._transport = transport
+        self._request_transport = request_transport or _open_without_redirects
+
+    def _get(self, path: str) -> Any:
+        if self._transport:
+            return self._transport(path)
+        request = urllib.request.Request(
+            self._config.github_api + path,
+            headers={
+                "Accept": "application/vnd.github+json",
+                "Cache-Control": "no-cache",
+                "X-GitHub-Api-Version": "2022-11-28",
+                "User-Agent": "saturnin-policy-reader/1",
+                "Authorization": "Bearer " + self._token,
+            },
+        )
+        try:
+            with self._request_transport(
+                request, self._config.request_timeout_seconds
+            ) as response:
+                if response.geturl().split("?", 1)[0] != (
+                    self._config.github_api + path
+                ):
+                    raise SystemAttestationError("GitHub redirect was refused")
+                body = response.read(MAX_RESPONSE + 1)
+        except (OSError, urllib.error.URLError):
+            raise SystemAttestationError(
+                "GitHub policy authorization lookup failed"
+            ) from None
+        if len(body) > MAX_RESPONSE:
+            raise SystemAttestationError("GitHub response is oversized")
+        try:
+            return json.loads(body)
+        except json.JSONDecodeError as exc:
+            raise SystemAttestationError("GitHub response is malformed") from exc
+
+    def verify_identity(self, repo: str) -> str:
+        repo = _repo(repo)
+        actor = self._get("/user")
+        repository = self._get(f"/repos/{repo}")
+        if (
+            not isinstance(actor, dict)
+            or str(actor.get("login", "")).casefold()
+            != self._config.policy_actor_login
+            or actor.get("type") != "User"
+            or not isinstance(repository, dict)
+            or str(repository.get("full_name", "")).casefold() != repo
+        ):
+            raise SystemAttestationError(
+                "policy GitHub credential identity or repository access is invalid"
+            )
+        return self._config.policy_actor_login
+
+    def branch_protection(self, repo: str, base_ref: str) -> dict[str, Any]:
+        repo = _repo(repo)
+        if (
+            repo not in self._config.repositories
+            or base_ref not in self._config.pr_base_refs
+        ):
+            raise SystemAttestationError("policy read scope is not allowed")
+        protection = self._get(
+            f"/repos/{repo}/branches/{urllib.parse.quote(base_ref, safe='')}/protection"
+        )
+        if not isinstance(protection, dict):
+            raise SystemAttestationError("branch protection response is malformed")
+        return protection
+
+
 @dataclass(frozen=True)
 class PublisherCredential:
     app_id: int
@@ -993,6 +1082,7 @@ class DedicatedSigner:
         now: Callable[[], datetime] | None = None,
         archive_keys: tuple[bytes, ...] = (),
         publisher_client: Callable[[str], GitHub] | None = None,
+        policy_client: PolicyGitHub | None = None,
     ) -> None:
         if len(current_key) < 32:
             raise SystemAttestationError("current signing credential is invalid")
@@ -1014,6 +1104,7 @@ class DedicatedSigner:
         self.current_key, self.previous_key = current_key, previous_key
         self.archive_keys = archive_keys
         self.publisher_client = publisher_client
+        self.policy_client = policy_client
         self.state_path = state_path
         self.now = now or (lambda: datetime.now(timezone.utc))
         self.lock = threading.Lock()
@@ -1776,6 +1867,7 @@ class DedicatedSigner:
         self, repo: str, number: int, destination: str, expected_head: str
     ) -> dict[str, Any]:
         actor = self._protected_actor(repo)
+        policy_actor = self._policy_reader().verify_identity(repo)
         evidence = self._pr(repo, number, _subject(repo, number), destination)
         if evidence["head_sha"] != expected_head:
             raise SystemAttestationError("pull request head changed")
@@ -1785,11 +1877,7 @@ class DedicatedSigner:
         )
         base_ref = snapshot["base_ref"]
         base_sha = snapshot["base_sha"]
-        protection = self.github.get(
-            f"/repos/{repo}/branches/{base_ref}/protection"
-        )
-        if not isinstance(protection, dict):
-            raise SystemAttestationError("branch protection response is malformed")
+        protection = self._policy_reader().branch_protection(repo, base_ref)
         review_rule = protection.get("required_pull_request_reviews")
         status_rule = protection.get("required_status_checks")
         contexts = set()
@@ -1845,9 +1933,8 @@ class DedicatedSigner:
         final_evidence = self._pr(
             repo, number, _subject(repo, number), destination
         )
-        final_protection = self.github.get(
-            f"/repos/{repo}/branches/{base_ref}/protection"
-        )
+        final_policy_actor = self._policy_reader().verify_identity(repo)
+        final_protection = self._policy_reader().branch_protection(repo, base_ref)
         final_checks = self.github.check_runs(repo, expected_head)
         final_snapshot = self._pull_snapshot(
             self.github.get(f"/repos/{repo}/pulls/{number}"),
@@ -1856,6 +1943,7 @@ class DedicatedSigner:
         if (
             final_evidence != evidence
             or final_snapshot != snapshot
+            or final_policy_actor != policy_actor
             or final_protection != protection
             or sorted(final_checks, key=lambda value: int(value.get("id", 0)))
             != sorted(checks, key=lambda value: int(value.get("id", 0)))
@@ -1874,6 +1962,7 @@ class DedicatedSigner:
                 f"{value['name']}:{value['id']}" for value in accepted
             ),
             "protected_actor": actor,
+            "policy_actor": policy_actor,
             "protection_hash": hashlib.sha256(_canonical(protection)).hexdigest(),
         }
 
@@ -1930,18 +2019,32 @@ class DedicatedSigner:
             )
         return self.config.protected_actor_login
 
-    def _verify_protected_access(self) -> None:
+    def _policy_reader(self) -> PolicyGitHub:
+        if self.policy_client is None:
+            raise SystemAttestationError(
+                "independent policy GitHub credential is unavailable"
+            )
+        return self.policy_client
+
+    def preflight(self) -> dict[str, Any]:
+        repositories: dict[str, dict[str, Any]] = {}
         for repo in sorted(self.config.repositories):
-            self._protected_actor(repo)
+            merge_actor = self._protected_actor(repo)
+            policy_actor = self._policy_reader().verify_identity(repo)
             for base_ref in self.config.pr_base_refs:
-                protection = self.github.get(
-                    f"/repos/{repo}/branches/{base_ref}/protection"
-                )
-                if not isinstance(protection, dict):
-                    raise SystemAttestationError(
-                        "branch protection response is malformed"
-                    )
+                self._policy_reader().branch_protection(repo, base_ref)
                 self.github.check_runs(repo, base_ref)
+            repositories[repo] = {
+                "merge_identity": merge_actor,
+                "repository_reachable": True,
+                "policy_identity": policy_actor,
+                "branch_protection_authorized": True,
+                "policy_mutation_interface": "absent",
+            }
+        return {"repositories": repositories, "external_mutation_scope": "unverified"}
+
+    def _verify_protected_access(self) -> None:
+        self.preflight()
         for destination in sorted(self.config.issue_destinations):
             self._publisher(destination)
 
@@ -2608,30 +2711,46 @@ def _notify_ready() -> None:
         notification.close()
 
 
-def serve() -> None:
+def _load_signer() -> DedicatedSigner:
     config = ServiceConfig.load()
     current = _credential("current.key")
     previous = _credential("previous.key", optional=True) or None
     archive = _archive_credential(_credential("archive.keys"))
     token = _credential("github.token").decode()
+    policy_token = _credential("github.policy").decode()
     publisher_credential = PublisherCredential.load(
         _credential("github.publisher")
     )
-    if (
-        not 20 <= len(token) <= 512
-        or not token.isascii()
-        or any(character.isspace() for character in token)
+    for value, label in (
+        (token, "protected GitHub credential"),
+        (policy_token, "policy GitHub credential"),
     ):
-        raise SystemAttestationError("protected GitHub credential is invalid")
+        if (
+            not 20 <= len(value) <= 512
+            or not value.isascii()
+            or any(character.isspace() for character in value)
+        ):
+            raise SystemAttestationError(f"{label} is invalid")
+    if hmac.compare_digest(token, policy_token):
+        raise SystemAttestationError("GitHub credentials must be distinct")
     publisher = GitHubAppPublisher(config, publisher_credential)
-    signer = DedicatedSigner(
+    return DedicatedSigner(
         config,
         GitHub(config, token),
         current,
         previous,
         archive_keys=archive,
         publisher_client=publisher.client,
+        policy_client=PolicyGitHub(config, policy_token),
     )
+
+
+def preflight() -> dict[str, Any]:
+    return _load_signer().preflight()
+
+
+def serve() -> None:
+    signer = _load_signer()
     signer._verify_protected_access()
     listener = _create_listener()
     _notify_ready()
@@ -2760,10 +2879,12 @@ def serve() -> None:
 
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser()
-    parser.add_argument("action", choices=["serve"])
+    parser.add_argument("action", choices=["serve", "preflight"])
     args = parser.parse_args(argv)
     if args.action == "serve":
         serve()
+    else:
+        print(json.dumps(preflight(), sort_keys=True, separators=(",", ":")))
     return 0
 
 
