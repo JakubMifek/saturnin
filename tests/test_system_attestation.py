@@ -653,6 +653,8 @@ def test_notes_gate_binds_contract_and_requires_provisioned_scribe(
         "retrievability",
     ]
     assert result["writer_evidence_id"] == "github:check-run:601"
+    with pytest.raises(SystemAttestationError, match="may not be merged"):
+        service.action(action_request(operation="merge", nonce="f" * 64))
 
     blocked = DedicatedSigner(
         replace(cfg, notes_writer_logins=frozenset()),

@@ -1303,6 +1303,10 @@ class DedicatedSigner:
         _subject(repo, number)
         if repo not in self.config.repositories or destination != repo:
             raise SystemAttestationError("protected action repository is not allowed")
+        if request["operation"] == "merge" and repo == self.config.notes_repository:
+            raise SystemAttestationError(
+                "notes repository changes may not be merged by the protected signer"
+            )
         expected_head = str(request["expected_head"]).casefold()
         if not _SHA.fullmatch(expected_head):
             raise SystemAttestationError("protected action head is invalid")
