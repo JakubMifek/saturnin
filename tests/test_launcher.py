@@ -2401,6 +2401,8 @@ def test_trusted_push_callback_delivers_exact_isolated_commit(
         ]
 
     config.policy("repos")["repos"]["notes"]["slug"] = "JakubMifek/saturnin"
+    with board.edit(task.id) as stored:
+        stored.repo = " JAKUBMIFEK/SATURNIN "
     with pytest.raises(WorkerCallbackError, match="may not deliver commits"):
         apply_queued(config, board, task_id=task.id, callback_dir=str(callback_dir))
     with board.edit(task.id) as stored:

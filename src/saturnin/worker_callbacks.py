@@ -862,8 +862,9 @@ def _require_repository_writer(
     config: Config, task: Task, trusted_role: str,
 ) -> None:
     notes = config.policy("repos").get("repos", {}).get("notes", {})
-    notes_slug = str(notes.get("slug", "")).casefold()
-    if (task.repo or "").casefold() != notes_slug:
+    notes_slug = normalize_repository_slug(str(notes.get("slug", "")))
+    task_slug = normalize_repository_slug(task.repo) if task.repo else ""
+    if task_slug != notes_slug:
         return
     writers = {
         str(role).strip().casefold()
