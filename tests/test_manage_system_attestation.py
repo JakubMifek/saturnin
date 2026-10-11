@@ -521,7 +521,12 @@ def test_system_units_sysusers_and_tmpfiles_are_consistent() -> None:
     tmpfiles = (unit_root / "saturnin-attestation.tmpfiles").read_text()
     assert "User=saturnin-signer" in service
     assert "Group=saturnin-signer" in service
-    assert "system_attestation.py preflight" in service
+    assert "ExecStartPre=" not in service
+    assert (
+        "ExecStart=/usr/bin/python3 -I "
+        "/usr/lib/saturnin-attestation/system_attestation.py serve"
+    ) in service
+    assert "TimeoutStartSec=30s" in service
     assert "LoadCredentialEncrypted=archive.keys:" in service
     assert "LoadCredentialEncrypted=github.token" in service
     assert "LoadCredentialEncrypted=github.policy" in service

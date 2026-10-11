@@ -13,6 +13,7 @@ import threading
 import urllib.error
 import urllib.request
 from concurrent.futures import ThreadPoolExecutor
+from dataclasses import replace
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from types import SimpleNamespace
@@ -373,6 +374,133 @@ def test_serve_builds_limiter_from_loaded_signer_config(
     assert observed == [
         (cfg.authorization_limit, cfg.authorization_window_seconds)
     ]
+
+
+def test_operator_preflight_remains_explicit_read_only_diagnostic(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    cfg = service_config()
+    signer = DedicatedSigner(
+        cfg, GitHub(cfg, token="merge-token", transport=action_transport()),
+        b"c" * 48, b"p" * 48, tmp_path / "operator-preflight.sqlite3",
+        now=lambda: NOW,
+    )
+    monkeypatch.setattr(system_attestation, "_load_signer", lambda: signer)
+    monkeypatch.setattr(
+        system_attestation, "_create_listener",
+        lambda: pytest.fail("operator preflight must not create a listener"),
+    )
+    monkeypatch.setattr(
+        system_attestation, "_notify_ready",
+        lambda: pytest.fail("operator preflight must not signal readiness"),
+    )
+    assert system_attestation.preflight()["external_mutation_scope"] == "unverified"
+
+
+@pytest.mark.parametrize("failure", [None, "merge", "policy", "protection", "checks", "publisher"])
+def test_serve_validates_once_before_listener_and_readiness(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, failure: str | None,
+) -> None:
+    cfg = replace(
+        service_config(), issue_destinations=frozenset({"acme/destination"})
+    )
+    events: list[str] = []
+    response_seconds: list[int] = []
+    base = action_transport()
+
+    def request(kind: str, path: str):
+        events.append(f"{kind}:{path}")
+        response_seconds.append(3)
+        blocked = (
+            failure == kind and path == "/user"
+            or failure == "protection" and path.endswith("/protection")
+            or failure == "checks" and "/check-runs?" in path
+        )
+        if blocked:
+            raise SystemAttestationError(f"{failure} startup lookup failed")
+        if kind == "policy" and path == "/user":
+            return {"login": cfg.policy_actor_login, "type": "User"}
+        return base(path)
+
+    def publisher_read(path: str):
+        events.append(f"publisher:{path}")
+        response_seconds.append(3)
+        if failure == "publisher":
+            raise SystemAttestationError("publisher startup lookup failed")
+        if path.endswith("/installation"):
+            return {
+                "id": 42, "app_id": 7, "app_slug": "saturnin-issue-publisher",
+                "repository_selection": "selected",
+                "permissions": {"issues": "write", "metadata": "read"},
+            }
+        assert path == "/repos/acme/destination"
+        return {"full_name": "acme/destination"}
+
+    def publisher_token(method: str, path: str, payload: dict):
+        assert (method, path, payload) == (
+            "POST", "/app/installations/42/access_tokens",
+            {"repositories": ["destination"],
+             "permissions": {"issues": "write", "metadata": "read"}},
+        )
+        events.append(f"publisher:{path}")
+        response_seconds.append(3)
+        return {
+            "token": "publisher-test-token",
+            "expires_at": (NOW + timedelta(hours=1)).isoformat(),
+            "repository_selection": "selected",
+            "permissions": {"issues": "write", "metadata": "read"},
+            "repositories": [{"full_name": "acme/destination"}],
+        }
+
+    publisher = GitHubAppPublisher(
+        cfg, PublisherCredential(7, b"test-private-key"),
+        now=lambda: NOW, jwt_signer=lambda _key, _message: b"test-signature",
+        transport=publisher_read, mutation_transport=publisher_token,
+    )
+
+    signer = _DedicatedSigner(
+        cfg, GitHub(cfg, token="merge-test-token",
+                    transport=lambda path: request("merge", path)),
+        b"c" * 48, b"p" * 48, tmp_path / "serve-startup.sqlite3",
+        policy_client=PolicyGitHub(
+            cfg, "policy-test-token", transport=lambda path: request("policy", path)
+        ),
+        publisher_client=publisher.client, now=lambda: NOW,
+    )
+    monkeypatch.setattr(system_attestation, "_load_signer", lambda: signer)
+
+    def listener():
+        events.append("listener")
+        return object()
+
+    monkeypatch.setattr(system_attestation, "_create_listener", listener)
+    monkeypatch.setattr(system_attestation, "_notify_ready", lambda: events.append("ready"))
+
+    class StopAfterStartup(Exception):
+        pass
+
+    def limiter(*_args):
+        raise StopAfterStartup
+
+    monkeypatch.setattr(system_attestation, "AuthorizationLimiter", limiter)
+    if failure:
+        with pytest.raises(SystemAttestationError, match=f"{failure} startup lookup failed"):
+            system_attestation.serve()
+        assert "listener" not in events
+        assert "ready" not in events
+    else:
+        with pytest.raises(StopAfterStartup):
+            system_attestation.serve()
+        assert events == [
+            "merge:/user", "merge:/repos/acme/widget",
+            "policy:/user", "policy:/repos/acme/widget",
+            "policy:/repos/acme/widget/branches/main/protection",
+            "merge:/repos/acme/widget/commits/main/check-runs?per_page=100&page=1",
+            "publisher:/repos/acme/destination/installation",
+            "publisher:/app/installations/42/access_tokens",
+            "publisher:/repos/acme/destination", "listener", "ready",
+        ]
+        assert sum(response_seconds) == 27
 
 
 def issue_action_fixture(*, expiry: datetime | None = None):

@@ -63,6 +63,20 @@ the administrator must review the browser permission form. Revocation,
 expiry, owner changes, or lost branch-protection access fail startup and every
 fresh protected action closed.
 
+Systemd runs `serve` directly: its single authoritative startup validation
+finishes before listener creation and `READY=1`, including publisher validation.
+The explicit `preflight` command remains available for operator diagnostics;
+it is not a second systemd startup phase. For the shipped one repository/base
+and one publisher destination, startup performs nine GitHub requests with a
+single check-runs page, rather than fifteen with the duplicated preflight.
+At three seconds per response that is 27 seconds instead of 45, excluding local
+work. The unchanged 30-second systemd deadline remains an overall fail-closed
+availability limit, not a guarantee that every response within the individual
+10-second request timeout can complete startup: ten check-runs pages allow up
+to eighteen requests (180 seconds of sequential request timeout allowances),
+plus publisher signing and local work. No per-request retry extends this limit;
+the unit's existing restart policy may start a new, independently checked attempt.
+
 Separately create the destination publisher App described below and encrypt
 its numeric App ID and private key at the trusted root console. Do not expose
 either value through an ordinary-UID shell:

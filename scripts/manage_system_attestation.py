@@ -66,7 +66,7 @@ EXPECTED_SHA256 = {
     "config/attestation.json":
         "abce4e29a1c5e20f7bf76381356129e0ee09d178a50f0c05764f61b92d1176d6",
     "systemd/system/saturnin-attestation.service":
-        "6b009c048a031b4e3047e8a55ab1848b5d97e051f6608f58b3d2b1f6ef68903c",
+        "8637e21bbd2beb8c8e3ca323e4a76be0fc35e7fbdcad6770bc889e18ac74be34",
     "systemd/system/saturnin-attestation.sysusers":
         "0059e8a1ead80a9b47399f04a1430a1cecf7b70479b224dc8efe084e27fa2187",
     "systemd/system/saturnin-attestation.tmpfiles":

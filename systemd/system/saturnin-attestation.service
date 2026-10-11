@@ -9,7 +9,6 @@ Type=notify
 NotifyAccess=main
 User=saturnin-signer
 Group=saturnin-signer
-ExecStartPre=/usr/bin/python3 -I /usr/lib/saturnin-attestation/system_attestation.py preflight
 ExecStart=/usr/bin/python3 -I /usr/lib/saturnin-attestation/system_attestation.py serve
 LoadCredentialEncrypted=current.key:/etc/saturnin-attestation/current.key.cred
 LoadCredentialEncrypted=previous.key:/etc/saturnin-attestation/previous.key.cred
