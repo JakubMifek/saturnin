@@ -14,6 +14,7 @@ Markers::
 
 from __future__ import annotations
 
+import json
 import re
 from pathlib import Path
 from typing import Any, Callable
@@ -293,7 +294,8 @@ def _attestation_boundary(config: Config) -> str:
             "The system `saturnin-attestation.service` runs as the non-login "
             "`saturnin-signer` identity from root-controlled runtime and configuration. "
             "The system manager decrypts current, previous, and bounded retired HMAC "
-            "credentials plus the separate destination-publisher App credential into "
+            "credentials, distinct merge and policy-reader credentials, plus the "
+            "separate destination-publisher App credential into "
             "its private credential tmpfs; ordinary workers never receive key "
             "material. The service, not PID 1, creates the canonical "
             "listener. Clients authenticate its kernel-reported UID plus the stable "
@@ -338,9 +340,12 @@ def _attestation_boundary(config: Config) -> str:
             "immediately before the signer uses GitHub's expected-head atomic merge "
             "API. The signer also requires strict branch protection with stale-review "
             "dismissal, required reviews/checks, administrator enforcement and no "
-            "bypass identities. Its fixed "
-            "non-admin merge identity and root-provisioned credential never enter the "
-            "ordinary UID; workers receive neither signing sessions nor credentials.",
+            "bypass identities. A structurally read-only client, bound to the configured "
+            "policy-reader login, performs every protection read; it has no mutation "
+            "method. The fixed non-admin merge identity performs ordinary PR/check "
+            "reads and expected-head merges but cannot substitute for policy reads. "
+            "Neither root-provisioned credential enters the ordinary UID; workers "
+            "receive neither signing sessions nor credentials.",
             "",
             "GitHub-hosted governance cannot access the host signer. Its "
             "`pull_request_target` job executes only default-branch code with a "
@@ -349,6 +354,103 @@ def _attestation_boundary(config: Config) -> str:
             "callbacks for host execution instead of receiving signer socket access.",
         ]
     )
+
+
+def _policy_reader_provisioning(config: Config) -> str:
+    attestation = config.governance.get("review", {}).get("attestation", {})
+    reader = attestation.get("policy_reader")
+    expected_keys = {
+        "credential_name", "credential", "login", "resource_owner",
+        "repository_access",
+        "repositories", "permissions", "mutation_permissions",
+        "mutation_interface",
+    }
+    if not isinstance(reader, dict) or set(reader) != expected_keys:
+        raise GeneratedBlockError("policy reader governance schema is invalid")
+    if (
+        reader["repository_access"] != "selected"
+        or reader["permissions"]
+        != {"administration": "read", "metadata": "read"}
+        or reader["mutation_permissions"] != []
+        or reader["mutation_interface"] != "absent"
+        or reader["resource_owner"] != reader["login"]
+        or not isinstance(reader["repositories"], list)
+        or len(reader["repositories"]) != 1
+    ):
+        raise GeneratedBlockError("policy reader least-privilege contract is invalid")
+    server_reader = (
+        config.policy("server_scope")
+        .get("dedicated_attestation_service", {})
+        .get("policy_credential")
+    )
+    if server_reader != reader["credential"]:
+        raise GeneratedBlockError("policy reader credential paths disagree")
+    unit_path = (
+        config.root / "systemd" / "system" / "saturnin-attestation.service"
+    )
+    runtime_path = config.root / "config" / "attestation.json"
+    source_home = (config.root / "pyproject.toml").is_file()
+    if source_home and (not unit_path.is_file() or not runtime_path.is_file()):
+        raise GeneratedBlockError(
+            "attestation deployment sources are missing from source home"
+        )
+    if source_home:
+        try:
+            credential_lines = [
+                line for line in unit_path.read_text(encoding="utf-8").splitlines()
+                if line.startswith("LoadCredentialEncrypted=github.policy:")
+            ]
+        except OSError as exc:
+            raise GeneratedBlockError(
+                "attestation systemd unit is unavailable"
+            ) from exc
+        expected_line = (
+            f"LoadCredentialEncrypted={reader['credential_name']}:"
+            f"{reader['credential']}"
+        )
+        if credential_lines != [expected_line]:
+            raise GeneratedBlockError("policy reader systemd credential disagrees")
+        try:
+            runtime = json.loads(runtime_path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError) as exc:
+            raise GeneratedBlockError(
+                "attestation runtime configuration is invalid"
+            ) from exc
+        if (
+            str(runtime.get("policy_actor_login", "")).casefold()
+            != str(reader["login"]).casefold()
+            or [str(item).casefold() for item in runtime.get("repositories", [])]
+            != [str(item).casefold() for item in reader["repositories"]]
+        ):
+            raise GeneratedBlockError("policy reader runtime configuration disagrees")
+    login = reader["login"]
+    repository = reader["repositories"][0]
+    credential = reader["credential"]
+    return "\n".join([
+        f"In a separate browser session authenticated as the exact `{login}` "
+        "policy-reader login, create an owner-issued fine-grained personal "
+        "access token:",
+        "",
+        f"1. Select resource owner `{reader['resource_owner']}`, repository access "
+        f"**Only select repositories**, and select only `{repository}`.",
+        "2. Grant repository **Administration: Read-only** and the implicit "
+        "**Metadata: Read-only** permission. Grant no other repository or "
+        "organization permission.",
+        "3. Set the shortest operationally practical expiry and record its "
+        "rotation date outside the repository. Copy it once into the trusted "
+        "root console; never place it in chat, a shell argument, environment, "
+        "clipboard shared with the ordinary UID, repository, report, log, "
+        "fixture, or process list.",
+        "4. Encrypt it independently:",
+        "",
+        "```bash",
+        "/bin/bash -c 'umask 077; IFS= read -r -s token; printf %s "
+        f"\"$token\" | /usr/bin/systemd-creds encrypt --name=github.policy - "
+        f"{credential}; unset token'",
+        f"/usr/bin/chown root:root {credential}",
+        f"/usr/bin/chmod 0600 {credential}",
+        "```",
+    ])
 
 
 def _roles_table(config: Config) -> str:
@@ -406,6 +508,7 @@ GENERATORS: dict[str, Callable[[Config], str]] = {
     "credential-admin-recovery": _credential_admin_recovery,
     "signer-unit-interface": _signer_unit_interface,
     "attestation-boundary": _attestation_boundary,
+    "policy-reader-provisioning": _policy_reader_provisioning,
     "roles": _roles_table,
     "routing": _routing_table,
     "backlog": _backlog_table,

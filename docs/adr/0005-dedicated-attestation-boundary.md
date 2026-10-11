@@ -66,6 +66,48 @@ allowances. Its fixed merge account must have write but not administration
 permission, and protection must apply to administrators, so GitHub rechecks
 review and status policy atomically at merge.
 
+Branch-policy authority is deliberately split from merge authority. A distinct
+root-encrypted `github.policy` fine-grained PAT is bound to the exact
+`JakubMifek` policy-reader login, selected only for this repository, and
+configured with Administration read plus implicit Metadata read. A separate
+`PolicyGitHub` type exposes identity, repository, and branch-protection reads
+only; merge, issue, check-run, and arbitrary request methods are absent. The
+Write-only `saturnin-merge-bot` client retains ordinary PR/review/check reads
+and the expected-head merge mutation, but no protection call site. Both
+identities are revalidated during startup and every live PR action, so absent,
+revoked, wrong-owner, equal, or swapped credentials fail closed. GitHub does
+not provide authoritative fine-grained PAT permission introspection: account
+repository roles cannot prove token narrowing. Preflight truthfully reports
+external mutation scope as unverified while enforcing the local mutation-free
+type boundary; selected-repository and read-only permission selection remains
+a reviewed browser ceremony.
+
+The split is fail-closed against its principal substitution and lifecycle
+threats. Credential names are independently embedded by `systemd-creds`;
+systemd maps each encrypted file to a distinct private credential-tmpfs
+pathname. The daemon rejects equal plaintexts, then binds each credential to a
+different exact live GitHub login. Swapping files, encrypted names, tokens, or
+configuration therefore fails before readiness. A compromised ordinary UID is
+not the signer UID and cannot read the root files, credential tmpfs, protected
+processes, or non-login account state. A hypothetical signer-UID compromise is
+inside the service trust boundary, but the policy client still supplies no
+mutation method; the system account runs no other service. Root file aliases,
+hard links, modes, owners, and descriptor identity are checked during the
+fixed installer transaction, while a root compromise remains explicitly out
+of scope.
+
+HMAC rotate and rollback transactions leave both GitHub credentials
+byte-identical, validate them before and after service restart, and restore the
+complete HMAC generation on failure. PAT rotation is a separate root/browser
+ceremony under the same fixed embedded credential names; old encrypted files
+remain outside ordinary-UID reach until a restart and preflight succeed.
+Uninstall preserves encrypted credentials and signer state for recovery.
+Every gate and both sides of a merge re-fetch merge identity, policy identity,
+review, head/base, protection, and checks. Revocation or rotation during that
+window produces an API or snapshot mismatch and denies the action. GitHub's
+expected-head merge remains the atomic final guard against a head change after
+authorization; branch protection is enforced by GitHub at mutation time.
+
 GitHub-hosted governance has no route to the host signer socket. Its
 base-controlled `pull_request_target` job therefore performs only a read-only
 decision: trusted default-branch code uses a read-only workflow token to fetch
@@ -147,11 +189,13 @@ credential in the root-owned configuration directory. It is not accepted from
 the operator environment or ordinary `gh` storage. Production installation
 refuses to start without that credential; provisioning it and removing merge
 authority from the ordinary account are human GitHub administration steps.
-The fine-grained merge token has Contents and Pull requests write plus
-Administration and Checks read on the fixed PR repository and no destination
-Issues permission. The account remains a Write collaborator, not an
-administrator. Readiness probes both protected read endpoints and every
-publisher installation before the listener becomes available.
+The fine-grained merge token has Contents and Pull requests write plus Checks
+read on the fixed PR repository and no Administration or destination Issues
+permission. The account remains a Write collaborator, not an administrator.
+The separate policy token has Administration read and no repository mutation
+permission. Readiness probes both identities, branch-policy authorization,
+ordinary check access, and every publisher installation before the listener
+becomes available.
 The allowlisted reviewer is a distinct GitHub-controlled bot identity; GitHub,
 not the ordinary caller, assigns that identity and review state.
 New v2 review records must also match a byte-identical signer-issued row in the

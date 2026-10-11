@@ -13,15 +13,18 @@ import threading
 import urllib.error
 import urllib.request
 from concurrent.futures import ThreadPoolExecutor
+from dataclasses import replace
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
 import saturnin.system_attestation as system_attestation
 from saturnin.system_attestation import (
-    DedicatedSigner,
+    DedicatedSigner as _DedicatedSigner,
     GitHub,
+    PolicyGitHub,
     GitHubAppPublisher,
     GitHubMutationError,
     ISSUE_MARKER,
@@ -88,6 +91,23 @@ def service_config() -> ServiceConfig:
         frozenset({"review-bot"}),
         frozenset({"approved"}),
     )
+
+
+def DedicatedSigner(*args, **kwargs):
+    config = args[0]
+    github = args[1]
+    if "policy_client" not in kwargs:
+        def policy_transport(path: str):
+            if path == "/user":
+                return {"login": config.policy_actor_login, "type": "User"}
+            if github.transport is None:
+                raise AssertionError(path)
+            return github.transport(path)
+
+        kwargs["policy_client"] = PolicyGitHub(
+            config, "independent-policy-test-token", transport=policy_transport
+        )
+    return _DedicatedSigner(*args, **kwargs)
 
 
 def pr_transport(*, state: str = "APPROVED", head: str = HEAD):
@@ -178,6 +198,309 @@ def action_request(**changes):
     }
     value.update(changes)
     return value
+
+
+def test_policy_client_has_no_mutation_or_ordinary_read_surface() -> None:
+    client = PolicyGitHub(
+        service_config(), "independent-policy-test-token", transport=lambda _path: {}
+    )
+    for name in ("put", "post_issue", "close_issue", "check_runs", "pages", "get"):
+        assert not hasattr(client, name)
+
+
+def test_live_action_uses_only_independent_policy_client_for_protection(
+    tmp_path: Path,
+) -> None:
+    cfg = service_config()
+    ordinary = action_transport()
+
+    def merge_transport(path: str):
+        assert "/protection" not in path
+        return ordinary(path)
+
+    def policy_transport(path: str):
+        if path == "/user":
+            return {"login": "JakubMifek", "type": "User"}
+        if path == "/repos/acme/widget":
+            return {"full_name": "acme/widget", "permissions": {"admin": True}}
+        if path == "/repos/acme/widget/branches/main/protection":
+            return production_branch_protection()
+        raise AssertionError(path)
+
+    service = _DedicatedSigner(
+        cfg,
+        GitHub(cfg, token="merge-token", transport=merge_transport),
+        b"c" * 48,
+        b"p" * 48,
+        tmp_path / "split.sqlite3",
+        now=lambda: NOW,
+        policy_client=PolicyGitHub(
+            cfg, "policy-token", transport=policy_transport
+        ),
+    )
+
+    result = service.action(action_request())
+
+    assert result["protected_actor"] == "saturnin-merge-bot"
+    assert result["policy_actor"] == "jakubmifek"
+
+
+def test_action_fails_closed_without_independent_policy_client(
+    tmp_path: Path,
+) -> None:
+    cfg = service_config()
+    service = _DedicatedSigner(
+        cfg,
+        GitHub(cfg, token="merge-token", transport=action_transport()),
+        b"c" * 48,
+        b"p" * 48,
+        tmp_path / "missing-policy.sqlite3",
+        now=lambda: NOW,
+    )
+
+    with pytest.raises(
+        SystemAttestationError,
+        match="independent policy GitHub credential is unavailable",
+    ):
+        service.action(action_request())
+
+
+def test_policy_reader_rejects_wrong_owner_and_out_of_scope_reads() -> None:
+    cfg = service_config()
+    client = PolicyGitHub(
+        cfg,
+        "policy-token",
+        transport=lambda path: (
+            {"login": "saturnin-merge-bot", "type": "User"}
+            if path == "/user"
+            else {"full_name": "acme/widget"}
+        ),
+    )
+    with pytest.raises(SystemAttestationError, match="identity"):
+        client.verify_identity("acme/widget")
+    with pytest.raises(SystemAttestationError, match="scope"):
+        client.branch_protection("acme/widget", "release")
+
+
+@pytest.mark.parametrize("repo", ["other/widget", "ACME/other"])
+def test_policy_identity_rejects_out_of_scope_before_any_request(repo: str) -> None:
+    requests: list[str] = []
+    client = PolicyGitHub(
+        service_config(), "policy-token", transport=requests.append
+    )
+
+    with pytest.raises(SystemAttestationError, match="policy read scope"):
+        client.verify_identity(repo)
+
+    assert requests == []
+
+
+@pytest.mark.parametrize(
+    "actor, repository, valid",
+    [
+        ({"login": "JakubMifek", "type": "User"}, {"full_name": "Acme/Widget"}, True),
+        ({"login": "other", "type": "User"}, {"full_name": "acme/widget"}, False),
+        ({"login": "JakubMifek", "type": "Bot"}, {"full_name": "acme/widget"}, False),
+        (None, {"full_name": "acme/widget"}, False),
+        ({"login": "JakubMifek", "type": "User"}, {"full_name": "other/widget"}, False),
+        ({"login": "JakubMifek", "type": "User"}, None, False),
+    ],
+)
+def test_policy_identity_normalizes_allowlisted_repository_and_checks_identity(
+    actor, repository, valid: bool,
+) -> None:
+    requests: list[str] = []
+
+    def transport(path: str):
+        requests.append(path)
+        return actor if path == "/user" else repository
+
+    client = PolicyGitHub(service_config(), "policy-token", transport=transport)
+    if valid:
+        assert client.verify_identity("ACME/Widget") == "jakubmifek"
+    else:
+        with pytest.raises(SystemAttestationError, match="identity"):
+            client.verify_identity("ACME/Widget")
+
+    assert requests == ["/user", "/repos/acme/widget"]
+
+
+def test_preflight_is_read_only_and_does_not_claim_external_mutation_denial(
+    tmp_path: Path,
+) -> None:
+    cfg = service_config()
+    service = DedicatedSigner(
+        cfg,
+        GitHub(cfg, token="merge-token", transport=action_transport()),
+        b"c" * 48,
+        b"p" * 48,
+        tmp_path / "preflight.sqlite3",
+        now=lambda: NOW,
+    )
+
+    result = service.preflight()
+
+    assert result["external_mutation_scope"] == "unverified"
+    assert result["repositories"]["acme/widget"] == {
+        "merge_identity": "saturnin-merge-bot",
+        "repository_reachable": True,
+        "policy_identity": "jakubmifek",
+        "branch_protection_authorized": True,
+        "policy_mutation_interface": "absent",
+    }
+
+
+def test_serve_builds_limiter_from_loaded_signer_config(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    cfg = service_config()
+    signer = SimpleNamespace(config=cfg, _verify_protected_access=lambda: None)
+    monkeypatch.setattr(system_attestation, "_load_signer", lambda: signer)
+    monkeypatch.setattr(system_attestation, "_create_listener", lambda: object())
+    monkeypatch.setattr(system_attestation, "_notify_ready", lambda: None)
+    observed: list[tuple[int, int]] = []
+
+    class StopAfterLimiter(Exception):
+        pass
+
+    def limiter(limit: int, window: int):
+        observed.append((limit, window))
+        raise StopAfterLimiter
+
+    monkeypatch.setattr(system_attestation, "AuthorizationLimiter", limiter)
+
+    with pytest.raises(StopAfterLimiter):
+        system_attestation.serve()
+    assert observed == [
+        (cfg.authorization_limit, cfg.authorization_window_seconds)
+    ]
+
+
+def test_operator_preflight_remains_explicit_read_only_diagnostic(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    cfg = service_config()
+    signer = DedicatedSigner(
+        cfg, GitHub(cfg, token="merge-token", transport=action_transport()),
+        b"c" * 48, b"p" * 48, tmp_path / "operator-preflight.sqlite3",
+        now=lambda: NOW,
+    )
+    monkeypatch.setattr(system_attestation, "_load_signer", lambda: signer)
+    monkeypatch.setattr(
+        system_attestation, "_create_listener",
+        lambda: pytest.fail("operator preflight must not create a listener"),
+    )
+    monkeypatch.setattr(
+        system_attestation, "_notify_ready",
+        lambda: pytest.fail("operator preflight must not signal readiness"),
+    )
+    assert system_attestation.preflight()["external_mutation_scope"] == "unverified"
+
+
+@pytest.mark.parametrize("failure", [None, "merge", "policy", "protection", "checks", "publisher"])
+def test_serve_validates_once_before_listener_and_readiness(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, failure: str | None,
+) -> None:
+    cfg = replace(
+        service_config(), issue_destinations=frozenset({"acme/destination"})
+    )
+    events: list[str] = []
+    response_seconds: list[int] = []
+    base = action_transport()
+
+    def request(kind: str, path: str):
+        events.append(f"{kind}:{path}")
+        response_seconds.append(3)
+        blocked = (
+            failure == kind and path == "/user"
+            or failure == "protection" and path.endswith("/protection")
+            or failure == "checks" and "/check-runs?" in path
+        )
+        if blocked:
+            raise SystemAttestationError(f"{failure} startup lookup failed")
+        if kind == "policy" and path == "/user":
+            return {"login": cfg.policy_actor_login, "type": "User"}
+        return base(path)
+
+    def publisher_read(path: str):
+        events.append(f"publisher:{path}")
+        response_seconds.append(3)
+        if failure == "publisher":
+            raise SystemAttestationError("publisher startup lookup failed")
+        if path.endswith("/installation"):
+            return {
+                "id": 42, "app_id": 7, "app_slug": "saturnin-issue-publisher",
+                "repository_selection": "selected",
+                "permissions": {"issues": "write", "metadata": "read"},
+            }
+        assert path == "/repos/acme/destination"
+        return {"full_name": "acme/destination"}
+
+    def publisher_token(method: str, path: str, payload: dict):
+        assert (method, path, payload) == (
+            "POST", "/app/installations/42/access_tokens",
+            {"repositories": ["destination"],
+             "permissions": {"issues": "write", "metadata": "read"}},
+        )
+        events.append(f"publisher:{path}")
+        response_seconds.append(3)
+        return {
+            "token": "publisher-test-token",
+            "expires_at": (NOW + timedelta(hours=1)).isoformat(),
+            "repository_selection": "selected",
+            "permissions": {"issues": "write", "metadata": "read"},
+            "repositories": [{"full_name": "acme/destination"}],
+        }
+
+    publisher = GitHubAppPublisher(
+        cfg, PublisherCredential(7, b"test-private-key"),
+        now=lambda: NOW, jwt_signer=lambda _key, _message: b"test-signature",
+        transport=publisher_read, mutation_transport=publisher_token,
+    )
+
+    signer = _DedicatedSigner(
+        cfg, GitHub(cfg, token="merge-test-token",
+                    transport=lambda path: request("merge", path)),
+        b"c" * 48, b"p" * 48, tmp_path / "serve-startup.sqlite3",
+        policy_client=PolicyGitHub(
+            cfg, "policy-test-token", transport=lambda path: request("policy", path)
+        ),
+        publisher_client=publisher.client, now=lambda: NOW,
+    )
+    monkeypatch.setattr(system_attestation, "_load_signer", lambda: signer)
+
+    def listener():
+        events.append("listener")
+        return object()
+
+    monkeypatch.setattr(system_attestation, "_create_listener", listener)
+    monkeypatch.setattr(system_attestation, "_notify_ready", lambda: events.append("ready"))
+
+    class StopAfterStartup(Exception):
+        pass
+
+    def limiter(*_args):
+        raise StopAfterStartup
+
+    monkeypatch.setattr(system_attestation, "AuthorizationLimiter", limiter)
+    if failure:
+        with pytest.raises(SystemAttestationError, match=f"{failure} startup lookup failed"):
+            system_attestation.serve()
+        assert "listener" not in events
+        assert "ready" not in events
+    else:
+        with pytest.raises(StopAfterStartup):
+            system_attestation.serve()
+        assert events == [
+            "merge:/user", "merge:/repos/acme/widget",
+            "policy:/user", "policy:/repos/acme/widget",
+            "policy:/repos/acme/widget/branches/main/protection",
+            "merge:/repos/acme/widget/commits/main/check-runs?per_page=100&page=1",
+            "publisher:/repos/acme/destination/installation",
+            "publisher:/app/installations/42/access_tokens",
+            "publisher:/repos/acme/destination", "listener", "ready",
+        ]
+        assert sum(response_seconds) == 27
 
 
 def issue_action_fixture(*, expiry: datetime | None = None):
@@ -2810,6 +3133,45 @@ def test_github_authorization_header_uses_token_without_disclosure(
     assert caught.value.__cause__ is None
     _audit("denied", hashlib.sha256(b"evidence").hexdigest(), "")
     assert token not in capsys.readouterr().err
+
+
+def test_policy_authorization_header_uses_only_policy_token() -> None:
+    seen: list[str] = []
+
+    class Response:
+        def __init__(self, request, body):
+            self.request = request
+            self.body = body
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *args):
+            return None
+
+        def geturl(self):
+            return self.request.full_url
+
+        def read(self, _size):
+            return json.dumps(self.body).encode()
+
+    def open_request(request, _timeout):
+        seen.append(request.get_header("Authorization"))
+        body = (
+            {"login": "JakubMifek", "type": "User"}
+            if request.full_url.endswith("/user")
+            else {"full_name": "acme/widget"}
+        )
+        return Response(request, body)
+
+    policy_token = "policy-token-for-test"
+    client = PolicyGitHub(
+        service_config(), policy_token, request_transport=open_request
+    )
+
+    assert client.verify_identity("acme/widget") == "jakubmifek"
+    assert len(seen) == 2
+    assert all(value.split(" ", 1) == ["Bearer", policy_token] for value in seen)
 
 
 def test_publisher_http_mutations_and_credential_parser() -> None:
