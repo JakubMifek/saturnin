@@ -281,6 +281,49 @@ def test_policy_reader_rejects_wrong_owner_and_out_of_scope_reads() -> None:
         client.branch_protection("acme/widget", "release")
 
 
+@pytest.mark.parametrize("repo", ["other/widget", "ACME/other"])
+def test_policy_identity_rejects_out_of_scope_before_any_request(repo: str) -> None:
+    requests: list[str] = []
+    client = PolicyGitHub(
+        service_config(), "policy-token", transport=requests.append
+    )
+
+    with pytest.raises(SystemAttestationError, match="policy read scope"):
+        client.verify_identity(repo)
+
+    assert requests == []
+
+
+@pytest.mark.parametrize(
+    "actor, repository, valid",
+    [
+        ({"login": "JakubMifek", "type": "User"}, {"full_name": "Acme/Widget"}, True),
+        ({"login": "other", "type": "User"}, {"full_name": "acme/widget"}, False),
+        ({"login": "JakubMifek", "type": "Bot"}, {"full_name": "acme/widget"}, False),
+        (None, {"full_name": "acme/widget"}, False),
+        ({"login": "JakubMifek", "type": "User"}, {"full_name": "other/widget"}, False),
+        ({"login": "JakubMifek", "type": "User"}, None, False),
+    ],
+)
+def test_policy_identity_normalizes_allowlisted_repository_and_checks_identity(
+    actor, repository, valid: bool,
+) -> None:
+    requests: list[str] = []
+
+    def transport(path: str):
+        requests.append(path)
+        return actor if path == "/user" else repository
+
+    client = PolicyGitHub(service_config(), "policy-token", transport=transport)
+    if valid:
+        assert client.verify_identity("ACME/Widget") == "jakubmifek"
+    else:
+        with pytest.raises(SystemAttestationError, match="identity"):
+            client.verify_identity("ACME/Widget")
+
+    assert requests == ["/user", "/repos/acme/widget"]
+
+
 def test_preflight_is_read_only_and_does_not_claim_external_mutation_denial(
     tmp_path: Path,
 ) -> None:

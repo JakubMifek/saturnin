@@ -863,6 +863,8 @@ class PolicyGitHub:
 
     def verify_identity(self, repo: str) -> str:
         repo = _repo(repo)
+        if repo not in self._config.repositories:
+            raise SystemAttestationError("policy read scope is not allowed")
         actor = self._get("/user")
         repository = self._get(f"/repos/{repo}")
         if (

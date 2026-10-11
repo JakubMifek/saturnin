@@ -19,7 +19,7 @@ import subprocess
 import sys
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Protocol
+from typing import Literal, Protocol
 
 ADMIN_SOURCE = Path(__file__).resolve()
 ADMIN_STAGE = Path(
@@ -62,7 +62,7 @@ FILES = {
 OBSOLETE_FILES = ("usr/lib/systemd/system/saturnin-attestation.socket",)
 EXPECTED_SHA256 = {
     "src/saturnin/system_attestation.py":
-        "95aad41710af10e3a8759df53651c91705f51065a4837024a430d55116fb9494",
+        "06cfb385f4b99ed827689e4512b2ae5671e780b0836ebb008354b436da135fbf",
     "config/attestation.json":
         "abce4e29a1c5e20f7bf76381356129e0ee09d178a50f0c05764f61b92d1176d6",
     "systemd/system/saturnin-attestation.service":
@@ -312,13 +312,15 @@ def _publisher_credential_path(root: Path) -> Path:
     return _credential_paths(root)[0].with_name("github.publisher.cred")
 
 
-def _validate_github_token(value: bytes) -> None:
+def _validate_github_token(
+    value: bytes, *, label: Literal["protected GitHub", "policy GitHub"],
+) -> None:
     if (
         not 20 <= len(value) <= 512
         or not value.isascii()
         or any(character in b" \t\r\n\v\f" for character in value)
     ):
-        raise InstallError("protected GitHub credential is invalid")
+        raise InstallError(f"{label} credential is invalid")
 
 
 def _validate_publisher_credential(value: bytes) -> None:
@@ -708,7 +710,7 @@ def _migrate_or_provision(root: Path, runner: Runner) -> list[Path]:
     merge_plaintext = runner.decrypt(
         _read_credential(root, github_token), "github.token"
     )
-    _validate_github_token(merge_plaintext)
+    _validate_github_token(merge_plaintext, label="protected GitHub")
     if not policy_credential.is_file() or policy_credential.is_symlink():
         raise InstallError(
             "root-provisioned policy GitHub credential is required"
@@ -724,7 +726,7 @@ def _migrate_or_provision(root: Path, runner: Runner) -> list[Path]:
     policy_plaintext = runner.decrypt(
         _read_credential(root, policy_credential), "github.policy"
     )
-    _validate_github_token(policy_plaintext)
+    _validate_github_token(policy_plaintext, label="policy GitHub")
     if secrets.compare_digest(merge_plaintext, policy_plaintext):
         raise InstallError("merge and policy GitHub credentials must differ")
     if not publisher_credential.is_file() or publisher_credential.is_symlink():
@@ -827,11 +829,11 @@ def status(root: Path, runner: Runner | None = None) -> None:
     merge_plaintext = codec.decrypt(
         _read_credential(root, _github_token_path(root)), "github.token"
     )
-    _validate_github_token(merge_plaintext)
+    _validate_github_token(merge_plaintext, label="protected GitHub")
     policy_plaintext = codec.decrypt(
         _read_credential(root, _policy_credential_path(root)), "github.policy"
     )
-    _validate_github_token(policy_plaintext)
+    _validate_github_token(policy_plaintext, label="policy GitHub")
     if secrets.compare_digest(merge_plaintext, policy_plaintext):
         raise InstallError("merge and policy GitHub credentials must differ")
     _validate_publisher_credential(

@@ -33,13 +33,49 @@ def test_policy_reader_provisioning_is_generated_from_structured_policy(
     assert "--name=github.policy" in rendered
 
 
-def test_policy_reader_runtime_identity_drift_fails_docs_and_doctor_contract(
+def test_merge_credential_has_no_unused_server_scope_duplicate(
     tmp_path: Path,
+) -> None:
+    config = policy_config(tmp_path)
+    assert "merge_credential" not in config.policy("server_scope")[
+        "dedicated_attestation_service"
+    ]
+    assert config.governance["review"]["attestation"]["protected_merge_credential"]
+
+
+@pytest.mark.parametrize(
+    "field, value",
+    [
+        ("resource_owner", "other"),
+        ("repository_access", "all"),
+        ("permissions", {"administration": "write", "metadata": "read"}),
+        ("mutation_permissions", ["contents:write"]),
+        ("mutation_interface", "present"),
+    ],
+)
+def test_policy_reader_rejects_structured_least_privilege_drift(
+    tmp_path: Path, field: str, value,
+) -> None:
+    config = policy_config(tmp_path)
+    config.governance["review"]["attestation"]["policy_reader"][field] = value
+    with pytest.raises(docsync.GeneratedBlockError, match="least-privilege"):
+        docsync._policy_reader_provisioning(config)
+
+
+@pytest.mark.parametrize(
+    "field, value",
+    [
+        ("policy_actor_login", "saturnin-merge-bot"),
+        ("repositories", ["JakubMifek/other"]),
+    ],
+)
+def test_policy_reader_runtime_drift_fails_docs_and_doctor_contract(
+    tmp_path: Path, field: str, value,
 ) -> None:
     config = policy_config(tmp_path)
     path = config.root / "config" / "attestation.json"
     runtime = json.loads(path.read_text(encoding="utf-8"))
-    runtime["policy_actor_login"] = "saturnin-merge-bot"
+    runtime[field] = value
     path.write_text(json.dumps(runtime), encoding="utf-8")
 
     with pytest.raises(

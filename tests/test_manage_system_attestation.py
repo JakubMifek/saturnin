@@ -112,17 +112,25 @@ def test_status_rejects_malformed_publisher_credential(
         run(root, "status")
 
 
-@pytest.mark.parametrize("payload", [b"", b"short", b"token with spaces"])
-def test_status_rejects_malformed_policy_credential(
-    tmp_path: Path, payload: bytes,
+@pytest.mark.parametrize(
+    "payload", [b"", b"short", b"token with spaces", b"\xff" * 20, b"x" * 513],
+)
+@pytest.mark.parametrize("action", ["install", "status"])
+@pytest.mark.parametrize(
+    "credential, label",
+    [("github.token", "protected GitHub"), ("github.policy", "policy GitHub")],
+)
+def test_lifecycle_labels_malformed_github_credential_without_disclosure(
+    tmp_path: Path, payload: bytes, action: str, credential: str, label: str,
 ) -> None:
     root = tmp_path / "root"
     root.mkdir()
     run(root, "install")
-    path = root / "etc/saturnin-attestation/github.policy.cred"
-    path.write_bytes(admin.FakeRunner().encrypt(payload, "github.policy"))
-    with pytest.raises(admin.InstallError, match="GitHub credential"):
-        run(root, "status")
+    path = root / f"etc/saturnin-attestation/{credential}.cred"
+    path.write_bytes(admin.FakeRunner().encrypt(payload, credential))
+    with pytest.raises(admin.InstallError) as error:
+        run(root, action)
+    assert str(error.value) == f"{label} credential is invalid"
 
 
 def test_status_rejects_credential_substitution(tmp_path: Path) -> None:
